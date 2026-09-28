@@ -21,6 +21,7 @@ export const K = {
     userStatic: 'userStatic',
     dayLog: 'dayLog',
     statsHistory: 'statsHistory',
+    dayTotals: 'dayTotals',
     priceHistory: 'priceHistory',
     prices: 'prices',
     recheck: 'recheck',
@@ -111,7 +112,7 @@ export function del(name) {
 export const DATA_GROUPS = {
     keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker],
     plan: [K.plan, K.recheck],
-    progress: [K.statsHistory, K.dayLog],
+    progress: [K.statsHistory, K.dayLog, K.dayTotals],
     prices: [K.priceHistory, K.prices],
 };
 

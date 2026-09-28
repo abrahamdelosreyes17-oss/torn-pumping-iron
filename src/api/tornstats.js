@@ -20,7 +20,7 @@ export function makeTsClient(opts) {
 
 const seg = (x) => encodeURIComponent(String(x).replace(/[^A-Za-z0-9_]/g, ''));
 
-function unwrap(client, r) {
+function tsUnwrap(client, r) {
     const b = r.body;
     if (b && b.status === false) {
         const dead = r.status === 404 || /user not found|invalid/i.test(String(b.message || ''));
@@ -47,13 +47,13 @@ function spyOf(s) {
 /** One player's spy, or null. */
 export async function fetchSpyUser(client, userId) {
     const r = await client.request((key) => TS_BASE + seg(key) + '/spy/user/' + seg(userId));
-    return spyOf(unwrap(client, r).spy);
+    return spyOf(tsUnwrap(client, r).spy);
 }
 
 /** A faction's members with spies: {[playerId]: spy}. */
 export async function fetchSpyFaction(client, factionId) {
     const r = await client.request((key) => TS_BASE + seg(key) + '/spy/faction/' + seg(factionId));
-    const f = unwrap(client, r).faction || {};
+    const f = tsUnwrap(client, r).faction || {};
     const out = {};
     for (const [id, m] of Object.entries(f.members || {})) {
         const s = spyOf(m && m.spy);

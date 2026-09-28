@@ -135,6 +135,11 @@ export function itemsUrl() {
     return TORN + 'item.php';
 }
 
+/** Energy refills are bought on the Points page. */
+export function pointsUrl() {
+    return TORN + 'points.php';
+}
+
 export function pointsMarketUrl() {
     return TORN + 'pmarket.php';
 }

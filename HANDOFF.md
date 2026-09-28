@@ -24,7 +24,7 @@ Read this first. Then `docs/BUILD-PLAN.md` (what to build, in order), `docs/ENGI
 | M1 | Mockups for every page in K's style | ☑ 7 mockups, checked, 2026-09-29 |
 | M2 | Core engine + tests | ☑ 135 tests, 2026-09-29 |
 | M3 | API and data layer | ☑ 157 tests, 2026-09-29 |
-| M4 | Webpage tabs | ☐ |
+| M4 | Webpage tabs | ☑ 160 tests + ux-check, 2026-09-29 |
 | M5 | Overlay + marks on Torn pages | ☐ |
 | M6 | Torn Eye | ☐ |
 | M7 | Discord service (Worker) | ☐ |
@@ -120,6 +120,8 @@ Research index: `docs/research-gym.md`, `research-builds-gympage.md`, `research-
   - Finding: Apollo Gym (DEF 6.4) beats Gun Shop (6.2) for the friend's DEF; the plan says so once DEF starts (day 2).
 - **M3 ☑** `src/api/torn.js` (every v2 call: user state in one call, perks, property, equipment, inventory cat-by-cat with 21/4 skipped, attacks, personalstats, discord, profile, gyms, items, itemdetails, attacklog, itemmarket, pointsmarket, faction members, key info + `keyIsEnough`), `src/api/w3b.js` (trading's client, `comment=PumpingIron`), `src/api/third.js` (keyed third-party base: one https host asserted, shared window, pause, dead key, redaction), `ffscouter.js` (get-stats batched 205, check-key, get-targets; 429 → `retry_after_seconds`; code 6 = dead), `tornstats.js` (key in the path; `status:false` = dead), `src/platform/store.js` (typed settings/plan/keys, data groups for "Your data"), `src/feed/state.js` (visible leader polls every 30 s; diffs → day log; daily stats history; slow data on its own clocks; dead key stops it), `src/core/model.js` (one pure pass → everything a page shows). `test/api.test.js` + `feed.test.js` use recording fetches: the Torn key only to api.torn.com, the FFScouter key only to ffscouter.com, TornStats' only to www.tornstats.com, nothing keyed to weav3r.dev.
   - `test/harness-live.html` (canned answers for every service; `?key=1&at=2026-09-29T10:48:00Z` pins the clock) shows the friend's day: 10:51 Xanax → DEX × 27 (+1,400), 10:56 refill, 15:56 natural, 17:51 Xanax, 22:41 natural; 9 requests on first load.
+- **M4 ☑** The webpage: `src/ui/styles.js` (K + pi.css in the shadow root), `src/ui/dom.js` (textContent only), `src/ui/app/{app,common,home,plan,buy,progress,settings}.js`, `src/runtime.js` (shared client, feed, model, day totals), `src/app-page.js` (prices at most every 5 min for what Buy/Home show, key saves with key/info and FFScouter check-key, diagnostics). Menu: "Open Pumping Iron", "Diagnostics". `test/ux-check.mjs` (Playwright core + Edge, harness-live, torn.com blocked) passes: every tab renders its content, no text under 11 px (SVG measured as drawn), nothing overflows at 1280, every control on top, the choco-jump warning appears before anything is saved, density applies; no key → Settings with the ToS table open.
+  - **Finding (engine vs the old sim):** training the friend's four stats toward Balanced (not STR alone, as sim30 did) makes happy boosts worth more at ~100k per stat: 30 days steady +338k/$126M, daily choco +9% for +$35M, EDVD jump +86% for +$387M, choco jump −2% for +$15M (still warned). On a $150M budget steady stays recommended. The 99k jump is hidden unless the booster cap is above 24 h (it equals the EDVD jump otherwise).
 
 ### 2026-09-28/29: research, three mockup rounds, specs (no code)
 - The owner asked for a gym planner ("searches market, makes a plan, recalculates daily, happiness, choco/EDVD jumps, pings on Discord") for themselves and a returning friend, plus an FFScouter-like fight helper that's better ("sometimes it says I win but I end at 1 HP").

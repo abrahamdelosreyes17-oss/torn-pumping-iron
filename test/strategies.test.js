@@ -86,4 +86,6 @@ test('strategy list and feasibility', () => {
     for (const id of STRATEGY_IDS) assert.ok(STRATEGIES[id].name);
     assert.equal(feasibleStrategies({ bliss: false }).includes('blissSteady'), false);
     assert.equal(feasibleStrategies({ bliss: true }).includes('blissSteady'), true);
+    assert.equal(feasibleStrategies({}).includes('happy99k'), false, '24 h cap: same as the EDVD jump');
+    assert.equal(feasibleStrategies({ boosterCapH: 48 }).includes('happy99k'), true);
 });

@@ -44,7 +44,7 @@ export function compareStrategies({ state, pc, shares, settings, prices }) {
     const gyms = {};
     for (const k of STATS) if (pc.best[k]) gyms[k] = { dots: pc.best[k].dots[k], energy: pc.best[k].energy };
     const results = {};
-    for (const id of feasibleStrategies({ bliss: pc.perks.bliss })) {
+    for (const id of feasibleStrategies({ bliss: pc.perks.bliss, boosterCapH: settings.boosterCapH || 24 })) {
         results[id] = simulateStrategy(id, {
             stats: pc.stats,
             target: shares,
@@ -57,6 +57,7 @@ export function compareStrategies({ state, pc, shares, settings, prices }) {
             prices: { ...SAMPLE_PRICES, ...(prices || {}) },
             bliss: pc.perks.bliss,
             happyLossMult: pc.perks.happyLossMult,
+            boosterCapH: settings.boosterCapH || 24,
         });
     }
     return results;
@@ -129,6 +130,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const proj = projectBuild({ stats: pc.stats, shares, energyPerDay, happy: state.happy.maximum + 300, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: 30, active: state.gymId, table: pc.table });
     const progressE = gymProgress && Number(gymProgress.gymId) === Number(state.gymId) ? gymProgress.energy : null;
     const ng = state.gymId && state.gymId < 24 ? nextGym(state.gymId, progressE, energyPerDay, { gymExpMult: pc.perks.gymExpMult, table: pc.table }) : null;
+    if (ng) ng.known = progressE !== null && progressE !== undefined;
 
     // Buy today
     const neededToday = itemsNeeded(steps.filter((s) => s.at < tornDayStart(now) + DAY));
@@ -138,7 +140,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const heads = [];
     for (const w of strictWarnings(steps, now)) heads.push({ tone: 'warn', text: w.text });
     if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS * 6) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
-    if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.days !== null && progressE !== null ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost) });
+    if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.known ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost) });
     let rec = null;
     if (compare) {
         const r = recommend(compare, { budget: settings.budget || Infinity });
@@ -174,6 +176,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         buyToday,
         heads,
         recommendation: rec,
+        compare,
         prices,
     };
 }

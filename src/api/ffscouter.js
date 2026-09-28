@@ -33,7 +33,7 @@ function url(path, key, params = {}) {
 }
 
 /** An FFScouter answer: throws on its error envelope, pauses on 429 (codes 20/21). */
-function unwrap(client, r) {
+function ffsUnwrap(client, r) {
     const b = r.body;
     if (r.ok && b && (Array.isArray(b) || b.code === undefined)) return b;
     const code = b && Number.isFinite(Number(b.code)) ? Number(b.code) : null;
@@ -74,7 +74,7 @@ export async function fetchFfsStats(client, playerIds) {
     for (let i = 0; i < list.length; i += FFS_BATCH) {
         const batch = list.slice(i, i + FFS_BATCH);
         const r = await client.request((key) => url('get-stats', key, { targets: batch.join(',') }));
-        const rows = unwrap(client, r);
+        const rows = ffsUnwrap(client, r);
         for (const row of Array.isArray(rows) ? rows : []) out.set(Number(row.player_id), normalizeFfsRow(row));
         for (const id of batch) if (!out.has(id)) out.set(id, normalizeFfsRow({ player_id: id }));
     }
@@ -84,7 +84,7 @@ export async function fetchFfsStats(client, playerIds) {
 /** Is this key registered at FFScouter? */
 export async function checkFfsKey(client) {
     const r = await client.request((key) => url('check-key', key));
-    const b = unwrap(client, r);
+    const b = ffsUnwrap(client, r);
     return { registered: Boolean(b.is_registered), premium: Boolean(b.is_premium), policyUpdate: Boolean(b.policy_update_required) };
 }
 
@@ -96,7 +96,7 @@ export async function fetchFfsTargets(client, { preset = null, minLevel = null, 
     const params = preset ? { preset, limit } : { minlevel: minLevel, maxlevel: maxLevel, inactiveonly: inactiveOnly, factionless, minff: minFf, maxff: maxFf, limit };
     const r = await client.request((key) => url('get-targets', key, params));
     if (r.status === 404 && r.body && Number(r.body.code) === 17) return [];
-    const b = unwrap(client, r);
+    const b = ffsUnwrap(client, r);
     return (b.targets || []).map((t) => ({
         playerId: Number(t.player_id),
         name: t.name || null,

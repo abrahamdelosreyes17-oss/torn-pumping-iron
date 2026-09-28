@@ -230,6 +230,7 @@
         userStatic: 'userStatic',
         dayLog: 'dayLog',
         statsHistory: 'statsHistory',
+        dayTotals: 'dayTotals',
         priceHistory: 'priceHistory',
         prices: 'prices',
         recheck: 'recheck',
@@ -320,7 +321,7 @@
     const DATA_GROUPS = {
         keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker],
         plan: [K.plan, K.recheck],
-        progress: [K.statsHistory, K.dayLog],
+        progress: [K.statsHistory, K.dayLog, K.dayTotals],
         prices: [K.priceHistory, K.prices],
     };
 
@@ -1870,8 +1871,9 @@
     }
 
     /** Which strategies can run at all for this player (items, cooldown caps, a book). */
-    function feasibleStrategies({ bliss = false } = {}) {
-        return STRATEGY_IDS.filter((id) => (id === 'blissSteady' ? bliss : true));
+    function feasibleStrategies({ bliss = false, boosterCapH = BOOSTER_CAP_H } = {}) {
+        // The 99k jump only differs from the EDVD jump when faction perks raise the booster cap.
+        return STRATEGY_IDS.filter((id) => (id === 'blissSteady' ? bliss : id === 'happy99k' ? boosterCapH > BOOSTER_CAP_H : true));
     }
 
     /* ===== src/core/plan.js ===== */
@@ -2942,6 +2944,11 @@
         return TORN + 'item.php';
     }
 
+    /** Energy refills are bought on the Points page. */
+    function pointsUrl() {
+        return TORN + 'points.php';
+    }
+
     function pointsMarketUrl() {
         return TORN + 'pmarket.php';
     }
@@ -3137,7 +3144,7 @@
         const gyms = {};
         for (const k of STATS) if (pc.best[k]) gyms[k] = { dots: pc.best[k].dots[k], energy: pc.best[k].energy };
         const results = {};
-        for (const id of feasibleStrategies({ bliss: pc.perks.bliss })) {
+        for (const id of feasibleStrategies({ bliss: pc.perks.bliss, boosterCapH: settings.boosterCapH || 24 })) {
             results[id] = simulateStrategy(id, {
                 stats: pc.stats,
                 target: shares,
@@ -3150,6 +3157,7 @@
                 prices: { ...SAMPLE_PRICES, ...(prices || {}) },
                 bliss: pc.perks.bliss,
                 happyLossMult: pc.perks.happyLossMult,
+                boosterCapH: settings.boosterCapH || 24,
             });
         }
         return results;
@@ -3222,6 +3230,7 @@
         const proj = projectBuild({ stats: pc.stats, shares, energyPerDay, happy: state.happy.maximum + 300, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: 30, active: state.gymId, table: pc.table });
         const progressE = gymProgress && Number(gymProgress.gymId) === Number(state.gymId) ? gymProgress.energy : null;
         const ng = state.gymId && state.gymId < 24 ? nextGym(state.gymId, progressE, energyPerDay, { gymExpMult: pc.perks.gymExpMult, table: pc.table }) : null;
+        if (ng) ng.known = progressE !== null && progressE !== undefined;
 
         // Buy today
         const neededToday = itemsNeeded(steps.filter((s) => s.at < tornDayStart(now) + DAY));
@@ -3231,7 +3240,7 @@
         const heads = [];
         for (const w of strictWarnings(steps, now)) heads.push({ tone: 'warn', text: w.text });
         if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS * 6) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
-        if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.days !== null && progressE !== null ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost) });
+        if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.known ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost) });
         let rec = null;
         if (compare) {
             const r = recommend(compare, { budget: settings.budget || Infinity });
@@ -3267,22 +3276,17 @@
             buyToday,
             heads,
             recommendation: rec,
+            compare,
             prices,
         };
     }
 
-    /* ===== src/main.js ===== */
+    /* ===== src/runtime.js ===== */
     /*
-     * Wiring. The only file that knows it is a userscript; core/ and api/ are
-     * plain modules tested under node.
-     *
-     * Two entry points share it:
-     *   - every Torn page: the state feed (one visible leader tab), the overlay
-     *     pill, the marks on the page being viewed, and Torn Eye chips;
-     *   - the webpage (GitHub Pages app.html): the full tabs, drawn over the
-     *     placeholder the page shows without the script.
+     * What every tab shares at run time: the one Torn client (70/min across
+     * tabs, visible only), the state feed, and the model every surface renders
+     * from. Userscript-only; core/ and api/ stay plain modules.
      */
-
 
 
 
@@ -3349,9 +3353,32 @@
         return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: get(K.prices, {}) || {}, compare, gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
     }
 
+    /**
+     * Today's totals for Progress (gained vs planned, Xanax, refills), written
+     * only when they change: one small GM write, not one a second.
+     */
+    function recordDayTotals(m) {
+        if (!m || !m.ready) return;
+        const day = tornDayStart(m.now);
+        const row = {
+            gained: Math.round(m.gainedToday),
+            planned: Math.round(m.plannedGain),
+            xanax: m.done.filter((e) => e.kind === 'xanax' || e.kind === 'stack' || e.kind === 'hold').length,
+            xanaxPlanned: m.strip.drug.xanaxPlanned,
+            refills: m.strip.refill.free ? 0 : 1,
+        };
+        const all = get(K.dayTotals, {}) || {};
+        if (JSON.stringify(all[day]) === JSON.stringify(row)) return;
+        all[day] = row;
+        const days = Object.keys(all).map(Number).sort((a, b) => a - b);
+        while (days.length > 120) delete all[days.shift()];
+        set(K.dayTotals, all);
+    }
+
     function refresh() {
         try {
             pi.model = currentModel();
+            recordDayTotals(pi.model);
         } catch (error) {
             set(K.lastError, { at: Date.now(), where: 'model', message: String((error && error.message) || error) });
             return;
@@ -3392,8 +3419,2396 @@
         refresh();
     }
 
+    /* ===== src/ui/dom.js ===== */
+    /*
+     * Building DOM without innerHTML for anything that came from Torn, a third
+     * party or the user: text goes in through textContent, always.
+     */
+
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    const SVG_TAGS = new Set(['svg', 'polyline', 'line', 'rect', 'text', 'g', 'circle', 'path']);
+
+    /**
+     * h('div', {class: 'x', onclick: fn, text: 'hi'}, [children])
+     * Attributes: class, text, style (string), on<event> (function), dataset
+     * via 'data-*', aria-*, and anything else set as an attribute.
+     */
+    function h(tag, attrs = {}, children = []) {
+        const svg = SVG_TAGS.has(tag);
+        const el = svg ? document.createElementNS(SVG_NS, tag) : document.createElement(tag);
+        for (const [k, v] of Object.entries(attrs || {})) {
+            if (v === null || v === undefined || v === false) continue;
+            if (k === 'text') el.textContent = String(v);
+            else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v);
+            else if (k === 'value' && !svg) el.value = v;
+            else if (k === 'checked' && !svg) el.checked = Boolean(v);
+            else el.setAttribute(k === 'className' ? 'class' : k, v === true ? '' : String(v));
+        }
+        for (const c of [].concat(children)) {
+            if (c === null || c === undefined || c === false) continue;
+            el.appendChild(typeof c === 'string' || typeof c === 'number' ? document.createTextNode(String(c)) : c);
+        }
+        return el;
+    }
+
+    /** A text span with a class. */
+    function t(cls, text) {
+        return h('span', { class: cls, text });
+    }
+
+    /** Replace a node's children. */
+    function fill(el, children) {
+        while (el.firstChild) el.removeChild(el.firstChild);
+        for (const c of [].concat(children)) if (c) el.appendChild(c);
+        return el;
+    }
+
+    /** A polyline sparkline in a w×h box from values (nulls skipped). */
+    function sparkline(values, { w = 76, h: ht = 18, color = '#efebe2', cls = 'spark', pad = 2 } = {}) {
+        const v = (values || []).map((x) => (Number.isFinite(x) ? x : null));
+        const nums = v.filter((x) => x !== null);
+        const svg = h('svg', { class: cls, viewBox: '0 0 ' + w + ' ' + ht, 'aria-hidden': 'true' });
+        if (nums.length < 2) return svg;
+        const lo = Math.min(...nums);
+        const hi = Math.max(...nums);
+        const pts = [];
+        v.forEach((y, i) => {
+            if (y === null) return;
+            const x = v.length === 1 ? 0 : (i / (v.length - 1)) * w;
+            const yy = hi === lo ? ht / 2 : ht - pad - ((y - lo) / (hi - lo)) * (ht - 2 * pad);
+            pts.push(x.toFixed(1) + ',' + yy.toFixed(1));
+        });
+        svg.appendChild(h('polyline', { fill: 'none', stroke: color, 'stroke-width': '1.5', points: pts.join(' ') }));
+        return svg;
+    }
+
+    /* ===== src/ui/styles.js ===== */
+    /*
+     * The webpage's look: K's tokens and components (mockups/K-home.html and
+     * mockups/pi.css, DESIGN.md §1). Inside the page's shadow root, so Torn Eye
+     * and overlay styles on torn.com never mix with it.
+     */
+
+    const APP_CSS = `
+    :host {
+      --page:#141618; --card:#1c1f22; --card2:#24282c; --line:#2c3136; --line2:#3a4046;
+      --text:#e3e5e8; --muted:#939aa1; --dim:#6c737a; --white:#fff;
+      --chalk:#efebe2; --on-chalk:#15171a;
+      --str:#e5534b; --def:#4a8ff0; --spd:#f0c02f; --dex:#43b86c;
+      --good:#9bdc8a; --warn:#e8a33d; --bad:#ff6b5e; --link:#8fb8e8;
+      --b-stomp:#3fbf5a; --b-good:#a6e08a; --b-tough:#f0a040; --b-cant:#ff5a4e; --b-none:#6c737a;
+      --display: "Barlow Condensed", "Arial Narrow", Arial, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    .pi-root { margin: 0; min-height: 100vh; background: var(--page); color: var(--text); font: 13px/1.4 Arial, Helvetica, sans-serif; }
+    .num { font-variant-numeric: tabular-nums; }
+    .lab { font-size: 11px; font-weight: bold; letter-spacing: .5px; text-transform: uppercase; color: var(--muted); }
+    .grow { flex: 1; }
+    a { color: var(--link); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .muted { color: var(--muted); } .dim { color: var(--dim); } .white { color: var(--white); }
+    .s-str { color: var(--str); } .s-def { color: var(--def); } .s-spd { color: var(--spd); } .s-dex { color: var(--dex); }
+    .c-good { color: var(--good); } .c-warn { color: var(--warn); } .c-bad { color: var(--bad); }
+    .mark { width: 26px; height: 26px; border-radius: 50%; background: var(--chalk); display: grid; place-items: center; box-shadow: inset 0 0 0 4px var(--chalk), inset 0 0 0 6px #2a2d31; flex: none; }
+    .mark i { width: 6px; height: 6px; border-radius: 50%; background: var(--on-chalk); }
+    .mark.sm { width: 18px; height: 18px; box-shadow: inset 0 0 0 3px var(--chalk), inset 0 0 0 4px #2a2d31; }
+    .mark.sm i { width: 4px; height: 4px; }
+
+    /* density */
+    .app { --row: 34px; --pad: 12px; --gap: 20px; --sec: 24px; min-width: 1180px; background: var(--page); }
+    .app.comfy { --row: 44px; --pad: 16px; --gap: 28px; --sec: 36px; }
+
+    /* top bar */
+    .top { height: 48px; display: flex; align-items: center; gap: 10px; padding: 0 20px; border-bottom: 1px solid var(--line); }
+    .brand { font: 700 17px/1 var(--display); letter-spacing: .6px; color: var(--white); text-transform: uppercase; margin-right: 16px; }
+    .tab { height: 48px; display: inline-flex; align-items: center; padding: 0 10px; color: var(--muted); font-weight: bold; border-bottom: 2px solid transparent; }
+    .tab:hover { text-decoration: none; color: var(--text); }
+    .tab.on { color: var(--white); border-bottom-color: var(--chalk); }
+    .upd { color: var(--muted); font-size: 12px; display: inline-flex; align-items: center; gap: 6px; }
+    .upd i { width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
+    .seg { display: inline-flex; border: 1px solid var(--line2); border-radius: 14px; overflow: hidden; }
+    .top .seg { margin-left: 12px; }
+    .seg button { height: 26px; padding: 0 10px; background: transparent; border: 0; color: var(--muted); font: bold 11px Arial; cursor: pointer; }
+    .seg button[aria-pressed="true"] { background: var(--chalk); color: var(--on-chalk); }
+    .seg button:focus-visible { outline: 2px solid var(--chalk); outline-offset: -2px; }
+
+    /* status strip */
+    .strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 24px; padding: var(--pad) 20px; border-bottom: 1px solid var(--line); background: #171a1c; }
+    .st { display: flex; flex-direction: column; gap: 5px; }
+    .st-h { display: flex; justify-content: space-between; align-items: baseline; }
+    .st-h b { font: 600 18px/1 var(--display); color: var(--white); }
+    .st-h b.warn { color: var(--warn); } .st-h b.good { color: var(--good); }
+    .bar { height: 5px; border-radius: 3px; background: var(--card2); overflow: hidden; }
+    .bar i { display: block; height: 100%; border-radius: 3px; }
+    .st small { color: var(--muted); font-size: 11px; }
+
+    /* body 70 / 30 */
+    .body { display: grid; grid-template-columns: minmax(0, 7fr) minmax(300px, 3fr); gap: var(--sec); padding: var(--sec) 20px; }
+    .main, .pane { display: flex; flex-direction: column; gap: var(--sec); min-width: 0; }
+    .sh { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+    .sh h2 { margin: 0; font: 700 22px/1 var(--display); color: var(--white); }
+    .sh h3 { margin: 0; font: 700 18px/1 var(--display); color: var(--white); }
+    .sh .meta { color: var(--muted); font-size: 12px; }
+    .sh .meta b { color: var(--good); font-weight: bold; }
+    .sh .right { margin-left: auto; }
+
+    /* buttons */
+    .acts { display: flex; gap: 8px; }
+    .btn { height: 30px; padding: 0 14px; border-radius: 5px; border: 1px solid var(--line2); background: var(--card2); color: var(--text); font: bold 12px Arial; display: inline-flex; align-items: center; cursor: pointer; white-space: nowrap; }
+    .btn:hover { text-decoration: none; border-color: var(--muted); }
+    .btn.primary { background: var(--chalk); color: var(--on-chalk); border-color: var(--chalk); }
+    .btn.sm { height: 26px; padding: 0 10px; font-size: 11px; }
+    .btn.ghost { background: transparent; }
+    .btn:focus-visible { outline: 2px solid var(--chalk); outline-offset: 2px; }
+
+    /* next band (Home primary) */
+    .next { display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: center; padding: var(--pad) 16px; background: var(--card); border: 1px solid var(--chalk); border-radius: 10px; }
+    .next .cd { font: 600 44px/0.9 var(--display); color: var(--chalk); min-width: 96px; }
+    .next .what b { display: block; font-size: 17px; color: var(--white); }
+    .next .what span { color: var(--muted); font-size: 13px; }
+
+    /* tables (steps, sources, targets, war) */
+    .tbl { width: 100%; border-collapse: collapse; }
+    .tbl th { text-align: left; font-size: 11px; font-weight: bold; letter-spacing: .5px; text-transform: uppercase; color: var(--dim); padding: 0 8px 6px; white-space: nowrap; }
+    .tbl td { height: var(--row); padding: 0 8px; border-top: 1px solid var(--line); }
+    .tbl .r { text-align: right; }
+    .tbl .t { font: 600 15px var(--display); color: var(--muted); width: 56px; }
+    .tbl tr.done td { color: var(--dim); }
+    .tbl tr.done .ok { color: var(--good); }
+    .tbl tr.now td { background: #202428; color: var(--white); }
+    .tbl tr.now .t { color: var(--chalk); }
+    .tbl tr.sel td { background: #202428; }
+    .tbl tr.sel td:first-child { box-shadow: inset 2px 0 0 var(--chalk); }
+    .tbl tr.click { cursor: pointer; }
+    .tbl tr.click:hover td { background: #1f2326; }
+    .tbl .when { color: var(--muted); font-size: 12px; }
+    .tbl small { color: var(--muted); font-size: 12px; }
+    .tbl tfoot td { border-top: 1px solid var(--line2); color: var(--muted); font-size: 12px; }
+    .tbl tfoot b { color: var(--white); }
+    .tbl b.w { color: var(--white); }
+
+    /* stats vs build */
+    .sg { display: flex; flex-direction: column; }
+    .sgr { display: grid; grid-template-columns: 40px 80px minmax(0, 1fr) 96px 120px 76px; gap: 12px; align-items: center; height: var(--row); border-top: 1px solid var(--line); }
+    .sgr:first-of-type { border-top: 0; }
+    .sgr b.n { font: 700 14px var(--display); letter-spacing: .5px; }
+    .sgr .v { text-align: right; font-weight: bold; color: var(--white); }
+    .share { position: relative; height: 6px; border-radius: 3px; background: var(--card2); }
+    .share i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; }
+    .share em { position: absolute; top: -4px; width: 2px; height: 14px; background: var(--chalk); }
+    .sgr .gap { text-align: right; font-size: 12px; color: var(--muted); }
+    .sgr .tod { text-align: right; font-size: 12px; }
+    .spark { width: 76px; height: 18px; }
+    .sgfoot { display: flex; gap: 20px; color: var(--muted); font-size: 12px; margin-top: 8px; }
+    .sgfoot b { color: var(--text); }
+
+    /* buy (pane) */
+    .buy { display: flex; flex-direction: column; }
+    .bi { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+    .bi:first-of-type { border-top: 0; }
+    .bi b { color: var(--white); }
+    .bi small { grid-column: 1 / 2; color: var(--muted); font-size: 12px; }
+    .bi .p { text-align: right; font-weight: bold; }
+    .buyfoot { display: flex; justify-content: space-between; align-items: baseline; border-top: 1px solid var(--line2); padding-top: 8px; color: var(--muted); font-size: 12px; }
+    .buyfoot b { color: var(--white); font: 600 20px var(--display); }
+
+    /* heads-up list */
+    .heads { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+    .heads li { display: grid; grid-template-columns: 8px 1fr; gap: 10px; align-items: baseline; font-size: 13px; }
+    .heads li i { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); transform: translateY(1px); }
+    .heads li.w i { background: var(--warn); }
+    .heads li.g i { background: var(--good); }
+    .heads li span { color: var(--muted); }
+
+    /* small card (current plan, selected choice) */
+    .plan { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+    .plan b { color: var(--white); }
+    .plan span { color: var(--muted); font-size: 12px; }
+
+    /* primary card (Plan's recommendation, Buy's total) */
+    .prime { padding: var(--pad) 16px; background: var(--card); border: 1px solid var(--chalk); border-radius: 10px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 24px; align-items: center; }
+    .prime .k { font: 700 26px/1 var(--display); color: var(--white); }
+    .prime .d { color: var(--muted); }
+    .prime .figs { display: flex; gap: 28px; }
+    .fig { display: flex; flex-direction: column; gap: 2px; }
+    .fig b { font: 600 24px/1 var(--display); color: var(--white); }
+    .fig b.good { color: var(--good); }
+    .prime .why { grid-column: 1 / -1; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+    .pill-tag { display: inline-block; height: 20px; line-height: 20px; padding: 0 8px; border-radius: 10px; font-size: 11px; font-weight: bold; letter-spacing: .4px; text-transform: uppercase; background: var(--card2); color: var(--muted); }
+    .pill-tag.chalk { background: var(--chalk); color: var(--on-chalk); }
+
+    /* warning block */
+    .warnb { border-left: 3px solid var(--warn); background: #231d12; padding: 10px 14px; border-radius: 0 8px 8px 0; display: flex; flex-direction: column; gap: 6px; }
+    .warnb b { color: #ffd79a; font-size: 14px; }
+    .warnb p { margin: 0; color: var(--text); max-width: 90ch; }
+    .warnb .acts { margin-top: 4px; }
+
+    /* builds */
+    .builds { display: flex; flex-direction: column; }
+    .brow { display: grid; grid-template-columns: 150px 180px minmax(0, 1fr) auto; gap: 14px; align-items: center; height: var(--row); padding: 0 8px; border-top: 1px solid var(--line); cursor: pointer; }
+    .brow:first-child { border-top: 0; }
+    .brow.sel { background: var(--card); box-shadow: inset 0 0 0 1px var(--chalk); border-radius: 6px; border-top-color: transparent; }
+    .brow.sel + .brow { border-top-color: transparent; }
+    .brow b { color: var(--white); }
+    .brow span { color: var(--muted); font-size: 12px; }
+    .ratio { display: flex; height: 8px; border-radius: 4px; overflow: hidden; gap: 1px; }
+    .ratio i { display: block; height: 100%; }
+
+    /* inputs */
+    .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+    .field .inp { width: 100%; }
+    .inp { height: 30px; padding: 0 10px; border-radius: 5px; border: 1px solid var(--line2); background: #111315; color: var(--text); font: 13px Arial; min-width: 0; }
+    .inp:focus { outline: 2px solid var(--chalk); outline-offset: -1px; }
+    .inp.masked { -webkit-text-security: disc; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 12px; }
+    .kv dt { color: var(--muted); } .kv dd { margin: 0; text-align: right; }
+
+    /* settings sections */
+    .sec { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 24px; padding: 18px 0; border-top: 1px solid var(--line); }
+    .sec:first-child { border-top: 0; padding-top: 0; }
+    .sec h3 { margin: 0 0 4px; font: 700 18px/1.1 var(--display); color: var(--white); }
+    .state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: bold; }
+    .state i { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+    .state.ok { color: var(--good); } .state.ok i { background: var(--good); }
+    .state.off { color: var(--muted); }
+    .state.bad { color: var(--bad); } .state.bad i { background: var(--bad); }
+    .secbody { display: flex; flex-direction: column; gap: 10px; max-width: 760px; }
+    .secbody p { margin: 0; color: var(--muted); }
+    ol.steps-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+    details.dis > summary { cursor: pointer; color: var(--link); font-size: 12px; list-style: none; }
+    details.dis > summary::before { content: "▸ "; }
+    details.dis[open] > summary::before { content: "▾ "; }
+    .tos { border-collapse: collapse; margin-top: 8px; width: 100%; font-size: 12px; }
+    .tos th { text-align: left; color: var(--muted); font-weight: bold; padding: 5px 10px 5px 0; width: 170px; vertical-align: top; border-top: 1px solid var(--line); }
+    .tos td { padding: 5px 0; border-top: 1px solid var(--line); }
+    .check { display: inline-flex; align-items: center; gap: 8px; }
+    .check input { accent-color: var(--chalk); width: 14px; height: 14px; }
+
+    /* charts */
+    .chart { width: 100%; display: block; }
+    .chart text { font: 11px Arial; fill: var(--muted); }
+    .chart .ax { stroke: var(--line); }
+    .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); }
+    .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+    /* Torn Eye chip */
+    .chip { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px 0 8px; border-radius: 14px; background: #1e2124; border: 1px solid var(--line2); font: 12px Arial; color: var(--text); white-space: nowrap; }
+    .chip .dot { width: 12px; height: 12px; border-radius: 50%; box-shadow: inset 0 0 0 3px currentColor; background: #111; flex: none; }
+    .chip b { font-weight: bold; }
+    .chip .src { color: var(--dim); font-size: 11px; }
+    .b-stomp { color: var(--b-stomp); } .b-good { color: var(--b-good); } .b-tough { color: var(--b-tough); } .b-cant { color: var(--b-cant); } .b-none { color: var(--b-none); }
+    .chip .figs { color: var(--text); }
+    .band { display: inline-flex; align-items: center; gap: 6px; font-weight: bold; white-space: nowrap; }
+    .band .dot { width: 10px; height: 10px; border-radius: 50%; box-shadow: inset 0 0 0 3px currentColor; background: #111; }
+
+    /* hover card */
+    .hcard { width: 330px; background: var(--card); border: 1px solid var(--line2); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.45); }
+    .hcard .hh { display: flex; align-items: baseline; gap: 8px; }
+    .hcard .hh b { color: var(--white); font-size: 14px; }
+    .kept { display: grid; grid-template-columns: 80px minmax(0,1fr) 40px; gap: 8px; align-items: center; font-size: 12px; }
+    .kept .bar { height: 6px; }
+    .hcard .foot { font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 8px; }
+
+    /* overlay pill + card (on torn.com) */
+    .pi-pill { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px 0 6px; border-radius: 18px; background: #1b1e21; border: 1px solid var(--line2); box-shadow: 0 4px 14px rgba(0,0,0,.4); font: bold 13px Arial; color: var(--text); }
+    .pi-pill .cd { font: bold 16px "Arial Narrow", Arial, sans-serif; color: var(--chalk); }
+    .pi-card { width: 280px; background: #1b1e21; border: 1px solid var(--line2); border-radius: 10px; padding: 12px 14px; box-shadow: 0 8px 24px rgba(0,0,0,.5); display: flex; flex-direction: column; gap: 8px; }
+    .pi-card .cd { font: bold 34px/1 "Arial Narrow", Arial, sans-serif; color: var(--chalk); }
+    .pi-card .step { font-weight: bold; color: var(--white); }
+    .pi-card .mini { display: grid; grid-template-columns: 48px 1fr 60px; gap: 6px; align-items: center; font-size: 11px; color: var(--muted); }
+    .pi-card .later { font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+    /* app-only additions */
+    * { box-sizing: border-box; }
+    .pi-root button { font-family: Arial, Helvetica, sans-serif; }
+    .app { min-height: 100vh; }
+    .empty { padding: 48px 20px; display: flex; flex-direction: column; gap: 12px; align-items: flex-start; max-width: 640px; }
+    .empty h2 { margin: 0; font: 700 26px/1 var(--display); color: var(--white); }
+    .empty p { margin: 0; color: var(--muted); }
+    .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--card2); border: 1px solid var(--line2); color: var(--text); padding: 8px 14px; border-radius: 8px; font-size: 13px; z-index: 5; }
+    .msg { font-size: 12px; }
+    .msg.ok { color: var(--good); } .msg.bad { color: var(--bad); }
+    .tab { cursor: pointer; }
+    .brow:focus-visible, .tbl tr.click:focus-visible { outline: 2px solid var(--chalk); outline-offset: -2px; }
+    .pane .chart { max-width: 100%; }
+    .ih { display: flex; align-items: baseline; gap: 12px; }
+    .ih b { font: 700 20px/1 var(--display); color: var(--white); }
+    .ih .need { color: var(--muted); font-size: 12px; }
+    .ih .sum { margin-left: auto; font: 600 20px/1 var(--display); color: var(--white); }
+    .item { display: flex; flex-direction: column; gap: 6px; }
+    .items { display: flex; flex-direction: column; gap: var(--sec); }
+    .verdict { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+    .verdict i { width: 8px; height: 8px; border-radius: 50%; }
+    .big { font: 700 34px/1 var(--display); color: var(--white); }
+    .pr { display: grid; grid-template-columns: 90px 76px 1fr; gap: 10px; align-items: center; height: var(--row); border-top: 1px solid var(--line); font-size: 12px; }
+    .pr:first-child { border-top: 0; }
+    .pr b { color: var(--white); font-size: 13px; }
+    .pr .r { text-align: right; }
+    .mult { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 20px; }
+    .smc { display: flex; flex-direction: column; gap: 4px; }
+    .smc .h { display: flex; justify-content: space-between; align-items: baseline; }
+    .smc .h b { font: 700 14px var(--display); letter-spacing: .5px; }
+    .smc .h span { font-weight: bold; color: var(--white); }
+    .smc small { color: var(--muted); font-size: 12px; }
+    .tl { display: flex; flex-direction: column; }
+    .tlr { display: grid; grid-template-columns: 18px 170px 90px minmax(0, 1fr) 110px; gap: 12px; align-items: center; height: var(--row); border-top: 1px solid var(--line); }
+    .tlr:first-child { border-top: 0; }
+    .tlr .dotc { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--dim); }
+    .tlr.now .dotc { background: var(--chalk); border-color: var(--chalk); }
+    .tlr.next .dotc { border-color: var(--chalk); }
+    .tlr b { color: var(--white); }
+    .tlr .r { text-align: right; }
+    .meter { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; align-items: baseline; padding: 8px 0; border-top: 1px solid var(--line); }
+    .meter:first-child { border-top: 0; }
+    .meter .bar { grid-column: 1 / -1; }
+    .meter b { color: var(--white); }
+    .keyrow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; max-width: 560px; }
+    .data { display: flex; flex-direction: column; }
+    .dr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+    .dr:first-child { border-top: 0; }
+    .dr b { color: var(--white); }
+    .dr small { color: var(--muted); font-size: 12px; }
+    .opts { display: flex; flex-wrap: wrap; gap: 8px 20px; }
+    .filters { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding-bottom: 10px; }
+    .filters .inp { width: 64px; height: 26px; }
+    .slider { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+    .slider input { accent-color: var(--chalk); width: 140px; }
+    .bands { display: flex; flex-direction: column; }
+    .bandr { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px; align-items: center; min-height: var(--row); border-top: 1px solid var(--line); font-size: 12px; }
+    .bandr:first-child { border-top: 0; }
+    .bandr .inp { width: 52px; height: 26px; padding: 0 6px; text-align: right; }
+    .stok { color: var(--good); } .sthos { color: var(--bad); } .sttr { color: var(--link); }
+    `;
+
+    /* ===== src/ui/app/common.js ===== */
+    /*
+     * Pieces every webpage tab shares: the status strip, the stats-vs-build rows,
+     * section headers, time words. All numbers come from the model.
+     */
+
+
+
+
+
+
+
+    const STAT_COLOR = { str: '#e5534b', spd: '#f0c02f', def: '#4a8ff0', dex: '#43b86c' };
+
+    /** A clock in the user's chosen time (Torn time is UTC). */
+    function clock(ts, settings) {
+        if (settings && settings.timeFormat === 'local') {
+            const d = new Date(ts);
+            return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+        }
+        return tornClock(ts);
+    }
+
+    /** A countdown node that the app's 1-second tick keeps current. */
+    function cd(at, now, { prefix = '', cls = '' } = {}) {
+        return h('span', { class: cls, 'data-cd': String(at), 'data-cd-prefix': prefix, text: prefix + countdown(at - now) });
+    }
+
+    function sectionHead(title, meta = null, right = null, level = 'h2') {
+        return h('div', { class: 'sh' }, [h(level, { text: title }), meta, right ? h('span', { class: 'right' }, [right]) : null]);
+    }
+
+    function meta(parts) {
+        return h('span', { class: 'meta num' }, parts);
+    }
+
+    /** "DEX × 27" or "DEX × 20 · DEF × 7" */
+    function trainsText(trains) {
+        const parts = Object.entries(trains || {}).filter(([, n]) => n > 0).map(([k, n]) => STAT_LABEL[k] + ' × ' + n);
+        return parts.join(' · ');
+    }
+
+    function itemsText(items) {
+        return (items || []).map((it) => itemName(it.id) + (it.qty > 1 ? ' × ' + it.qty : '')).join(' + ');
+    }
+
+    function stCell(label, value, valueCls, pct, color, small) {
+        return h('div', { class: 'st' }, [
+            h('div', { class: 'st-h' }, [t('lab', label), h('b', { class: valueCls || null, text: value })]),
+            h('div', { class: 'bar' }, [h('i', { style: 'width:' + Math.max(0, Math.min(100, pct)).toFixed(1) + '%;background:' + color })]),
+            h('small', { text: small }),
+        ]);
+    }
+
+    /** Energy · Happy · Drug · Booster · Refill (Home and Plan only). */
+    function statusStrip(m, settings) {
+        const s = m.strip;
+        const now = m.now;
+        const drugTxt = s.drug.left > 0 ? countdown(s.drug.left) : 'Ready';
+        const drugPct = s.drug.left > 0 && s.drug.total > 0 ? (100 * s.drug.left) / s.drug.total : 0;
+        const boosterTxt = s.booster.left > 0 ? countdown(s.booster.left) : 'Ready';
+        return h('div', { class: 'strip num' }, [
+            stCell('Energy', s.energy.current + ' / ' + s.energy.max, null, (100 * s.energy.current) / Math.max(1, s.energy.max), 'var(--chalk)', s.energy.fullAt ? 'Full at ' + clock(s.energy.fullAt, settings) : 'Full'),
+            stCell('Happy', fmtInt(s.happy.current), null, (100 * Math.min(s.happy.current, s.happy.max)) / Math.max(1, s.happy.max), 'var(--good)', 'Max ' + fmtInt(s.happy.max) + (s.happy.property ? ' · ' + s.happy.property : '')),
+            (() => {
+                const c = stCell('Drug', drugTxt, s.drug.left > 0 ? 'warn' : 'good', drugPct, 'var(--warn)', 'Xanax ' + Math.min(s.drug.xanaxDone + 1, Math.max(1, s.drug.xanaxPlanned)) + ' of ' + Math.max(1, s.drug.xanaxPlanned) + ' today');
+                if (s.drug.left > 0) c.querySelector('b').setAttribute('data-cd', String(now + s.drug.left));
+                return c;
+            })(),
+            stCell('Booster', boosterTxt, s.booster.left > 0 ? null : 'good', 0, 'var(--chalk)', s.booster.used ? 'Used by this plan' : 'Not used by this plan'),
+            stCell('Refill', s.refill.free ? 'Unused' : 'Used', null, s.refill.free ? 0 : 100, 'var(--chalk)', s.refill.free ? (s.refill.plannedAt ? 'Planned ' + clock(s.refill.plannedAt, settings) : 'Use before 00:00') : 'Next at 00:00 Torn time'),
+        ]);
+    }
+
+    /** The four stat rows against the build (Home and Plan). */
+    function statRowsBlock(m, { todayCol = 'gain' } = {}) {
+        return h(
+            'div',
+            { class: 'sg num' },
+            m.statRows.map((r) => {
+                const k = r.stat;
+                const shareW = Math.min(100, r.share * 200);
+                const gapTxt = (r.share * 100).toFixed(1) + '% · ' + (r.over ? 'over' : r.gap > 0 ? '+' + fmtInt(r.gap) : 'on build');
+                let tod;
+                if (todayCol === 'trains') tod = h('span', { class: 'gap' + (r.plannedTrains ? ' s-' + k : ''), text: r.plannedTrains + ' trains' });
+                else tod = h('span', { class: 'tod' + (r.today ? ' s-' + k : ''), style: r.today ? null : 'color:var(--dim)', text: r.today ? fmtSigned(r.today) + ' today' : r.plannedTrains ? r.plannedTrains + ' planned' : '+0 today' });
+                return h('div', { class: 'sgr' }, [
+                    h('b', { class: 'n s-' + k, text: STAT_LABEL[k] }),
+                    h('span', { class: 'v', text: fmtInt(r.value) }),
+                    h('div', { class: 'share' }, [h('i', { style: 'width:' + shareW.toFixed(1) + '%;background:' + STAT_COLOR[k] }), h('em', { style: 'left:' + Math.min(100, r.target * 200).toFixed(1) + '%' })]),
+                    h('span', { class: 'gap', text: gapTxt }),
+                    sparkline(r.spark, { color: STAT_COLOR[k] }),
+                    tod,
+                ]);
+            }),
+        );
+    }
+
+    /** A dot-and-line list (Heads-up). */
+    function headsList(items) {
+        return h(
+            'ul',
+            { class: 'heads num' },
+            items.map((x) => h('li', { class: x.tone === 'warn' ? 'w' : x.tone === 'good' ? 'g' : null }, [h('i'), h('div', {}, [x.text, x.sub ? h('span', { text: ' · ' + x.sub }) : null])])),
+        );
+    }
+
+    /* ===== src/ui/app/home.js ===== */
+    /*
+     * Home (mockups/K-home.html): the next step, today's steps, stats against
+     * the build; Buy today, Heads-up and the current plan in the pane.
+     */
+
+
+
+
+
+
+
+
+
+
+    const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    function dateLine(now) {
+        const d = new Date(now);
+        return DAYS[d.getUTCDay()] + ' ' + d.getUTCDate() + ' ' + MONTHS[d.getUTCMonth()];
+    }
+
+    /** The step in words: "Take Xanax #2, then train DEX × 27". */
+    function stepWords(s) {
+        const tr = trainsText(s.trains);
+        const then = tr ? ', then train ' + tr : '';
+        switch (s.kind) {
+            case 'xanax':
+                return 'Take ' + s.label + then;
+            case 'refill':
+                return 'Use your refill' + then;
+            case 'natural':
+                return tr ? 'Train ' + tr : 'Natural energy';
+            case 'stack':
+            case 'hold':
+                return 'Take ' + s.label;
+            case 'jump':
+            case 'boost':
+                return s.label.replace('train it all', 'train ' + (tr || 'it all'));
+            default:
+                return s.label + then;
+        }
+    }
+
+    function stepSub(s) {
+        const parts = [];
+        const gyms = [...new Set(Object.values(s.gyms || {}).filter(Boolean))];
+        if (gyms.length) parts.push('At ' + gyms.join(' / '));
+        if (s.gain) parts.push('about ' + fmtSigned(s.gain) + (Object.keys(s.trains).length === 1 ? ' ' + STAT_LABEL[Object.keys(s.trains)[0]] : ''));
+        if (s.energy) parts.push('uses ' + fmtInt(s.energy) + ' energy');
+        if (s.note) parts.push(s.note);
+        return parts.join(' · ');
+    }
+
+    function stepLinks(s) {
+        const items = (s.items || []).filter((it) => it.id !== POINTS);
+        const out = [];
+        if (s.kind === 'refill') out.push(h('a', { class: 'btn primary', href: pointsUrl(), target: '_blank', rel: 'noopener', text: 'Points' }));
+        if (items.length) out.push(h('a', { class: 'btn primary', href: itemsUrl(), target: '_blank', rel: 'noopener', text: 'Items' }));
+        if (Object.keys(s.trains || {}).length) out.push(h('a', { class: 'btn' + (out.length ? '' : ' primary'), href: gymUrl(), target: '_blank', rel: 'noopener', text: 'Gym' }));
+        return out;
+    }
+
+    /** Cheapest fill for one need, from stored listings. */
+    function buyRow(need, prices, history) {
+        const p = prices && prices[need.id];
+        if (!p || !Array.isArray(p.listings) || !p.listings.length) return { need, fill: null, verdict: null };
+        const fill = fillCheapest(p.listings, need.buy, need.id);
+        const cheapest = fill.rows[0] ? fill.rows[0].price : null;
+        return { need, fill, verdict: priceVerdict(cheapest, p.avg7 || null) };
+    }
+
+    function buyPane(m, ctx) {
+        const needs = m.buyToday.filter((n) => n.buy > 0);
+        // Home refreshes today's prices too, at most every 5 minutes (ENGINE-SPEC §13).
+        if (needs.length && ctx.wantPrices) ctx.wantPrices(needs.map((n) => n.id));
+        const held = m.buyToday.filter((n) => n.have > 0);
+        const rows = needs.map((n) => buyRow(n, ctx.prices));
+        const total = rows.reduce((a, r) => a + (r.fill ? r.fill.total : 0), 0);
+        const list = h('div', { class: 'buy num' }, [
+            ...rows.map(({ need, fill, verdict }) => {
+                const first = fill && fill.rows[0];
+                const link = first ? first.link : need.id === POINTS ? pointsMarketUrl() : itemMarketUrl(need.id);
+                const where = first ? whereText(first) + (fill.rows.length > 1 ? ' + ' + (fill.rows.length - 1) + ' more' : '') + (verdict && verdict.pct !== null ? ' · ' + verdict.text.split(' · ')[1] : '') : 'Prices load on the Buy tab';
+                return h('div', { class: 'bi' }, [
+                    h('div', {}, [h('b', { text: need.name + ' × ' + need.buy })]),
+                    h('span', { class: 'p', text: fill ? fmtMoney(fill.total) : '' }),
+                    h('a', { class: 'btn sm', href: link, target: '_blank', rel: 'noopener', text: 'Open' }),
+                    h('small', { text: need.id === POINTS ? where + ' · for the refill' : where }),
+                ]);
+            }),
+            needs.length ? null : h('div', { class: 'bi' }, [h('div', {}, [h('b', { text: 'Nothing to buy today' })]), h('span'), h('span'), h('small', { text: 'Your inventory covers the plan' })]),
+            h('div', { class: 'buyfoot' }, [h('span', { text: held.length ? held.map((n) => n.have + ' ' + n.name + ' in inventory').join(' · ') : 'Nothing held yet' }), h('b', { text: total ? fmtMoney(total) : '' })]),
+        ]);
+        return h('div', {}, [sectionHead('Buy today', h('span', { class: 'meta' }, [h('a', { href: '#buy', onclick: (e) => { e.preventDefault(); ctx.go('buy'); }, text: 'Next 3 days' })])), list]);
+    }
+
+    function renderHome(m, ctx) {
+        const s = ctx.settings;
+        const now = m.now;
+        const next = m.next;
+        const mainStat = (() => {
+            const tot = {};
+            for (const st of m.steps) for (const [k, n] of Object.entries(st.trains || {})) tot[k] = (tot[k] || 0) + n;
+            const ks = Object.keys(tot);
+            return ks.length === 1 ? ks[0] : null;
+        })();
+        const late = next && next.kind === 'xanax' && m.strip.drug.left === 0;
+        const buyTotal = m.buyToday.reduce((a, n) => {
+            const r = buyRow(n, ctx.prices);
+            return a + (r.fill ? r.fill.total : 0);
+        }, 0);
+
+        const head = sectionHead(
+            'Today',
+            meta([
+                dateLine(now) + ' · planned ',
+                h('b', { style: mainStat ? 'color:var(--' + mainStat + ')' : null, text: fmtSigned(m.plannedGain) + (mainStat ? ' ' + STAT_LABEL[mainStat] : '') }),
+                buyTotal ? ' · ' + fmtMoney(buyTotal) : '',
+                ' · ',
+                h('b', { style: late ? 'color:var(--warn)' : null, text: late ? 'Xanax ready' : 'on plan' }),
+            ]),
+        );
+
+        const nextBand = next
+            ? h('div', { class: 'next num' }, [
+                  next.at > now ? cd(next.at, now, { cls: 'cd' }) : h('span', { class: 'cd', text: 'Now' }),
+                  h('div', { class: 'what' }, [h('b', { text: stepWords(next) }), h('span', { text: stepSub(next) })]),
+                  h('div', { class: 'acts' }, stepLinks(next)),
+              ])
+            : h('div', { class: 'next num' }, [h('span', { class: 'cd', text: '—' }), h('div', { class: 'what' }, [h('b', { text: 'Nothing left today' }), h('span', { text: 'Tomorrow’s plan starts at 00:00 Torn time' })]), h('div')]);
+
+        const rows = [];
+        for (const d of m.done) rows.push(h('tr', { class: 'done' }, [h('td', { class: 't', text: clock(d.at, s) }), h('td', { text: d.label }), h('td', { text: Object.keys(d.trained || {}).map((k) => STAT_LABEL[k]).join(' · ') || '—' }), h('td', { class: 'r', text: d.gain ? fmtSigned(d.gain) : '' }), h('td', { class: 'r ok', text: 'Done' })]));
+        m.steps.forEach((st, i) => {
+            rows.push(
+                h('tr', { class: i === 0 ? 'now' : null }, [
+                    h('td', { class: 't', text: clock(st.at, s) }),
+                    h('td', { text: st.label }),
+                    h('td', { text: trainsText(st.trains) || '—' }),
+                    h('td', { class: 'r', text: st.gain ? fmtSigned(st.gain) : '' }),
+                    h('td', { class: 'r' }, [st.at > now ? cd(st.at, now, { prefix: 'in ', cls: 'when' }) : h('span', { class: 'when', text: 'now' })]),
+                ]),
+            );
+        });
+        const steps = h('table', { class: 'tbl num' }, [
+            h('thead', {}, [h('tr', {}, [h('th', { text: 'Time' }), h('th', { text: 'Step' }), h('th', { text: 'Train' }), h('th', { class: 'r', text: 'Gain' }), h('th', { class: 'r' })])]),
+            h('tbody', {}, rows),
+            h('tfoot', {}, [h('tr', {}, [h('td'), h('td', { colspan: '2' }, ['So far ', h('b', { text: fmtSigned(m.gainedToday) }), ' of ' + fmtSigned(m.plannedGain)]), h('td', { class: 'r', colspan: '2', text: 'Late on a step? The rest move with it.' })])]),
+        ]);
+
+        const foot = [];
+        if (m.reachedDay !== null && m.reachedDay !== undefined) foot.push(h('span', {}, [m.build.name + ' in ', h('b', { text: m.reachedDay === 0 ? 'now' : 'about ' + m.reachedDay + ' day' + (m.reachedDay === 1 ? '' : 's') })]));
+        if (m.nextGym && m.nextGym.gym) foot.push(h('span', {}, [m.nextGym.gym.name + ' ', h('b', { text: m.nextGym.known ? 'in ' + fmtInt(m.nextGym.energyLeft) + ' E' : 'next' }), m.nextGym.known ? ' (about ' + Math.max(1, Math.round(m.nextGym.days)) + ' days)' : ' · open Torn’s gym page once to track it']));
+
+        const stats = h('div', {}, [sectionHead('Stats', meta(['against ' + m.build.name + ' build · ' + fmtInt(m.total) + ' total'])), statRowsBlock(m), h('div', { class: 'sgfoot num' }, foot)]);
+
+        const plan = ctx.plan;
+        const strat = STRATEGIES[plan.strategy] || STRATEGIES.steady;
+        const planCard = h('div', { class: 'plan' }, [h('div', {}, [h('b', { text: strat.short + ' · ' + m.build.name + ' build' }), h('br'), h('span', { text: strat.what })]), h('div', { class: 'grow' }), h('a', { class: 'btn', href: '#plan', onclick: (e) => { e.preventDefault(); ctx.go('plan'); }, text: 'Change' })]);
+
+        return {
+            main: [h('div', {}, [head, nextBand]), steps, stats],
+            pane: [buyPane(m, ctx), h('div', {}, [sectionHead('Heads-up'), headsList(m.heads.length ? m.heads : [{ tone: 'good', text: 'Nothing needs you' }])]), planCard],
+        };
+    }
+
+    /* ===== src/ui/app/plan.js ===== */
+    /*
+     * Plan (mockups/L-plan.html): the recommended strategy, the others against
+     * it with a warning before a worse pick, the build, and the 30-day chart.
+     */
+
+
+
+
+
+
+
+
+
+
+
+    const KIND_TAG = { steady: 'Steady', boost: 'Boost', jump: 'Jump' };
+
+    function planPerDay(r, days) {
+        const x = (r.used[XANAX] || 0) / days;
+        const parts = [];
+        if (x) parts.push((Math.round(x * 2) / 2).toString().replace('.5', '½') + ' Xanax');
+        if (r.used[EDVD]) parts.push(Math.round((r.used[EDVD] / days) * 10) / 10 + ' EDVD');
+        if ((r.used[POINTS] || 0) >= REFILL_POINTS * days * 0.9) parts.push('refill');
+        return parts.join(' + ') || '—';
+    }
+
+    function planChart(compare, recommended, days) {
+        const W = 290;
+        const H = 150;
+        const ids = Object.keys(compare);
+        const max = Math.max(1, ...ids.map((id) => compare[id].gained));
+        const top = Math.pow(10, Math.floor(Math.log10(max)));
+        const gridV = Math.floor(max / top) * top;
+        const svg = h('svg', { class: 'chart num', viewBox: '0 0 352 180', role: 'img', 'aria-label': 'Stats gained over ' + days + ' days per plan' });
+        const y = (v) => H - (v / max) * (H - 10);
+        svg.appendChild(h('line', { class: 'ax', x1: 0, y1: H, x2: W, y2: H }));
+        svg.appendChild(h('line', { class: 'ax', x1: 0, y1: y(gridV).toFixed(1), x2: W, y2: y(gridV).toFixed(1), 'stroke-dasharray': '2 4' }));
+        svg.appendChild(h('text', { x: 0, y: (y(gridV) - 5).toFixed(1), text: fmtShort(gridV) }));
+        const labels = [];
+        const order = ids.filter((id) => id !== recommended).concat(recommended);
+        for (const id of order) {
+            const r = compare[id];
+            const pts = ['0,' + H].concat(r.daily.map((v, i) => (((i + 1) / r.daily.length) * W).toFixed(1) + ',' + y(v).toFixed(1)));
+            const rec = id === recommended;
+            const color = rec ? '#efebe2' : r.gained < compare[recommended].gained * 0.8 ? '#e8a33d' : '#6c737a';
+            svg.appendChild(h('polyline', { fill: 'none', stroke: color, 'stroke-width': rec ? '2.5' : '1.5', points: pts.join(' ') }));
+            labels.push({ id, y: y(r.gained), color, rec });
+        }
+        labels.sort((a, b) => a.y - b.y);
+        let last = -Infinity;
+        for (const l of labels) {
+            const yy = Math.max(l.y + 4, last + 13);
+            last = yy;
+            svg.appendChild(h('text', { x: W + 4, y: yy.toFixed(1), style: 'fill:' + l.color + (l.rec ? ';font-weight:bold' : ''), text: (STRATEGIES[l.id] || {}).short || l.id }));
+        }
+        svg.appendChild(h('text', { x: 0, y: H + 18, text: 'today' }));
+        svg.appendChild(h('text', { x: W, y: H + 18, 'text-anchor': 'end', text: days + ' d' }));
+        return svg;
+    }
+
+    function weekBars(days) {
+        const W = 700;
+        const colW = 70;
+        const gap = (W - 7 * colW) / 7;
+        const max = Math.max(1, ...days.map((d) => STATS.reduce((a, k) => a + d[k], 0)));
+        const svg = h('svg', { class: 'chart', viewBox: '0 0 ' + W + ' 92', role: 'img', 'aria-label': 'Trains per stat over the next 7 days' });
+        const names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        const today = new Date(Date.now()).getUTCDay();
+        days.forEach((d, i) => {
+            const x = gap / 2 + i * (colW + gap);
+            let yy = 4;
+            for (const k of ['dex', 'def', 'spd', 'str']) {
+                const hgt = (d[k] / max) * 64;
+                if (hgt > 0) svg.appendChild(h('rect', { x: x.toFixed(1), y: yy.toFixed(1), width: colW, height: hgt.toFixed(1), fill: STAT_COLOR[k] }));
+                yy += hgt;
+            }
+            svg.appendChild(h('text', { x: (x + colW / 2).toFixed(1), y: 86, 'text-anchor': 'middle', text: names[(today + i) % 7] }));
+        });
+        return svg;
+    }
+
+    function renderPlan(m, ctx) {
+        const compare = ctx.compare || {};
+        const rec = m.recommendation;
+        const days = ctx.settings.horizonDays || 30;
+        const plan = ctx.plan;
+        if (!rec || !rec.recommended || !compare[rec.recommended]) return { main: [h('p', { class: 'muted', text: 'Working out the plans…' })], pane: [] };
+        const best = compare[rec.recommended];
+        const S = STRATEGIES[rec.recommended];
+        const pick = ctx.ui.planPick || null;
+        const using = plan.strategy;
+
+        const recCard = h('div', {}, [
+            sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + fmtMoney(ctx.settings.budget) + ' budget · ' + days + ' days'])),
+            h('div', { class: 'prime num' }, [
+                h('div', {}, [h('span', { class: 'pill-tag chalk', text: KIND_TAG[S.kind] }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: S.what })]),
+                h('div', { class: 'figs' }, [
+                    h('div', { class: 'fig' }, [t('lab', days + ' days'), h('b', { class: 'good', text: '+' + fmtShort(best.gained) })]),
+                    h('div', { class: 'fig' }, [t('lab', 'Cost'), h('b', { text: fmtMoney(best.cost) })]),
+                    h('div', { class: 'fig' }, [t('lab', 'Per day'), h('b', { text: planPerDay(best, days) })]),
+                ]),
+                h('div', { class: 'why' }, [
+                    'Why: ' + (rec.reasons[0] || 'It gains the most stats inside your budget.') + ' ',
+                    using === rec.recommended ? h('span', { class: 'c-good', text: 'You’re on it.' }) : h('a', { href: '#', onclick: (e) => { e.preventDefault(); ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); ctx.ui.planPick = null; }, text: 'Use it' }),
+                ]),
+            ]),
+        ]);
+
+        const altRows = [];
+        if (m.nextGym && m.nextGym.gym) {
+            altRows.push(h('tr', { class: 'click' + (plan.goal && plan.goal.kind === 'unlockGym' ? ' sel' : ''), tabindex: '0', onclick: () => ctx.setPlan({ goal: plan.goal && plan.goal.kind === 'unlockGym' ? null : { kind: 'unlockGym', gymId: m.nextGym.gym.id }, type: 'goal' }) }, [h('td', {}, [h('small', { text: 'Goal' })]), h('td', {}, [h('b', { class: 'w', text: 'Unlock a gym' })]), h('td', { class: 'muted', text: m.nextGym.gym.name + (m.nextGym.days !== null ? ' in about ' + Math.max(1, Math.round(m.nextGym.days)) + ' days' : ' is next') + ' on ' + (STRATEGIES[using] || S).short.toLowerCase() }), h('td', { class: 'r muted', text: 'same' }), h('td', { class: 'r muted', text: 'same' })]));
+        }
+        altRows.push(h('tr', { class: 'click' + (plan.goal && plan.goal.kind === 'statTargets' ? ' sel' : ''), tabindex: '0', onclick: () => { ctx.ui.goalForm = !ctx.ui.goalForm; ctx.rerender(); } }, [h('td', {}, [h('small', { text: 'Goal' })]), h('td', {}, [h('b', { class: 'w', text: 'Reach stat numbers' })]), h('td', { class: 'muted', text: plan.goal && plan.goal.kind === 'statTargets' ? Object.entries(plan.goal.targets).map(([k, v]) => STAT_LABEL[k] + ' ' + fmtInt(v)).join(' · ') : 'e.g. DEX 150,000: aims each train at what’s missing' }), h('td', { class: 'r muted', text: 'same' }), h('td', { class: 'r muted', text: 'same' })]));
+        for (const a of rec.alternatives) {
+            const st = STRATEGIES[a.id];
+            const sel = (pick || using) === a.id;
+            altRows.push(
+                h('tr', { class: 'click' + (sel ? ' sel' : ''), tabindex: '0', onclick: () => { const w = pickWarning(best, compare[a.id], { bliss: m.pc.perks.bliss, days }); if (w.warn) { ctx.ui.planPick = a.id; ctx.rerender(); } else { ctx.ui.planPick = null; ctx.setPlan({ strategy: a.id, strategyPicked: true }); } } }, [
+                    h('td', {}, [h('small', { text: KIND_TAG[st.kind] })]),
+                    h('td', {}, [h('b', { class: 'w', text: st.name })]),
+                    h('td', { class: 'muted', text: st.what + (a.overBudget ? ' · over budget' : '') }),
+                    h('td', { class: 'r ' + (a.deltaStatsPct >= 0 ? 'c-good' : 'c-bad'), text: fmtPct(a.deltaStatsPct) }),
+                    h('td', { class: 'r ' + (a.deltaCost > 0 ? 'c-bad' : 'c-good'), text: (a.deltaCost >= 0 ? '+' : '−') + fmtMoney(Math.abs(a.deltaCost)) }),
+                ]),
+            );
+        }
+        const altTable = h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:70px', text: 'Kind' }), h('th', { style: 'width:170px', text: 'Plan' }), h('th', { text: 'What you do' }), h('th', { class: 'r', style: 'width:90px', text: 'Stats' }), h('th', { class: 'r', style: 'width:90px', text: 'Cost' })])]), h('tbody', {}, altRows)]);
+
+        const blocks = [sectionHead('Other plans', meta(['compared with ' + S.short.toLowerCase() + ' · click a row to pick it'])), altTable];
+        if (ctx.ui.goalForm) {
+            const vals = (plan.goal && plan.goal.kind === 'statTargets' && plan.goal.targets) || {};
+            const inputs = {};
+            blocks.push(
+                h('div', { class: 'row num', style: 'margin-top:10px;flex-wrap:wrap' }, [
+                    ...STATS.map((k) => h('label', { class: 'field', style: 'width:140px' }, [t('lab', STAT_LABEL[k]), (inputs[k] = h('input', { class: 'inp num', inputmode: 'numeric', placeholder: fmtInt(m.pc.stats[k]), value: vals[k] ? String(vals[k]) : '' }))])),
+                    h('button', { class: 'btn primary', type: 'button', style: 'align-self:flex-end', onclick: () => { const targets = {}; for (const k of STATS) { const v = Number(String(inputs[k].value).replace(/[^\d]/g, '')); if (v > m.pc.stats[k]) targets[k] = v; } ctx.ui.goalForm = false; ctx.setPlan(Object.keys(targets).length ? { goal: { kind: 'statTargets', targets }, type: 'goal' } : { goal: null }); }, text: 'Save goal' }),
+                ]),
+            );
+        }
+        if (pick && compare[pick]) {
+            const w = pickWarning(best, compare[pick], { bliss: m.pc.perks.bliss, days });
+            blocks.push(
+                h('div', { class: 'warnb num', style: 'margin-top:12px' }, [
+                    h('b', { text: w.title }),
+                    h('p', { text: w.text + ' ' + w.reasons.join(' ') }),
+                    h('div', { class: 'acts' }, [
+                        h('button', { class: 'btn primary', type: 'button', onclick: () => { ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Keep ' + S.short.toLowerCase() }),
+                        h('button', { class: 'btn', type: 'button', onclick: () => { ctx.ui.planPick = null; ctx.setPlan({ strategy: pick, strategyPicked: true }); }, text: 'Use it anyway' }),
+                    ]),
+                ]),
+            );
+        }
+
+        const buildRows = BUILD_ORDER.map((id) => {
+            const b = BUILDS[id];
+            const sel = String(plan.build || 'balanced').split(':')[0] === id;
+            return h('div', { class: 'brow' + (sel ? ' sel' : ''), tabindex: '0', role: 'button', onclick: () => ctx.setPlan({ build: id }) }, [
+                h('b', {}, [b.name, sel ? h('span', { class: 'pill-tag chalk', style: 'margin-left:6px', text: 'Now' }) : null]),
+                h('div', { class: 'ratio' }, STATS.map((k) => h('i', { style: 'width:' + (b.shares[k] * 100).toFixed(1) + '%;background:' + STAT_COLOR[k] }))),
+                t('', b.line),
+                t('', b.gyms.map((g) => (gymById(g) || { name: '' }).name.replace(' Gym', '').replace('Mr. ', '')).join(' + ')),
+            ]);
+        });
+
+        const todayTrains = m.projection[0] || {};
+        const todayTxt = STATS.filter((k) => todayTrains[k]).map((k) => STAT_LABEL[k] + ' ' + todayTrains[k]).join(', ');
+        const youVs = h('div', {}, [
+            sectionHead('You vs ' + m.build.name, meta(['Today: ' + STATS.reduce((a, k) => a + (todayTrains[k] || 0), 0) + ' trains → ', h('b', { text: todayTxt || 'none' })])),
+            statRowsBlock(m, { todayCol: 'trains' }),
+            h('div', { style: 'margin-top:16px' }, [
+                h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('lab', 'Next 7 days · trains per stat'), h('span', { class: 'legend' }, STATS.map((k) => h('span', {}, [h('i', { style: 'background:' + STAT_COLOR[k] }), STAT_LABEL[k]])))]),
+                weekBars(m.projection),
+                h('div', { class: 'sgfoot num' }, [h('span', {}, [m.build.name + ' in ', h('b', { text: m.reachedDay === null ? 'more than 30 days' : m.reachedDay === 0 ? 'now' : 'about ' + m.reachedDay + ' days' })])]),
+            ]),
+        ]);
+
+        let daysIn;
+        let budgetIn;
+        const pane = [
+            h('div', {}, [
+                sectionHead(days + ' days', meta(['stats gained, each plan'])),
+                planChart(compare, rec.recommended, days),
+                h('dl', { class: 'kv num', style: 'margin-top:8px' }, Object.values(compare).sort((a, b) => b.gained - a.gained).flatMap((r) => [h('dt', { text: STRATEGIES[r.id].name }), h('dd', { class: r.id === rec.recommended ? 'white' : r.gained < best.gained * 0.8 ? 'c-warn' : null, text: '+' + fmtShort(r.gained) + ' · ' + fmtMoney(r.cost) })])),
+            ]),
+            h('div', {}, [
+                sectionHead('Plan for', null, null, 'h3'),
+                h('div', { class: 'row' }, [
+                    h('label', { class: 'field', style: 'flex:1' }, [t('lab', 'Days'), (daysIn = h('input', { class: 'inp num', inputmode: 'numeric', value: String(days), onchange: () => { const v = Math.max(3, Math.min(90, Number(daysIn.value) || 30)); ctx.setSettings({ horizonDays: v }); } }))]),
+                    h('label', { class: 'field', style: 'flex:2' }, [t('lab', 'Budget'), (budgetIn = h('input', { class: 'inp num', inputmode: 'numeric', value: '$' + fmtInt(ctx.settings.budget), onchange: () => { const v = Number(String(budgetIn.value).replace(/[^\d]/g, '')) || 0; ctx.setSettings({ budget: v }); } }))]),
+                ]),
+                rec.alternatives.some((a) => a.overBudget) ? h('p', { class: 'muted', style: 'margin:8px 0 0;font-size:12px', text: rec.alternatives.filter((a) => a.overBudget).map((a) => STRATEGIES[a.id].short).join(', ') + ' over this budget.' }) : null,
+            ]),
+            h('div', {}, [sectionHead('When you’re late', null, null, 'h3'), headsList([{ tone: 'plain', text: 'Steady and goal plans', sub: 're-time by themselves; later steps move' }, { tone: 'warn', text: 'Jump plans', sub: 'warn 5 min before the tick or cooldown, then re-time' }])]),
+        ];
+
+        return { main: [recCard, h('div', {}, blocks), h('div', {}, [sectionHead('Build', meta(['how your total splits across the four stats · the plan picks where each train goes'])), h('div', { class: 'builds num' }, buildRows)]), youVs], pane };
+    }
+
+    /* ===== src/api/w3b.js ===== */
+    /*
+     * TornW3B (weav3r.dev) - the crowd-sourced bazaar price feed.
+     *
+     * Torn's API has no per-listing bazaar prices a Public key can trust (the
+     * `user -> bazaar` selection can be served days old on a Public key, and the
+     * `market -> bazaar` selection is a directory with no prices). TornW3B polls
+     * bazaars with keys their SELLERS donated, for their own bazaar only, and
+     * publishes the result. TornTools, TornPDA and Weav3r's own script read it.
+     *
+     * Non-negotiables, enforced here rather than by convention:
+     *
+     *   1. This client NEVER sees a Torn API key. It has no key parameter, no
+     *      getKey, and the only query it ever sends is `comment`. The Torn client
+     *      and this one share nothing.
+     *   2. weav3r.dev is the only destination - asserted on the resolved URL, not
+     *      just implied by a constant, exactly as client.js does for api.torn.com.
+     *   3. Its own sliding window, well under TornW3B's 100/min Cloudflare limit,
+     *      and a hard cooldown on 429 or a non-JSON (Cloudflare challenge) body.
+     *
+     * Responses are cached server-side for 60s, so asking faster is pointless.
+     */
+
+
+
+    const W3B_API_BASE = 'https://weav3r.dev/api/';
+    const W3B_HOST = 'weav3r.dev';
+    const W3B_TERMS_URL = 'https://weav3r.dev/terms-of-service';
+    const W3B_SITE_URL = 'https://weav3r.dev';
+
+    /** TornW3B enforces 100/min per IP; leave 40 for TornTools and friends. */
+    const W3B_MAX_PER_MINUTE = 60;
+
+    /**
+     * Every tab together: each client's own ceiling only limits itself. The
+     * trading app and TornTools draw on the same 100/min per IP, so this app
+     * stays well under it (the Buy tab asks for a handful of items).
+     */
+    const W3B_SHARED_PER_MINUTE = 80;
+
+    /** After a 429 or a challenge page, stop asking for this long. */
+    const W3B_COOLDOWN_MS = 60000;
+
+    class W3bError extends Error {
+        constructor(message, { http = null, blocked = false } = {}) {
+            super(message);
+            this.name = 'W3bError';
+            this.http = http;
+            this.blocked = blocked;
+        }
+    }
+
+    function w3bSleep(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    class W3bClient {
+        /**
+         * @param {object} [options]
+         * @param {function} [options.fetchImpl] - injectable for tests
+         * @param {number} [options.maxPerMinute]
+         * @param {function} [options.now]
+         * @param {function} [options.loadShared] - () => {recent: number[], cooldownUntil}
+         *   stored for every tab: one window across all of them, and a 429 seen
+         *   by one tab stops them all.
+         * @param {function} [options.saveShared] - (state) => void
+         * @param {function} [options.addShared] - (at) => void: record one slot of
+         *   THIS tab only (platform/tab-window.js), so tabs never overwrite each
+         *   other's; without it the whole window is written back through saveShared
+         * @param {number} [options.sharedPerMinute]
+         * @param {function} [options.sleep] - (ms) => Promise; injectable for tests
+         * @param {function} [options.isVisible] - () => boolean; nothing is sent
+         *   from a hidden tab, even a request queued while it was visible
+         */
+        constructor({
+            fetchImpl = gmFetch,
+            maxPerMinute = W3B_MAX_PER_MINUTE,
+            now = () => Date.now(),
+            loadShared = null,
+            saveShared = null,
+            sharedPerMinute = W3B_SHARED_PER_MINUTE,
+            sleep = w3bSleep,
+            isVisible = () => true,
+            addShared = null,
+        } = {}) {
+            this.addShared = addShared;
+            this.sleep = sleep;
+            this.isVisible = isVisible;
+            this.fetchImpl = fetchImpl;
+            this.maxPerMinute = maxPerMinute;
+            this.now = now;
+            this.loadShared = loadShared;
+            this.saveShared = saveShared;
+            this.sharedPerMinute = sharedPerMinute;
+            this.recent = [];
+            this.chain = Promise.resolve();
+            this.cooldownUntil = 0;
+        }
+
+        /** What every tab has used, and any wait one of them was told to make. */
+        readShared(t) {
+            const out = { recent: [], cooldownUntil: 0 };
+            if (!this.loadShared) return out;
+            let s;
+            try {
+                s = this.loadShared();
+            } catch {
+                return out;
+            }
+            if (!s || typeof s !== 'object') return out;
+            if (Array.isArray(s.recent)) out.recent = s.recent.filter((x) => Number.isFinite(x) && t - x < 60000).sort((a, b) => a - b);
+            if (Number.isFinite(Number(s.cooldownUntil))) out.cooldownUntil = Number(s.cooldownUntil);
+            return out;
+        }
+
+        writeShared(state) {
+            if (!this.saveShared) return;
+            try {
+                this.saveShared(state);
+            } catch {
+                // Sharing is best-effort; this tab still limits itself.
+            }
+        }
+
+        /** The later of this tab's wait and any other tab's. */
+        blockedUntil(t = this.now()) {
+            return Math.max(this.cooldownUntil, this.readShared(t).cooldownUntil);
+        }
+
+        stats() {
+            const t = this.now();
+            const used = this.recent.filter((x) => t - x < 60000).length;
+            return {
+                usedLastMinute: used,
+                remaining: Math.max(0, this.maxPerMinute - used),
+                coolingDown: t < this.blockedUntil(t),
+                sharedLastMinute: this.loadShared ? this.readShared(t).recent.length : used,
+            };
+        }
+
+        async waitForSlot() {
+            for (;;) {
+                // Hidden: take no slot and send nothing until the tab is back.
+                if (!this.isVisible()) {
+                    await this.sleep(1000);
+                    continue;
+                }
+                const t = this.now();
+                this.recent = this.recent.filter((x) => t - x < 60000);
+                const shared = this.readShared(t);
+                const sharedFull = this.loadShared && shared.recent.length >= this.sharedPerMinute;
+
+                if (this.recent.length < this.maxPerMinute && !sharedFull) {
+                    this.recent.push(t);
+                    if (this.addShared) {
+                        try {
+                            this.addShared(t);
+                        } catch {
+                            // Best-effort; this tab still limits itself.
+                        }
+                    } else if (this.loadShared) {
+                        this.writeShared({ ...shared, recent: [...shared.recent, t] });
+                    }
+                    return;
+                }
+
+                // Wait until every full window has a slot again.
+                const frees = [];
+                if (this.recent.length >= this.maxPerMinute) frees.push(this.recent[this.recent.length - this.maxPerMinute]);
+                if (sharedFull) frees.push(shared.recent[shared.recent.length - this.sharedPerMinute]);
+                await this.sleep(Math.max(50, 60000 - (t - Math.max(...frees)) + 25));
+            }
+        }
+
+        /** Stop asking - this tab and, through storage, every other. */
+        coolDown() {
+            const t = this.now();
+            this.cooldownUntil = t + W3B_COOLDOWN_MS;
+            if (this.loadShared) this.writeShared({ ...this.readShared(t), cooldownUntil: this.cooldownUntil });
+        }
+
+        /** Build and check a URL. Exposed for tests. */
+        buildUrl(path) {
+            const url = new URL(String(path).replace(/^\/+/, ''), W3B_API_BASE);
+
+            if (url.hostname !== W3B_HOST) {
+                throw new W3bError('Refusing to contact ' + url.hostname + '.');
+            }
+
+            // Nothing but an attribution comment ever goes in the query.
+            url.search = '';
+            url.searchParams.set('comment', 'PumpingIron');
+
+            return url;
+        }
+
+        /** GET one TornW3B path. Serialised, rate-limited, never keyed. */
+        get(path) {
+            const run = () => this.execute(path);
+            const promise = this.chain.catch(() => {}).then(run);
+            this.chain = promise.catch(() => {});
+            return promise;
+        }
+
+        async execute(path) {
+            if (this.now() < this.blockedUntil()) {
+                throw new W3bError('TornW3B is rate limiting us; paused briefly.', {
+                    blocked: true,
+                });
+            }
+
+            const url = this.buildUrl(path);
+            await this.waitForSlot();
+            // Another tab may have been blocked while this one waited for a slot.
+            if (this.now() < this.blockedUntil()) {
+                throw new W3bError('TornW3B is rate limiting us; paused briefly.', {
+                    blocked: true,
+                });
+            }
+
+            let response;
+            try {
+                response = await this.fetchImpl(url.toString());
+            } catch (error) {
+                throw new W3bError(
+                    'TornW3B network error: ' + ((error && error.message) || error),
+                );
+            }
+
+            if (response.status === 429) {
+                this.coolDown();
+                throw new W3bError('TornW3B rate limit (429).', {
+                    http: 429,
+                    blocked: true,
+                });
+            }
+
+            if (!response.ok) {
+                throw new W3bError('TornW3B HTTP ' + response.status, {
+                    http: response.status,
+                });
+            }
+
+            try {
+                return await response.json();
+            } catch {
+                // Cloudflare answers a challenge page with HTML, not JSON.
+                this.coolDown();
+                throw new W3bError('TornW3B returned a non-JSON page (blocked?).', {
+                    blocked: true,
+                });
+            }
+        }
+    }
+
+    /**
+     * Cheapest bazaar price for every item, in one request.
+     *
+     * @returns {Promise<Array<{itemId: string, name: string, lowestPrice: number|null,
+     *   marketPrice: number|null, bazaarAverage: number|null, totalBazaars: number}>>}
+     */
+    async function fetchW3bSummary(client) {
+        const data = await client.get('marketplace');
+        const items = data && Array.isArray(data.items) ? data.items : null;
+
+        if (!items) throw new W3bError('TornW3B returned no item summary.');
+
+        return items
+            .filter((i) => i && Number.isFinite(Number(i.item_id)))
+            .map((i) => ({
+                itemId: String(i.item_id),
+                name: i.item_name || '',
+                lowestPrice: positiveOrNull(i.lowest_price),
+                marketPrice: positiveOrNull(i.market_price),
+                bazaarAverage: positiveOrNull(i.bazaar_average),
+                totalBazaars: Number(i.total_bazaars) || 0,
+            }));
+    }
+
+    /**
+     * Every bazaar listing TornW3B knows for one item.
+     *
+     * Retries once when the payload says there are listings but sends none - a
+     * known mid-scan glitch. `maxPrice` and friends are deliberately NOT sent:
+     * they are not in TornW3B's spec, TornTools filters client-side anyway, and
+     * trusting an ignored filter is how a list fills with rows that are not deals.
+     *
+     * @returns {Promise<{listings: Array, total: number}>} raw listing objects
+     */
+    async function fetchW3bListings(client, itemId) {
+        const path = 'marketplace/' + encodeURIComponent(String(itemId));
+
+        let data = await client.get(path);
+
+        const empty = (d) =>
+            d &&
+            Number(d.total_listings) > 0 &&
+            Array.isArray(d.listings) &&
+            d.listings.length === 0;
+
+        if (empty(data)) data = await client.get(path);
+
+        return {
+            listings: data && Array.isArray(data.listings) ? data.listings : [],
+            total: Number(data && data.total_listings) || 0,
+        };
+    }
+
+    function positiveOrNull(value) {
+        const n = Number(value);
+        return Number.isFinite(n) && n > 0 ? n : null;
+    }
+
+    /* ===== src/ui/app/buy.js ===== */
+    /*
+     * Buy (mockups/M-buy.html): what the plan needs for today / 3 days / a week,
+     * minus what you hold, filled from the cheapest listings across the Item
+     * Market, bazaars (TornW3B) and the points market, each with a link to
+     * that exact listing. You buy by hand.
+     */
+
+
+
+
+
+
+
+
+
+
+    const WINDOW_LABEL = { today: 'Today', three: '3 days', week: 'Week' };
+    const TRACKED = [XANAX, POINTS, ECSTASY, EDVD];
+
+    /** The plan's needs for a window: today's steps, plus later days at the plan's daily average. */
+    function needsForWindow(m, compare, plan, windowKey, horizonDays) {
+        const days = WINDOWS[windowKey] || 1;
+        const today = itemsNeeded(m.steps.filter((s) => s.at < tornDayStart(m.now) + DAY));
+        if (days <= 1) return today;
+        const r = compare && compare[plan.strategy];
+        const out = { ...today };
+        if (r) {
+            for (const [id, n] of Object.entries(r.used || {})) {
+                const extra = ((n || 0) / (horizonDays || 30)) * (days - 1);
+                if (extra > 0) out[id] = Math.ceil((out[id] || 0) + extra - 1e-9);
+            }
+        }
+        return out;
+    }
+
+    function agoText(at, now) {
+        if (!at) return 'not yet';
+        const s = Math.max(0, Math.round((now - at) / 1000));
+        return s < 90 ? s + 's ago' : Math.round(s / 60) + ' min ago';
+    }
+
+    function renderBuy(m, ctx) {
+        const s = ctx.settings;
+        const win = s.buyWindow || 'three';
+        const needs = needList(needsForWindow(m, ctx.compare, ctx.plan, win, s.horizonDays), ctx.statics.inventory || {});
+        const toBuy = needs.filter((n) => n.buy > 0);
+        ctx.wantPrices(toBuy.map((n) => n.id).concat(TRACKED));
+        const prices = ctx.prices || {};
+        let total = 0;
+        const blocks = toBuy.map((n) => {
+            const p = prices[n.id];
+            const fill = p && p.listings ? fillCheapest(p.listings, n.buy, n.id) : null;
+            if (fill) total += fill.total;
+            const v = fill && fill.rows[0] ? priceVerdict(fill.rows[0].price, p.avg7 || null, { slack: n.have > 0 }) : null;
+            const vColor = !v ? 'var(--dim)' : v.kind === 'buy' || v.kind === 'bulk' ? 'var(--good)' : v.kind === 'wait' ? 'var(--warn)' : 'var(--dim)';
+            const perDay = WINDOWS[win] > 1 ? Math.round((n.need / WINDOWS[win]) * 10) / 10 + ' a day' : n.need + ' today';
+            const rows = fill
+                ? fill.rows.map((r) =>
+                      h('tr', {}, [
+                          h('td', {}, [h('b', { class: 'w', text: whereText(r) }), h('small', { text: ' · ' + (r.listed > r.qty ? r.listed + ' listed, take ' + r.qty : r.listed + ' listed') })]),
+                          h('td', { class: 'r' }, [h('b', { class: 'w', text: fmtInt(r.qty) })]),
+                          h('td', { class: 'r', text: fmtMoney(r.price) }),
+                          h('td', { class: 'r', text: '$' + fmtInt(r.subtotal) }),
+                          h('td', { class: 'r' }, [h('a', { class: 'btn sm', href: r.link, target: '_blank', rel: 'noopener', text: r.source === 'bazaar' ? 'Open bazaar' : r.source === 'points' ? 'Open points' : 'Open market' })]),
+                      ]),
+                  )
+                : [h('tr', {}, [h('td', { colspan: '5', class: 'muted', text: p && p.error ? 'Prices could not load: ' + p.error : 'Checking prices…' })])];
+            return h('div', { class: 'item num' }, [
+                h('div', { class: 'ih' }, [h('b', { text: n.name + ' × ' + fmtInt(n.buy) }), h('span', { class: 'need', text: perDay + (n.have ? ', ' + n.have + ' in inventory' : '') + (n.id === POINTS ? ' · for the refill' : '') }), h('span', { class: 'sum', text: fill ? fmtMoney(fill.total) : '' })]),
+                v ? h('div', { class: 'verdict' }, [h('i', { style: 'background:' + vColor }), v.pct !== null ? h('span', {}, [h('b', { style: 'color:' + vColor, text: v.text.split(' · ')[0] }), h('span', { class: 'muted', text: ' · ' + v.text.split(' · ')[1] + ' (' + fmtMoney(Math.round(p.avg7)) + ')' })]) : h('span', { class: 'muted', text: 'Price history starts today: a verdict after two days' })]) : null,
+                fill && fill.short > 0 ? h('div', { class: 'msg bad', text: 'Only ' + fill.filled + ' listed at these prices' }) : null,
+                h('table', { class: 'tbl' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'Where' }), h('th', { class: 'r', style: 'width:80px', text: 'Take' }), h('th', { class: 'r', style: 'width:120px', text: 'Each' }), h('th', { class: 'r', style: 'width:130px', text: 'Subtotal' }), h('th', { style: 'width:130px' })])]), h('tbody', {}, rows)]),
+            ]);
+        });
+
+        const held = needs.filter((n) => n.have > 0).map((n) => n.have + ' ' + n.name);
+        const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Window', style: 'margin-top:6px' }, Object.keys(WINDOWS).map((k) => h('button', { type: 'button', 'aria-pressed': String(k === win), onclick: () => ctx.setSettings({ buyWindow: k }), text: WINDOW_LABEL[k] })));
+        const summary = toBuy.map((n) => fmtInt(n.buy) + ' ' + (n.id === POINTS ? 'points' : n.name)).join(' and ');
+        const top = h('div', { class: 'prime num', style: 'grid-template-columns:auto 1fr auto' }, [
+            h('div', {}, [t('lab', 'Buy for'), seg]),
+            h('div', { class: 'd', style: 'padding-left:12px', text: (summary || 'Nothing to buy') + (held.length ? ' · you have ' + held.join(', ') : '') + ' · cheapest first across the Item Market, bazaars and the points market' }),
+            h('div', { style: 'text-align:right' }, [t('lab', 'Total'), h('div', { class: 'big', text: total ? fmtMoney(total) : '$0' })]),
+        ]);
+
+        const now = m.now;
+        const spark = TRACKED.map((id) => {
+            const p = prices[id] || {};
+            const lows = p.lows7 || [];
+            const cheapest = p.listings && p.listings.length ? Math.min(...p.listings.map((l) => l.price)) : null;
+            const v = cheapest && p.avg7 ? priceVerdict(cheapest, p.avg7) : null;
+            const inPlan = toBuy.some((n) => n.id === id);
+            return h('div', { class: 'pr' }, [h('b', { text: itemName(id) }), sparkline(lows, { color: inPlan ? '#efebe2' : '#6c737a' }), h('span', { class: 'r ' + (v && v.pct > 3 ? 'c-warn' : !inPlan ? 'muted' : '') }, [cheapest ? fmtMoney(cheapest) : '—', v && v.pct !== null ? h('span', { class: v.pct < 0 ? 'c-good' : 'muted', text: ' ' + (v.pct >= 0 ? '+' : '−') + Math.abs(v.pct).toFixed(1) + '%' }) : null])]);
+        });
+        const notInPlan = [ECSTASY, EDVD, CANDY_KISSES, FHC].filter((id) => !toBuy.some((n) => n.id === id)).map(itemName);
+        const im = Object.values(prices).map((p) => p.imAt || 0);
+        const bz = Object.values(prices).map((p) => p.w3bAt || 0);
+        const pane = [
+            h('div', {}, [sectionHead('7-day prices', meta(['lowest listing we saw each day'])), h('div', { class: 'num' }, spark)]),
+            notInPlan.length ? h('div', {}, [sectionHead('Not in your plan', null, null, 'h3'), h('details', { class: 'dis' }, [h('summary', { text: notInPlan.join(', ') }), h('p', { class: 'muted', style: 'margin:6px 0 0;font-size:12px', text: 'Your plan doesn’t use them. Pick a jump in Plan and they show here with sellers.' })])]) : null,
+            h('div', {}, [sectionHead('Where prices come from', null, null, 'h3'), h('dl', { class: 'kv' }, [h('dt', { text: 'Item Market' }), h('dd', { text: 'Torn API · ' + agoText(Math.max(0, ...im), now) }), h('dt', { text: 'Points market' }), h('dd', { text: 'Torn API · ' + agoText(prices[POINTS] && prices[POINTS].imAt, now) }), h('dt', { text: 'Bazaars' }), h('dd', {}, [h('a', { href: W3B_SITE_URL, target: '_blank', rel: 'noopener', text: 'TornW3B' }), ' · ' + agoText(Math.max(0, ...bz), now)])])]),
+        ];
+        return { main: [top, h('div', { class: 'items' }, blocks), h('p', { class: 'muted', style: 'margin:0;font-size:12px', text: 'A listing can sell before you get there. The list checks again when you come back to this tab.' })], pane };
+    }
+
+    /* ===== src/ui/app/progress.js ===== */
+    /*
+     * Progress (mockups/N-progress.html): stats over time, gained against the
+     * plan each day (TrainingPeaks colours), the gyms ahead; this week in the pane.
+     */
+
+
+
+
+
+
+
+
+    const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const dayLabel = (d) => new Date(d).getUTCDate() + ' ' + MONTH_SHORT[new Date(d).getUTCMonth()];
+
+    /** Plan-vs-actual colour: green within ±20%, yellow 50–79% or 121–150%, red further off. */
+    function planColor(ratio) {
+        if (ratio >= 0.8 && ratio <= 1.2) return 'good';
+        if ((ratio >= 0.5 && ratio < 0.8) || (ratio > 1.2 && ratio <= 1.5)) return 'warn';
+        return 'bad';
+    }
+
+    const PC_HEX = { good: '#9bdc8a', warn: '#e8a33d', bad: '#ff6b5e' };
+
+    function smallMultiple(k, series) {
+        const vals = series.map((s) => s[k]);
+        const lo = Math.min(...vals);
+        const hi = Math.max(...vals);
+        const W = 180;
+        const H = 64;
+        const pts = vals.map((v, i) => ((vals.length === 1 ? 0 : i / (vals.length - 1)) * W).toFixed(1) + ',' + (hi === lo ? H / 2 : H - 2 - ((v - lo) / (hi - lo)) * (H - 4)).toFixed(1));
+        const gained = vals[vals.length - 1] - vals[0];
+        const firstUp = vals.findIndex((v, i) => i > 0 && v > vals[i - 1]);
+        return h('div', { class: 'smc' }, [
+            h('div', { class: 'h' }, [h('b', { class: 's-' + k, text: STAT_LABEL[k] }), h('span', { text: fmtInt(vals[vals.length - 1]) })]),
+            h('svg', { class: 'chart', viewBox: '0 0 ' + W + ' ' + H, 'aria-hidden': 'true' }, [h('polyline', { fill: 'none', stroke: STAT_COLOR[k], 'stroke-width': '2', points: pts.join(' ') })]),
+            h('small', { text: fmtSigned(gained) + (firstUp > 1 ? ' · from ' + dayLabel(series[firstUp].day) : firstUp === 1 ? ' · every day' : '') }),
+        ]);
+    }
+
+    function renderProgress(m, ctx) {
+        const range = ctx.ui.progressRange || 14;
+        const hist = ctx.history || {};
+        const days = Object.keys(hist).map(Number).sort((a, b) => a - b).slice(-range);
+        const series = days.map((d) => ({ day: d, ...hist[d] }));
+        const main = [];
+        const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Range' }, [14, 30, 120].map((n) => h('button', { type: 'button', 'aria-pressed': String(n === range), onclick: () => { ctx.ui.progressRange = n; ctx.rerender(); }, text: n === 120 ? 'All' : n + ' days' })));
+        if (series.length >= 2) {
+            main.push(h('div', {}, [sectionHead('Stats', meta(['last ' + series.length + ' days · ' + fmtInt(series[0].total) + ' → ', h('b', { text: fmtInt(series[series.length - 1].total) }), ' total']), seg), h('div', { class: 'mult num' }, STATS.map((k) => smallMultiple(k, series)))]));
+        } else {
+            main.push(h('div', {}, [sectionHead('Stats', meta(['a line per stat once two days are recorded']), seg), h('p', { class: 'muted', style: 'margin:0', text: 'Pumping Iron records your stats once a day while a Torn or Pumping Iron tab is open. Come back tomorrow for the first line.' })]));
+        }
+
+        // Gained vs plan per day
+        const totals = ctx.dayTotals || {};
+        // Only finished Torn days are judged against the plan; today is still going.
+        const todayStart = Math.floor(m.now / DAY) * DAY;
+        const tdays = Object.keys(totals).map(Number).filter((d) => d < todayStart).sort((a, b) => a - b).slice(-14);
+        if (!tdays.length) main.push(h('div', {}, [sectionHead('Gained vs plan', meta(['per day'])), h('p', { class: 'muted', style: 'margin:0', text: 'Your first full day shows here tomorrow: what you gained against what the plan said.' })]));
+        if (tdays.length) {
+            const W = 780;
+            const H = 110;
+            const colW = Math.min(36, W / tdays.length - 20);
+            const step = W / tdays.length;
+            const max = Math.max(1, ...tdays.map((d) => Math.max(totals[d].gained || 0, totals[d].planned || 0))) * 1.1;
+            const svg = h('svg', { class: 'chart num', viewBox: '0 0 ' + W + ' 132', role: 'img', 'aria-label': 'Stats gained each day against the plan' });
+            svg.appendChild(h('line', { class: 'ax', x1: 0, y1: H, x2: W, y2: H }));
+            let onPlan = 0;
+            const notes = [];
+            tdays.forEach((d, i) => {
+                const x = i * step + (step - colW) / 2;
+                const g = totals[d].gained || 0;
+                const p = totals[d].planned || 0;
+                const ratio = p > 0 ? g / p : 1;
+                const c = planColor(ratio);
+                if (c === 'good') onPlan++;
+                else notes.push(dayLabel(d) + ': ' + Math.round(ratio * 100) + '% of plan');
+                const hg = (g / max) * H;
+                svg.appendChild(h('rect', { x: x.toFixed(1), y: (H - hg).toFixed(1), width: colW.toFixed(1), height: hg.toFixed(1), rx: 2, fill: PC_HEX[c] }));
+                if (p > 0) svg.appendChild(h('line', { x1: (x - 3).toFixed(1), x2: (x + colW + 3).toFixed(1), y1: (H - (p / max) * H).toFixed(1), y2: (H - (p / max) * H).toFixed(1), stroke: '#efebe2', 'stroke-width': 2 }));
+                if (i === 0 || i === tdays.length - 1 || i % 5 === 0) svg.appendChild(h('text', { x: (x + colW / 2).toFixed(1), y: 126, 'text-anchor': 'middle', text: i === tdays.length - 1 ? 'today' : dayLabel(d) }));
+            });
+            const legendEl = h('span', { class: 'right legend' }, [h('span', {}, [h('i', { style: 'background:var(--good)' }), 'within 20%']), h('span', {}, [h('i', { style: 'background:var(--warn)' }), '50–79% or 121–150%']), h('span', {}, [h('i', { style: 'background:var(--bad)' }), 'further off']), h('span', {}, [h('i', { style: 'background:var(--chalk);height:2px;vertical-align:3px' }), 'plan'])]);
+            main.push(h('div', {}, [sectionHead('Gained vs plan', meta(['per day · ', h('b', { text: onPlan + ' of ' + tdays.length + ' on plan' })]), legendEl), svg, notes.length ? h('div', { class: 'sgfoot num' }, notes.slice(-3).map((n) => h('span', { text: n }))) : null]));
+        }
+
+        // Gyms ahead
+        const active = m.state.gymId || 1;
+        const rows = [];
+        let cumE = 0;
+        const perDay = m.energyPerDay || 1620;
+        if (active < GEORGES) {
+            const cur = gymById(active, m.pc.table);
+            rows.push(h('div', { class: 'tlr now' }, [h('i', { class: 'dotc' }), h('b', { text: cur ? cur.name : 'Gym ' + active }), h('span', { class: 'muted', text: bestDots(cur) }), h('span', { class: 'muted', text: m.nextGym && m.nextGym.energyLeft !== null && ctx.gymProgress ? fmtInt(m.nextGym.energyLeft) + ' E to the next' : 'open the gym page once to track progress' }), h('span', { class: 'r', text: 'now' })]));
+            for (let id = active + 1; id <= GEORGES && rows.length < 7; id++) {
+                const g = gymById(id, m.pc.table);
+                const need = id === active + 1 && m.nextGym ? m.nextGym.energyLeft : unlockEnergyAfter(id - 1, m.pc.perks.gymExpMult);
+                cumE += need || 0;
+                rows.push(h('div', { class: 'tlr' + (id === active + 1 ? ' next' : '') }, [h('i', { class: 'dotc' }), h('b', { text: g.name }), h('span', { class: 'muted', text: bestDots(g) }), h('span', { class: 'muted', text: (id === active + 1 ? fmtInt(need) + ' E to go' : '+' + fmtInt(need) + ' E') + ' · ' + fmtMoney(g.cost) }), h('span', { class: 'r', text: 'about ' + Math.max(1, Math.round(cumE / perDay)) + ' days' })]));
+            }
+        } else {
+            rows.push(h('div', { class: 'tlr now' }, [h('i', { class: 'dotc' }), h('b', { text: (gymById(active, m.pc.table) || {}).name || "George's" }), h('span', { class: 'muted', text: 'every ladder gym unlocked' }), h('span'), h('span', { class: 'r', text: 'now' })]));
+        }
+        main.push(h('div', {}, [sectionHead('Gyms', meta(['at ' + fmtInt(perDay) + ' energy a day'])), h('div', { class: 'tl num' }, rows)]));
+
+        // Pane: this week
+        const weekStart = Math.floor(m.now / DAY) * DAY - 6 * DAY;
+        const wk = tdays.filter((d) => d >= weekStart).map((d) => totals[d]);
+        const sum = (k) => wk.reduce((a, x) => a + (x[k] || 0), 0);
+        const g = sum('gained');
+        const p = sum('planned');
+        const pct = p > 0 && wk.length ? Math.round((100 * g) / p) : null;
+        const meter = (label, valText, sub, fillPct, color) => h('div', { class: 'meter' }, [h('span', { text: label }), h('b', {}, [valText, sub ? h('span', { class: 'muted', style: 'font-weight:normal', text: ' ' + sub }) : null]), h('div', { class: 'bar' }, [h('i', { style: 'width:' + Math.max(0, Math.min(100, fillPct)) + '%;background:' + color })])]);
+        const pane = [
+            h('div', {}, [
+                sectionHead('This week', meta([wk.length ? wk.length + ' full day' + (wk.length === 1 ? '' : 's') : 'first full day tomorrow'])),
+                h('div', { class: 'num' }, [
+                    meter('Stats gained', fmtSigned(g), pct !== null ? pct + '% of plan' : '', pct || 0, pct !== null && planColor(pct / 100) === 'good' ? 'var(--good)' : 'var(--warn)'),
+                    meter('Xanax taken', String(sum('xanax')), 'of ' + sum('xanaxPlanned'), sum('xanaxPlanned') ? (100 * sum('xanax')) / sum('xanaxPlanned') : 0, 'var(--chalk)'),
+                    meter('Refills used', String(sum('refills')), 'of ' + wk.length, wk.length ? (100 * sum('refills')) / wk.length : 0, 'var(--chalk)'),
+                ]),
+            ]),
+            h('div', {}, [sectionHead('Gain model', null, null, 'h3'), headsList([ctx.calibration && ctx.calibration.n >= 10 ? { tone: Math.abs(ctx.calibration.errPct) <= 3 ? 'good' : 'warn', text: 'Within ' + Math.max(1, Math.round(Math.abs(ctx.calibration.errPct))) + '% of your last ' + ctx.calibration.n + ' sessions', sub: 'predicted against what your stats did' } : { tone: 'plain', text: 'Checks itself after 10 sessions', sub: 'from stat changes after each train' }])]),
+            h('div', {}, [sectionHead('Totals', null, null, 'h3'), h('dl', { class: 'kv num' }, [h('dt', { text: 'Days recorded' }), h('dd', { text: String(Object.keys(hist).length) }), h('dt', { text: 'Best day' }), h('dd', { text: tdays.length ? fmtSigned(Math.max(...tdays.map((d) => totals[d].gained || 0))) : '—' })])]),
+        ];
+        return { main, pane };
+    }
+
+    function bestDots(g) {
+        if (!g) return '';
+        const best = Math.max(...STATS.map((k) => g.dots[k]));
+        const which = STATS.filter((k) => g.dots[k] === best).map((k) => STAT_LABEL[k]);
+        return best + ' ' + (which.length === 4 ? 'all' : which.join('/'));
+    }
+
+    /* ===== src/ui/mask.js ===== */
+    /*
+     * Masked API key boxes, the same way on every page.
+     *
+     * A key box must hide what is typed WITHOUT being a password field: Chrome,
+     * Edge and password managers offer to save (and sync) whatever is typed in a
+     * type="password" box, and a Full key in a synced password store is a key
+     * outside our control. So the box is type="text" and CSS hides the letters
+     * (-webkit-text-security, which Chrome, Edge and Safari support).
+     *
+     * Where CSS cannot mask (some Firefox builds), a plain text box would show
+     * the key in the clear; there, and only there, it falls back to a password
+     * box with saving discouraged (autocomplete off, password-manager opt-outs).
+     */
+
+    /** Can this browser hide a text box's letters with CSS? */
+    function cssMaskSupported() {
+        try {
+            return Boolean(
+                typeof CSS !== 'undefined' &&
+                    CSS.supports &&
+                    (CSS.supports('-webkit-text-security', 'disc') || CSS.supports('text-security', 'disc')),
+            );
+        } catch {
+            return false;
+        }
+    }
+
+    /** The attributes every key box gets: no autofill, no spellcheck, no password-manager capture. */
+    function keyInputAttrs() {
+        return {
+            type: cssMaskSupported() ? 'text' : 'password',
+            autocomplete: 'off',
+            autocapitalize: 'off',
+            autocorrect: 'off',
+            spellcheck: 'false',
+            'data-lpignore': 'true',
+            'data-1p-ignore': 'true',
+            'data-bwignore': 'true',
+            'data-form-type': 'other',
+        };
+    }
+
+    /** A revealed saved key is taken out of the box again after this long. */
+    const REVEAL_MS = 60000;
+
+    /**
+     * Show / hide for one key box.
+     *
+     * @param {HTMLInputElement} input
+     * @param {string} maskedClass - the page's CSS class that hides the letters
+     * @param {object} [opts]
+     * @param {function} [opts.onReveal] - () => the saved key, put in the box only while shown
+     * @param {function} [opts.onChange] - (hidden) => void, e.g. to relabel a Show button
+     * @returns {{hidden: function, toggle: function, hide: function}}
+     */
+    function keyMask(input, maskedClass, { onReveal = null, onChange = () => {} } = {}) {
+        const byCss = input.type !== 'password';
+        let hidden = true;
+        let revealed = false;
+        let timer = null;
+
+        const apply = () => {
+            if (byCss) input.classList.toggle(maskedClass, hidden);
+            else input.type = hidden ? 'password' : 'text';
+            onChange(hidden);
+        };
+
+        const hide = () => {
+            if (timer) clearTimeout(timer);
+            timer = null;
+            hidden = true;
+            // A saved key shown on request never stays in the box: any script
+            // that can reach the box could read it.
+            if (revealed) {
+                input.value = '';
+                revealed = false;
+            }
+            apply();
+        };
+
+        const show = () => {
+            hidden = false;
+            if (!input.value && onReveal) {
+                input.value = onReveal() || '';
+                revealed = true;
+                timer = setTimeout(hide, REVEAL_MS);
+            }
+            apply();
+        };
+
+        if (byCss) input.classList.add(maskedClass);
+        return {
+            hidden: () => hidden,
+            toggle: () => (hidden ? show() : hide()),
+            hide,
+        };
+    }
+
+    /* ===== src/api/third.js ===== */
+    /*
+     * A client for one keyed third party (FFScouter, TornStats): one host,
+     * asserted on the resolved URL; its own per-minute window shared across
+     * tabs; a pause when the service says so; nothing from a hidden tab; the
+     * key redacted from every error. The Torn key never reaches these clients:
+     * each holds only the key its own service issued (or already has).
+     */
+
+
+
+    class ThirdPartyError extends Error {
+        constructor(message, { service = '', http = null, code = null, paused = false, retryAfterS = null, deadKey = false } = {}) {
+            super(message);
+            this.name = 'ThirdPartyError';
+            this.service = service;
+            this.http = http;
+            this.code = code;
+            this.paused = paused;
+            this.retryAfterS = retryAfterS;
+            this.deadKey = deadKey;
+        }
+    }
+
+    function tpSleep(ms) {
+        return new Promise((r) => setTimeout(r, ms));
+    }
+
+    function redactThirdKey(text, key) {
+        let out = String(text === null || text === undefined ? '' : text);
+        if (key) out = out.split(key).join('<redacted>');
+        return out.replace(/key=[A-Za-z0-9_-]{8,}/g, 'key=<redacted>');
+    }
+
+    class ThirdPartyClient {
+        /**
+         * @param {object} o
+         * @param {string} o.service - name for messages
+         * @param {string} o.host - the only hostname this client may reach
+         * @param {function} o.getKey - () => this service's key
+         * @param {number} [o.maxPerMinute]
+         * @param {function} [o.fetchImpl]
+         * @param {function} [o.now]
+         * @param {function} [o.sleep]
+         * @param {function} [o.isVisible]
+         * @param {function} [o.loadShared] - () => {recent:number[], pauseUntil}
+         * @param {function} [o.saveShared]
+         */
+        constructor({ service, host, getKey, maxPerMinute = 30, fetchImpl = gmFetch, now = () => Date.now(), sleep = tpSleep, isVisible = () => true, loadShared = null, saveShared = null }) {
+            this.service = service;
+            this.host = host;
+            this.getKey = getKey;
+            this.maxPerMinute = maxPerMinute;
+            this.fetchImpl = fetchImpl;
+            this.now = now;
+            this.sleep = sleep;
+            this.isVisible = isVisible;
+            this.loadShared = loadShared;
+            this.saveShared = saveShared;
+            this.recent = [];
+            this.pauseUntil = 0;
+            this.chain = Promise.resolve();
+            this.dead = false;
+        }
+
+        shared() {
+            try {
+                const s = this.loadShared ? this.loadShared() : null;
+                return s && typeof s === 'object' ? s : {};
+            } catch {
+                return {};
+            }
+        }
+
+        writeShared(s) {
+            try {
+                if (this.saveShared) this.saveShared(s);
+            } catch {
+                // best-effort
+            }
+        }
+
+        window(t) {
+            const s = this.shared();
+            const list = Array.isArray(s.recent) ? s.recent : this.recent;
+            return list.filter((x) => Number.isFinite(x) && t - x < 60000).sort((a, b) => a - b);
+        }
+
+        pausedUntil() {
+            return Math.max(this.pauseUntil, Number(this.shared().pauseUntil) || 0);
+        }
+
+        stats() {
+            const t = this.now();
+            const used = this.window(t).length;
+            return { usedLastMinute: used, remaining: Math.max(0, this.maxPerMinute - used), paused: t < this.pausedUntil() };
+        }
+
+        pause(seconds) {
+            this.pauseUntil = this.now() + Math.max(1, seconds) * 1000;
+            this.writeShared({ ...this.shared(), recent: this.window(this.now()), pauseUntil: this.pauseUntil });
+        }
+
+        async waitForSlot() {
+            for (;;) {
+                if (!this.isVisible()) {
+                    await this.sleep(1000);
+                    continue;
+                }
+                const t = this.now();
+                const w = this.window(t);
+                if (w.length < this.maxPerMinute) {
+                    w.push(t);
+                    this.recent = w;
+                    this.writeShared({ ...this.shared(), recent: w });
+                    return;
+                }
+                await this.sleep(Math.max(50, 60000 - (t - w[w.length - this.maxPerMinute]) + 25));
+            }
+        }
+
+        /** Check a URL before anything is sent: right host, https. Exposed for tests. */
+        checkUrl(url) {
+            const u = new URL(url);
+            if (u.hostname !== this.host || u.protocol !== 'https:') throw new ThirdPartyError('Refusing to contact ' + u.hostname + '.', { service: this.service });
+            return u;
+        }
+
+        /** One request: queued, rate-limited, host-checked, key-redacted. `build(key)` returns the URL. */
+        request(build, init = {}) {
+            const run = () => this.execute(build, init);
+            const p = this.chain.catch(() => {}).then(run);
+            this.chain = p.catch(() => {});
+            return p;
+        }
+
+        async execute(build, init) {
+            const key = this.getKey ? this.getKey() : '';
+            if (!key) throw new ThirdPartyError('No ' + this.service + ' key saved.', { service: this.service, deadKey: true });
+            if (this.dead) throw new ThirdPartyError(this.service + ' rejected this key. Save a new one.', { service: this.service, deadKey: true });
+            const paused = () => {
+                if (this.now() < this.pausedUntil()) {
+                    const s = Math.ceil((this.pausedUntil() - this.now()) / 1000);
+                    throw new ThirdPartyError(this.service + ' asked us to wait ' + s + ' s.', { service: this.service, paused: true, retryAfterS: s });
+                }
+            };
+            paused();
+            const url = this.checkUrl(build(key)).toString();
+            await this.waitForSlot();
+            paused();
+            let res;
+            try {
+                res = await this.fetchImpl(url, init);
+            } catch (e) {
+                throw new ThirdPartyError(this.service + ' network error: ' + redactThirdKey(e && e.message, key), { service: this.service });
+            }
+            let body = null;
+            try {
+                body = await res.json();
+            } catch {
+                body = null;
+            }
+            return { status: res.status, ok: res.ok, body, key };
+        }
+    }
+
+    /* ===== src/api/ffscouter.js ===== */
+    /*
+     * FFScouter (ffscouter.com/api/v1): stat estimates for players you haven't
+     * fought, and target lists. The key is the user's own Torn key registered
+     * at FFScouter - FFScouter already has it; it goes nowhere else from here.
+     * Credited wherever its data shows (DESIGN §6), with a link to its home page,
+     * where its data policy lives (research-third-party-api.md §1.8).
+     */
+
+
+
+    const FFS_HOST = 'ffscouter.com';
+    const FFS_BASE = 'https://ffscouter.com/api/v1/';
+    const FFS_SITE_URL = 'https://ffscouter.com/';
+    const FFS_POLICY_URL = 'https://ffscouter.com/';
+
+    /** get-stats allows 120/min per IP; we keep to half. */
+    const FFS_MAX_PER_MINUTE = 60;
+    const FFS_BATCH = 205;
+
+    /** Estimates are cached 5 min in memory, 1 h in storage (FFScouter's guidance). */
+    const FFS_MEMORY_MS = 5 * 60 * 1000;
+    const FFS_STORED_MS = 60 * 60 * 1000;
+
+    function makeFfsClient(opts) {
+        return new ThirdPartyClient({ service: 'FFScouter', host: FFS_HOST, maxPerMinute: FFS_MAX_PER_MINUTE, ...opts });
+    }
+
+    function url(path, key, params = {}) {
+        const u = new URL(path, FFS_BASE);
+        u.searchParams.set('key', key);
+        for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== '') u.searchParams.set(k, String(v));
+        return u.toString();
+    }
+
+    /** An FFScouter answer: throws on its error envelope, pauses on 429 (codes 20/21). */
+    function ffsUnwrap(client, r) {
+        const b = r.body;
+        if (r.ok && b && (Array.isArray(b) || b.code === undefined)) return b;
+        const code = b && Number.isFinite(Number(b.code)) ? Number(b.code) : null;
+        const retry = b && Number(b.retry_after_seconds) > 0 ? Number(b.retry_after_seconds) : null;
+        if (r.status === 429 || code === 20 || code === 21) {
+            client.pause(retry || 60);
+            throw new ThirdPartyError('FFScouter asked us to slow down.', { service: 'FFScouter', http: r.status, code, paused: true, retryAfterS: retry || 60 });
+        }
+        const dead = code === 1 || code === 2 || code === 6 || code === 4010 || code === 4011;
+        if (dead) client.dead = true;
+        const msg = code === 6 ? 'This key is not registered at FFScouter.' : b && b.error ? String(b.error) : 'HTTP ' + r.status;
+        throw new ThirdPartyError('FFScouter: ' + msg.split(r.key || '\u0000').join('<redacted>'), { service: 'FFScouter', http: r.status, code, deadKey: dead });
+    }
+
+    /** One row as the estimator reads it; null fields where FFScouter has nothing. */
+    function normalizeFfsRow(row) {
+        const id = Number(row && row.player_id);
+        const has = row && row.bs_estimate > 0 && row.last_updated > 0;
+        return {
+            playerId: id,
+            bsEstimate: has ? Number(row.bs_estimate) : null,
+            bssPublic: row && row.bss_public > 0 ? Number(row.bss_public) : null,
+            fairFight: row && row.fair_fight > 0 ? Number(row.fair_fight) : null,
+            updatedAt: has ? Number(row.last_updated) * 1000 : null,
+            source: row && row.source ? String(row.source) : null,
+            distribution: row && row.distribution && row.distribution.stats_percentage ? { ...row.distribution.stats_percentage } : null,
+        };
+    }
+
+    /**
+     * Estimates for up to any number of ids, in batches of 205. Every id asked
+     * for comes back (a missing one as an empty row, as FF Scouter V2 does).
+     * @returns {Promise<Map<number, object>>}
+     */
+    async function fetchFfsStats(client, playerIds) {
+        const list = [...new Set((playerIds || []).map(Number).filter((x) => x > 0))];
+        const out = new Map();
+        for (let i = 0; i < list.length; i += FFS_BATCH) {
+            const batch = list.slice(i, i + FFS_BATCH);
+            const r = await client.request((key) => url('get-stats', key, { targets: batch.join(',') }));
+            const rows = ffsUnwrap(client, r);
+            for (const row of Array.isArray(rows) ? rows : []) out.set(Number(row.player_id), normalizeFfsRow(row));
+            for (const id of batch) if (!out.has(id)) out.set(id, normalizeFfsRow({ player_id: id }));
+        }
+        return out;
+    }
+
+    /** Is this key registered at FFScouter? */
+    async function checkFfsKey(client) {
+        const r = await client.request((key) => url('check-key', key));
+        const b = ffsUnwrap(client, r);
+        return { registered: Boolean(b.is_registered), premium: Boolean(b.is_premium), policyUpdate: Boolean(b.policy_update_required) };
+    }
+
+    /**
+     * Target list: {preset:'respect'|'level'} or level/FF filters. No match is
+     * HTTP 404 code 17: an empty list, not an error.
+     */
+    async function fetchFfsTargets(client, { preset = null, minLevel = null, maxLevel = null, inactiveOnly = 1, factionless = null, maxFf = null, minFf = null, limit = 50 } = {}) {
+        const params = preset ? { preset, limit } : { minlevel: minLevel, maxlevel: maxLevel, inactiveonly: inactiveOnly, factionless, minff: minFf, maxff: maxFf, limit };
+        const r = await client.request((key) => url('get-targets', key, params));
+        if (r.status === 404 && r.body && Number(r.body.code) === 17) return [];
+        const b = ffsUnwrap(client, r);
+        return (b.targets || []).map((t) => ({
+            playerId: Number(t.player_id),
+            name: t.name || null,
+            level: Number(t.level) || null,
+            fairFight: t.fair_fight > 0 ? Number(t.fair_fight) : null,
+            bsEstimate: t.bs_estimate > 0 ? Number(t.bs_estimate) : null,
+            bssPublic: t.bss_public > 0 ? Number(t.bss_public) : null,
+            lastAction: t.last_action ? Number(t.last_action) * 1000 : null,
+            hospitalUntil: t.hospital_until ? Number(t.hospital_until) * 1000 : null,
+        }));
+    }
+
+    /* ===== src/api/tornstats.js ===== */
+    /*
+     * TornStats spies (optional): exact stats your faction shared. The key is
+     * the Torn key on the user's TornStats account (TornStats has it already)
+     * and sits in the URL PATH, so the host is asserted and URLs are never
+     * logged. research-third-party-api.md §2.
+     */
+
+
+
+    const TS_HOST = 'www.tornstats.com';
+    const TS_BASE = 'https://www.tornstats.com/api/v2/';
+    const TS_TOS_URL = 'https://tornstats.com/tos';
+
+    /** TornStats documents 100/min; we keep to 30. */
+    const TS_MAX_PER_MINUTE = 30;
+
+    function makeTsClient(opts) {
+        return new ThirdPartyClient({ service: 'TornStats', host: TS_HOST, maxPerMinute: TS_MAX_PER_MINUTE, ...opts });
+    }
+
+    const seg = (x) => encodeURIComponent(String(x).replace(/[^A-Za-z0-9_]/g, ''));
+
+    function tsUnwrap(client, r) {
+        const b = r.body;
+        if (b && b.status === false) {
+            const dead = r.status === 404 || /user not found|invalid/i.test(String(b.message || ''));
+            if (dead) client.dead = true;
+            throw new ThirdPartyError('TornStats: ' + String(b.message || 'refused').split(r.key || '\u0000').join('<redacted>'), { service: 'TornStats', http: r.status, deadKey: dead });
+        }
+        if (r.status === 429) {
+            client.pause(60);
+            throw new ThirdPartyError('TornStats asked us to slow down.', { service: 'TornStats', http: 429, paused: true, retryAfterS: 60 });
+        }
+        if (!r.ok || !b) throw new ThirdPartyError('TornStats HTTP ' + r.status, { service: 'TornStats', http: r.status });
+        return b;
+    }
+
+    function spyOf(s) {
+        if (!s || s.status === false) return null;
+        const v = (k) => (Number(s[k]) > 0 ? Number(s[k]) : null);
+        const ts = Number(s.timestamp) || 0;
+        const stats = { str: v('strength'), spd: v('speed'), def: v('defense'), dex: v('dexterity') };
+        if (!Object.values(stats).some(Boolean) && !v('total')) return null;
+        return { ...stats, total: v('total'), at: ts > 0 ? ts * 1000 : null };
+    }
+
+    /** One player's spy, or null. */
+    async function fetchSpyUser(client, userId) {
+        const r = await client.request((key) => TS_BASE + seg(key) + '/spy/user/' + seg(userId));
+        return spyOf(tsUnwrap(client, r).spy);
+    }
+
+    /** A faction's members with spies: {[playerId]: spy}. */
+    async function fetchSpyFaction(client, factionId) {
+        const r = await client.request((key) => TS_BASE + seg(key) + '/spy/faction/' + seg(factionId));
+        const f = tsUnwrap(client, r).faction || {};
+        const out = {};
+        for (const [id, m] of Object.entries(f.members || {})) {
+            const s = spyOf(m && m.spy);
+            if (s) out[Number(id)] = s;
+        }
+        return out;
+    }
+
+    /* ===== src/ui/app/settings.js ===== */
+    /*
+     * Settings (mockups/P-settings.html): keys, each with Torn's ToS table
+     * where it is entered; FFScouter, TornStats, Discord, overlay, display,
+     * diagnostics; "Your data" in the pane.
+     */
+
+
+
+
+
+
+
+
+
+
+    /** Torn's API ToS disclosure for the userscript's Torn key. */
+    const TOS_TORN = [
+        ['Data storage', 'Only locally, in this browser'],
+        ['Data sharing', 'Nobody'],
+        ['Purpose of use', 'Personal gain: gym planning and fight estimates'],
+        ['Key storage & sharing', 'Stored locally / Not shared'],
+        ['Key access level', 'Limited (user: bars, cooldowns, refills, battlestats, gym, perks, property, equipment, inventory, attacks, personalstats, discord, profile; torn: gyms, items, itemdetails, attacklog; market: itemmarket, pointsmarket; faction: members; key: info)'],
+        ['Other services', 'None. FFScouter, TornStats, TornW3B and your Discord service never receive this key.'],
+    ];
+
+    const TOS_FFS = [
+        ['Data storage', 'Only locally, in this browser'],
+        ['Data sharing', 'The player ids you look at go to FFScouter'],
+        ['Purpose of use', 'Fight estimates'],
+        ['Key storage & sharing', 'Stored locally / Sent only to ffscouter.com, which already has it'],
+        ['Key access level', 'The key you registered at FFScouter; we only read estimates and targets'],
+    ];
+
+    const TOS_TS = [
+        ['Data storage', 'Only locally, in this browser'],
+        ['Data sharing', 'The player and faction ids you look at go to TornStats'],
+        ['Purpose of use', 'Exact stats your faction shared (spies)'],
+        ['Key storage & sharing', 'Stored locally / Sent only to tornstats.com, which already has it'],
+        ['Key access level', 'The key on your TornStats account; we only read spies'],
+    ];
+
+    function tosTable(rows) {
+        return h('table', { class: 'tos' }, rows.map(([k, v]) => h('tr', {}, [h('th', { text: k }), h('td', { text: v })])));
+    }
+
+    /** A masked key row: input, Show, Save (or Check and save). */
+    function keyRow({ label, placeholder, saveText, onSave, onReveal, primary = true }) {
+        const attrs = keyInputAttrs();
+        const input = h('input', { class: 'inp', 'aria-label': label, placeholder, ...attrs });
+        const show = h('button', { class: 'btn', type: 'button', text: 'Show' });
+        const msg = h('span', { class: 'msg' });
+        const mask = keyMask(input, 'masked', { onReveal, onChange: (hidden) => (show.textContent = hidden ? 'Show' : 'Hide') });
+        show.addEventListener('click', () => mask.toggle());
+        const save = async () => {
+            const v = input.value.trim();
+            msg.className = 'msg';
+            msg.textContent = 'Checking…';
+            try {
+                const r = await onSave(v);
+                msg.className = 'msg ' + (r && r.ok ? 'ok' : 'bad');
+                msg.textContent = (r && r.text) || '';
+            } catch (error) {
+                msg.className = 'msg bad';
+                msg.textContent = String((error && error.message) || error);
+            }
+            input.value = '';
+            mask.hide();
+        };
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') save();
+        });
+        return { row: h('div', { class: 'keyrow' }, [input, show, h('button', { class: 'btn' + (primary ? ' primary' : ''), type: 'button', onclick: save, text: saveText || 'Save' })]), msg };
+    }
+
+    function stateTag(tone, text) {
+        return h('span', { class: 'state ' + tone }, [h('i'), text]);
+    }
+
+    function settingsSection(title, state, body) {
+        return h('div', { class: 'sec' }, [h('div', {}, [h('h3', { text: title }), state]), h('div', { class: 'secbody' }, body)]);
+    }
+
+    function settingsCheck(label, on, onchange) {
+        return h('label', { class: 'check' }, [h('input', { type: 'checkbox', checked: on, onchange: (e) => onchange(e.target.checked) }), label]);
+    }
+
+    function segOf(value, options, onpick, aria) {
+        return h('div', { class: 'seg', role: 'group', 'aria-label': aria }, options.map(([v, label]) => h('button', { type: 'button', 'aria-pressed': String(v === value), onclick: () => onpick(v), text: label })));
+    }
+
+    function renderSettings(m, ctx) {
+        const s = ctx.settings;
+        const ki = (ctx.statics && ctx.statics.keyInfo) || null;
+        const dead = ctx.flags.keyDead;
+        const hasKey = ctx.flags.hasKey;
+        const tornState = !hasKey ? stateTag('off', 'No key yet') : dead ? stateTag('bad', 'Torn rejected this key') : ki && ki.type ? stateTag(ki.level >= 3 || ki.level === 0 ? 'ok' : 'bad', (ki.level >= 3 || ki.level === 0 ? 'Connected · ' : 'Too low · ') + String(ki.type).replace(' Access', '').replace(' Only', '')) : stateTag('ok', 'Saved');
+
+        const torn = keyRow({ label: 'Torn API key', placeholder: hasKey ? 'Saved · paste a new one to replace it' : 'Paste a Limited key', onSave: ctx.saveTornKey, onReveal: () => ctx.revealKey(K.apiKey) });
+        const tornSec = settingsSection('Torn API key', tornState, [
+            torn.row,
+            torn.msg,
+            h('p', {}, ['Reads your bars, cooldowns, stats, perks, property, gear and attacks. It can’t train, buy or attack. ', h('a', { href: apiKeyPageUrl(), target: '_blank', rel: 'noopener', text: 'Make a Limited key' })]),
+            h('details', { class: 'dis', open: !hasKey }, [h('summary', { text: 'How this key is used' }), tosTable(TOS_TORN)]),
+        ]);
+
+        const ffs = keyRow({ label: 'FFScouter key', placeholder: ctx.flags.hasFfs ? 'Saved · paste a new one to replace it' : 'Your FFScouter key', saveText: 'Check and save', onSave: ctx.saveFfsKey, onReveal: () => ctx.revealKey(K.ffsKey) });
+        const ffsState = ctx.flags.hasFfs ? (ctx.flags.ffsDead ? stateTag('bad', 'Key refused') : stateTag('ok', 'Connected')) : stateTag('off', 'Not connected');
+        const ffsSec = settingsSection('FFScouter', ffsState, [
+            h('p', { text: 'Stat estimates for players you haven’t fought. Credited wherever they show.' }),
+            h('ol', { class: 'steps-list muted' }, [h('li', {}, ['Sign up at ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'ffscouter.com' }), ' with a Torn key and accept their ', h('a', { href: FFS_POLICY_URL, target: '_blank', rel: 'noopener', text: 'data policy' }), '.']), h('li', { text: 'Paste that same key here. We check it with FFScouter.' })]),
+            ffs.row,
+            ffs.msg,
+            h('details', { class: 'dis' }, [h('summary', { text: 'How this key is used' }), tosTable(TOS_FFS)]),
+        ]);
+
+        const ts = keyRow({ label: 'TornStats key', placeholder: ctx.flags.hasTs ? 'Saved · paste a new one to replace it' : 'Your TornStats key', onSave: ctx.saveTsKey, onReveal: () => ctx.revealKey(K.tsKey), primary: false });
+        const tsSec = settingsSection('TornStats spies', ctx.flags.hasTs ? stateTag('ok', 'Saved') : stateTag('off', 'Optional'), [h('p', {}, ['If your faction shares spies on TornStats, exact stats beat every estimate. ', h('a', { href: TS_TOS_URL, target: '_blank', rel: 'noopener', text: 'Their terms' })]), ts.row, ts.msg, h('details', { class: 'dis' }, [h('summary', { text: 'How this key is used' }), tosTable(TOS_TS)])]);
+
+        const discordSec = ctx.renderDiscord ? ctx.renderDiscord() : settingsSection('Discord pings', stateTag('off', 'Not set up yet'), [h('p', { text: 'Coming with the Discord service.' })]);
+
+        const overlaySec = settingsSection('Overlay on Torn', null, [
+            h('div', { class: 'opts' }, [settingsCheck('Pill on every page', s.pill, (v) => ctx.setSettings({ pill: v })), settingsCheck('Marks on the gym page', s.gymMarks, (v) => ctx.setSettings({ gymMarks: v })), settingsCheck('Marks on items and markets', s.marketMarks, (v) => ctx.setSettings({ marketMarks: v })), settingsCheck('Torn Eye chips', s.eyeChips, (v) => ctx.setSettings({ eyeChips: v }))]),
+            h('p', { class: 'num' }, ['Hide the pill: ', h('b', { class: 'white', text: 'Alt+P' }), ' · drag it anywhere; it stays out of Torn’s content.']),
+            h('p', {}, ['Bazaar prices come from ', h('a', { href: W3B_SITE_URL, target: '_blank', rel: 'noopener', text: 'TornW3B' }), ' (item ids only, never a key; ', h('a', { href: W3B_TERMS_URL, target: '_blank', rel: 'noopener', text: 'their terms' }), ').']),
+        ]);
+
+        const displaySec = settingsSection('Display', null, [
+            h('div', { class: 'row' }, [h('span', { class: 'lab', style: 'width:90px', text: 'Spacing' }), segOf(s.density, [['compact', 'Compact'], ['comfy', 'Comfortable']], (v) => ctx.setSettings({ density: v }), 'Spacing')]),
+            h('div', { class: 'row' }, [h('span', { class: 'lab', style: 'width:90px', text: 'Time' }), segOf(s.timeFormat, [['torn', 'Torn time'], ['local', 'Local time']], (v) => ctx.setSettings({ timeFormat: v }), 'Time')]),
+        ]);
+
+        const d = ctx.diagnostics();
+        const diagSec = settingsSection('Diagnostics', null, [h('dl', { class: 'kv num', style: 'max-width:460px' }, [h('dt', { text: 'Torn API, last minute' }), h('dd', { text: d.torn + ' of 70' }), h('dt', { text: 'FFScouter, last minute' }), h('dd', { text: d.ffs + ' of 60' }), h('dt', { text: 'TornW3B, last minute' }), h('dd', { text: d.w3b + ' of 60' }), h('dt', { text: 'Last error' }), h('dd', { text: d.lastError || 'none' }), h('dt', { text: 'Perk lines not understood' }), h('dd', { text: String(d.unknownPerks) }), h('dt', { text: 'Version' }), h('dd', { text: d.version })])]);
+
+        const dataRows = [
+            ['keys', 'Keys', 'Torn, FFScouter, TornStats, Discord service', 'Forget keys'],
+            ['plan', 'Plan and build', ctx.planLine, 'Reset'],
+            ['progress', 'Progress history', d.historyDays + ' day' + (d.historyDays === 1 ? '' : 's') + ' of stats', 'Clear'],
+            ['prices', 'Price history', d.priceItems + ' item' + (d.priceItems === 1 ? '' : 's'), 'Clear'],
+            ['eye', 'Torn Eye', d.eyeLine, 'Clear'],
+        ];
+        const pane = [
+            h('div', {}, [sectionHead('Your data', h('span', { class: 'meta', text: 'all on this computer' })), h('div', { class: 'data num' }, dataRows.map(([g, name, sub, act]) => h('div', { class: 'dr' }, [h('div', {}, [h('b', { text: name }), h('br'), h('small', { text: sub })]), h('button', { class: 'btn sm', type: 'button', onclick: () => ctx.clearGroup(g), text: act })])))]),
+            h('div', {}, [sectionHead('What it never does', null, null, 'h3'), headsList([{ tone: 'plain', text: 'Train, buy, use or attack', sub: 'Fill only types a number' }, { tone: 'plain', text: 'Load a Torn page by itself' }, { tone: 'plain', text: 'Ping from a Torn tab', sub: 'only your Discord service does' }])]),
+        ];
+        return { main: [h('div', {}, [sectionHead('Settings'), tornSec, ffsSec, tsSec, discordSec, overlaySec, displaySec, diagSec])], pane };
+    }
+
+    /* ===== src/ui/app/app.js ===== */
+    /*
+     * The webpage: a full-page shadow host drawn over app.html's placeholder
+     * (the trading app's traders-page pattern). Top bar with tabs and the
+     * density switch, the status strip on Home and Plan, then the 70/30 body.
+     * Countdowns tick every second without redrawing the page.
+     */
+
+
+
+
+
+
+
+
+
+
+
+    const APP_TABS = [
+        ['home', 'Home'],
+        ['plan', 'Plan'],
+        ['buy', 'Buy'],
+        ['progress', 'Progress'],
+        ['eye', 'Torn Eye'],
+        ['settings', 'Settings'],
+    ];
+
+    const RENDERERS = { home: renderHome, plan: renderPlan, buy: renderBuy, progress: renderProgress, settings: renderSettings };
+
+    const FONT_URL = 'https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&display=swap';
+
+    class PiApp {
+        /** @param {object} o - {getCtx: () => ctx, renderers: {tab: fn} (extra tabs, e.g. Torn Eye)} */
+        constructor({ getCtx, renderers = {}, getUpdated = null }) {
+            this.getCtx = getCtx;
+            this.getUpdated = getUpdated;
+            this.renderers = { ...RENDERERS, ...renderers };
+            this.tab = this.tabFromHash();
+            this.sig = '';
+            this.ui = {};
+        }
+
+        tabFromHash() {
+            const want = String((typeof location !== 'undefined' && location.hash) || '').replace(/^#\/?/, '').split(/[?&]/)[0];
+            return APP_TABS.some(([id]) => id === want) ? want : 'home';
+        }
+
+        mount() {
+            document.title = 'Pumping Iron';
+            // Our own page (GitHub Pages): the display font may load here, never on torn.com.
+            if (!document.querySelector('link[data-pi-font]')) document.head.appendChild(h('link', { rel: 'stylesheet', href: FONT_URL, 'data-pi-font': '1' }));
+            for (const el of document.body.children) if (el.id !== 'pi-app') el.style.display = 'none';
+            this.host = document.getElementById('pi-app') || h('div', { id: 'pi-app', style: 'position:fixed;inset:0;overflow:auto;z-index:1' });
+            if (!this.host.parentNode) document.body.appendChild(this.host);
+            document.body.style.margin = '0';
+            document.body.style.background = '#141618';
+            this.shadow = this.host.shadowRoot || this.host.attachShadow({ mode: 'open' });
+            fill(this.shadow, [h('style', { text: APP_CSS }), (this.root = h('div', { class: 'pi-root' }))]);
+            window.addEventListener('hashchange', () => this.go(this.tabFromHash(), false));
+            setInterval(() => this.tick(), 1000);
+        }
+
+        go(tab, push = true) {
+            if (!this.renderers[tab] && tab !== 'eye') return;
+            this.tab = tab;
+            if (push && location.hash !== '#' + tab) history.replaceState(null, '', '#' + tab);
+            this.render(true);
+            this.host.scrollTop = 0;
+        }
+
+        /** True while the user is typing in the page: a redraw would lose the cursor. */
+        typing() {
+            const a = this.shadow && this.shadow.activeElement;
+            return Boolean(a && (a.tagName === 'INPUT' || a.tagName === 'SELECT' || a.tagName === 'TEXTAREA'));
+        }
+
+        render(force = false) {
+            if (!this.root) return;
+            const ctx = this.getCtx();
+            this.lastTickCtx = ctx;
+            ctx.ui = this.ui;
+            ctx.go = (tab) => this.go(tab);
+            ctx.rerender = () => this.render(true);
+            const m = ctx.model;
+            const sig = [this.tab, m && m.ready ? m.state.at : 'x', ctx.sig || '', JSON.stringify(this.ui)].join('|');
+            if (!force && (sig === this.sig || this.typing())) return;
+            this.sig = sig;
+            const s = ctx.settings;
+            const app = h('div', { class: 'app' + (s.density === 'comfy' ? ' comfy' : '') });
+            app.appendChild(this.topBar(ctx));
+            let tab = this.tab;
+            if (!m || !m.ready) {
+                // No state yet: keys first.
+                if (!ctx.flags.hasKey || ctx.flags.keyDead) tab = 'settings';
+                else {
+                    app.appendChild(h('div', { class: 'empty' }, [h('h2', { text: 'Reading your state…' }), h('p', { text: 'One call to Torn for your bars, cooldowns, stats and gym. It shows here in a few seconds.' })]));
+                    fill(this.root, [app]);
+                    return;
+                }
+            }
+            if ((tab === 'home' || tab === 'plan') && m && m.ready) app.appendChild(statusStrip(m, s));
+            const fn = this.renderers[tab] || this.renderers.home;
+            let out;
+            try {
+                out = fn(m && m.ready ? m : { ready: false, now: Date.now(), statRows: [], steps: [], heads: [] }, ctx);
+            } catch (error) {
+                out = { main: [h('div', { class: 'warnb' }, [h('b', { text: 'This tab hit a problem' }), h('p', { text: String((error && error.message) || error) })])], pane: [] };
+            }
+            app.appendChild(h('div', { class: 'body' }, [h('div', { class: 'main' }, out.main || []), h('div', { class: 'pane' }, out.pane || [])]));
+            fill(this.root, [app]);
+            this.tick();
+        }
+
+        topBar(ctx) {
+            const s = ctx.settings;
+            const tabs = APP_TABS.filter(([id]) => this.renderers[id]).map(([id, label]) => h('a', { class: 'tab' + (id === this.tab ? ' on' : ''), href: '#' + id, onclick: (e) => { e.preventDefault(); this.go(id); }, text: label }));
+            this.clockEl = h('span', { class: 'upd num' }, [h('i'), (this.clockText = t('', ''))]);
+            return h('div', { class: 'top' }, [
+                h('div', { class: 'mark' }, [h('i')]),
+                h('span', { class: 'brand', text: 'Pumping Iron' }),
+                ...tabs,
+                h('div', { class: 'grow' }),
+                this.clockEl,
+                h('div', { class: 'seg', role: 'group', 'aria-label': 'Spacing' }, [
+                    h('button', { type: 'button', 'aria-pressed': String(s.density !== 'comfy'), onclick: () => ctx.setSettings({ density: 'compact' }), text: 'Compact' }),
+                    h('button', { type: 'button', 'aria-pressed': String(s.density === 'comfy'), onclick: () => ctx.setSettings({ density: 'comfy' }), text: 'Comfortable' }),
+                ]),
+            ]);
+        }
+
+        /** Every second: countdowns and the clock, without a redraw. */
+        tick() {
+            if (!this.root) return;
+            const now = Date.now();
+            const ctx = this.lastTickCtx || null;
+            for (const el of this.root.querySelectorAll('[data-cd]')) {
+                const at = Number(el.getAttribute('data-cd'));
+                el.textContent = (el.getAttribute('data-cd-prefix') || '') + countdown(at - now);
+            }
+            if (this.clockText) {
+                const st = this.getUpdated ? this.getUpdated() : null;
+                const settings = (ctx && ctx.settings) || null;
+                const ago = st ? Math.max(0, Math.round((now - st) / 1000)) : null;
+                this.clockText.textContent = clock(now, settings) + (settings && settings.timeFormat === 'local' ? ' local' : ' Torn time') + (ago !== null ? ' · updated ' + (ago < 90 ? ago + 's' : Math.round(ago / 60) + ' min') + ' ago' : '');
+            }
+        }
+    }
+
+    /* ===== src/core/history.js ===== */
+    /*
+     * The lowest price we saw each Torn day, per item, for the last few weeks.
+     * Pure - the caller stores it. (The trading app's core/history.js idea:
+     * no API gives price history, so we write down what we see.)
+     *
+     * store = {v: 1, items: {[itemId]: {[dayNumber]: lowest}}}
+     */
+
+    const HISTORY_DAYS_KEPT = 30;
+    const DAY_MS = 86400000;
+
+    function emptyPriceHistory() {
+        return { v: 1, items: {} };
+    }
+
+    function readPriceHistory(raw) {
+        return raw && raw.v === 1 && raw.items && typeof raw.items === 'object' ? raw : emptyPriceHistory();
+    }
+
+    const dayOf = (t) => Math.floor(t / DAY_MS);
+
+    /** Remember a price seen now; keeps the day's lowest. Returns a new store. */
+    function recordPrice(store, itemId, now, price) {
+        if (!(price > 0)) return store;
+        const s = readPriceHistory(store);
+        const d = dayOf(now);
+        const rec = { ...(s.items[itemId] || {}) };
+        rec[d] = rec[d] > 0 ? Math.min(rec[d], price) : price;
+        for (const k of Object.keys(rec)) if (Number(k) <= d - HISTORY_DAYS_KEPT) delete rec[k];
+        return { ...s, items: { ...s.items, [itemId]: rec } };
+    }
+
+    /** Daily lows for the last `days` days, oldest first; null where nothing was seen. */
+    function dailyLows(store, itemId, now, days = 7) {
+        const rec = readPriceHistory(store).items[itemId] || {};
+        const d = dayOf(now);
+        const out = [];
+        for (let i = days - 1; i >= 0; i--) out.push(rec[d - i] > 0 ? rec[d - i] : null);
+        return out;
+    }
+
+    /** Average of the daily lows over the last 7 days, and how many days it covers. */
+    function average7(store, itemId, now) {
+        const lows = dailyLows(store, itemId, now, 7).filter((v) => v !== null);
+        if (!lows.length) return { avg: null, days: 0 };
+        return { avg: lows.reduce((a, b) => a + b, 0) / lows.length, days: lows.length };
+    }
+
+    /* ===== src/app-page.js ===== */
+    /*
+     * The webpage's wiring: what each tab can read and do. Prices are fetched
+     * only for items the Buy list needs (plus a few tracked ones), at most once
+     * every 5 minutes, and only while this tab is visible.
+     */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /** How long fetched prices count as fresh. */
+    const PRICE_FRESH_MS = 5 * 60 * 1000;
+
+    const page = { app: null, w3b: null, ffs: null, loading: new Set() };
+
+    function w3bClient() {
+        if (!page.w3b) {
+            const win = tabWindow('w3bWindow', pi.tabId, { get: (k, fb) => get(k, fb), set: (k, v) => set(k, v), del: (k) => set(k, null) });
+            page.w3b = new W3bClient({ isVisible, addShared: (at) => win.add(at), loadShared: () => ({ recent: win.load(), cooldownUntil: get('w3bCooldown', 0) }), saveShared: (s) => set('w3bCooldown', s.cooldownUntil || 0) });
+        }
+        return page.w3b;
+    }
+
+    function ffsClient() {
+        if (!page.ffs) page.ffs = makeFfsClient({ getKey: () => getKey(K.ffsKey), isVisible, loadShared: () => get('ffsWindow', {}), saveShared: (s) => set('ffsWindow', s) });
+        return page.ffs;
+    }
+
+    /** Fetch listings for the items the Buy list shows, if older than 5 minutes. */
+    async function loadPrices(ids) {
+        if (!getKey(K.apiKey)) return;
+        const prices = { ...(get(K.prices, {}) || {}) };
+        const now = Date.now();
+        const due = [...new Set(ids.map(String))].filter((id) => !page.loading.has(id) && !(prices[id] && now - (prices[id].at || 0) < PRICE_FRESH_MS));
+        if (!due.length) return;
+        for (const id of due) page.loading.add(id);
+        let hist = readPriceHistory(get(K.priceHistory, null));
+        for (const id of due) {
+            const row = { at: Date.now(), listings: [], imAt: null, w3bAt: null, error: null };
+            try {
+                if (id === POINTS) {
+                    row.listings = listingsFromPoints(await fetchPointsMarket(tornClient()));
+                    row.imAt = Date.now();
+                } else {
+                    row.listings = listingsFromItemMarket(await fetchItemMarket(tornClient(), id));
+                    row.imAt = Date.now();
+                    try {
+                        const w = await fetchW3bListings(w3bClient(), id);
+                        row.listings = row.listings.concat(listingsFromW3b(w).filter((l) => l.sellerId && l.price > 1));
+                        row.w3bAt = Date.now();
+                    } catch {
+                        // Bazaars are a bonus; the Item Market still answers.
+                    }
+                }
+            } catch (error) {
+                row.error = redactKey(String((error && error.message) || error), getKey(K.apiKey));
+            }
+            const cheapest = row.listings.length ? Math.min(...row.listings.map((l) => l.price)) : null;
+            if (cheapest) hist = recordPrice(hist, id, Date.now(), cheapest);
+            const avg = average7(hist, id, Date.now());
+            row.avg7 = avg.days >= 2 ? avg.avg : null;
+            row.lows7 = dailyLows(hist, id, Date.now(), 7);
+            prices[id] = row;
+            page.loading.delete(id);
+        }
+        set(K.priceHistory, hist);
+        const merged = { ...(get(K.prices, {}) || {}), ...Object.fromEntries(due.map((id) => [id, prices[id]])) };
+        set(K.prices, merged);
+        refresh();
+        if (page.app) page.app.render(true);
+    }
+
+    async function saveTornKey(v) {
+        if (!v) return { ok: false, text: 'Paste a key first.' };
+        if (!/^[A-Za-z0-9]{16}$/.test(v)) return { ok: false, text: 'A Torn key is 16 letters and numbers.' };
+        setKey(K.apiKey, v);
+        set(K.userStatic, { ...(get(K.userStatic, {}) || {}), keyInfoAt: 0 });
+        try {
+            const info = await fetchKeyInfo(tornClient());
+            const s = { ...(get(K.userStatic, {}) || {}), keyInfo: info, keyInfoAt: Date.now() };
+            set(K.userStatic, s);
+            const enough = keyIsEnough(info);
+            if (enough === false) return { ok: false, text: 'Saved, but this is a ' + (info.type || 'low') + ' key: make a Limited one for stats and attacks.' };
+            return { ok: true, text: 'Saved · ' + (info.type || 'key accepted') + '.' };
+        } catch (error) {
+            return { ok: false, text: String((error && error.message) || error) };
+        }
+    }
+
+    async function saveFfsKey(v) {
+        if (!v) return { ok: false, text: 'Paste your FFScouter key first.' };
+        setKey(K.ffsKey, v);
+        page.ffs = null;
+        try {
+            const r = await checkFfsKey(ffsClient());
+            set(K.ffsState, { registered: r.registered, checkedAt: Date.now() });
+            return r.registered ? { ok: true, text: 'Connected to FFScouter.' + (r.policyUpdate ? ' Their data policy changed: accept it on ffscouter.com.' : '') } : { ok: false, text: 'Saved, but FFScouter doesn’t know this key yet. Sign up there first.' };
+        } catch (error) {
+            return { ok: false, text: String((error && error.message) || error) };
+        }
+    }
+
+    async function saveTsKey(v) {
+        setKey(K.tsKey, v);
+        return { ok: true, text: v ? 'Saved. Spies show on Torn Eye.' : 'Removed.' };
+    }
+
+    function diagnostics() {
+        const statics = get(K.userStatic, {}) || {};
+        const err = get(K.lastError, null);
+        const w3b = page.w3b ? page.w3b.stats().usedLastMinute : 0;
+        return {
+            torn: tornClient().stats().usedLastMinute,
+            ffs: page.ffs ? page.ffs.stats().usedLastMinute : 0,
+            w3b,
+            lastError: err ? new Date(err.at).toISOString().slice(11, 16) + ' ' + err.message : null,
+            unknownPerks: parsePerks(statics.perks || {}).unknown.length,
+            version: PI_BUILD_VERSION,
+            historyDays: Object.keys(get(K.statsHistory, {}) || {}).length,
+            priceItems: Object.keys((readPriceHistory(get(K.priceHistory, null)) || {}).items || {}).length,
+            eyeLine: 'estimates and gear seen',
+        };
+    }
+
+    function getCtx() {
+        const settings = getSettings();
+        const plan = getPlan();
+        const statics = get(K.userStatic, {}) || {};
+        const prices = get(K.prices, {}) || {};
+        const ffsState = get(K.ffsState, null);
+        const S = STRATEGIES[plan.strategy] || STRATEGIES.steady;
+        return {
+            model: pi.model,
+            settings,
+            plan,
+            statics,
+            prices,
+            compare: pi.model && pi.model.compare,
+            history: get(K.statsHistory, {}) || {},
+            dayTotals: get(K.dayTotals, {}) || {},
+            gymProgress: get(K.gymProgress, null),
+            calibration: get('calibration', null),
+            flags: { hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)), hasFfs: Boolean(getKey(K.ffsKey)), ffsDead: Boolean(ffsState && ffsState.registered === false), hasTs: Boolean(getKey(K.tsKey)) },
+            planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
+            sig: [JSON.stringify(settings), JSON.stringify(plan), Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0].join('|'),
+            setSettings: (p) => {
+                setSettings(p);
+                refresh();
+                page.app.render(true);
+            },
+            setPlan: (p) => {
+                setPlan({ ...getPlan(), ...p, createdAt: Date.now() });
+                refresh();
+                page.app.render(true);
+            },
+            wantPrices: (ids) => {
+                if (isVisible()) setTimeout(() => loadPrices(ids).catch(() => {}), 0);
+            },
+            saveTornKey,
+            saveFfsKey,
+            saveTsKey,
+            revealKey: (name) => getKey(name),
+            clearGroup: (g) => {
+                clearGroup(g);
+                refresh();
+                page.app.render(true);
+            },
+            diagnostics,
+        };
+    }
+
+    function bootAppPage({ renderers = {} } = {}) {
+        page.app = new PiApp({ getCtx, renderers, getUpdated: () => (get(K.userState, null) || {}).at || null });
+        page.app.mount();
+        onModel(() => page.app.render());
+        for (const k of [K.prices, K.settings, K.plan, K.userStatic]) gmOnChange(k, () => page.app.render());
+        page.app.render(true);
+        return page.app;
+    }
+
+    /* ===== src/main.js ===== */
+    /*
+     * Wiring. The only file that knows it is a userscript; core/ and api/ are
+     * plain modules tested under node.
+     *
+     * Two entry points share it:
+     *   - every Torn page: the state feed (one visible leader tab), the overlay
+     *     pill, the marks on the page being viewed, and Torn Eye chips;
+     *   - the webpage (GitHub Pages app.html): the full tabs, drawn over the
+     *     placeholder the page shows without the script.
+     */
+
+
+
+
+
+
+
     function menus() {
         gmMenu('Open Pumping Iron', () => gmOpenTab(APP_PAGE_URL));
+        gmMenu('Diagnostics', () => gmOpenTab(APP_PAGE_URL + '#settings'));
     }
 
     function boot() {
@@ -3403,6 +5818,7 @@
         if (typeof document !== 'undefined' && document.documentElement) document.documentElement.setAttribute('data-pi-booted', where);
         if (typeof window === 'undefined' || typeof document === 'undefined' || !document.body) return;
         menus();
+        if (where === 'app') bootAppPage();
         startFeed();
         // Off torn.com (the harness), expose the model for checks. On torn.com the sandbox keeps it private anyway.
         if (!isTornHost(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed };

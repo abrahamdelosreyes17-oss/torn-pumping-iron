@@ -202,6 +202,7 @@ export function simulateStrategy(id, o) {
 }
 
 /** Which strategies can run at all for this player (items, cooldown caps, a book). */
-export function feasibleStrategies({ bliss = false } = {}) {
-    return STRATEGY_IDS.filter((id) => (id === 'blissSteady' ? bliss : true));
+export function feasibleStrategies({ bliss = false, boosterCapH = BOOSTER_CAP_H } = {}) {
+    // The 99k jump only differs from the EDVD jump when faction perks raise the booster cap.
+    return STRATEGY_IDS.filter((id) => (id === 'blissSteady' ? bliss : id === 'happy99k' ? boosterCapH > BOOSTER_CAP_H : true));
 }
