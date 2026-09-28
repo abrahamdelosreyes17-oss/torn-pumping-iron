@@ -1,0 +1,92 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Pumping Iron live harness</title></head>
+<body style="background:#141618;color:#e3e5e8;font:13px Arial;margin:0">
+<pre id="out" style="padding:12px;white-space:pre-wrap">running...</pre>
+<script>
+/*
+ * Boots the real built script with Tampermonkey stubs and canned answers
+ * for every service (never the network). The friend's account: 118k STR,
+ * Private Island, Gun Shop, 20 energy, Xanax cooldown ending in 3:52.
+ *
+ * Parameters:
+ *   ?key=1        save a Torn key (Limited)
+ *   &page=gym     stand in for a Torn page (gym, items, itemmarket, bazaar, points, profile, faction, attack)
+ *   &pi=app       boot the webpage instead
+ *   &dead=1       Torn answers error 2 (dead key)
+ *   &drug=0       drug cooldown already over
+ *   &calls=1      list every request made in the output
+ *   &at=2026-09-29T10:48:00Z   run the page's clock from this Torn time
+ */
+const Q = new URLSearchParams(location.search);
+if (Q.get('at')) {
+  const realNow = Date.now.bind(Date);
+  const shift = Date.parse(Q.get('at')) - realNow();
+  Date.now = () => realNow() + shift;
+}
+const _store = {};
+const _listeners = {};
+window.GM_getValue = (k, d) => (k in _store ? _store[k] : d);
+window.GM_setValue = (k, v) => { const old = _store[k]; _store[k] = v; (_listeners[k] || []).forEach((f) => f(k, old, v, false)); };
+window.GM_deleteValue = (k) => { delete _store[k]; };
+window.GM_registerMenuCommand = (label) => { (window.__menus = window.__menus || []).push(label); };
+window.GM_openInTab = (url) => { (window.__opened = window.__opened || []).push(url); };
+window.GM_addValueChangeListener = (k, f) => { (_listeners[k] = _listeners[k] || []).push(f); };
+window.__calls = [];
+
+const now = Date.now();
+const drug = Q.has('drug') ? Number(Q.get('drug')) : 232;
+const CANNED = {
+  '/v2/user': () => ({
+    bars: { energy: { current: 20, maximum: 150, increment: 5, interval: 600, tick_time: 120, full_time: 15600 },
+            happy: { current: 5100, maximum: 5025, increment: 5, interval: 900, tick_time: 300, full_time: 0 },
+            nerve: { current: 40, maximum: 60, increment: 1, interval: 300, tick_time: 12, full_time: 6012 },
+            life: { current: 7500, maximum: 7500, increment: 450, interval: 300, tick_time: 90, full_time: 0 }, chain: null },
+    cooldowns: { drug, medical: 0, booster: 0 },
+    refills: { energy: false, nerve: false, token: false, special_count: 0 },
+    battlestats: { strength: { value: 118400, modifier: 0, modifiers: [] }, defense: { value: 96200, modifier: 0, modifiers: [] },
+                   speed: { value: 110900, modifier: 0, modifiers: [] }, dexterity: { value: 82700, modifier: 0, modifiers: [] }, total: 408200 },
+    gym: { id: 18, name: 'Gun Shop' },
+  }),
+  '/v2/user/perks': () => ({ perks: { faction: [], job: [], property: ['+ 2% gym gains'], education: ['+ 1% dexterity gym gains'], enhancer: [], book: [], stock: [], merit: [] } }),
+  '/v2/user/property': () => ({ property: { id: 1, property: { id: 13, name: 'Private Island' }, happy: 5025 } }),
+  '/v2/torn/gyms': () => ({ gyms: [{ id: 18, name: 'Gun Shop', class: 'Middleweight', energy_cost: 10, cost: 10000000, modifiers: { strength: 6.5, speed: 6.4, defense: 6.2, dexterity: 6.2 }, note: null }] }),
+  '/v2/user/inventory': (u) => ({ inventory: { items: u.searchParams.get('cat') === 'Drug' ? [{ id: 206, amount: 1, name: 'Xanax' }] : [] } }),
+  '/v2/key/info': () => ({ info: { access: { level: 3, type: 'Limited Access' }, user: { id: 2345678 }, selections: {} } }),
+  '/v2/market/206/itemmarket': () => ({ itemmarket: { item: { id: 206, name: 'Xanax' }, listings: [{ price: 829900, amount: 12 }, { price: 831000, amount: 40 }] } }),
+  '/v2/market/pointsmarket': () => ({ pointsmarket: [{ id: 1, cost: 44900, quantity: 60 }, { id: 2, cost: 45000, quantity: 100 }] }),
+  '/api/marketplace/206': () => ({ item_id: 206, listings: [{ player_id: 1234567, player_name: 'Iron_Monk', price: 826500, quantity: 3 }, { player_id: 2345678, player_name: 'LuckyLefty', price: 828000, quantity: 6 }] }),
+};
+
+window.GM_xmlhttpRequest = (o) => {
+  const u = new URL(o.url);
+  window.__calls.push(u.hostname + u.pathname + (u.searchParams.get('selections') ? '?selections=' + u.searchParams.get('selections') : '') + (u.searchParams.get('cat') ? '?cat=' + u.searchParams.get('cat') : ''));
+  setTimeout(() => {
+    let body;
+    if (Q.get('dead') && u.hostname === 'api.torn.com') body = { error: { code: 2, error: 'Incorrect key' } };
+    else body = (CANNED[u.pathname] || (() => ({})))(u);
+    o.onload({ status: 200, responseText: JSON.stringify(body) });
+  }, 20);
+};
+if (Q.get('key')) _store['pumpingIron.v1.apiKey'] = JSON.stringify('HarnessKey123456');
+window.onerror = (m) => { document.getElementById('out').textContent = 'BOOT ERROR: ' + m; };
+</script>
+<script>document.write('<script src="../torn-pumping-iron.user.js?v=' + Date.now() + '"><\/script>');</script>
+<script>
+setTimeout(() => {
+  const out = document.getElementById('out');
+  if (out.textContent.startsWith('BOOT ERROR')) return;
+  const m = window.__pi && window.__pi.model();
+  const clock = (t) => new Date(t).toISOString().slice(11, 16);
+  const summary = m && m.ready ? {
+    next: m.next && { at: clock(m.next.at), label: m.next.label, trains: m.next.trains, gain: m.next.gain },
+    steps: m.steps.map((s) => clock(s.at) + ' ' + s.label + ' ' + JSON.stringify(s.trains) + ' +' + s.gain),
+    strip: { energy: m.strip.energy.current + '/' + m.strip.energy.max, happy: m.strip.happy.current, property: m.strip.happy.property, drugLeftS: Math.round(m.strip.drug.left / 1000), refillFree: m.strip.refill.free },
+    buyToday: m.buyToday,
+    heads: m.heads,
+    recommended: m.recommendation && m.recommendation.recommended,
+    plannedGain: m.plannedGain,
+    reachedDay: m.reachedDay,
+  } : m;
+  out.textContent = JSON.stringify({ booted: document.documentElement.getAttribute('data-pi-booted'), menus: window.__menus, model: summary, lastError: JSON.parse(_store['pumpingIron.v1.lastError'] || 'null'), keyDead: _store['pumpingIron.v1.apiKeyDead'] || null, calls: Q.get('calls') ? window.__calls : window.__calls.length }, null, 1);
+}, Number(Q.get('wait') || 3500));
+</script>
+</body></html>

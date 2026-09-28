@@ -31,9 +31,9 @@ export const W3B_SITE_URL = 'https://weav3r.dev';
 export const W3B_MAX_PER_MINUTE = 60;
 
 /**
- * Every tab together (the feed's Torn tab, Torn Bids, Fill in other tabs):
- * each client's own ceiling only limits itself, so two of them made 84/min
- * against TornW3B's 100 per IP before TornTools asked for anything.
+ * Every tab together: each client's own ceiling only limits itself. The
+ * trading app and TornTools draw on the same 100/min per IP, so this app
+ * stays well under it (the Buy tab asks for a handful of items).
  */
 export const W3B_SHARED_PER_MINUTE = 80;
 
@@ -188,7 +188,7 @@ export class W3bClient {
 
         // Nothing but an attribution comment ever goes in the query.
         url.search = '';
-        url.searchParams.set('comment', 'TornTradingV2');
+        url.searchParams.set('comment', 'PumpingIron');
 
         return url;
     }
@@ -303,30 +303,6 @@ export async function fetchW3bListings(client, itemId) {
         listings: data && Array.isArray(data.listings) ? data.listings : [],
         total: Number(data && data.total_listings) || 0,
     };
-}
-
-/** A trader's price list, as a person sees it on TornW3B. */
-export function w3bPriceListUrl(traderId) {
-    return W3B_SITE_URL + '/pricelist/' + encodeURIComponent(String(traderId));
-}
-
-/**
- * One trader's TornW3B price list: GET /api/pricelist/{tornId}, which returns
- * [{itemId, name, buyPrice, ...}] (buyPrice 0 = not buying). A player with no
- * list gets [] or a 404; both come back as an empty body, not an error.
- *
- * @returns {Promise<Array>} the raw rows (see parseW3bPriceList)
- */
-export async function fetchW3bPriceList(client, traderId) {
-    const id = String(traderId).replace(/\D/g, '');
-    if (!id) throw new W3bError('No trader id.');
-    try {
-        const body = await client.get('pricelist/' + id);
-        return Array.isArray(body) ? body : [];
-    } catch (error) {
-        if (error && error.http === 404) return [];
-        throw error;
-    }
 }
 
 function positiveOrNull(value) {

@@ -206,6 +206,2604 @@
         return true;
     }
 
+    /* ===== src/platform/store.js ===== */
+    /*
+     * Typed settings and saved data over gm.js (prefix pumpingIron.v1.). Small
+     * values live in GM storage, which every tab sees and gets change events
+     * for; big, one-page data (Torn Eye estimates, captured gear) goes to
+     * IndexedDB so it doesn't slow every Torn page (the trading app's lesson).
+     */
+
+
+
+    const K = {
+        apiKey: 'apiKey',
+        apiKeyDead: 'apiKeyDead',
+        keyInfo: 'keyInfo',
+        ffsKey: 'ffsKey',
+        ffsState: 'ffsState',
+        tsKey: 'tsKey',
+        worker: 'worker',
+        settings: 'settings',
+        plan: 'plan',
+        userState: 'userState',
+        userStatic: 'userStatic',
+        dayLog: 'dayLog',
+        statsHistory: 'statsHistory',
+        priceHistory: 'priceHistory',
+        prices: 'prices',
+        recheck: 'recheck',
+        unlocked: 'unlockedGyms',
+        gymProgress: 'gymProgress',
+        leader: 'leader',
+        overlayPos: 'overlayPos',
+        apiPause: 'apiPause',
+        lastError: 'lastError',
+    };
+
+    /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */
+    const DEFAULT_BANDS = {
+        stomp: { win: 99, keep: 75 },
+        good: { win: 90, keep: 40 },
+        tough: { win: 60, keep: 0 },
+    };
+
+    const DEFAULT_SETTINGS = {
+        density: 'compact',
+        timeFormat: 'torn',
+        pill: true,
+        gymMarks: true,
+        marketMarks: true,
+        eyeChips: true,
+        budget: 150000000,
+        horizonDays: 30,
+        buyWindow: 'three',
+        bands: DEFAULT_BANDS,
+        donator: true,
+        odRisk: 0,
+    };
+
+    const DEFAULT_PLAN = { type: 'steady', strategy: 'steady', build: 'balanced', goal: null, createdAt: 0, strategyPicked: false };
+
+    function merged(stored, defaults) {
+        return stored && typeof stored === 'object' && !Array.isArray(stored) ? { ...defaults, ...stored } : { ...defaults };
+    }
+
+    function getSettings() {
+        const s = merged(gmGet(K.settings, null), DEFAULT_SETTINGS);
+        s.bands = { ...DEFAULT_BANDS, ...(s.bands || {}) };
+        return s;
+    }
+
+    function setSettings(partial) {
+        const next = { ...getSettings(), ...partial };
+        gmSet(K.settings, next);
+        return next;
+    }
+
+    function getPlan() {
+        return merged(gmGet(K.plan, null), DEFAULT_PLAN);
+    }
+
+    function setPlan(plan) {
+        gmSet(K.plan, plan);
+        return plan;
+    }
+
+    function getKey(name) {
+        const v = gmGet(name, '');
+        return typeof v === 'string' ? v : '';
+    }
+
+    /** Keys are saved trimmed; an empty one is deleted. Saving a key clears its dead mark. */
+    function setKey(name, value) {
+        const v = String(value || '').trim();
+        if (v) gmSet(name, v);
+        else gmDel(name);
+        if (name === K.apiKey) gmDel(K.apiKeyDead);
+        return v;
+    }
+
+    function get(name, fallback = null) {
+        return gmGet(name, fallback);
+    }
+
+    function set(name, value) {
+        gmSet(name, value);
+    }
+
+    function del(name) {
+        gmDel(name);
+    }
+
+    /** What "Your data" in Settings can clear, by group. */
+    const DATA_GROUPS = {
+        keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker],
+        plan: [K.plan, K.recheck],
+        progress: [K.statsHistory, K.dayLog],
+        prices: [K.priceHistory, K.prices],
+    };
+
+    function clearGroup(group) {
+        for (const k of DATA_GROUPS[group] || []) gmDel(k);
+    }
+
+    /* ===== src/platform/tab-window.js ===== */
+    /*
+     * A request window every tab shares, without tabs losing each other's writes.
+     *
+     * The old shared window was one stored array: each tab read it, pushed its
+     * request and wrote it back. Tampermonkey hands each tab its own copy of a
+     * value and syncs changes asynchronously, so two tabs taking a slot at about
+     * the same time each wrote back an array without the other's timestamp - and
+     * the shared count ran low exactly when the most tabs were busy.
+     *
+     * Now each tab writes ONLY its own timestamps, under its own key, and a small
+     * registry lists the tabs. Reading adds every live tab's list together. A
+     * registry write can still race, but only on a tab's first slot (or after a
+     * cleanup), and a tab missing from the registry puts itself back on its next
+     * slot - so at worst one tab's calls go uncounted until its next call.
+     */
+
+    /** A tab whose newest slot is older than this is gone; its key is deleted. */
+    const TAB_WINDOW_STALE_MS = 2 * 60 * 1000;
+
+    /**
+     * @param {string} name - storage key prefix, e.g. 'apiWindow'
+     * @param {string} tabId
+     * @param {object} store - {get(key, fallback), set(key, value), del(key)}
+     * @param {function} [now]
+     */
+    function tabWindow(name, tabId, store, now = () => Date.now()) {
+        const regKey = name + '.tabs';
+        const ownKey = name + '.' + tabId;
+        let own = [];
+
+        const registry = () => {
+            const r = store.get(regKey, null);
+            return r && typeof r === 'object' && !Array.isArray(r) ? r : {};
+        };
+
+        return {
+            /** Every live tab's timestamps of the last minute, oldest first. */
+            load() {
+                const t = now();
+                const out = [];
+                for (const id of Object.keys(registry())) {
+                    const list = id === tabId ? own : store.get(name + '.' + id, []);
+                    if (!Array.isArray(list)) continue;
+                    for (const x of list) if (Number.isFinite(x) && t - x < 60000) out.push(x);
+                }
+                // This tab before it is registered (its first slot is being taken).
+                if (!Object.prototype.hasOwnProperty.call(registry(), tabId)) {
+                    for (const x of own) if (t - x < 60000) out.push(x);
+                }
+                return out.sort((a, b) => a - b);
+            },
+
+            /** Record one slot taken by this tab. */
+            add(at) {
+                const t = now();
+                own = own.filter((x) => t - x < 60000);
+                own.push(at);
+                store.set(ownKey, own);
+
+                const reg = registry();
+                let changed = false;
+                if (!reg[tabId] || t - reg[tabId] > TAB_WINDOW_STALE_MS / 4) {
+                    reg[tabId] = t;
+                    changed = true;
+                }
+                for (const [id, seen] of Object.entries(reg)) {
+                    if (id !== tabId && !(t - seen <= TAB_WINDOW_STALE_MS)) {
+                        delete reg[id];
+                        store.del(name + '.' + id);
+                        changed = true;
+                    }
+                }
+                if (changed) store.set(regKey, reg);
+            },
+        };
+    }
+
+    /* ===== src/core/leader.js ===== */
+    /*
+     * Which Torn tab runs the live feed. Pure: the caller reads and writes the
+     * shared record.
+     *
+     * Every Torn tab boots this script. Without one leader, five tabs make five
+     * times the requests - Torn's 100/min is per USER across every key and tool,
+     * and TornW3B's 100/min is per IP. So exactly one tab polls and the others
+     * render what it stores.
+     *
+     * Only a VISIBLE tab may lead. Torn's rules forbid software that works from
+     * unfocused pages to "generate alerts, or draw attention to itself"; a hidden
+     * tab polling in the background is the shape of that, so a tab that is
+     * hidden gives up the role instead of keeping it.
+     */
+
+    /** A leader that has not renewed in this long is presumed gone. */
+    const LEADER_STALE_MS = 10000;
+
+    /** How often the leader renews its claim. */
+    const LEADER_HEARTBEAT_MS = 3000;
+
+    /**
+     * @param {object|null} record - { id, ts } as last stored
+     * @param {string} me - this tab's id
+     * @param {object} opts
+     * @param {number} opts.now
+     * @param {boolean} opts.visible
+     * @returns {{lead: boolean, confirmed: boolean, write: object|null}}
+     *   `write` is the record to store (null = leave it alone). `confirmed` is
+     *   true only when the stored record ALREADY named this tab: two tabs can
+     *   both claim a stale record in the same instant, and only the one whose
+     *   write survived sees itself there on the next tick. Poll only when
+     *   confirmed, and the race costs one heartbeat instead of double requests.
+     */
+    function decideLeader(record, me, { now, visible, staleMs = LEADER_STALE_MS }) {
+        const held = record && record.id && Number.isFinite(record.ts);
+        const mine = held && record.id === me;
+        const fresh = held && now - record.ts < staleMs;
+
+        if (mine) {
+            if (visible) {
+                return { lead: true, confirmed: true, write: { id: me, ts: now } };
+            }
+            // Hidden: step down so a visible tab can take over at once.
+            return { lead: false, confirmed: false, write: { id: null, ts: 0 } };
+        }
+
+        if (!fresh && visible) {
+            return { lead: true, confirmed: false, write: { id: me, ts: now } };
+        }
+
+        return { lead: false, confirmed: false, write: null };
+    }
+
+    function makeTabId() {
+        return (
+            Date.now().toString(36) +
+            '-' +
+            Math.random().toString(36).slice(2, 10)
+        );
+    }
+
+    /* ===== src/api/client.js ===== */
+    /*
+     * The one place that talks to the network.
+     *
+     * Non-negotiables enforced here rather than by convention:
+     *
+     *   1. api.torn.com is the ONLY destination. The base URL is a constant and
+     *      callers pass a path, never a URL. No third party ever receives a Torn
+     *      key, because no third party can be addressed from this client.
+     *   2. The key is never logged. Errors are redacted before they are thrown,
+     *      so a stack trace pasted into Discord cannot leak it.
+     *   3. Every call goes through one rate-limited queue (<=70/min against
+     *      Torn's ~100/min ceiling) with request dedup and exponential backoff.
+     *      A key that trips abuse detection is a worse outcome than a slow panel.
+     */
+
+
+
+    const TORN_API_BASE = 'https://api.torn.com/';
+
+    /** Torn error codes worth reacting to specifically. */
+    const TORN_ERROR_KEY_INVALID = 2;
+    const TORN_ERROR_RATE_LIMIT = 5;
+    const TORN_ERROR_IP_BLOCK = 8;
+    const TORN_ERROR_UNAVAILABLE = 9;
+    const TORN_ERROR_KEY_DISABLED = 13;
+    const TORN_ERROR_KEY_PAUSED = 18;
+
+    /**
+     * Errors that mean "this key must not be used again until the user changes
+     * it". Torn's docs: "Multiple requests using invalid keys may result in a
+     * temporary IP ban - you must account for this by removing disabled or
+     * invalid keys upon error."
+     */
+    const KEY_DEAD_CODES = new Set([
+        TORN_ERROR_KEY_INVALID,
+        TORN_ERROR_KEY_DISABLED,
+        TORN_ERROR_KEY_PAUSED,
+    ]);
+
+    /** Torn's rate block lasts "a small period"; 1-2-4s retries only burn it. */
+    const RATE_LIMIT_BACKOFF_MS = 30000;
+
+    /**
+     * After these answers EVERY tab stops asking Torn for a while (shared through
+     * storage): asking through an IP block (8) only lengthens it, and a disabled
+     * API (9) or a rate block (5) will not clear in seconds either.
+     */
+    const TORN_PAUSE_MS = {
+        [TORN_ERROR_RATE_LIMIT]: RATE_LIMIT_BACKOFF_MS,
+        [TORN_ERROR_IP_BLOCK]: 10 * 60 * 1000,
+        [TORN_ERROR_UNAVAILABLE]: 2 * 60 * 1000,
+    };
+
+    /** A hidden tab waiting for a slot checks again this often. */
+    const HIDDEN_POLL_MS = 1000;
+
+    class TornApiError extends Error {
+        constructor(message, { code = null, http = null, paused = false } = {}) {
+            super(message);
+            this.name = 'TornApiError';
+            this.code = code;
+            this.http = http;
+            /** Refused by this client during a shared pause: nothing was sent. */
+            this.paused = paused;
+        }
+    }
+
+    function apiSleep(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    /**
+     * Strip anything that looks like an API key out of a string before it can
+     * reach a console, an alert, or the panel.
+     */
+    function redactKey(text, key) {
+        let out = String(text === null || text === undefined ? '' : text);
+
+        if (key) out = out.split(key).join('<redacted>');
+
+        // Belt and braces: catch a key that arrived from somewhere else.
+        return out.replace(/key=[A-Za-z0-9]{8,}/g, 'key=<redacted>');
+    }
+
+    class TornApiClient {
+        /**
+         * @param {object} options
+         * @param {function(): string} options.getKey - returns the current API key
+         * @param {function} [options.fetchImpl]      - injectable for tests
+         * @param {number} [options.maxPerMinute]     - request ceiling
+         * @param {number} [options.dedupTtlMs]       - reuse identical responses
+         * @param {number} [options.maxRetries]
+         * @param {function(): number[]} [options.loadWindow] - shared request
+         *   timestamps, so every open Torn tab draws on ONE budget. Torn's limit
+         *   is per user across all keys; a per-tab window let two tabs make
+         *   140/min against a 100/min ceiling.
+         * @param {function(number[])} [options.saveWindow]
+         * @param {function(number)} [options.addToWindow] - record one slot of
+         *   THIS tab (platform/tab-window.js); preferred over saveWindow, which
+         *   writes the whole shared array back and can drop another tab's slot
+         * @param {function} [options.loadPause] - () => {until, code} shared by every tab
+         * @param {function} [options.savePause] - ({until, code}) => void
+         * @param {function} [options.isVisible] - () => boolean; a request never
+         *   leaves a hidden tab, even one that was queued while it was visible
+         */
+        constructor({
+            getKey,
+            fetchImpl = gmFetch,
+            maxPerMinute = 70,
+            dedupTtlMs = 5000,
+            maxRetries = 3,
+            loadWindow = null,
+            saveWindow = null,
+            rateLimitBackoffMs = RATE_LIMIT_BACKOFF_MS,
+            loadPause = null,
+            savePause = null,
+            isVisible = () => true,
+            addToWindow = null,
+        } = {}) {
+            this.addToWindow = addToWindow;
+            this.loadPause = loadPause;
+            this.savePause = savePause;
+            this.isVisible = isVisible;
+            this.pause = { until: 0, code: null };
+            this.getKey = getKey;
+            this.fetchImpl = fetchImpl;
+            this.maxPerMinute = maxPerMinute;
+            this.dedupTtlMs = dedupTtlMs;
+            this.maxRetries = maxRetries;
+            this.loadWindow = loadWindow;
+            this.saveWindow = saveWindow;
+            this.rateLimitBackoffMs = rateLimitBackoffMs;
+
+            /** Timestamps of recent requests, for the sliding window. */
+            this.recent = [];
+            /** Serialises the queue so the window check cannot race. */
+            this.chain = Promise.resolve();
+            /** In-flight and recently-completed requests, keyed without the key. */
+            this.inflight = new Map();
+            this.cache = new Map();
+        }
+
+        /** Requests made in the last 60s, and room remaining. */
+        stats(now = Date.now()) {
+            this.syncWindow(now);
+            const window = this.recent.filter((t) => now - t < 60000);
+            return {
+                usedLastMinute: window.length,
+                remaining: Math.max(0, this.maxPerMinute - window.length),
+            };
+        }
+
+        /**
+         * Adopt the shared window: it already holds this tab's own requests,
+         * because every slot taken is saved back to it. Replacing rather than
+         * merging matters - two requests in the same millisecond are two
+         * requests, and a Set of timestamps would count them as one.
+         */
+        syncWindow(now = Date.now()) {
+            if (!this.loadWindow) return;
+
+            let shared;
+            try {
+                shared = this.loadWindow();
+            } catch {
+                return;
+            }
+            if (!Array.isArray(shared)) return;
+
+            this.recent = shared
+                .filter((t) => Number.isFinite(t) && now - t < 60000)
+                .sort((a, b) => a - b);
+        }
+
+        /** Block until the sliding window has room for one more request. */
+        async waitForSlot() {
+            for (;;) {
+                const now = Date.now();
+                this.syncWindow(now);
+                this.recent = this.recent.filter((t) => now - t < 60000);
+
+                // Hidden: take no slot and send nothing until the tab is back.
+                if (!this.isVisible()) {
+                    await apiSleep(HIDDEN_POLL_MS);
+                    continue;
+                }
+
+                if (this.recent.length < this.maxPerMinute) {
+                    this.recent.push(now);
+                    if (this.addToWindow) {
+                        try {
+                            this.addToWindow(now);
+                        } catch {
+                            // Best-effort, as below.
+                        }
+                    } else if (this.saveWindow) {
+                        try {
+                            this.saveWindow(this.recent);
+                        } catch {
+                            // Sharing the window is best-effort; the local one
+                            // still limits this tab.
+                        }
+                    }
+                    return;
+                }
+
+                const oldest = this.recent[0];
+                await apiSleep(Math.max(50, 60000 - (now - oldest) + 25));
+            }
+        }
+
+        /**
+         * GET a Torn API path.
+         *
+         * @param {string} path - e.g. "torn" or "user" or "market/123"
+         * @param {object} params - query params; `key` is added here and only here
+         */
+        async get(path, params = {}) {
+            const cacheKey = path + '?' + new URLSearchParams(params).toString();
+
+            const cached = this.cache.get(cacheKey);
+            if (cached && Date.now() - cached.at < this.dedupTtlMs) {
+                return cached.data;
+            }
+
+            const existing = this.inflight.get(cacheKey);
+            if (existing) return existing;
+
+            // Queue behind whatever is already scheduled, then take a slot.
+            const promise = this.chain
+                .catch(() => {})
+                .then(() => this.execute(path, params, cacheKey));
+
+            this.chain = promise.catch(() => {});
+            this.inflight.set(cacheKey, promise);
+
+            try {
+                const data = await promise;
+                this.pruneCache();
+                this.cache.set(cacheKey, { at: Date.now(), data });
+                return data;
+            } finally {
+                this.inflight.delete(cacheKey);
+            }
+        }
+
+        /** The dedup cache is for bursts, not memory; a sweep adds hundreds. */
+        pruneCache(now = Date.now()) {
+            for (const [k, v] of this.cache) {
+                if (now - v.at >= this.dedupTtlMs) this.cache.delete(k);
+            }
+        }
+
+        async execute(path, params, cacheKey) {
+            if (!this.fetchImpl) {
+                throw new TornApiError('No fetch implementation available.');
+            }
+
+            const key = this.getKey ? this.getKey() : '';
+            if (!key) {
+                throw new TornApiError('No API key set.', {
+                    code: TORN_ERROR_KEY_INVALID,
+                });
+            }
+
+            let attempt = 0;
+            let lastError = null;
+            // A pause this call started itself (a rate block it is waiting out)
+            // does not stop its own retry; a longer one from elsewhere does.
+            let mine = 0;
+
+            while (attempt <= this.maxRetries) {
+                this.throwIfPaused(mine);
+                await this.waitForSlot();
+                // Another tab may have hit a block while this one waited.
+                this.throwIfPaused(mine);
+
+                try {
+                    return await this.requestOnce(path, params, key);
+                } catch (error) {
+                    lastError = error;
+                    mine = Math.max(mine, this.pauseFor(error));
+
+                    if (!this.isRetryable(error) || attempt === this.maxRetries) {
+                        throw error;
+                    }
+
+                    // Torn's rate block outlasts a quick retry; wait it out.
+                    // Otherwise exponential backoff: 1s, 2s, 4s.
+                    const rateLimited =
+                        error instanceof TornApiError &&
+                        (error.code === TORN_ERROR_RATE_LIMIT || error.http === 429);
+
+                    await apiSleep(
+                        rateLimited
+                            ? this.rateLimitBackoffMs
+                            : 1000 * Math.pow(2, attempt),
+                    );
+                    attempt += 1;
+                }
+            }
+
+            throw lastError;
+        }
+
+        /** The shared pause, the later of this tab's and storage's. */
+        currentPause(now = Date.now()) {
+            let p = this.pause;
+            if (this.loadPause) {
+                try {
+                    const s = this.loadPause();
+                    if (s && Number(s.until) > p.until) p = { until: Number(s.until), code: s.code ?? null };
+                } catch {
+                    // Sharing is best-effort.
+                }
+            }
+            return now < p.until ? p : null;
+        }
+
+        throwIfPaused(ignoreUntil = 0) {
+            const p = this.currentPause();
+            if (!p || p.until <= ignoreUntil) return;
+            const secs = Math.ceil((p.until - Date.now()) / 1000);
+            const why = p.code === TORN_ERROR_IP_BLOCK ? 'Torn has blocked this IP for a while' : p.code === TORN_ERROR_UNAVAILABLE ? 'the Torn API is down' : 'Torn asked us to slow down';
+            throw new TornApiError('Paused: ' + why + '. Trying again in ' + (secs >= 90 ? Math.ceil(secs / 60) + ' min' : secs + 's') + '.', { code: p.code, paused: true });
+        }
+
+        /** Start a shared pause after an answer that asking again cannot fix soon. */
+        pauseFor(error) {
+            const code = error instanceof TornApiError ? error.code : null;
+            // Torn's code 5, or an HTTP 429 (no code): every tab slows down, not just this one.
+            const rateLimited = code === TORN_ERROR_RATE_LIMIT || (error instanceof TornApiError && error.http === 429);
+            const ms = rateLimited ? this.rateLimitBackoffMs : TORN_PAUSE_MS[code];
+            if (!ms || error.paused) return 0;
+            const until = Date.now() + ms;
+            if (until <= this.pause.until) return until;
+            this.pause = { until, code };
+            if (this.savePause) {
+                try {
+                    this.savePause(this.pause);
+                } catch {
+                    // This tab still pauses.
+                }
+            }
+            return until;
+        }
+
+        isRetryable(error) {
+            // A shared pause is waited out by the caller, not retried here.
+            if (error instanceof TornApiError && error.paused) return false;
+            if (error instanceof TornApiError && error.code === TORN_ERROR_UNAVAILABLE) return false;
+            if (!(error instanceof TornApiError)) return true;
+
+            if (error.code === TORN_ERROR_RATE_LIMIT) return true;
+            if (error.code === TORN_ERROR_UNAVAILABLE) return true;
+            if (error.http && error.http >= 500) return true;
+            if (error.http === 429) return true;
+
+            // A bad key or an IP block will not fix itself by asking again.
+            return false;
+        }
+
+        async requestOnce(path, params, key) {
+            /*
+             * v1 paths take a trailing slash ("torn/?selections=items" is the form
+             * verified in game). v2 paths are written without one everywhere they
+             * are documented, so they are left exactly as given.
+             */
+            const clean = String(path).replace(/^\/+/, '');
+            const url = new URL(
+                /^v2\//.test(clean) ? clean : clean + '/',
+                TORN_API_BASE,
+            );
+
+            /*
+             * A relative path resolves under the base, but an ABSOLUTE one
+             * ("https://elsewhere/steal") overrides it entirely — and the key is
+             * attached below. The base being a constant is therefore not enough
+             * on its own; this is the assertion that actually enforces "one
+             * destination".
+             */
+            if (url.hostname !== 'api.torn.com') {
+                throw new TornApiError(
+                    'Refusing to send the API key to ' + url.hostname + '.',
+                );
+            }
+
+            for (const [name, value] of Object.entries(params || {})) {
+                if (value === undefined || value === null) continue;
+                url.searchParams.set(name, String(value));
+            }
+            url.searchParams.set('key', key);
+            url.searchParams.set('comment', 'PumpingIron');
+
+            let response;
+            try {
+                response = await this.fetchImpl(url.toString());
+            } catch (error) {
+                throw new TornApiError(
+                    'Network error: ' + redactKey(error && error.message, key),
+                );
+            }
+
+            if (!response.ok) {
+                throw new TornApiError('HTTP ' + response.status, {
+                    http: response.status,
+                });
+            }
+
+            let data;
+            try {
+                data = await response.json();
+            } catch {
+                throw new TornApiError('Torn API returned invalid JSON.');
+            }
+
+            /*
+             * Errors arrive as HTTP 200 with { error: { code, error } } - and
+             * some v2 endpoints are reported to put { code, error } at the top
+             * level instead. Read both, or a v2 error looks like an empty result.
+             */
+            const err =
+                data && data.error && typeof data.error === 'object'
+                    ? data.error
+                    : data &&
+                        Number.isFinite(Number(data.code)) &&
+                        typeof data.error === 'string'
+                      ? { code: Number(data.code), error: data.error }
+                      : null;
+
+            if (err) {
+                throw new TornApiError(
+                    'Torn API ' + err.code + ': ' + redactKey(err.error, key),
+                    { code: Number(err.code) },
+                );
+            }
+
+            return data;
+        }
+    }
+
+    /* ===== src/core/gain.js ===== */
+    /*
+     * Gym gain: Vladar's formula V2 (rgiskard's C++ calculator, GreasyFork
+     * 392876), stepped train by train because happy and the stat both change
+     * with every train. Pure; see docs/ENGINE-SPEC.md §1 and research-gym.md.
+     */
+
+    const STATS = ['str', 'spd', 'def', 'dex'];
+
+    /** Torn's names for our short keys (API battlestats, gym modifiers). */
+    const STAT_API = { str: 'strength', spd: 'speed', def: 'defense', dex: 'dexterity' };
+
+    const STAT_LABEL = { str: 'STR', spd: 'SPD', def: 'DEF', dex: 'DEX' };
+
+    /** Per-stat constants A and B of the formula. */
+    const STAT_AB = {
+        str: [1600, 1700],
+        spd: [1600, 2000],
+        dex: [1800, 1500],
+        def: [2100, -600],
+    };
+
+    const HAPPY_CAP = 99999;
+
+    /**
+     * [calibrate] How a stat above 50M is damped. Disputed in the community
+     * (research-gym.md "Post-50M"): 'log10' (likely), 'ln', or 'power' (Gym
+     * Gains Calculator+'s 50M + 0.057406·(S−50M)^0.928996). Calibrate against
+     * the user's own trains (Progress › Gain model).
+     */
+    const POST_50M_MODE = 'log10';
+
+    /**
+     * [calibrate] Happy lost per train, per energy. Torn's real loss is random in
+     * 0.4–0.6 × energy per train (research-gym.md); the mean is used.
+     */
+    const HAPPY_LOSS_PER_ENERGY = 0.5;
+
+    function round4(x) {
+        return Math.round(x * 1e4) / 1e4;
+    }
+
+    /** The stat the formula sees: itself up to 50M, damped above. */
+    function effectiveStat(S, mode = POST_50M_MODE) {
+        if (!(S > 5e7)) return Math.max(0, S || 0);
+        if (mode === 'power') return 5e7 + 0.057406 * Math.pow(S - 5e7, 0.928996);
+        const log = mode === 'ln' ? Math.log(S) : Math.log10(S);
+        return 5e7 + (S - 5e7) / (8.77635 * log);
+    }
+
+    /**
+     * Gain of ONE train.
+     * @param {string} stat - 'str'|'spd'|'def'|'dex'
+     * @param {number} S - the stat now
+     * @param {number} H - happy now (capped at 99,999)
+     * @param {number} dots - the gym's dots for this stat, as displayed (7.3)
+     * @param {number} E - energy per train of the gym (5, 10, 25, 50)
+     * @param {number} [perks] - product of every gym-gain multiplier (1.02 …)
+     */
+    function gainPerTrain(stat, S, H, dots, E, perks = 1, mode = POST_50M_MODE) {
+        const ab = STAT_AB[stat];
+        if (!ab || !(dots > 0) || !(E > 0)) return 0;
+        const h = Math.min(HAPPY_CAP, Math.max(0, H || 0));
+        const [A, B] = ab;
+        const inner =
+            effectiveStat(S, mode) * round4(1 + 0.07 * round4(Math.log(1 + h / 250))) +
+            8 * Math.pow(h, 1.05) +
+            (1 - Math.pow(h / HAPPY_CAP, 2)) * A +
+            B;
+        return Math.max(0, (inner / 200000) * dots * E * perks);
+    }
+
+    /**
+     * Train one stat, one train at a time, until the energy (or maxTrains) runs out.
+     * @returns {{gain:number, trains:number, energyUsed:number, statAfter:number, happyAfter:number}}
+     */
+    function trainSession({ stat, S, H, dots, energyPerTrain, energy, perks = 1, maxTrains = Infinity, mode = POST_50M_MODE }) {
+        let s = S;
+        let h = H;
+        let trains = 0;
+        const cap = Math.min(maxTrains, Math.floor(Math.max(0, energy) / energyPerTrain));
+        for (; trains < cap; trains++) {
+            s += gainPerTrain(stat, s, h, dots, energyPerTrain, perks, mode);
+            h = Math.max(0, h - HAPPY_LOSS_PER_ENERGY * energyPerTrain);
+        }
+        return { gain: s - S, trains, energyUsed: trains * energyPerTrain, statAfter: s, happyAfter: h };
+    }
+
+    /**
+     * Trains (and energy) to take a stat from S to at least `target`.
+     * Returns null when it would take more than `limit` trains.
+     */
+    function trainsToReach({ stat, S, target, H, dots, energyPerTrain, perks = 1, limit = 1e6, mode = POST_50M_MODE }) {
+        if (S >= target) return { trains: 0, energy: 0 };
+        let s = S;
+        let n = 0;
+        while (s < target) {
+            if (++n > limit) return null;
+            s += gainPerTrain(stat, s, H, dots, energyPerTrain, perks, mode);
+        }
+        return { trains: n, energy: n * energyPerTrain };
+    }
+
+    /** Sum of the four stats. */
+    function totalOf(stats) {
+        return STATS.reduce((a, k) => a + (Number(stats && stats[k]) || 0), 0);
+    }
+
+    /* ===== src/core/bars.js ===== */
+    /*
+     * Energy, happy, cooldowns, refill and Torn time. Pure: every function takes
+     * the time it is asked about. Torn time is UTC; a Torn day starts at 00:00
+     * UTC. See ENGINE-SPEC §3 and research-api-shapes.md §1 for the bar fields.
+     */
+
+
+
+    const MIN = 60 * 1000;
+    const HOUR = 60 * MIN;
+    const DAY = 24 * HOUR;
+    const QUARTER = 15 * MIN;
+
+    /** Natural regeneration: +5 energy per 10 min (donator/subscriber) or 15 min; +5 happy per 15 min. */
+    const ENERGY_PER_TICK = 5;
+    const HAPPY_PER_TICK = 5;
+
+    function tornDayStart(t) {
+        return Math.floor(t / DAY) * DAY;
+    }
+
+    function msToTornMidnight(t) {
+        return tornDayStart(t) + DAY - t;
+    }
+
+    /** The next :00/:15/:30/:45 Torn time strictly after t. */
+    function nextQuarterTick(t) {
+        return (Math.floor(t / QUARTER) + 1) * QUARTER;
+    }
+
+    /** "10:48" in Torn time (UTC). */
+    function tornClock(t) {
+        const d = new Date(t);
+        return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0');
+    }
+
+    /** A countdown the way the app shows it: "3:52" under an hour (m:ss), "2h 42m" above, "now" at 0. */
+    function countdown(ms) {
+        if (!(ms > 0)) return 'now';
+        const s = Math.ceil(ms / 1000);
+        if (s < 3600) return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+        const h = Math.floor(s / 3600);
+        const m = Math.floor((s % 3600) / 60);
+        return h + 'h ' + String(m).padStart(2, '0') + 'm';
+    }
+
+    function bar(b, fallbackMax, increment, intervalS) {
+        const o = b && typeof b === 'object' ? b : {};
+        return {
+            current: Number(o.current) || 0,
+            maximum: Number(o.maximum) || fallbackMax,
+            increment: Number(o.increment) || increment,
+            interval: Number(o.interval) || intervalS,
+            tickTime: Number.isFinite(Number(o.tick_time)) ? Number(o.tick_time) : intervalS,
+            fullTime: Number(o.full_time) || 0,
+        };
+    }
+
+    const API_STAT = { strength: 'str', speed: 'spd', defense: 'def', dexterity: 'dex' };
+
+    /**
+     * One call's answer (`/v2/user?selections=bars,cooldowns,refills,battlestats,gym`)
+     * as the state the engine reads. Missing parts stay null.
+     */
+    function normalizeState(api, at) {
+        const a = api && typeof api === 'object' ? api : {};
+        const bars = a.bars || {};
+        const cd = a.cooldowns || {};
+        let stats = null;
+        if (a.battlestats && typeof a.battlestats === 'object') {
+            stats = {};
+            for (const [k, short] of Object.entries(API_STAT)) {
+                const v = a.battlestats[k];
+                stats[short] = Number(v && typeof v === 'object' ? v.value : v) || 0;
+            }
+        }
+        return {
+            at,
+            energy: bar(bars.energy, 150, ENERGY_PER_TICK, 600),
+            happy: bar(bars.happy, 5025, HAPPY_PER_TICK, 900),
+            life: bars.life ? bar(bars.life, 0, 0, 300) : null,
+            drugCd: Number(cd.drug) || 0,
+            boosterCd: Number(cd.booster) || 0,
+            medicalCd: Number(cd.medical) || 0,
+            refillUsed: a.refills ? Boolean(a.refills.energy) : null,
+            stats,
+            gymId: a.gym && a.gym.id ? Number(a.gym.id) : null,
+            gymName: a.gym && a.gym.name ? String(a.gym.name) : null,
+        };
+    }
+
+    /** Is this a donator/subscriber's energy bar (5 per 10 min)? */
+    function fastEnergy(state) {
+        return state.energy.interval <= 600;
+    }
+
+    /** Ticks of a bar between the state's time and t. */
+    function ticksBy(b, stateAt, t) {
+        if (t <= stateAt) return 0;
+        const first = stateAt + b.tickTime * 1000;
+        if (t < first) return 0;
+        return 1 + Math.floor((t - first) / (b.interval * 1000));
+    }
+
+    /** Energy at time t, with natural regeneration (nothing regenerates above the maximum). */
+    function energyAt(state, t) {
+        const e = state.energy;
+        if (e.current >= e.maximum) return e.current;
+        return Math.min(e.maximum, e.current + e.increment * ticksBy(e, state.at, t));
+    }
+
+    /** When energy reaches `target` (≤ maximum) by natural regeneration; the state time if already there; null if never. */
+    function energyReachesAt(state, target) {
+        const e = state.energy;
+        if (e.current >= target) return state.at;
+        if (target > e.maximum) return null;
+        const ticks = Math.ceil((target - e.current) / e.increment);
+        return state.at + e.tickTime * 1000 + (ticks - 1) * e.interval * 1000;
+    }
+
+    /**
+     * Happy at time t. Below the maximum it regenerates +5 a tick. Above it,
+     * it resets to the maximum at the next quarter tick, unless Ignorance Is
+     * Bliss is active (then it keeps regenerating, up to 99,999).
+     */
+    function happyAt(state, t, { bliss = false } = {}) {
+        const h = state.happy;
+        const ticks = ticksBy(h, state.at, t);
+        if (bliss) return Math.min(HAPPY_CAP, h.current + h.increment * ticks);
+        if (h.current > h.maximum) return nextQuarterTick(state.at) <= t ? h.maximum : h.current;
+        return Math.min(h.maximum, h.current + h.increment * ticks);
+    }
+
+    function drugFreeAt(state) {
+        return state.at + state.drugCd * 1000;
+    }
+
+    function boosterFreeAt(state) {
+        return state.at + state.boosterCd * 1000;
+    }
+
+    /** Hours of booster cooldown left under the cap at time t (room for EDVD/candy). */
+    function boosterRoomH(state, t, capH = 24) {
+        const cdLeft = Math.max(0, state.boosterCd * 1000 - (t - state.at));
+        return Math.max(0, capH - cdLeft / HOUR);
+    }
+
+    /** Is today's refill still unused at time t? The API flag covers the day of the state; a new Torn day resets it. */
+    function refillAvailable(state, t) {
+        if (tornDayStart(t) > tornDayStart(state.at)) return true;
+        return state.refillUsed === false;
+    }
+
+    /**
+     * What changed between two states: the plan marks steps done from these,
+     * never from a click (ENGINE-SPEC §6).
+     * @returns {{drugTaken:boolean, refillUsed:boolean, boosterUsed:boolean, energySpent:number, trained:object}}
+     */
+    function diffStates(prev, next) {
+        const out = { drugTaken: false, refillUsed: false, boosterUsed: false, energySpent: 0, trained: {} };
+        if (!prev || !next) return out;
+        const elapsed = Math.max(0, (next.at - prev.at) / 1000);
+        // The drug cooldown only ever counts down; a jump up means a drug was taken.
+        if (next.drugCd > Math.max(0, prev.drugCd - elapsed) + 60) out.drugTaken = true;
+        if (next.boosterCd > Math.max(0, prev.boosterCd - elapsed) + 60) out.boosterUsed = true;
+        if (prev.refillUsed === false && next.refillUsed === true && tornDayStart(prev.at) === tornDayStart(next.at)) out.refillUsed = true;
+        if (prev.stats && next.stats) {
+            for (const k of Object.keys(next.stats)) {
+                const d = (next.stats[k] || 0) - (prev.stats[k] || 0);
+                if (d > 0) out.trained[k] = d;
+            }
+        }
+        const expected = energyAt(prev, next.at);
+        if (Object.keys(out.trained).length) out.energySpent = Math.max(0, expected - next.energy.current);
+        return out;
+    }
+
+    /* ===== src/core/gyms.js ===== */
+    /*
+     * Gyms: the table, specialist rules and which gym is best for each stat.
+     * Pure. The table is Torn's /torn/gyms dump (research-gym.md); the live
+     * list replaces it by id when the API answers (mergeLiveGyms).
+     */
+
+
+
+    /** [id, name, energy per train, cost, str, spd, def, dex] */
+    const GYM_ROWS = [
+        [1, 'Premier Fitness', 5, 10, 2.0, 2.0, 2.0, 2.0],
+        [2, 'Average Joes', 5, 100, 2.4, 2.4, 2.7, 2.4],
+        [3, "Woody's Workout Club", 5, 250, 2.7, 3.2, 3.0, 2.7],
+        [4, 'Beach Bods', 5, 500, 3.2, 3.2, 3.2, 0],
+        [5, 'Silver Gym', 5, 1000, 3.4, 3.6, 3.4, 3.2],
+        [6, 'Pour Femme', 5, 2500, 3.4, 3.6, 3.6, 3.8],
+        [7, 'Davies Den', 5, 5000, 3.7, 0, 3.7, 3.7],
+        [8, 'Global Gym', 5, 10000, 4.0, 4.0, 4.0, 4.0],
+        [9, 'Knuckle Heads', 10, 50000, 4.8, 4.4, 4.0, 4.2],
+        [10, 'Pioneer Fitness', 10, 100000, 4.4, 4.6, 4.8, 4.4],
+        [11, 'Anabolic Anomalies', 10, 250000, 5.0, 4.6, 5.2, 4.6],
+        [12, 'Core', 10, 500000, 5.0, 5.2, 5.0, 5.0],
+        [13, 'Racing Fitness', 10, 1000000, 5.0, 5.4, 4.8, 5.2],
+        [14, 'Complete Cardio', 10, 2000000, 5.5, 5.7, 5.5, 5.2],
+        [15, 'Legs, Bums and Tums', 10, 3000000, 0, 5.5, 5.5, 5.7],
+        [16, 'Deep Burn', 10, 5000000, 6.0, 6.0, 6.0, 6.0],
+        [17, 'Apollo Gym', 10, 7500000, 6.0, 6.2, 6.4, 6.2],
+        [18, 'Gun Shop', 10, 10000000, 6.5, 6.4, 6.2, 6.2],
+        [19, 'Force Training', 10, 15000000, 6.4, 6.5, 6.4, 6.8],
+        [20, "Cha Cha's", 10, 20000000, 6.4, 6.4, 6.8, 7.0],
+        [21, 'Atlas', 10, 30000000, 7.0, 6.4, 6.4, 6.5],
+        [22, 'Last Round', 10, 50000000, 6.8, 6.5, 7.0, 6.5],
+        [23, 'The Edge', 10, 75000000, 6.8, 7.0, 7.0, 6.8],
+        [24, "George's", 10, 100000000, 7.3, 7.3, 7.3, 7.3],
+        [25, 'Balboas Gym', 25, 50000000, 0, 0, 7.5, 7.5],
+        [26, 'Frontline Fitness', 25, 50000000, 7.5, 7.5, 0, 0],
+        [27, 'Gym 3000', 50, 100000000, 8.0, 0, 0, 0],
+        [28, 'Mr. Isoyamas', 50, 100000000, 0, 0, 8.0, 0],
+        [29, 'Total Rebound', 50, 100000000, 0, 8.0, 0, 0],
+        [30, 'Elites', 50, 100000000, 0, 0, 0, 8.0],
+        [31, 'Sports Science Lab', 25, 500000000, 9.0, 9.0, 9.0, 9.0],
+        [33, 'Jail Gym', 5, 0, 3.4, 3.4, 4.6, 0],
+    ];
+
+    const GEORGES = 24;
+    const BALBOAS = 25;
+    const FRONTLINE = 26;
+    const GYM_3000 = 27;
+    const ISOYAMAS = 28;
+    const TOTAL_REBOUND = 29;
+    const ELITES = 30;
+    const SSL = 31;
+    const JAIL_GYM = 33;
+
+    /** The single-stat specialist gym of each stat. */
+    const SINGLE_GYM = { str: GYM_3000, def: ISOYAMAS, spd: TOTAL_REBOUND, dex: ELITES };
+
+    /** Specialist access ratio: 1.25 (research-builds-gympage.md). */
+    const SPECIALIST_RATIO = 1.25;
+
+    /** [calibrate] Sports Science Lab: at most this many Xanax + Ecstasy taken, ever (research-gym.md "uncertain vs 50+50"). */
+    const SSL_DRUG_LIMIT = 150;
+
+    /** [calibrate] Specialist gyms open once George's is unlocked (unconfirmed; the stat rule is the hard part). */
+    const SPECIALIST_NEEDS_GYM = GEORGES;
+
+    /**
+     * Energy (gym experience) to unlock the NEXT ladder gym, from gym 1 → 2 up to
+     * The Edge → George's. The Music Store's "30% gym experience" divides these.
+     */
+    const UNLOCK_ENERGY = [200, 500, 1000, 2000, 2750, 3000, 3500, 4000, 6000, 7000, 8000, 11000, 12420, 18000, 18100, 24140, 31260, 36610, 46640, 56520, 67775, 84535, 106305];
+
+    function rowToGym([id, name, energy, cost, str, spd, def, dex]) {
+        return { id, name, energy, cost, dots: { str, spd, def, dex }, specialist: id >= 25 && id <= 31 };
+    }
+
+    const GYMS = GYM_ROWS.map(rowToGym);
+
+    function gymById(id, table = GYMS) {
+        return table.find((g) => g.id === Number(id)) || null;
+    }
+
+    /**
+     * Live /v2/torn/gyms replaces the table by id. `modifiers` are displayed dots
+     * (7.3); an older v1 dump used ×10 integers, which are scaled back.
+     */
+    function mergeLiveGyms(apiGyms, table = GYMS) {
+        const list = Array.isArray(apiGyms) ? apiGyms : apiGyms && typeof apiGyms === 'object' ? Object.entries(apiGyms).map(([id, g]) => ({ id: Number(id), ...g })) : [];
+        const out = table.map((g) => ({ ...g, dots: { ...g.dots } }));
+        for (const live of list) {
+            const id = Number(live && live.id);
+            if (!id) continue;
+            let g = out.find((x) => x.id === id);
+            if (!g) {
+                g = { id, name: String(live.name || 'Gym ' + id), energy: 10, cost: 0, dots: { str: 0, spd: 0, def: 0, dex: 0 }, specialist: false };
+                out.push(g);
+            }
+            if (live.name) g.name = String(live.name);
+            if (Number(live.energy_cost) > 0) g.energy = Number(live.energy_cost);
+            if (Number.isFinite(Number(live.cost))) g.cost = Number(live.cost);
+            const mods = live.modifiers || live.stats || null;
+            if (mods && typeof mods === 'object') {
+                for (const k of STATS) {
+                    const v = Number(mods[STAT_API[k]]);
+                    if (Number.isFinite(v)) g.dots[k] = v > 12 ? v / 10 : v; // real dots never pass 9
+                }
+            }
+        }
+        return out.sort((a, b) => a.id - b.id);
+    }
+
+    /** Energy to unlock the ladder gym after `fromId` (null past George's). */
+    function unlockEnergyAfter(fromId, gymExpMult = 1) {
+        const e = UNLOCK_ENERGY[Number(fromId) - 1];
+        return e === undefined ? null : Math.ceil(e / (gymExpMult || 1));
+    }
+
+    /**
+     * Ladder gyms unlocked, inferred from the active gym (the API gives only
+     * that). A specialist or the Jail Gym being active tells us George's is done.
+     * `known` (read from the gym page's buttons) wins when present.
+     */
+    function unlockedGyms(activeId, known = null) {
+        if (Array.isArray(known) && known.length) return [...new Set(known.map(Number))].sort((a, b) => a - b);
+        const id = Number(activeId) || 1;
+        const top = id >= 25 && id <= 31 ? GEORGES : id === JAIL_GYM ? 1 : Math.min(id, GEORGES);
+        const out = [];
+        for (let i = 1; i <= top; i++) out.push(i);
+        if (id >= 25 && id <= 31) out.push(id);
+        return out;
+    }
+
+    /** The second-highest stat other than `stat`. */
+    function highestOther(stats, stat) {
+        return Math.max(...STATS.filter((k) => k !== stat).map((k) => Number(stats[k]) || 0));
+    }
+
+    /**
+     * Can the player use this gym with these stats right now?
+     * @returns {{ok:boolean, reason:string|null}}
+     */
+    function gymAccess(gym, stats, { drugsTaken = null } = {}) {
+        if (!gym) return { ok: false, reason: 'Unknown gym' };
+        const s = { str: +stats.str || 0, spd: +stats.spd || 0, def: +stats.def || 0, dex: +stats.dex || 0 };
+        switch (gym.id) {
+            case BALBOAS:
+                return s.def + s.dex >= SPECIALIST_RATIO * (s.str + s.spd) ? { ok: true, reason: null } : { ok: false, reason: 'DEF + DEX under 1.25 × STR + SPD' };
+            case FRONTLINE:
+                return s.str + s.spd >= SPECIALIST_RATIO * (s.def + s.dex) ? { ok: true, reason: null } : { ok: false, reason: 'STR + SPD under 1.25 × DEF + DEX' };
+            case GYM_3000:
+            case ISOYAMAS:
+            case TOTAL_REBOUND:
+            case ELITES: {
+                const stat = Object.keys(SINGLE_GYM).find((k) => SINGLE_GYM[k] === gym.id);
+                return s[stat] >= SPECIALIST_RATIO * highestOther(s, stat) ? { ok: true, reason: null } : { ok: false, reason: stat.toUpperCase() + ' under 1.25 × your next-highest stat' };
+            }
+            case SSL:
+                if (drugsTaken === null || drugsTaken === undefined) return { ok: true, reason: null };
+                return drugsTaken <= SSL_DRUG_LIMIT ? { ok: true, reason: null } : { ok: false, reason: 'More than ' + SSL_DRUG_LIMIT + ' Xanax and Ecstasy taken' };
+            default:
+                return { ok: true, reason: null };
+        }
+    }
+
+    /**
+     * The best gym for a stat among the unlocked, accessible ones. Gain per
+     * energy is proportional to dots, whatever the energy per train, so the
+     * highest dots wins; on a tie, the cheaper train (less leftover energy).
+     */
+    function bestGymFor(stat, stats, unlockedIds, { table = GYMS, drugsTaken = null, active = null } = {}) {
+        let best = null;
+        for (const id of unlockedIds || []) {
+            const g = gymById(id, table);
+            if (!g || !(g.dots[stat] > 0)) continue;
+            if (!gymAccess(g, stats, { drugsTaken }).ok) continue;
+            if (!best || g.dots[stat] > best.dots[stat]) best = g;
+            else if (g.dots[stat] === best.dots[stat]) {
+                // A tie: stay in the gym you're in (no switch for nothing), else the cheaper train.
+                if (g.id === Number(active) || (best.id !== Number(active) && g.energy < best.energy)) best = g;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * The next ladder gym and how far away it is.
+     * @param {number} activeId
+     * @param {number|null} progressE - gym experience already earned toward it (from the gym page), or null
+     * @param {number} energyPerDay
+     */
+    function nextGym(activeId, progressE, energyPerDay, { gymExpMult = 1, table = GYMS } = {}) {
+        const id = Number(activeId);
+        if (!(id >= 1 && id < GEORGES)) return null;
+        const need = unlockEnergyAfter(id, gymExpMult);
+        const left = Math.max(0, need - (Number(progressE) || 0));
+        const g = gymById(id + 1, table);
+        return { gym: g, energyLeft: left, days: energyPerDay > 0 ? left / energyPerDay : null, cost: g ? g.cost : null };
+    }
+
+    /* ===== src/core/builds.js ===== */
+    /*
+     * Builds (how the total splits across the four stats) and the per-session
+     * energy split toward one. Pure; ENGINE-SPEC §7, research-builds-gympage.md.
+     */
+
+
+
+
+    /** Share of the total, per stat. The first listed gyms are the ones the build relies on. */
+    const BUILDS = {
+        balanced: { id: 'balanced', name: 'Balanced', shares: { str: 0.25, spd: 0.25, def: 0.25, dex: 0.25 }, gyms: [GEORGES], line: 'Strong everywhere, best at defending. Stay until George\'s.' },
+        baldr: { id: 'baldr', name: "Baldr's", shares: { str: 0.309, spd: 0.247, def: 0.222, dex: 0.222 }, gyms: [GYM_3000, FRONTLINE], line: 'One stat high, its partner close. Easy to leave.' },
+        baldrDef: { id: 'baldrDef', name: "Baldr's defensive", shares: { str: 0.222, spd: 0.222, def: 0.309, dex: 0.247 }, gyms: [ISOYAMAS, BALBOAS], line: 'Hard to hit and hard to hurt.' },
+        hank: { id: 'hank', name: "Hank's", shares: { str: 0.347, spd: 0.097, def: 0.278, dex: 0.278 }, gyms: [GYM_3000, BALBOAS], line: 'Fastest total growth, weakest in a fight.' },
+        hankDef: { id: 'hankDef', name: "Hank's defensive", shares: { str: 0.278, spd: 0.278, def: 0.347, dex: 0.097 }, gyms: [ISOYAMAS, FRONTLINE], line: 'Same idea with DEF high.' },
+        tank: { id: 'tank', name: 'Tank', shares: { str: 0.19, spd: 0.19, def: 0.31, dex: 0.31 }, gyms: [BALBOAS], line: 'Survives attacks; slow to win your own.' },
+        offense: { id: 'offense', name: 'Offense', shares: { str: 0.31, spd: 0.31, def: 0.19, dex: 0.19 }, gyms: [FRONTLINE], line: 'Hits often and hard; takes hits badly.' },
+    };
+
+    const BUILD_ORDER = ['balanced', 'baldr', 'baldrDef', 'hank', 'hankDef', 'tank', 'offense'];
+
+    const DEFAULT_BUILD = 'balanced';
+
+    /** Within this many percentage points of the target counts as "on build". */
+    const ON_BUILD_PP = 0.5;
+
+    const SINGLE = { str: GYM_3000, def: ISOYAMAS, spd: TOTAL_REBOUND, dex: ELITES };
+    const PAIR_OF = { str: FRONTLINE, spd: FRONTLINE, def: BALBOAS, dex: BALBOAS };
+
+    /**
+     * A preset with its high stat moved (e.g. Baldr's on DEX uses Elites +
+     * Balboas): the shares of `from` and `to` swap, and so do the gyms.
+     */
+    function withHighStat(buildId, stat) {
+        const b = BUILDS[buildId];
+        if (!b) return null;
+        const high = STATS.reduce((a, k) => (b.shares[k] > b.shares[a] ? k : a), 'str');
+        if (high === stat) return b;
+        const shares = { ...b.shares, [high]: b.shares[stat], [stat]: b.shares[high] };
+        const gyms = b.gyms.map((id) => (id === SINGLE[high] ? SINGLE[stat] : id === PAIR_OF[high] && PAIR_OF[high] !== PAIR_OF[stat] ? PAIR_OF[stat] : id));
+        return { ...b, id: buildId + ':' + stat, shares, gyms };
+    }
+
+    /** Each stat's share of the total, and its gap to the build (in stat points). */
+    function buildGaps(stats, shares) {
+        const total = totalOf(stats);
+        const out = {};
+        for (const k of STATS) {
+            const share = total > 0 ? stats[k] / total : 0;
+            out[k] = { share, target: shares[k], gap: Math.max(0, shares[k] * total - stats[k]), over: share > shares[k] + ON_BUILD_PP / 100 };
+        }
+        return out;
+    }
+
+    /** True when every stat is within ON_BUILD_PP of the build. */
+    function onBuild(stats, shares) {
+        const g = buildGaps(stats, shares);
+        return STATS.every((k) => Math.abs(g[k].share - shares[k]) * 100 <= ON_BUILD_PP);
+    }
+
+    /** Would these stats still have every gym in `keep` (ids)? */
+    function keepsGyms(stats, keep) {
+        return keep.every((id) => gymAccess(gymById(id), stats).ok);
+    }
+
+    /**
+     * How many trains of `stat` at `gym` before a gym in `keep` is lost
+     * ("Stop at 18 trains: more loses Balboas"). Also stops at `maxTrains`.
+     * @returns {{trains:number, gain:number, breaks:object|null}}
+     */
+    function allowedTrains({ stat, stats, gym, happy, perks = 1, keep = [], maxTrains = Infinity }) {
+        const s = { ...stats };
+        let h = happy;
+        let n = 0;
+        let gain = 0;
+        const cap = Number.isFinite(maxTrains) ? maxTrains : 100000;
+        const keepNow = keep.filter((id) => gymAccess(gymById(id), s).ok);
+        while (n < cap) {
+            const d = gainPerTrain(stat, s[stat], h, gym.dots[stat], gym.energy, perks);
+            const after = { ...s, [stat]: s[stat] + d };
+            const broken = keepNow.find((id) => !gymAccess(gymById(id), after).ok);
+            if (broken) return { trains: n, gain, breaks: gymById(broken) };
+            s[stat] = after[stat];
+            gain += d;
+            n++;
+            h = Math.max(0, h - HAPPY_LOSS_PER_ENERGY * gym.energy);
+        }
+        return { trains: n, gain, breaks: null };
+    }
+
+    /**
+     * Split one session's energy across the stats, one train at a time, each
+     * to the stat furthest below its share (GTG+ runBalance), at that stat's best
+     * unlocked and accessible gym. A train that would lose a gym in `keep` is
+     * never planned; that stat gets `stopAt`.
+     *
+     * @param {object} o
+     * @param {object} o.stats - {str,spd,def,dex}
+     * @param {object} o.shares - target shares
+     * @param {number} o.energy - energy to spend
+     * @param {number} o.happy - happy at the start
+     * @param {number[]} o.unlocked - unlocked gym ids
+     * @param {object} [o.perks] - per-stat multipliers {str,...}
+     * @param {number[]} [o.keep] - gym ids the plan relies on
+     * @param {object[]} [o.table] - gym table
+     * @param {number} [o.happyLossMult] - Goal Oriented perk etc.
+     * @returns {{perStat:object, gain:number, energyUsed:number, energyLeft:number, happyAfter:number, statsAfter:object, order:string[]}}
+     */
+    function splitSession({ stats, shares, energy, happy, unlocked, perks = null, keep = [], table = GYMS, drugsTaken = null, happyLossMult = 1, active = null }) {
+        const s = { ...stats };
+        let h = happy;
+        let left = energy;
+        const perStat = {};
+        for (const k of STATS) perStat[k] = { trains: 0, energy: 0, gain: 0, gym: null, stopAt: null, stopReason: null };
+        const blocked = new Set();
+        const keepNow = keep.filter((id) => gymAccess(gymById(id, table), s).ok);
+        const order = [];
+        for (let guard = 0; guard < 100000; guard++) {
+            const total = totalOf(s);
+            let pick = null;
+            let best = -Infinity;
+            for (const k of STATS) {
+                if (blocked.has(k)) continue;
+                const gym = bestGymFor(k, s, unlocked, { table, drugsTaken, active });
+                if (!gym || gym.energy > left) continue;
+                const deficit = shares[k] - (total > 0 ? s[k] / total : 0);
+                if (deficit > best) {
+                    best = deficit;
+                    pick = { k, gym };
+                }
+            }
+            if (!pick) break;
+            const { k, gym } = pick;
+            const d = gainPerTrain(k, s[k], h, gym.dots[k], gym.energy, perks ? perks[k] : 1);
+            const after = { ...s, [k]: s[k] + d };
+            const broken = keepNow.find((id) => !gymAccess(gymById(id, table), after).ok);
+            if (broken) {
+                blocked.add(k);
+                perStat[k].stopAt = perStat[k].trains;
+                perStat[k].stopReason = gymById(broken, table).name;
+                continue;
+            }
+            s[k] = after[k];
+            h = Math.max(0, h - HAPPY_LOSS_PER_ENERGY * gym.energy * happyLossMult);
+            left -= gym.energy;
+            const p = perStat[k];
+            p.trains++;
+            p.energy += gym.energy;
+            p.gain += d;
+            p.gym = gym;
+            if (order[order.length - 1] !== k) order.push(k);
+        }
+        const gain = STATS.reduce((a, k) => a + perStat[k].gain, 0);
+        return { perStat, gain, energyUsed: energy - left, energyLeft: left, happyAfter: h, statsAfter: s, order };
+    }
+
+    /**
+     * Trains per stat for each of the next `days` days at `energyPerDay`, and
+     * the day the build is reached (null if not within `days`).
+     */
+    function projectBuild({ stats, shares, energyPerDay, happy, unlocked, perks = null, keep = [], days = 7, sessionsPerDay = 6, table = GYMS, active = null }) {
+        let s = { ...stats };
+        const out = [];
+        let reachedDay = onBuild(s, shares) ? 0 : null;
+        const perSession = Math.floor(energyPerDay / sessionsPerDay);
+        for (let d = 1; d <= days; d++) {
+            const day = { str: 0, spd: 0, def: 0, dex: 0, gain: 0 };
+            let left = energyPerDay;
+            for (let i = 0; i < sessionsPerDay && left > 0; i++) {
+                const e = i === sessionsPerDay - 1 ? left : Math.min(left, perSession);
+                // Happy is back at its usual level at the start of each session (regeneration + Xanax).
+                const r = splitSession({ stats: s, shares, energy: e, happy, unlocked, perks, keep, table, active });
+                for (const k of STATS) day[k] += r.perStat[k].trains;
+                day.gain += r.gain;
+                left -= r.energyUsed;
+                s = r.statsAfter;
+                if (r.energyUsed === 0) break;
+            }
+            out.push(day);
+            if (reachedDay === null && onBuild(s, shares)) reachedDay = d;
+        }
+        return { days: out, reachedDay, statsAfter: s };
+    }
+
+    /* ===== src/core/items.js ===== */
+    /*
+     * The items a gym plan uses, with their effects (Torn's own item text, from
+     * the items dump in docs/reference). Pure data.
+     */
+
+    const XANAX = 206;
+    const ECSTASY = 197;
+    const LSD = 199;
+    const EDVD = 366;
+    const FHC = 367;
+    const LOLLIPOP = 310;
+    const BOX_CHOC = 35;
+    const BIG_BOX_CHOC = 36;
+    const CANDY_KISSES = 527;
+    const PIXIE_STICKS = 151;
+    const MUNSTER = 530;
+    const RED_COW = 532;
+    const TAURINE = 533;
+    const BOOK_GHOGH = 757;
+    const BOOK_BLISS = 770;
+
+    /** A points refill costs this many points (research-gym.md: "30 pts/day, was 25"). */
+    const REFILL_POINTS = 30;
+
+    /** Pseudo item id for points in buy lists (not a Torn item). */
+    const POINTS = 'points';
+
+    /** [calibrate] Drug cooldowns, minutes (Xanax 6–8 h; Ecstasy ~3.3–4 h). The plan uses the live cooldown once a drug is taken. */
+    const XANAX_CD_MIN = 7 * 60;
+    const ECSTASY_CD_MIN = 4 * 60;
+    const LSD_CD_MIN = 7 * 60;
+
+    /** Booster cooldown cap, hours (faction perks raise it up to 48). */
+    const BOOSTER_CAP_H = 24;
+
+    /**
+     * kind: drug | booster (candy, EDVD, FHC, cans)
+     * energy: +E; happy: +happy; happyMult: × happy; boosterH: + booster cooldown; toMax: energy to max
+     */
+    const ITEMS = {
+        [XANAX]: { id: XANAX, name: 'Xanax', kind: 'drug', category: 'Drug', energy: 250, happy: 75, cdMin: XANAX_CD_MIN },
+        [ECSTASY]: { id: ECSTASY, name: 'Ecstasy', kind: 'drug', category: 'Drug', happyMult: 2, cdMin: ECSTASY_CD_MIN },
+        [LSD]: { id: LSD, name: 'LSD', kind: 'drug', category: 'Drug', energy: 50, happy: 350, cdMin: LSD_CD_MIN },
+        [EDVD]: { id: EDVD, name: 'Erotic DVD', short: 'EDVD', kind: 'booster', category: 'Booster', happy: 2500, boosterH: 6 },
+        [FHC]: { id: FHC, name: 'Feathery Hotel Coupon', short: 'FHC', kind: 'booster', category: 'Booster', toMax: true, happy: 500, boosterH: 6 },
+        [LOLLIPOP]: { id: LOLLIPOP, name: 'Lollipop', kind: 'booster', category: 'Candy', happy: 25, boosterH: 0.5 },
+        [BOX_CHOC]: { id: BOX_CHOC, name: 'Box of Chocolate Bars', kind: 'booster', category: 'Candy', happy: 25, boosterH: 0.5 },
+        [BIG_BOX_CHOC]: { id: BIG_BOX_CHOC, name: 'Big Box of Chocolate Bars', kind: 'booster', category: 'Candy', happy: 35, boosterH: 0.5 },
+        [CANDY_KISSES]: { id: CANDY_KISSES, name: 'Bag of Candy Kisses', kind: 'booster', category: 'Candy', happy: 50, boosterH: 0.5 },
+        [PIXIE_STICKS]: { id: PIXIE_STICKS, name: 'Pixie Sticks', kind: 'booster', category: 'Candy', happy: 150, boosterH: 0.5 },
+        [MUNSTER]: { id: MUNSTER, name: 'Can of Munster', kind: 'booster', category: 'Energy Drink', energy: 20, boosterH: 2 },
+        [RED_COW]: { id: RED_COW, name: 'Can of Red Cow', kind: 'booster', category: 'Energy Drink', energy: 25, boosterH: 2 },
+        [TAURINE]: { id: TAURINE, name: 'Can of Taurine Elite', kind: 'booster', category: 'Energy Drink', energy: 30, boosterH: 2 },
+    };
+
+    /** Sample prices (docs/sims) used until live prices arrive, and in tests. */
+    const SAMPLE_PRICES = {
+        [XANAX]: 830000,
+        [ECSTASY]: 55000,
+        [EDVD]: 3700000,
+        [CANDY_KISSES]: 32000,
+        [FHC]: 12400000,
+        [POINTS]: 45000,
+    };
+
+    function itemName(id) {
+        if (id === POINTS) return 'Points';
+        const it = ITEMS[id];
+        return it ? it.short || it.name : 'Item ' + id;
+    }
+
+    /** Candy that fills the booster cap: how many of an item fit under `capH` from `cdH` already used. */
+    function boostersThatFit(itemId, capH = BOOSTER_CAP_H, cdH = 0) {
+        const it = ITEMS[itemId];
+        if (!it || !(it.boosterH > 0)) return 0;
+        // An item can be used while the cooldown is below the cap, and the cooldown
+        // ticks down between uses, so the last one overshoots it: 5 EDVD or 49 candy
+        // on an empty 24 h cooldown (research-gym.md).
+        if (cdH >= capH) return 0;
+        return Math.floor((capH - cdH) / it.boosterH + 1e-9) + 1;
+    }
+
+    /* ===== src/core/strategies.js ===== */
+    /*
+     * The training strategies as event simulators over N days, in 5-minute
+     * steps (the model of docs/sims/sim30.mjs, generalised to four stats and
+     * specialist gyms). Pure. ENGINE-SPEC §4.
+     *
+     * Each strategy decides when drugs, boosters and the refill are used; every
+     * train in between goes through one trainer (one stat, or greedy toward a
+     * build's shares), so strategies compare like for like.
+     */
+
+
+
+
+    const STRATEGY_IDS = ['steady', 'dailyChoco', 'chocoJump', 'edvdJump', 'happy99k', 'blissSteady'];
+
+    const STRATEGIES = {
+        steady: { id: 'steady', kind: 'steady', name: 'Steady training', short: 'Steady', what: 'Xanax on cooldown, daily refill, natural energy as it comes' },
+        dailyChoco: { id: 'dailyChoco', kind: 'boost', name: 'Daily choco boost', short: 'Daily choco', what: 'Candy + Ecstasy once a day on top of a Xanax' },
+        chocoJump: { id: 'chocoJump', kind: 'jump', name: 'Choco jump', short: 'Choco jump', what: 'Stack 4 Xanax, then candy + Ecstasy, train it all' },
+        edvdJump: { id: 'edvdJump', kind: 'jump', name: 'EDVD jump', short: 'EDVD jump', what: 'Stack 4 Xanax, then 5 EDVD + Ecstasy' },
+        happy99k: { id: 'happy99k', kind: 'jump', name: '99k happy jump', short: '99k jump', what: 'EDVD to the booster cap + Ecstasy, near 99,999 happy' },
+        blissSteady: { id: 'blissSteady', kind: 'steady', name: 'Steady with Bliss', short: 'Bliss steady', what: 'Steady, plus EDVD whenever the booster allows; happy keeps climbing' },
+    };
+
+    /** Minutes per simulation step. */
+    const STEP_MIN = 5;
+
+    /** Xanax stacked before a jump (ffscouter guide's 4-Xan jumps). */
+    const JUMP_STACK = 4;
+
+    /** Minutes after a quarter tick the boost lands (the reset has just passed). */
+    const TICK_OFFSET_MIN = 5;
+
+    /**
+     * @param {string} id - a STRATEGY_IDS entry
+     * @param {object} o
+     * @param {object} o.stats - starting {str,spd,def,dex}
+     * @param {string|object} o.target - one stat ('str') or build shares ({str:.25,...})
+     * @param {object} o.gyms - per stat {dots, energy} of the gym each stat trains in
+     * @param {object} [o.perks] - per-stat gain multipliers
+     * @param {number} o.happyMax - the property's max happy
+     * @param {number} [o.energyMax] - 150 (donator) or 100
+     * @param {boolean} [o.fastEnergy] - +5 per 10 min (donator) instead of 15
+     * @param {number} [o.days]
+     * @param {object} o.prices - {[itemId]: $, points: $}
+     * @param {number} [o.candyId] - which candy a choco boost uses
+     * @param {number} [o.candyCount] - candy per boost (default: fill the booster cap)
+     * @param {number} [o.edvdCount] - EDVD per jump (default 5; 99k: fill the cap)
+     * @param {number} [o.boosterCapH]
+     * @param {boolean} [o.bliss] - Ignorance Is Bliss active
+     * @param {boolean} [o.adultNovelties10] - 10★ Adult Novelties: EDVD happy ×2
+     * @param {number} [o.xanaxCdMin]
+     * @param {number} [o.ecstasyCdMin]
+     * @param {number} [o.happyLossMult]
+     * @returns {{id, gained:number, perStat:object, cost:number, energyTrained:number, daily:number[], used:object}}
+     */
+    function simulateStrategy(id, o) {
+        const days = o.days || 30;
+        const maxE = o.energyMax || 150;
+        const maxH = o.happyMax;
+        const regenEvery = o.fastEnergy === false ? 15 : 10;
+        const xanCD = o.xanaxCdMin || XANAX_CD_MIN;
+        const ecsCD = o.ecstasyCdMin || ECSTASY_CD_MIN;
+        const capH = o.boosterCapH || BOOSTER_CAP_H;
+        const candyId = o.candyId || CANDY_KISSES;
+        const candyN = o.candyCount || boostersThatFit(candyId, capH);
+        const candyHappy = ITEMS[candyId].happy;
+        let edvdN = o.edvdCount || 5;
+        if (id === 'happy99k' && !o.edvdCount) edvdN = boostersThatFit(EDVD, capH);
+        const edvdHappy = ITEMS[EDVD].happy * (o.adultNovelties10 ? 2 : 1);
+        const bliss = Boolean(o.bliss);
+        const price = (k) => Number(o.prices && o.prices[k]) || 0;
+        const lossMult = o.happyLossMult || 1;
+
+        const S = { ...o.stats };
+        const single = typeof o.target === 'string' ? o.target : null;
+        const shares = single ? null : o.target;
+        let E = maxE;
+        let H = maxH;
+        let cost = 0;
+        let trainedE = 0;
+        let drugFree = 0;
+        let boosterFree = 0; // minute the booster cooldown reaches 0
+        let refillDay = -1;
+        let stacked = 0;
+        let phase = id === 'dailyChoco' ? 'free' : 'stack';
+        let doneDay = -1;
+        const used = { [XANAX]: 0, [ECSTASY]: 0, [EDVD]: 0, [candyId]: 0, [POINTS]: 0 };
+        const daily = [];
+        const start = totalOf(S);
+
+        const pick = () => {
+            if (single) return single;
+            const tot = totalOf(S);
+            let best = null;
+            let bd = -Infinity;
+            for (const k of STATS) {
+                if (!o.gyms[k] || !(o.gyms[k].dots > 0)) continue;
+                const d = shares[k] - S[k] / tot;
+                if (d > bd) {
+                    bd = d;
+                    best = k;
+                }
+            }
+            return best;
+        };
+        const train = (keep = 0) => {
+            for (;;) {
+                const k = pick();
+                if (!k) return;
+                const g = o.gyms[k];
+                if (E - g.energy < keep) return;
+                S[k] += gainPerTrain(k, S[k], H, g.dots, g.energy, o.perks ? o.perks[k] : 1);
+                E -= g.energy;
+                H = Math.max(0, H - HAPPY_LOSS_PER_ENERGY * g.energy * lossMult);
+                trainedE += g.energy;
+            }
+        };
+        const buy = (item, n = 1) => {
+            used[item] = (used[item] || 0) + n;
+            cost += price(item) * n;
+        };
+        const refill = (day) => {
+            E += maxE;
+            buy(POINTS, REFILL_POINTS);
+            refillDay = day;
+        };
+        const xanax = (t) => {
+            E += ITEMS[XANAX].energy;
+            H += ITEMS[XANAX].happy;
+            buy(XANAX);
+            drugFree = t + xanCD;
+        };
+
+        for (let t = 0; t < days * 1440; t += STEP_MIN) {
+            const day = Math.floor(t / 1440);
+            if (t % 1440 === 0 && t) daily.push(Math.round(totalOf(S) - start));
+            if (t % regenEvery === 0 && E < maxE) E = Math.min(maxE, E + 5);
+            if (t % 15 === 0) {
+                if (bliss) H = Math.min(HAPPY_CAP, H + 5);
+                else H = H > maxH ? maxH : Math.min(maxH, H + 5);
+            }
+
+            if (id === 'steady' || id === 'blissSteady') {
+                if (t >= drugFree) xanax(t);
+                if (id === 'blissSteady' && boosterFree - t < capH * 60) {
+                    H = Math.min(HAPPY_CAP, H + edvdHappy);
+                    buy(EDVD);
+                    boosterFree = Math.max(boosterFree, t) + ITEMS[EDVD].boosterH * 60;
+                }
+                if (day !== refillDay && E < 20) refill(day);
+                train();
+            } else if (id === 'dailyChoco') {
+                // Hold one Xanax's worth of cooldown, then candy + Ecstasy in its place.
+                if (phase === 'hold' && t >= drugFree && t % 15 === TICK_OFFSET_MIN) {
+                    H = (H + candyN * candyHappy) * 2;
+                    buy(candyId, candyN);
+                    buy(ECSTASY);
+                    drugFree = t + ecsCD;
+                    train();
+                    refill(day);
+                    train();
+                    phase = 'done';
+                    doneDay = day;
+                } else if (phase !== 'hold' && t >= drugFree) {
+                    xanax(t);
+                    if (doneDay !== day) phase = 'hold';
+                }
+                if (phase !== 'hold') train();
+            } else {
+                // Jumps: stack Xanax without training, then boost just after a tick and train it all.
+                if (phase === 'stack' && t >= drugFree) {
+                    xanax(t);
+                    stacked++;
+                    if (stacked === JUMP_STACK) phase = 'wait';
+                }
+                if (phase === 'wait' && t >= drugFree && t % 15 === TICK_OFFSET_MIN) {
+                    if (id === 'chocoJump') {
+                        H = (H + candyN * candyHappy) * 2;
+                        buy(candyId, candyN);
+                    } else {
+                        H = (H + edvdN * edvdHappy) * 2;
+                        buy(EDVD, edvdN);
+                    }
+                    H = Math.min(HAPPY_CAP, H);
+                    buy(ECSTASY);
+                    drugFree = t + ecsCD;
+                    train();
+                    if (day !== refillDay) {
+                        refill(day);
+                        train();
+                    }
+                    phase = 'stack';
+                    stacked = 0;
+                }
+            }
+        }
+        daily.push(Math.round(totalOf(S) - start));
+        const perStat = {};
+        for (const k of STATS) perStat[k] = Math.round(S[k] - o.stats[k]);
+        return { id, gained: Math.round(totalOf(S) - start), perStat, cost: Math.round(cost), energyTrained: trainedE, daily, used };
+    }
+
+    /** Which strategies can run at all for this player (items, cooldown caps, a book). */
+    function feasibleStrategies({ bliss = false } = {}) {
+        return STRATEGY_IDS.filter((id) => (id === 'blissSteady' ? bliss : true));
+    }
+
+    /* ===== src/core/plan.js ===== */
+    /*
+     * Plans and the day's steps. Pure. ENGINE-SPEC §6.
+     *
+     * The timeline is always worked out again from the live state, so a step
+     * done late (or early) moves every later step with it: steady and goal plans
+     * re-time silently. Jump steps are strict: they carry a warning time ahead
+     * of the tick they depend on. Steps are marked done from state changes
+     * (a drug cooldown that jumped, a stat that rose), never from a click.
+     */
+
+
+
+
+
+
+
+
+    const PLAN_TYPES = ['steady', 'goal', 'jump'];
+
+    /** Strict steps warn this long before their time. */
+    const STRICT_WARN_MS = 5 * MIN;
+
+    /** An unused refill is flagged this long before Torn midnight. */
+    const REFILL_WARN_MS = 2 * HOUR;
+
+    /** A refill the plan couldn't place earlier goes this long before midnight. */
+    const REFILL_LAST_CALL_MS = 30 * MIN;
+
+    /** The plan type a strategy belongs to. */
+    function planTypeOf(strategyId, goal = null) {
+        if (goal) return 'goal';
+        const s = STRATEGIES[strategyId];
+        return s && s.kind === 'jump' ? 'jump' : 'steady';
+    }
+
+    /**
+     * @param {object} o - {strategy, build, goal?, createdAt}
+     *   goal: {kind:'unlockGym', gymId} | {kind:'reachBuild', buildId} | {kind:'statTargets', targets:{str,...}}
+     */
+    function makePlan({ strategy = 'steady', build = 'balanced', goal = null, createdAt = 0 } = {}) {
+        return { type: planTypeOf(strategy, goal), strategy, build, goal, createdAt };
+    }
+
+    /**
+     * The shares each train aims at. A stat-number goal aims at what's still
+     * missing; otherwise the build's shares.
+     */
+    function targetShares(plan, stats, buildShares) {
+        if (plan && plan.goal && plan.goal.kind === 'statTargets' && stats) {
+            const t = plan.goal.targets || {};
+            const gap = {};
+            let sum = 0;
+            for (const k of STATS) {
+                gap[k] = Math.max(0, (Number(t[k]) || 0) - (stats[k] || 0));
+                sum += gap[k];
+            }
+            if (sum > 0) {
+                // Shares that make the greedy split close the biggest gaps first.
+                const total = totalOf(stats) + sum;
+                const out = {};
+                for (const k of STATS) out[k] = ((stats[k] || 0) + gap[k]) / total;
+                return out;
+            }
+        }
+        return buildShares;
+    }
+
+    /** Days until each stat target is met at `energyPerDay` (a rough ETA from the current rate). */
+    function goalEta({ stats, targets, gyms, happy, energyPerDay }) {
+        let energy = 0;
+        for (const k of STATS) {
+            const t = Number(targets && targets[k]) || 0;
+            if (!(t > (stats[k] || 0))) continue;
+            const g = gyms[k];
+            if (!g) return null;
+            const r = trainsToReach({ stat: k, S: stats[k] || 0, target: t, H: happy, dots: g.dots[k] || g.dots, energyPerTrain: g.energy });
+            if (!r) return null;
+            energy += r.energy;
+        }
+        return energyPerDay > 0 ? { energy, days: energy / energyPerDay } : null;
+    }
+
+    /* --------------------------------------------------------------- timeline */
+
+    function sessionGain(ctx, stats, energy, happy) {
+        return splitSession({
+            stats,
+            shares: ctx.shares,
+            energy,
+            happy,
+            unlocked: ctx.unlocked,
+            perks: ctx.perks || null,
+            keep: ctx.keep || [],
+            table: ctx.table,
+            active: ctx.active,
+            happyLossMult: ctx.happyLossMult || 1,
+        });
+    }
+
+    function trainsOf(split) {
+        const out = {};
+        for (const k of STATS) if (split.perStat[k].trains) out[k] = split.perStat[k].trains;
+        return out;
+    }
+
+    function gymsOf(split) {
+        const out = {};
+        for (const k of STATS) if (split.perStat[k].trains) out[k] = split.perStat[k].gym ? split.perStat[k].gym.name : null;
+        return out;
+    }
+
+    /**
+     * The day's remaining steps, worked out from the live state.
+     *
+     * @param {object} o
+     * @param {object} o.state - normalizeState() output
+     * @param {number} o.now
+     * @param {string} o.strategy
+     * @param {object} o.ctx - {shares, unlocked, perks, keep, active, table, bliss, happyLossMult,
+     *   xanaxCdMin, ecstasyCdMin, candyId, candyCount, edvdCount, boosterCapH, stackedSoFar, drugsToday}
+     * @param {number} [o.until] - end of the window (default: the next Torn midnight)
+     * @returns {object[]} steps {id, at, kind, label, items:[{id,qty}], trains:{}, gyms:{}, gain, energy, strict, warnAt, note}
+     */
+    function dayTimeline({ state, now, strategy, ctx, until = null }) {
+        const end = until || tornDayStart(now) + DAY;
+        const maxE = state.energy.maximum;
+        const interval = state.energy.interval * 1000;
+        const inc = state.energy.increment;
+        const happyMax = state.happy.maximum;
+        const xanCD = (ctx.xanaxCdMin || XANAX_CD_MIN) * MIN;
+        const ecsCD = (ctx.ecstasyCdMin || ECSTASY_CD_MIN) * MIN;
+        const bliss = Boolean(ctx.bliss);
+        const minTrain = Math.min(...STATS.map((k) => (ctx.minTrainE && ctx.minTrainE[k]) || 10));
+
+        let stats = { ...(state.stats || { str: 0, spd: 0, def: 0, dex: 0 }) };
+        let t = now;
+        let E = energyAt(state, now);
+        let H = happyAt(state, now, { bliss });
+        let drugAt = Math.max(now, drugFreeAt(state));
+        let refillLeft = refillAvailable(state, now);
+        let xanN = (ctx.drugsToday || 0) + 1;
+        const steps = [];
+        let n = 0;
+
+        // Natural regeneration from t to t2 (none above the maximum), and happy back up.
+        const advance = (t2) => {
+            if (t2 <= t) return;
+            if (E < maxE) E = Math.min(maxE, E + inc * Math.floor((t2 - t) / interval));
+            if (!bliss && H > happyMax) H = nextQuarterTick(t) <= t2 ? happyMax : H;
+            else if (H < (bliss ? HAPPY_CAP : happyMax)) H = Math.min(bliss ? HAPPY_CAP : happyMax, H + 5 * Math.floor((t2 - t) / (15 * MIN)));
+            t = t2;
+        };
+        const train = (at, kind, label, items, extra = {}) => {
+            const split = sessionGain(ctx, stats, E, H);
+            stats = split.statsAfter;
+            const step = { id: kind + '-' + ++n, at, kind, label, items, trains: trainsOf(split), gyms: gymsOf(split), gain: Math.round(split.gain), energy: split.energyUsed, strict: false, warnAt: null, ...extra };
+            E = split.energyLeft;
+            H = split.happyAfter;
+            steps.push(step);
+            return step;
+        };
+        const fullAt = () => (E >= maxE ? t : t + Math.ceil((maxE - E) / inc) * interval);
+
+        const s = STRATEGIES[strategy] ? strategy : 'steady';
+
+        if (s === 'chocoJump' || s === 'edvdJump' || s === 'happy99k') {
+            let stacked = ctx.stackedSoFar || 0;
+            while (stacked < JUMP_STACK) {
+                advance(drugAt);
+                E += ITEMS[XANAX].energy;
+                H += ITEMS[XANAX].happy;
+                stacked++;
+                steps.push({ id: 'stack-' + ++n, at: drugAt, kind: 'stack', label: 'Xanax #' + stacked + ' of ' + JUMP_STACK + ' · don\'t train', items: [{ id: XANAX, qty: 1 }], trains: {}, gyms: {}, gain: 0, energy: 0, strict: false, warnAt: null });
+                drugAt += xanCD;
+            }
+            // The boost lands just after a quarter tick, once the drug cooldown allows the Ecstasy.
+            const tick = nextQuarterTick(drugAt - 1);
+            const at = tick + MIN;
+            advance(at);
+            const capH = ctx.boosterCapH || BOOSTER_CAP_H;
+            let items;
+            if (s === 'chocoJump') {
+                const candyId = ctx.candyId || CANDY_KISSES;
+                const qty = ctx.candyCount || boostersThatFit(candyId, capH);
+                H += qty * ITEMS[candyId].happy;
+                items = [{ id: candyId, qty }];
+            } else {
+                const qty = ctx.edvdCount || (s === 'happy99k' ? boostersThatFit(EDVD, capH) : 5);
+                H += qty * ITEMS[EDVD].happy * (ctx.adultNovelties10 ? 2 : 1);
+                items = [{ id: EDVD, qty }];
+            }
+            H = Math.min(HAPPY_CAP, H * ITEMS[ECSTASY].happyMult);
+            items.push({ id: ECSTASY, qty: 1 });
+            const label = (s === 'chocoJump' ? 'Candy × ' + items[0].qty : 'EDVD × ' + items[0].qty) + ' + Ecstasy, then train it all';
+            const jump = train(at, 'jump', label, items, { strict: true, warnAt: tick - STRICT_WARN_MS, note: 'Right after the ' + clockOf(tick) + ' tick' });
+            jump.tick = tick;
+            if (refillLeft) {
+                E += Math.max(0, maxE - E);
+                train(at + MIN, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }]);
+                refillLeft = false;
+            }
+            drugAt = at + ecsCD;
+            return steps;
+        }
+
+        // Daily choco: one Xanax a day is held (its energy kept, not trained); at
+        // its cooldown end, candy + Ecstasy just after a tick, train it all, refill.
+        const daily = s === 'dailyChoco';
+        let boosted = Boolean(ctx.boostedToday);
+        let holding = Boolean(ctx.holding);
+        let naturalOk = true;
+        for (let guard = 0; guard < 50; guard++) {
+            if (daily && holding) {
+                const tick = nextQuarterTick(drugAt - 1);
+                const at = tick + MIN;
+                if (at >= end && steps.length) break;
+                advance(at);
+                const candyId = ctx.candyId || CANDY_KISSES;
+                const qty = ctx.candyCount || boostersThatFit(candyId, ctx.boosterCapH || BOOSTER_CAP_H);
+                H = Math.min(HAPPY_CAP, (H + qty * ITEMS[candyId].happy) * ITEMS[ECSTASY].happyMult);
+                train(at, 'boost', 'Candy × ' + qty + ' + Ecstasy, then train it all', [{ id: candyId, qty }, { id: ECSTASY, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick });
+                if (refillLeft) {
+                    E += Math.max(0, maxE - E);
+                    train(at + MIN, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }]);
+                    refillLeft = false;
+                }
+                drugAt = at + ecsCD;
+                boosted = true;
+                holding = false;
+                continue;
+            }
+            // Natural energy fills up before the next drug: train it then, so none is wasted.
+            const full = fullAt();
+            if (naturalOk && full < drugAt && full < end && maxE >= minTrain) {
+                advance(full);
+                const st = train(full, 'natural', 'Natural energy', []);
+                if (!st.energy) {
+                    steps.pop();
+                    naturalOk = false;
+                }
+                continue;
+            }
+            if (drugAt >= end && steps.length) break;
+            advance(drugAt);
+            E += ITEMS[XANAX].energy;
+            H += ITEMS[XANAX].happy;
+            if (daily && !boosted) {
+                steps.push({ id: 'hold-' + ++n, at: drugAt, kind: 'hold', label: 'Xanax #' + xanN++ + ' · keep the energy for the boost', items: [{ id: XANAX, qty: 1 }], trains: {}, gyms: {}, gain: 0, energy: 0, strict: false, warnAt: null });
+                holding = true;
+                drugAt += xanCD;
+                continue;
+            }
+            train(drugAt, 'xanax', 'Xanax #' + xanN++, [{ id: XANAX, qty: 1 }]);
+            // The refill is worth most right after a session, when energy is near zero.
+            if (refillLeft && !daily && drugAt + 5 * MIN < end) {
+                advance(drugAt + 5 * MIN);
+                E += Math.max(0, maxE - E);
+                train(t, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }]);
+                refillLeft = false;
+            }
+            drugAt += xanCD;
+            if (drugAt >= end) {
+                // Energy that comes in after the last drug of the day.
+                const f = fullAt();
+                if (naturalOk && f < end) {
+                    advance(f);
+                    const st = train(f, 'natural', 'Natural energy', []);
+                    if (!st.energy) steps.pop();
+                }
+                break;
+            }
+        }
+        // A refill still unused goes in before midnight.
+        if (refillLeft) {
+            const at = Math.max(now, end - REFILL_LAST_CALL_MS);
+            advance(at);
+            E += Math.max(0, maxE - E);
+            train(at, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }], { note: 'Use before 00:00 Torn time' });
+        }
+        return steps.sort((a, b) => a.at - b.at);
+    }
+
+    function clockOf(t) {
+        const d = new Date(t);
+        return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0');
+    }
+
+    /** Strict steps whose warning time has come (and whose own time hasn't passed). */
+    function strictWarnings(steps, now) {
+        return (steps || []).filter((s) => s.strict && s.warnAt !== null && now >= s.warnAt && now < s.at).map((s) => ({ stepId: s.id, at: s.at, text: 'In ' + Math.max(1, Math.ceil((s.at - now) / MIN)) + ' min: ' + s.label }));
+    }
+
+    /** Items a list of steps uses, summed: {[itemId]: qty}. */
+    function itemsNeeded(steps) {
+        const out = {};
+        for (const s of steps || []) for (const it of s.items || []) out[it.id] = (out[it.id] || 0) + it.qty;
+        return out;
+    }
+
+    /* ------------------------------------------------------------- done steps */
+
+    /**
+     * The day's log of what was done, from state changes. `diff` is diffStates()
+     * between the last two polls. A drug taken becomes the step it most likely
+     * was (the next planned drug step); trains add to the latest entry, or to
+     * a "Natural energy" entry when nothing else happened.
+     */
+    function logFromDiff(log, diff, { at, nextStep = null }) {
+        const out = (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(at));
+        const trained = diff && diff.trained ? diff.trained : {};
+        const gain = STATS.reduce((a, k) => a + (trained[k] || 0), 0);
+        if (diff && (diff.drugTaken || diff.refillUsed || diff.boosterUsed)) {
+            const kind = diff.refillUsed && !diff.drugTaken ? 'refill' : nextStep && nextStep.kind !== 'natural' ? nextStep.kind : 'xanax';
+            const label = diff.refillUsed && !diff.drugTaken ? 'Refill · ' + REFILL_POINTS + ' points' : nextStep && nextStep.kind !== 'natural' ? nextStep.label : 'Xanax';
+            out.push({ at, kind, label, trained: { ...trained }, gain });
+            return out;
+        }
+        if (gain > 0) {
+            const last = out[out.length - 1];
+            if (last && at - last.at < 30 * MIN) {
+                for (const k of STATS) if (trained[k]) last.trained[k] = (last.trained[k] || 0) + trained[k];
+                last.gain += gain;
+            } else {
+                out.push({ at, kind: 'natural', label: 'Natural energy', trained: { ...trained }, gain });
+            }
+        }
+        return out;
+    }
+
+    /** Drugs taken so far today, from the log (numbers the next Xanax). */
+    function drugsToday(log, now) {
+        return (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(now) && (e.kind === 'xanax' || e.kind === 'stack')).length;
+    }
+
+    /* ===== src/api/torn.js ===== */
+    /*
+     * Torn API v2 calls the app makes, each a thin wrapper over TornApiClient
+     * (one rate-limited queue, api.torn.com only, the key redacted from errors).
+     * Shapes: docs/research-api-shapes.md. Every function returns plain data the
+     * core can read; none of them retries on its own beyond the client.
+     */
+
+
+
+    /** Torn's "incorrect category" and "access level too low". */
+    const TORN_ERROR_WRONG_FIELDS = 4;
+    const TORN_ERROR_ACCESS_LEVEL = 16;
+    const TORN_ERROR_INCORRECT_CATEGORY = 21;
+
+    /** The one call Home and the overlay live on, every 30 s while visible (Limited key). */
+    const USER_STATE_SELECTIONS = 'bars,cooldowns,refills,battlestats,gym';
+
+    /** Inventory categories a gym plan cares about (always sent: no-cat answers 21). */
+    const INVENTORY_CATS = ['Drug', 'Booster', 'Candy', 'Energy Drink'];
+
+    /** key/info access levels (v1 numbering, assumed the same in v2). */
+    const ACCESS_CUSTOM = 0;
+    const ACCESS_PUBLIC = 1;
+    const ACCESS_MINIMAL = 2;
+    const ACCESS_LIMITED = 3;
+    const ACCESS_FULL = 4;
+
+    const ids = (list) => [...new Set((Array.isArray(list) ? list : [list]).map((x) => String(x).replace(/\D/g, '')).filter(Boolean))];
+
+    async function fetchUserState(client) {
+        return client.get('v2/user', { selections: USER_STATE_SELECTIONS });
+    }
+
+    async function fetchPerks(client) {
+        const d = await client.get('v2/user/perks');
+        return (d && d.perks) || {};
+    }
+
+    async function fetchProperty(client) {
+        const d = await client.get('v2/user/property');
+        return (d && d.property) || null;
+    }
+
+    async function fetchEquipment(client) {
+        const d = await client.get('v2/user/equipment');
+        return { equipment: (d && d.equipment) || [], clothing: (d && d.clothing) || [] };
+    }
+
+    /**
+     * Held quantities for the gym plan's categories, one call per category
+     * (Torn caches each for an hour). A category Torn refuses is skipped, not
+     * fatal; a dead key still throws.
+     * @returns {Promise<{[itemId:number]: number}>}
+     */
+    async function fetchInventory(client, cats = INVENTORY_CATS) {
+        const out = {};
+        for (const cat of cats) {
+            let d;
+            try {
+                d = await client.get('v2/user/inventory', { cat, limit: 250 });
+            } catch (error) {
+                if (error instanceof TornApiError && (error.code === TORN_ERROR_INCORRECT_CATEGORY || error.code === TORN_ERROR_WRONG_FIELDS)) continue;
+                throw error;
+            }
+            const inv = d && d.inventory;
+            const items = Array.isArray(inv) ? inv : inv && Array.isArray(inv.items) ? inv.items : [];
+            for (const it of items) {
+                const id = Number(it && it.id);
+                if (!id || it.faction_owned) continue;
+                out[id] = (out[id] || 0) + (Number(it.amount ?? it.quantity) || 0);
+            }
+        }
+        return out;
+    }
+
+    /** Your recent attacks (newest first), with Torn's fair-fight modifier and respect. */
+    async function fetchAttacks(client, { limit = 100, from = null, to = null, filter = null } = {}) {
+        const params = { limit, sort: 'DESC' };
+        if (from) params.from = from;
+        if (to) params.to = to;
+        if (filter) params.filters = filter;
+        const d = await client.get('v2/user/attacks', params);
+        return (d && d.attacks) || [];
+    }
+
+    /**
+     * Personal stats: a category (`cat`) or up to 10 named stats (`stat`), never
+     * both (Torn error 26). With `timestamp`, the values at that date.
+     * @returns {Promise<object|object[]>} the `personalstats` value
+     */
+    async function fetchPersonalStats(client, { id = null, cat = null, stat = null, timestamp = null } = {}) {
+        const path = id ? 'v2/user/' + ids(id)[0] + '/personalstats' : 'v2/user/personalstats';
+        const params = {};
+        if (stat) params.stat = (Array.isArray(stat) ? stat : [stat]).slice(0, 10).join(',');
+        else params.cat = cat || 'popular';
+        if (timestamp) params.timestamp = timestamp;
+        const d = await client.get(path, params);
+        return d && d.personalstats !== undefined ? d.personalstats : null;
+    }
+
+    /** Named stats as {name: value}, whichever form Torn answered in. */
+    function personalStatValues(ps) {
+        const out = {};
+        if (Array.isArray(ps)) for (const r of ps) if (r && r.name) out[r.name] = Number(r.value) || 0;
+        return out;
+    }
+
+    async function fetchDiscord(client, id = null) {
+        const d = await client.get(id ? 'v2/user/' + ids(id)[0] + '/discord' : 'v2/user/discord');
+        return (d && d.discord) || null;
+    }
+
+    async function fetchProfile(client, id) {
+        const d = await client.get('v2/user/' + ids(id)[0] + '/profile');
+        return (d && d.profile) || null;
+    }
+
+    async function fetchGyms(client) {
+        const d = await client.get('v2/torn/gyms');
+        return (d && d.gyms) || [];
+    }
+
+    /** Items by id (≤ 100 per call here), details always filled in. */
+    async function fetchItems(client, itemIds) {
+        const list = ids(itemIds).slice(0, 100);
+        if (!list.length) return [];
+        const d = await client.get('v2/torn/' + list.join(',') + '/items');
+        return (d && d.items) || [];
+    }
+
+    /** Exact stats of specific weapon/armour pieces by armoury id (≤ 25). */
+    async function fetchItemDetails(client, armouryIds) {
+        const list = ids(armouryIds).slice(0, 25);
+        if (!list.length) return [];
+        const d = await client.get('v2/torn/' + list.join(',') + '/itemdetails');
+        const v = d && d.itemdetails;
+        return Array.isArray(v) ? v : v ? [v] : [];
+    }
+
+    async function fetchAttackLog(client, code) {
+        const c = String(code || '').replace(/[^a-z0-9]/gi, '');
+        if (!c) return null;
+        return client.get('v2/torn/attacklog', { log: c });
+    }
+
+    async function fetchItemMarket(client, itemId) {
+        return client.get('v2/market/' + ids(itemId)[0] + '/itemmarket');
+    }
+
+    async function fetchPointsMarket(client) {
+        return client.get('v2/market/pointsmarket');
+    }
+
+    async function fetchFactionMembers(client, factionId = null) {
+        const d = await client.get(factionId ? 'v2/faction/' + ids(factionId)[0] + '/members' : 'v2/faction/members');
+        const m = d && d.members;
+        return Array.isArray(m) ? m : m && typeof m === 'object' ? Object.entries(m).map(([id, v]) => ({ id: Number(id), ...v })) : [];
+    }
+
+    /**
+     * The key's access level and selections. The check is advisory (trading
+     * pattern): if Torn's answer can't be read, level is null and nothing is said.
+     */
+    async function fetchKeyInfo(client) {
+        const d = await client.get('v2/key/info');
+        const info = (d && d.info) || {};
+        const access = info.access || {};
+        const level = Number.isFinite(Number(access.level)) ? Number(access.level) : null;
+        return { level, type: access.type || null, userId: info.user && info.user.id ? Number(info.user.id) : null, selections: info.selections || null };
+    }
+
+    /** Is this key enough for the app (Limited or Full, or a custom key with the user state selections)? */
+    function keyIsEnough(info) {
+        if (!info || info.level === null) return null;
+        if (info.level >= ACCESS_LIMITED) return true;
+        if (info.level === ACCESS_CUSTOM) {
+            const u = (info.selections && info.selections.user) || [];
+            return USER_STATE_SELECTIONS.split(',').every((s) => u.includes(s));
+        }
+        return false;
+    }
+
+    /* ===== src/feed/state.js ===== */
+    /*
+     * The live state feed. Exactly one VISIBLE Torn/app tab (the leader) asks
+     * Torn for the user's state every 30 s and stores it; every other tab reads
+     * the stored copy through GM change events. Hidden tabs ask nothing (Torn's
+     * rules; trading's leader pattern). Slower data (perks, property, gyms,
+     * inventory, key info) refreshes on its own clock, still only from the leader.
+     *
+     * Everything the feed needs is injected, so tests drive it with a fake
+     * clock, store and client.
+     */
+
+
+
+
+
+
+
+
+    const STATE_POLL_MS = 30000;
+
+    /** How often each slower part refreshes. */
+    const STATIC_EVERY = {
+        perks: 60 * 60 * 1000,
+        property: 6 * 60 * 60 * 1000,
+        gyms: 24 * 60 * 60 * 1000,
+        inventory: 30 * 60 * 1000,
+        keyInfo: 24 * 60 * 60 * 1000,
+    };
+
+    class StateFeed {
+        /**
+         * @param {object} o
+         * @param {object} o.client - TornApiClient
+         * @param {object} o.store - {get(key, fallback), set(key, value)}
+         * @param {string} o.tabId
+         * @param {function} [o.now]
+         * @param {function} [o.isVisible]
+         * @param {function} [o.nextStep] - () => the plan's next step (names a drug taken)
+         * @param {function} [o.onState] - (state, api) => void, after each poll
+         * @param {function} [o.onError] - (error) => void
+         * @param {object} [o.keys] - store keys {state, static, log, leader, history}
+         */
+        constructor({ client, store, tabId, now = () => Date.now(), isVisible = () => true, nextStep = () => null, onState = () => {}, onError = () => {}, keys = {} }) {
+            this.client = client;
+            this.store = store;
+            this.tabId = tabId;
+            this.now = now;
+            this.isVisible = isVisible;
+            this.nextStep = nextStep;
+            this.onState = onState;
+            this.onError = onError;
+            this.keys = { state: 'userState', static: 'userStatic', log: 'dayLog', leader: 'leader', history: 'statsHistory', dead: 'apiKeyDead', ...keys };
+            this.polling = false;
+        }
+
+        /** Leader election: one heartbeat. Returns true when this tab may poll. */
+        heartbeat() {
+            const d = decideLeader(this.store.get(this.keys.leader, null), this.tabId, { now: this.now(), visible: this.isVisible() });
+            if (d.write) this.store.set(this.keys.leader, d.write);
+            return d.lead && d.confirmed;
+        }
+
+        /** The stored state (any tab). */
+        current() {
+            const s = this.store.get(this.keys.state, null);
+            return s && s.api ? normalizeState(s.api, s.at) : null;
+        }
+
+        /** One tick of the feed: poll if leader and due. Resolves to true when it polled. */
+        async tick() {
+            if (this.polling || !this.heartbeat()) return false;
+            if (this.store.get(this.keys.dead, false)) return false;
+            const last = this.store.get(this.keys.state, null);
+            const t = this.now();
+            if (last && t - last.at < STATE_POLL_MS) {
+                await this.refreshStatic();
+                return false;
+            }
+            this.polling = true;
+            try {
+                const api = await fetchUserState(this.client);
+                const at = this.now();
+                const next = normalizeState(api, at);
+                const prev = last && last.api ? normalizeState(last.api, last.at) : null;
+                if (prev) {
+                    const diff = diffStates(prev, next);
+                    const log = logFromDiff(this.store.get(this.keys.log, []), diff, { at, nextStep: this.nextStep() });
+                    this.store.set(this.keys.log, log);
+                }
+                this.store.set(this.keys.state, { at, api });
+                this.recordDaily(next);
+                this.onState(next, api);
+                await this.refreshStatic();
+                return true;
+            } catch (error) {
+                if (error && KEY_DEAD_CODES.has(error.code)) this.store.set(this.keys.dead, true);
+                this.onError(error);
+                return false;
+            } finally {
+                this.polling = false;
+            }
+        }
+
+        /** Stats at the end of each Torn day seen (Progress). Keeps 120 days. */
+        recordDaily(state) {
+            if (!state.stats) return;
+            const h = this.store.get(this.keys.history, {}) || {};
+            const day = tornDayStart(state.at);
+            h[day] = { ...state.stats, total: totalOf(state.stats) };
+            const days = Object.keys(h).map(Number).sort((a, b) => a - b);
+            while (days.length > 120) delete h[days.shift()];
+            this.store.set(this.keys.history, h);
+        }
+
+        /** Perks, property, gyms, inventory, key info: each on its own clock. */
+        async refreshStatic() {
+            const st = { ...(this.store.get(this.keys.static, {}) || {}) };
+            const at = this.now();
+            const due = (k) => !(st[k + 'At'] && at - st[k + 'At'] < STATIC_EVERY[k]);
+            const jobs = [
+                ['keyInfo', () => fetchKeyInfo(this.client)],
+                ['perks', () => fetchPerks(this.client)],
+                ['property', () => fetchProperty(this.client)],
+                ['gyms', () => fetchGyms(this.client)],
+                ['inventory', () => fetchInventory(this.client)],
+            ];
+            let changed = false;
+            for (const [k, fn] of jobs) {
+                if (!due(k)) continue;
+                try {
+                    st[k] = await fn();
+                } catch (error) {
+                    if (error && KEY_DEAD_CODES.has(error.code)) {
+                        this.store.set(this.keys.dead, true);
+                        this.onError(error);
+                        break;
+                    }
+                    // A part Torn refuses (e.g. access level) is retried on its clock, not every tick.
+                    this.onError(error);
+                }
+                st[k + 'At'] = at;
+                changed = true;
+            }
+            if (changed) this.store.set(this.keys.static, st);
+            return st;
+        }
+    }
+
+    /* ===== src/core/perks.js ===== */
+    /*
+     * Parse `/v2/user/perks` into what the gym maths needs. Pure.
+     *
+     * Every perk line is its own multiplier (1 + p): faction steadfast,
+     * education courses, property, company, books, enhancers. Lines we don't
+     * understand are kept in `unknown` for Settings › Diagnostics, never guessed.
+     * String forms come from the API (research-api-shapes.md §2), TornTools'
+     * company table and Torn's item effects (research-gym.md).
+     */
+
+
+
+    const STAT_WORD = { strength: 'str', speed: 'spd', defense: 'def', defence: 'def', dexterity: 'dex', str: 'str', spd: 'spd', def: 'def', dex: 'dex' };
+
+    // "+ 20% strength gym gains", "10% dexterity gym gains"
+    const RE_STAT = /([+-]?\s*\d+(?:\.\d+)?)\s*%\s+(?:to\s+)?(strength|speed|defen[sc]e|dexterity|str|spd|def|dex)\s+gym\s+gains?/i;
+    // "+ 2% gym gains", "3% gym gains", "+1% to all gym gains"
+    const RE_ALL = /([+-]?\s*\d+(?:\.\d+)?)\s*%\s+(?:to\s+)?(?:all\s+)?gym\s+gains?/i;
+    // "Increases speed gym gains by 15%", "Incr. Str gym gains by 30% (31 days)."
+    const RE_BOOK_STAT = /(?:increases?|incr\.)\s+(strength|speed|defen[sc]e|dexterity|str|spd|def|dex)\s+gym\s+gains?\s+by\s+(\d+(?:\.\d+)?)\s*%/i;
+    // "Increases all gym gains by 20% for 31 days"
+    const RE_BOOK_ALL = /(?:increases?|incr\.)\s+(?:all\s+)?gym\s+gains?\s+by\s+(\d+(?:\.\d+)?)\s*%/i;
+    // Ignorance Is Bliss (item 770): "Happiness can regenerate above maximum for 31 days."
+    const RE_BLISS = /happiness\s+can\s+regenerate\s+above\s+maximum/i;
+    // Music Store "Well Tuned": "30% gym experience" (unlock thresholds ÷ 1.3)
+    const RE_GYM_XP = /(\d+(?:\.\d+)?)\s*%\s+gym\s+experience/i;
+    // "Goal Oriented": "50% happy loss reduction in gym"
+    const RE_HAPPY_LOSS = /(\d+(?:\.\d+)?)\s*%\s+happy\s+loss\s+reduction/i;
+    // "31 days", "(12 days)" - how long a book lasts
+    const RE_DAYS = /(\d+)\s*days?/i;
+
+    const num = (s) => Number(String(s).replace(/\s+/g, ''));
+
+    /**
+     * @param {object} perks - the `perks` object of /v2/user/perks: {faction:[], job:[], property:[], education:[], enhancer:[], book:[], stock:[], merit:[]}
+     * @returns {{mult:{str,spd,def,dex}, lines:object[], bliss:boolean, blissDays:number|null, gymExpMult:number, happyLossMult:number, books:object[], unknown:string[]}}
+     */
+    function parsePerks(perks) {
+        const mult = { str: 1, spd: 1, def: 1, dex: 1 };
+        const lines = [];
+        const books = [];
+        const unknown = [];
+        let bliss = false;
+        let blissDays = null;
+        let gymExpMult = 1;
+        let happyLossMult = 1;
+
+        const src = perks && typeof perks === 'object' ? perks : {};
+        for (const [source, list] of Object.entries(src)) {
+            if (!Array.isArray(list)) continue;
+            for (const raw of list) {
+                const text = String(raw || '').trim();
+                if (!text) continue;
+                let m;
+                if (RE_BLISS.test(text)) {
+                    bliss = true;
+                    const d = text.match(RE_DAYS);
+                    blissDays = d ? Number(d[1]) : null;
+                    books.push({ kind: 'bliss', text });
+                    continue;
+                }
+                if ((m = text.match(RE_GYM_XP))) {
+                    gymExpMult *= 1 + num(m[1]) / 100;
+                    continue;
+                }
+                if ((m = text.match(RE_HAPPY_LOSS))) {
+                    happyLossMult *= Math.max(0, 1 - num(m[1]) / 100);
+                    continue;
+                }
+                let stat = null;
+                let pct = null;
+                if ((m = text.match(RE_BOOK_STAT))) {
+                    stat = STAT_WORD[m[1].toLowerCase()];
+                    pct = num(m[2]);
+                } else if ((m = text.match(RE_STAT))) {
+                    stat = STAT_WORD[m[2].toLowerCase()];
+                    pct = num(m[1]);
+                } else if ((m = text.match(RE_BOOK_ALL)) || (m = text.match(RE_ALL))) {
+                    pct = num(m[1]);
+                }
+                if (pct === null || !Number.isFinite(pct)) {
+                    // Only gym-looking lines are worth a diagnostics line.
+                    if (/gym|happi|energy/i.test(text)) unknown.push(source + ': ' + text);
+                    continue;
+                }
+                const f = 1 + pct / 100;
+                for (const k of stat ? [stat] : STATS) mult[k] *= f;
+                lines.push({ source, stat: stat || 'all', pct, text });
+                if (source === 'book') {
+                    const d = text.match(RE_DAYS);
+                    books.push({ kind: stat ? 'stat' : 'all', stat, pct, days: d ? Number(d[1]) : null, text });
+                }
+            }
+        }
+        return { mult, lines, bliss, blissDays, gymExpMult, happyLossMult, books, unknown };
+    }
+
+    /** No perks at all (the default before the API answers). */
+    function noPerks() {
+        return parsePerks({});
+    }
+
+    /* ===== src/core/format.js ===== */
+    /*
+     * Number words the way the pages show them. Pure.
+     */
+
+    /** 1234567 → "1,234,567" */
+    function fmtInt(n) {
+        const v = Math.round(Number(n) || 0);
+        return (v < 0 ? '−' : '') + Math.abs(v).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    }
+
+    /** Signed: "+1,420", "−300" */
+    function fmtSigned(n) {
+        const v = Math.round(Number(n) || 0);
+        return (v >= 0 ? '+' : '') + fmtInt(v);
+    }
+
+    /** Short stats: 994142 → "994k", 1124595 → "1.12M", 119410643 → "119M", 8723 → "8,723" */
+    function fmtShort(n) {
+        const v = Math.abs(Number(n) || 0);
+        const sign = Number(n) < 0 ? '−' : '';
+        if (v >= 1e9) return sign + trim(v / 1e9, v >= 1e10 ? 1 : 2) + 'B';
+        if (v >= 1e6) return sign + trim(v / 1e6, v >= 1e8 ? 0 : v >= 1e7 ? 1 : 2) + 'M';
+        if (v >= 1e5) return sign + Math.round(v / 1e3) + 'k';
+        return sign + fmtInt(v);
+    }
+
+    function trim(x, dp) {
+        return x.toFixed(dp).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+    }
+
+    /** Money: "$826,500" under $1M, "$6.62M", "$126M", "$1.2B" */
+    function fmtMoney(n) {
+        const v = Number(n) || 0;
+        if (Math.abs(v) < 1e6) return (v < 0 ? '−$' : '$') + fmtInt(Math.abs(v));
+        const s = fmtShort(Math.abs(v));
+        return (v < 0 ? '−$' : '$') + s;
+    }
+
+    /** "+13%", "−40%" */
+    function fmtPct(p, dp = 0) {
+        const v = Number(p) || 0;
+        return (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toFixed(dp) + '%';
+    }
+
+    /* ===== src/core/recommend.js ===== */
+    /*
+     * Recommend a strategy, rank the others against it, and explain a worse
+     * pick in plain words. Pure. ENGINE-SPEC §5.
+     */
+
+
+
+
+    /** A pick this much worse in stats (or costlier without being this much better) gets the warning. */
+    const WARN_STATS_PCT = 5;
+
+    /** Re-check when a price moves this much against its 7-day average. */
+    const PRICE_MOVE_PCT = 15;
+
+    /** Re-check when total stats have grown this many times since the last check. */
+    const STATS_GROWTH_X = 2;
+
+    /** The daily re-check, Torn time. */
+    const DAILY_CHECK_HOUR = 6;
+
+    const JUMP_LIKE = new Set(['chocoJump', 'edvdJump', 'happy99k']);
+    const HAPPY_BOUGHT = new Set(['dailyChoco', 'chocoJump', 'edvdJump', 'happy99k']);
+
+    /**
+     * @param {object} results - {id: simulateStrategy result}
+     * @param {object} o
+     * @param {number} [o.budget] - money for the horizon; Infinity when unset
+     * @returns {{recommended:string, alternatives:object[], reasons:string[]}}
+     */
+    function recommend(results, { budget = Infinity } = {}) {
+        const list = Object.values(results).filter(Boolean);
+        if (!list.length) return { recommended: null, alternatives: [], reasons: [] };
+        const inBudget = list.filter((r) => r.cost <= budget);
+        const pool = inBudget.length ? inBudget : [list.reduce((a, b) => (b.cost < a.cost ? b : a))];
+        const perM = (r) => (r.cost > 0 ? r.gained / (r.cost / 1e6) : Infinity);
+        pool.sort((a, b) => b.gained - a.gained || perM(b) - perM(a));
+        const best = pool[0];
+        const alternatives = list
+            .filter((r) => r.id !== best.id)
+            .map((r) => {
+                const deltaStatsPct = best.gained > 0 ? (100 * (r.gained - best.gained)) / best.gained : 0;
+                const deltaCost = r.cost - best.cost;
+                const overBudget = r.cost > budget;
+                let verdict = 'worse';
+                if (overBudget && r.gained > best.gained) verdict = 'overBudget';
+                else if (Math.abs(deltaStatsPct) < 1 && Math.abs(deltaCost) < 1e6) verdict = 'same';
+                else if (deltaStatsPct > 0 && !overBudget) verdict = 'better';
+                return { id: r.id, gained: r.gained, cost: r.cost, deltaStatsPct, deltaCost, overBudget, verdict };
+            })
+            .sort((a, b) => b.gained - a.gained);
+        return { recommended: best.id, alternatives, reasons: whyRecommended(best, results, { budget }) };
+    }
+
+    /** One line on why the recommended plan wins. */
+    function whyRecommended(best, results, { budget }) {
+        const out = [];
+        const beaten = Object.values(results).filter((r) => r && r.id !== best.id && r.gained > best.gained);
+        if (beaten.length && beaten.every((r) => r.cost > budget)) out.push('Anything that gains more is over your budget.');
+        if (best.id === 'steady') out.push('Stacking Xanax for a jump stops natural energy, so you end with fewer stats.');
+        if (best.id === 'blissSteady') out.push('Ignorance Is Bliss lets happy climb above your maximum, so boosters keep paying off.');
+        if (JUMP_LIKE.has(best.id)) out.push('At your stats a bigger happy multiplies each train more than the energy you lose while stacking.');
+        return out;
+    }
+
+    /**
+     * Should picking `picked` over `recommended` warn, and in which words?
+     * @returns {{warn:boolean, title:string, text:string, reasons:string[]}}
+     */
+    function pickWarning(recommended, picked, { bliss = false, days = 30 } = {}) {
+        if (!recommended || !picked || recommended.id === picked.id) return { warn: false, title: '', text: '', reasons: [] };
+        const dPct = recommended.gained > 0 ? (100 * (picked.gained - recommended.gained)) / recommended.gained : 0;
+        const dCost = picked.cost - recommended.cost;
+        const warn = dPct < -WARN_STATS_PCT || (dCost > 0 && dPct < WARN_STATS_PCT);
+        const reasons = [];
+        if (JUMP_LIKE.has(picked.id)) reasons.push('Holding four Xanax stops natural energy.');
+        if (HAPPY_BOUGHT.has(picked.id)) reasons.push('The Ecstasy uses a drug cooldown a Xanax would have filled.');
+        if (picked.id === 'dailyChoco') reasons.push('The candy lifts happy for one session a day only.');
+        if (HAPPY_BOUGHT.has(picked.id) && !bliss) reasons.push('Worth it only if you read Ignorance Is Bliss.');
+        const name = (STRATEGIES[picked.id] && STRATEGIES[picked.id].name) || picked.id;
+        const recName = (STRATEGIES[recommended.id] && STRATEGIES[recommended.id].short) || recommended.id;
+        const title = 'A ' + name.charAt(0).toLowerCase() + name.slice(1) + " isn't worth it for you";
+        const money = dCost > 0 ? ', and ' + fmtMoney(dCost) + ' more' : dCost < 0 ? ', for ' + fmtMoney(-dCost) + ' less' : '';
+        const text = days + ' days: about +' + fmtShort(picked.gained) + ' stats, against +' + fmtShort(recommended.gained) + ' on ' + recName.toLowerCase() + money + '.';
+        return { warn, title, text, reasons };
+    }
+
+    /**
+     * Things that should make the app look at the plan again (Home › Heads-up).
+     * @param {object} last - snapshot at the last check {at, bliss, statBooks, unlockedTop, total, budget}
+     * @param {object} now - the same, now; plus prices {[id]: {now, avg7}}
+     * @returns {{kind:string, text:string}[]}
+     */
+    function recheckTriggers(last, now) {
+        const out = [];
+        if (!last) return [{ kind: 'first', text: 'First plan check' }];
+        if (Boolean(now.bliss) !== Boolean(last.bliss)) out.push({ kind: 'book', text: now.bliss ? 'Ignorance Is Bliss is active: jumps may win now' : 'Ignorance Is Bliss ran out' });
+        if ((now.statBooks || 0) !== (last.statBooks || 0)) out.push({ kind: 'book', text: 'A gym book changed' });
+        if ((now.unlockedTop || 0) > (last.unlockedTop || 0)) out.push({ kind: 'gym', text: 'New gym unlocked' });
+        if (last.total > 0 && now.total >= STATS_GROWTH_X * last.total) out.push({ kind: 'stats', text: 'Your stats doubled since the last check' });
+        if ((now.budget || 0) !== (last.budget || 0)) out.push({ kind: 'budget', text: 'Budget changed' });
+        for (const [id, p] of Object.entries(now.prices || {})) {
+            if (p && p.avg7 > 0 && Math.abs(p.now / p.avg7 - 1) * 100 > PRICE_MOVE_PCT) out.push({ kind: 'price', item: id, text: 'A price moved more than ' + PRICE_MOVE_PCT + '%' });
+        }
+        return out;
+    }
+
+    /** Is the daily re-check due? (Once per Torn day, from 06:00 Torn time.) */
+    function dailyCheckDue(lastAt, now) {
+        const day = Math.floor(now / 86400000) * 86400000;
+        const due = day + DAILY_CHECK_HOUR * 3600000;
+        if (now < due) return lastAt < due - 86400000;
+        return !(lastAt >= due);
+    }
+
     /* ===== src/sources/route.js ===== */
     /*
      * Which page are we on? Pure string work, so it is testable.
@@ -372,14 +2970,315 @@
         return TORN + 'preferences.php#tab=api';
     }
 
+    /* ===== src/core/market.js ===== */
+    /*
+     * What to buy and where: the need list from the plan, the cheapest fill
+     * across the Item Market, every bazaar (TornW3B) and the points market, and
+     * a verdict against our own 7-day history. Pure. ENGINE-SPEC §8.
+     */
+
+
+
+
+    const SOURCE_BAZAAR = 'bazaar';
+    const SOURCE_ITEM_MARKET = 'itemmarket';
+    const SOURCE_POINTS = 'points';
+
+    /** Verdict thresholds vs the 7-day average of the lowest price. */
+    const BUY_NOW_MAX_PCT = 1;
+    const WAIT_OVER_PCT = 3;
+    const BULK_UNDER_PCT = 3;
+
+    /** Buy windows (Buy tab switch). */
+    const WINDOWS = { today: 1, three: 3, week: 7 };
+
+    /**
+     * @param {object} needed - {[itemId]: qty} for the window (plan.itemsNeeded over those days)
+     * @param {object} inventory - {[itemId]: qty held}
+     * @returns {{id, need:number, have:number, buy:number}[]} in a stable order (drugs, boosters, points)
+     */
+    function needList(needed, inventory = {}) {
+        const order = (id) => (id === POINTS ? 3 : ITEMS[id] && ITEMS[id].kind === 'drug' ? 1 : 2);
+        return Object.entries(needed || {})
+            .map(([k, q]) => {
+                const id = k === POINTS ? POINTS : Number(k);
+                const have = Math.max(0, Number(inventory[id]) || 0);
+                return { id, name: itemName(id), need: q, have, buy: Math.max(0, q - have) };
+            })
+            .filter((r) => r.need > 0)
+            .sort((a, b) => order(a.id) - order(b.id) || String(a.id).localeCompare(String(b.id)));
+    }
+
+    /** Where a row sends you: the exact bazaar, Item Market search or the points market. */
+    function linkFor(row, itemId) {
+        if (row.source === SOURCE_BAZAAR && row.sellerId) return bazaarUrl(row.sellerId);
+        if (row.source === SOURCE_POINTS) return pointsMarketUrl();
+        return itemMarketUrl(itemId);
+    }
+
+    /**
+     * Take `qty` from the cheapest listings upward, whatever the source.
+     * Listings: {source, sellerId?, sellerName?, price, qty}. Ties keep the
+     * given order (callers list the Item Market first: no trip to a bazaar for
+     * the same price).
+     * @returns {{rows:object[], total:number, filled:number, short:number}}
+     */
+    function fillCheapest(listings, qty, itemId) {
+        const sorted = (listings || [])
+            .filter((l) => l && Number(l.price) > 0 && Number(l.qty) > 0)
+            .map((l, i) => ({ ...l, i }))
+            .sort((a, b) => a.price - b.price || a.i - b.i);
+        const rows = [];
+        let left = Math.max(0, qty);
+        let total = 0;
+        for (const l of sorted) {
+            if (left <= 0) break;
+            const take = Math.min(left, l.qty);
+            const row = { source: l.source, sellerId: l.sellerId || null, sellerName: l.sellerName || null, listed: l.qty, qty: take, price: l.price, subtotal: take * l.price };
+            row.link = linkFor(row, itemId);
+            rows.push(row);
+            total += row.subtotal;
+            left -= take;
+        }
+        return { rows, total, filled: qty - left, short: left };
+    }
+
+    /**
+     * Buy now, fine, wait or stock up, from the cheapest price against the
+     * 7-day average of daily lows.
+     * @param {number} price - the cheapest price now
+     * @param {number|null} avg7
+     * @param {object} [o] - {slack: the plan can wait a day (enough in inventory for today)}
+     */
+    function priceVerdict(price, avg7, { slack = false } = {}) {
+        if (!(avg7 > 0) || !(price > 0)) return { kind: 'unknown', pct: null, text: 'No 7-day history yet' };
+        const pct = (100 * (price - avg7)) / avg7;
+        const vs = Math.abs(pct) < 0.05 ? 'at the 7-day average' : Math.abs(pct).toFixed(1) + '% ' + (pct < 0 ? 'under' : 'over') + ' the 7-day average';
+        if (pct <= -BULK_UNDER_PCT) return { kind: 'bulk', pct, text: 'Stock up · ' + vs };
+        if (pct <= BUY_NOW_MAX_PCT) return { kind: 'buy', pct, text: 'Buy now · ' + vs };
+        if (pct > WAIT_OVER_PCT && slack) return { kind: 'wait', pct, text: 'Wait · ' + vs };
+        return { kind: 'fine', pct, text: 'Fine · ' + vs };
+    }
+
+    /**
+     * Listings from each source in one shape.
+     * - Item Market (/v2/market/{id}/itemmarket): itemmarket.listings[{price, amount}]
+     * - TornW3B (/api/marketplace/{id}): listings[{player_id, player_name, price, quantity}]
+     * - Points market (/v2/market/pointsmarket): pointsmarket[{id, cost, quantity}] (cost per point)
+     */
+    function listingsFromItemMarket(api) {
+        const im = api && (api.itemmarket || api);
+        const list = im && Array.isArray(im.listings) ? im.listings : [];
+        return list.map((l) => ({ source: SOURCE_ITEM_MARKET, price: Number(l.price), qty: Number(l.amount ?? l.quantity) || 0 }));
+    }
+
+    function listingsFromW3b(api) {
+        const list = api && Array.isArray(api.listings) ? api.listings : [];
+        return list.map((l) => ({ source: SOURCE_BAZAAR, sellerId: l.player_id ? String(l.player_id) : null, sellerName: l.player_name || null, price: Number(l.price), qty: Number(l.quantity) || 0 }));
+    }
+
+    function listingsFromPoints(api) {
+        const raw = api && api.pointsmarket;
+        const list = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? Object.entries(raw).map(([id, v]) => ({ id, ...v })) : [];
+        return list.map((l) => ({ source: SOURCE_POINTS, listingId: l.id ? String(l.id) : null, price: Number(l.cost ?? l.price), qty: Number(l.quantity) || 0 }));
+    }
+
+    /** A seller line: "Iron_Monk's bazaar", "Item Market", "Points market". */
+    function whereText(row) {
+        if (row.source === SOURCE_BAZAAR) return (row.sellerName ? row.sellerName + "'s" : 'A') + ' bazaar';
+        if (row.source === SOURCE_POINTS) return 'Points market';
+        return 'Item Market';
+    }
+
+    /* ===== src/core/model.js ===== */
+    /*
+     * Everything a page shows, worked out from stored data in one pure pass:
+     * the live state, the slow data (perks, property, gyms, inventory), the
+     * plan, the day's log and settings. The webpage and the overlay both render
+     * from this, so they can never disagree.
+     */
+
+
+
+
+
+
+
+
+
+
+
+
+    /** Build shares for a plan's build id ("baldr" or "baldr:dex"). */
+    function buildOf(id) {
+        const [base, high] = String(id || DEFAULT_BUILD).split(':');
+        const b = high ? withHighStat(base, high) : BUILDS[base];
+        return b || BUILDS[DEFAULT_BUILD];
+    }
+
+    /**
+     * The context the engine needs about this player right now.
+     * @param {object} state - normalizeState()
+     * @param {object} statics - stored slow data {perks, property, gyms, inventory, keyInfo}
+     * @param {object} extra - {unlockedKnown, drugsTaken}
+     */
+    function playerContext(state, statics = {}, extra = {}) {
+        const table = statics.gyms && statics.gyms.length ? mergeLiveGyms(statics.gyms) : GYMS;
+        const perks = parsePerks(statics.perks || {});
+        const unlocked = unlockedGyms(state && state.gymId, extra.unlockedKnown || null);
+        const stats = (state && state.stats) || { str: 0, spd: 0, def: 0, dex: 0 };
+        const best = {};
+        for (const k of STATS) best[k] = bestGymFor(k, stats, unlocked, { table, drugsTaken: extra.drugsTaken ?? null, active: state && state.gymId });
+        return { table, perks, unlocked, stats, best };
+    }
+
+    /** Run every feasible strategy for the horizon (cached by the caller per day). */
+    function compareStrategies({ state, pc, shares, settings, prices }) {
+        const gyms = {};
+        for (const k of STATS) if (pc.best[k]) gyms[k] = { dots: pc.best[k].dots[k], energy: pc.best[k].energy };
+        const results = {};
+        for (const id of feasibleStrategies({ bliss: pc.perks.bliss })) {
+            results[id] = simulateStrategy(id, {
+                stats: pc.stats,
+                target: shares,
+                gyms,
+                perks: pc.perks.mult,
+                happyMax: state.happy.maximum,
+                energyMax: state.energy.maximum,
+                fastEnergy: state.energy.interval <= 600,
+                days: settings.horizonDays || 30,
+                prices: { ...SAMPLE_PRICES, ...(prices || {}) },
+                bliss: pc.perks.bliss,
+                happyLossMult: pc.perks.happyLossMult,
+            });
+        }
+        return results;
+    }
+
+    /**
+     * @param {object} o
+     * @param {object} o.state - normalizeState() of the stored user state (null before the first poll)
+     * @param {object} o.statics
+     * @param {object} o.plan - stored plan
+     * @param {object} o.settings
+     * @param {object[]} o.log - today's done steps
+     * @param {object} o.history - statsHistory {day: {str,...,total}}
+     * @param {object} [o.prices] - {itemId: cheapest price}
+     * @param {object} [o.compare] - cached compareStrategies() result
+     * @param {object} [o.gymProgress] - {gymId, energy} read from the gym page
+     * @param {number} o.now
+     */
+    function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, gymProgress = null, unlockedKnown = null, now }) {
+        if (!state) return { ready: false };
+        const pc = playerContext(state, statics, { unlockedKnown });
+        const build = buildOf(plan.build);
+        const shares = targetShares(plan, pc.stats, build.shares);
+        const keep = (build.gyms || []).filter((id) => pc.unlocked.includes(id) && gymAccess(gymById(id, pc.table), pc.stats).ok);
+        const today = (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(now));
+        const ctx = { shares, unlocked: pc.unlocked, perks: pc.perks.mult, keep, active: state.gymId, table: pc.table, bliss: pc.perks.bliss, happyLossMult: pc.perks.happyLossMult, drugsToday: drugsToday(today, now), boostedToday: today.some((e) => e.kind === 'boost') };
+        const steps = dayTimeline({ state, now, strategy: plan.strategy, ctx });
+        const next = steps[0] || null;
+
+        // Status strip
+        const energy = energyAt(state, now);
+        const e = state.energy;
+        const fullAt = energy >= e.maximum ? null : now + (Math.ceil((e.maximum - energy) / e.increment) * e.interval * 1000);
+        const drugLeft = Math.max(0, drugFreeAt(state) - now);
+        const boosterLeft = Math.max(0, boosterFreeAt(state) - now);
+        const refillFree = refillAvailable(state, now);
+        const refillStep = steps.find((s) => s.kind === 'refill');
+        const xanaxPlanned = today.filter((x) => x.kind === 'xanax' || x.kind === 'stack').length + steps.filter((s) => (s.kind === 'xanax' || s.kind === 'stack' || s.kind === 'hold') && s.at < tornDayStart(now) + DAY).length;
+        const strip = {
+            energy: { current: energy, max: e.maximum, fullAt },
+            happy: { current: happyAt(state, now, { bliss: pc.perks.bliss }), max: state.happy.maximum, property: statics.property && statics.property.property ? statics.property.property.name : null },
+            drug: { left: drugLeft, total: drugLeft > 0 ? Math.max(drugLeft, state.drugCd * 1000) : 0, xanaxDone: ctx.drugsToday, xanaxPlanned },
+            booster: { left: boosterLeft, used: steps.some((s) => (s.items || []).some((it) => it.id !== XANAX && it.id !== 'points' && it.id !== 197)) },
+            refill: { free: refillFree, plannedAt: refillStep ? refillStep.at : null },
+        };
+
+        // Stats vs build
+        const gaps = buildGaps(pc.stats, shares);
+        const days = Object.keys(history || {}).map(Number).sort((a, b) => a - b).slice(-7);
+        const trainedToday = {};
+        for (const x of today) for (const k of STATS) trainedToday[k] = (trainedToday[k] || 0) + ((x.trained && x.trained[k]) || 0);
+        const plannedToday = {};
+        for (const s of steps) for (const [k, n] of Object.entries(s.trains || {})) plannedToday[k] = (plannedToday[k] || 0) + n;
+        const statRows = STATS.map((k) => ({
+            stat: k,
+            value: pc.stats[k],
+            share: gaps[k].share,
+            target: shares[k],
+            gap: gaps[k].gap,
+            over: gaps[k].over,
+            spark: days.map((d) => history[d][k]),
+            today: trainedToday[k] || 0,
+            plannedTrains: plannedToday[k] || 0,
+        }));
+        const gainedToday = today.reduce((a, x) => a + (x.gain || 0), 0);
+        const plannedGain = gainedToday + steps.filter((s) => s.at < tornDayStart(now) + DAY).reduce((a, s) => a + (s.gain || 0), 0);
+
+        // Build ETA and next gym
+        const energyPerDay = Math.round(((e.interval <= 600 ? 720 : 480) + 250 * Math.floor(1440 / 420) + e.maximum) / 10) * 10;
+        const proj = projectBuild({ stats: pc.stats, shares, energyPerDay, happy: state.happy.maximum + 300, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: 30, active: state.gymId, table: pc.table });
+        const progressE = gymProgress && Number(gymProgress.gymId) === Number(state.gymId) ? gymProgress.energy : null;
+        const ng = state.gymId && state.gymId < 24 ? nextGym(state.gymId, progressE, energyPerDay, { gymExpMult: pc.perks.gymExpMult, table: pc.table }) : null;
+
+        // Buy today
+        const neededToday = itemsNeeded(steps.filter((s) => s.at < tornDayStart(now) + DAY));
+        const buyToday = needList(neededToday, statics.inventory || {});
+
+        // Heads-up
+        const heads = [];
+        for (const w of strictWarnings(steps, now)) heads.push({ tone: 'warn', text: w.text });
+        if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS * 6) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
+        if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.days !== null && progressE !== null ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost) });
+        let rec = null;
+        if (compare) {
+            const r = recommend(compare, { budget: settings.budget || Infinity });
+            rec = r;
+            const mine = compare[plan.strategy];
+            if (r.recommended === plan.strategy) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is still best' });
+            else if (mine) {
+                const w = pickWarning(compare[r.recommended], mine, { bliss: pc.perks.bliss, days: settings.horizonDays || 30 });
+                if (w.warn) heads.push({ tone: 'warn', text: (STRATEGIES[r.recommended] || {}).name + ' would gain more', sub: 'see Plan' });
+            }
+        }
+
+        return {
+            ready: true,
+            now,
+            state,
+            pc,
+            build,
+            shares,
+            keep,
+            steps,
+            next,
+            done: today,
+            strip,
+            statRows,
+            total: totalOf(pc.stats),
+            gainedToday,
+            plannedGain,
+            reachedDay: proj.reachedDay,
+            projection: proj.days.slice(0, 7),
+            nextGym: ng,
+            energyPerDay,
+            buyToday,
+            heads,
+            recommendation: rec,
+            prices,
+        };
+    }
+
     /* ===== src/main.js ===== */
     /*
      * Wiring. The only file that knows it is a userscript; core/ and api/ are
      * plain modules tested under node.
      *
      * Two entry points share it:
-     *   - every Torn page: the overlay pill, the marks on the page being viewed,
-     *     and Torn Eye chips;
+     *   - every Torn page: the state feed (one visible leader tab), the overlay
+     *     pill, the marks on the page being viewed, and Torn Eye chips;
      *   - the webpage (GitHub Pages app.html): the full tabs, drawn over the
      *     placeholder the page shows without the script.
      */
@@ -387,14 +3286,126 @@
 
 
 
+
+
+
+
+
+
+
+
+    const pi = {
+        tabId: makeTabId(),
+        client: null,
+        feed: null,
+        model: null,
+        compare: null,
+        compareKey: '',
+        listeners: [],
+    };
+
+    function isVisible() {
+        return typeof document === 'undefined' || document.visibilityState !== 'hidden';
+    }
+
+    const storeApi = { get: (k, fb) => get(k, fb), set: (k, v) => set(k, v), del: (k) => set(k, null) };
+
+    /** The one Torn client every part of this tab uses: 70/min across tabs, visible only. */
+    function tornClient() {
+        if (pi.client) return pi.client;
+        const win = tabWindow('apiWindow', pi.tabId, storeApi);
+        pi.client = new TornApiClient({
+            getKey: () => getKey(K.apiKey),
+            loadWindow: () => win.load(),
+            addToWindow: (at) => win.add(at),
+            loadPause: () => get(K.apiPause, null),
+            savePause: (p) => set(K.apiPause, p),
+            isVisible,
+        });
+        return pi.client;
+    }
+
+    /** Re-run the strategy comparison at most once per Torn hour or when inputs change. */
+    function comparisonFor(state, statics, plan, settings) {
+        const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null) });
+        const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
+        const key = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, state.gymId, state.happy.maximum, pc.perks.bliss, Math.round(pc.stats.str / 1000)].join('|');
+        if (key !== pi.compareKey) {
+            pi.compare = compareStrategies({ state, pc, shares, settings, prices: get(K.prices, {}) || {} });
+            pi.compareKey = key;
+        }
+        return pi.compare;
+    }
+
+    /** The model every surface renders from. */
+    function currentModel(now = Date.now()) {
+        const s = get(K.userState, null);
+        const state = s && s.api ? normalizeState(s.api, s.at) : null;
+        if (!state) return { ready: false, hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)) };
+        const statics = get(K.userStatic, {}) || {};
+        const plan = getPlan();
+        const settings = getSettings();
+        const compare = comparisonFor(state, statics, plan, settings);
+        return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: get(K.prices, {}) || {}, compare, gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+    }
+
+    function refresh() {
+        try {
+            pi.model = currentModel();
+        } catch (error) {
+            set(K.lastError, { at: Date.now(), where: 'model', message: String((error && error.message) || error) });
+            return;
+        }
+        for (const fn of pi.listeners) {
+            try {
+                fn(pi.model);
+            } catch (error) {
+                set(K.lastError, { at: Date.now(), where: 'render', message: String((error && error.message) || error) });
+            }
+        }
+    }
+
+    function onModel(fn) {
+        pi.listeners.push(fn);
+        if (pi.model) fn(pi.model);
+    }
+
+    function startFeed() {
+        pi.feed = new StateFeed({
+            client: tornClient(),
+            store: storeApi,
+            tabId: pi.tabId,
+            isVisible,
+            nextStep: () => (pi.model && pi.model.next) || null,
+            onState: () => refresh(),
+            onError: (error) => set(K.lastError, { at: Date.now(), where: 'feed', code: error && error.code, message: String((error && error.message) || error) }),
+        });
+        const tick = () => pi.feed.tick().catch(() => {});
+        tick();
+        setInterval(tick, LEADER_HEARTBEAT_MS);
+        // Follower tabs redraw when the leader stores a new state; everyone redraws each second for countdowns.
+        gmOnChange(K.userState, refresh);
+        gmOnChange(K.userStatic, refresh);
+        gmOnChange(K.plan, refresh);
+        gmOnChange(K.settings, refresh);
+        setInterval(refresh, 1000);
+        refresh();
+    }
+
+    function menus() {
+        gmMenu('Open Pumping Iron', () => gmOpenTab(APP_PAGE_URL));
+    }
+
     function boot() {
         const href = typeof location !== 'undefined' ? location.href : '';
         const where = isAppPageUrl(href) ? 'app' : detectPage(href);
-        gmSet('lastBoot', { at: Date.now(), where, version: PI_BUILD_VERSION });
-        if (typeof document !== 'undefined' && document.documentElement) {
-            document.documentElement.setAttribute('data-pi-booted', where);
-        }
-        return gmGet('lastBoot', null);
+        set('lastBoot', { at: Date.now(), where, version: PI_BUILD_VERSION });
+        if (typeof document !== 'undefined' && document.documentElement) document.documentElement.setAttribute('data-pi-booted', where);
+        if (typeof window === 'undefined' || typeof document === 'undefined' || !document.body) return;
+        menus();
+        startFeed();
+        // Off torn.com (the harness), expose the model for checks. On torn.com the sandbox keeps it private anyway.
+        if (!isTornHost(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed };
     }
 
     boot();
