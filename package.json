@@ -1,0 +1,13 @@
+{
+  "name": "torn-pumping-iron",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Gym planner and fight scout for Torn (Tampermonkey userscript).",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test \"test/*.test.js\"",
+    "test:worker": "node --test \"worker/test/*.test.js\"",
+    "check": "node build.mjs && node --check dist/torn-pumping-iron.user.js && node --test \"test/*.test.js\""
+  }
+}

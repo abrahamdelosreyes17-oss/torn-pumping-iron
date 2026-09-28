@@ -1,0 +1,11 @@
+node_modules/
+
+# Internal working notes, mockups and downloaded reference source - kept out
+# of the public repo, like the trading app.
+docs/
+mockups/
+reference/
+.claude/
+
+# Build output; the released copy lives at torn-pumping-iron.user.js
+dist/

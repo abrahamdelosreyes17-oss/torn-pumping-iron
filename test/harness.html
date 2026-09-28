@@ -1,0 +1,26 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Pumping Iron harness</title></head>
+<body style="background:#141618;color:#e3e5e8;font:13px Arial">
+<pre id="out">running...</pre>
+<script>
+// Minimal Tampermonkey stubs so the real bundle can boot unmodified.
+const _store = {};
+function GM_getValue(k, d) { return k in _store ? _store[k] : d; }
+function GM_setValue(k, v) { _store[k] = v; }
+function GM_deleteValue(k) { delete _store[k]; }
+function GM_registerMenuCommand() {}
+function GM_openInTab() {}
+function GM_xmlhttpRequest(o) { setTimeout(() => o.onerror && o.onerror(), 0); }
+window.onerror = (m) => { document.getElementById('out').textContent = 'BOOT ERROR: ' + m; };
+</script>
+<script>document.write('<script src="../torn-pumping-iron.user.js?v=' + Date.now() + '"><\/script>');</script>
+<script>
+setTimeout(() => {
+  const out = document.getElementById('out');
+  if (out.textContent.startsWith('BOOT ERROR')) return;
+  out.textContent = JSON.stringify({
+    booted: document.documentElement.getAttribute('data-pi-booted'),
+    lastBoot: JSON.parse(_store['pumpingIron.v1.lastBoot'] || 'null'),
+  }, null, 1);
+}, 500);
+</script>
+</body></html>

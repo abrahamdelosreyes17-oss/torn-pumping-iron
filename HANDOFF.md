@@ -1,0 +1,117 @@
+# HANDOFF: Torn Pumping Iron
+
+Read this first. Then `docs/BUILD-PLAN.md` (what to build, in order), `docs/ENGINE-SPEC.md` (the maths), `docs/DESIGN.md` (the look), and open `mockups/K-home.html` and `mockups/J-blueprint.html` in a browser.
+
+---
+
+## 1. Start here
+
+- **What it is:** one Tampermonkey userscript for Torn City. It includes:
+  - a **gym planner**: what to take, when, what to train and how many trains, and the cheapest place to buy;
+  - **Torn Eye**: whether you beat a player and how much HP you keep, plus war mode;
+  - a **webpage** the script opens (GitHub Pages host page);
+  - an optional **Discord pinger** (a Cloudflare Worker).
+- **Users:** the owner (13B networth, ~1B total stats, Private Island) and a returning friend (low stats, under $200M liquid, Private Island).
+- **Where it stands (2026-09-29):** research done. Design settled on `mockups/K-home.html` ("make every page similar"). **No code yet.** Next step: **M0** in BUILD-PLAN.
+- **The owner checks in only at the first release (1.0.0).** Build M0–M8 without asking. Stop at the end of M8 and ask before any commit to GitHub, push or release.
+- **Release repo:** https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron. Release like the trading app (one file at the repo root, `@updateURL` on `main`, a `gh-pages` host page, pinned `<sha>` install links). Not like the poker app: the owner says poker "uninstalls itself from Tampermonkey every release". Its headers were stable, so the cause is unknown. Never change `@name`/`@namespace`.
+
+### Milestones (update as you go)
+
+| | Milestone | Status |
+|---|---|---|
+| M0 | Scaffold from the trading app | ☐ |
+| M1 | Mockups for every page in K's style | ☐ |
+| M2 | Core engine + tests | ☐ |
+| M3 | API and data layer | ☐ |
+| M4 | Webpage tabs | ☐ |
+| M5 | Overlay + marks on Torn pages | ☐ |
+| M6 | Torn Eye | ☐ |
+| M7 | Discord service (Worker) | ☐ |
+| M8 | Hardening, README, release prep → ask the owner | ☐ |
+
+---
+
+## 2. How the owner works (follow exactly)
+
+1. **Nothing goes to GitHub** (commit to the release repo, push, tag, release, gh-pages) until the owner says so. Local `git init` and local commits as checkpoints are fine. Never add the remote before the go-ahead.
+2. They think out loud, sometimes in Taglish. Restate what they asked in plain English before acting.
+3. They want research before building, from real sources (GreasyFork/GitHub script source, Torn API spec, community guides). Don't guess mechanics. Put confidence tags ([code], [snippet], [calibrate]) in the docs.
+4. They hate generic "AI-looking" design. Round 1 was "almost there but too much, cramped"; round 2 was "almost nothing, dead space". K is the answer: dense but grouped, one primary thing per page. Every page follows K.
+5. They want the app to **recommend** (with alternatives and warnings), not ask them to reason about diminishing returns.
+6. Everything must link to the exact Torn page (train → gym, buy → that bazaar or listing).
+7. Plain words, the player's terms (Xanax, refill, trains, IM, bazaar). No "FF" anywhere (that's FFScouter's). Our bands: Stomp / Good / Tough / Can't win.
+8. "Tests pass ≠ it works" (from the trading HANDOFF). Prove behaviour in the harness with fixtures.
+9. On torn.com, the agent only reads. Never click, type or navigate there with browser tools.
+
+## 3. Settled decisions (don't reopen)
+
+- One script, one release; the overlay opens the webpage in a new tab (GM_openInTab), like trading's Torn Bids.
+- The attack, targets and war side is called **Torn Eye** (the owner said "call this one Torn Eye (kinda like a spy)"; read as the fight side inside Pumping Iron).
+- **Plan types:** Steady, Goal (unlock gym / reach build / stat numbers), Jump (choco, EDVD, 99k). Jump plans are strict (warn before a timing, then re-time). Steady and goal plans re-time silently. There is no strict/adaptive switch; buying re-prices daily.
+- The app recommends, with a dropdown of alternatives. A worse pick shows a warning ("not worth it; train natural energy and drug cooldown instead, unless you have Ignorance Is Bliss").
+- **Property:** just read the property's max happy; no rental finder.
+- **Builds:** presets (Balanced, Baldr's, Baldr's defensive, Hank's, Hank's defensive, Tank, Offense) + per-session split in trains per stat. Default Balanced until George's.
+- **Gym page:** no buttons of our own. Outline the stat, show trains + gain, **Fill N** types into Torn's reps box on click, and the user presses TRAIN. Warn before a train breaks a specialist gym.
+- **Buy:** the cheapest across the item market, all bazaars (TornW3B) and the points market; qty per seller; an Open link to that listing.
+- **Torn Eye:** a one-line chip (mix of round 1's A and C) with a hover card; user-set colour bands (green stomp, light green good, orange tough, red can't win); war mode (attackable now, next out of hospital, early outs, travel); attack-page panel; gear captured read-only from the attack page.
+- **FFScouter:** use their data, credited, with a link to their data policy. The owner registers at ffscouter.com and pastes the same key; we call `/api/v1/get-stats`.
+- **Discord:** the owner will create the server later; the app must be ready. Webhook pings from the Worker (never from the Torn tab). The bot comes later.
+- **Look:** K's tokens, chalk accent, weight-plate stat colours (STR red, SPD yellow, DEF blue, DEX green), Arial + Barlow Condensed (webpage only).
+
+## 4. Defaults I chose where the owner didn't answer (flag them at the release review)
+
+| Question | Default in 1.0 |
+|---|---|
+| Density | Compact default, Comfortable in settings |
+| Fill N on the gym page | Yes |
+| Main number after the chip's colour | "keep ~62%" (HP kept) |
+| Share captured gear with the friend | No (local only in 1.0) |
+| Target list page in 1.0 | Yes, basic (FFScouter get-targets + our estimate) |
+| One Discord Worker or one each | One Worker supporting several users; the docs explain both |
+| Keys | One Limited Torn key for the userscript; a separate custom Minimal key for the Worker |
+| Pill on every Torn page | Yes (setting to limit) |
+
+## 5. Key findings (details in docs/)
+
+- **The friend should NOT choco jump.** Stacking stops natural energy and Ecstasy eats a drug cooldown. Steady training (Xanax on cooldown + refill) wins at his stats; his Private Island's happy is the big lever. EDVD jumps beat steady only with far more money.
+- **For the owner at ~250M per stat,** one EDVD jump adds ~12% (+297k DEF for $18.6M). Over a month steady still wins, unless **Ignorance Is Bliss** (item 770: happy regenerates above max for 31 days) is active.
+- **Opponent gear:** no API exposes it. Torn sends `defenderItems` to the attack page via `page.php?sid=attackData` after Start Fight (before it with the Gun Shop job perk). KAL and S&R Loadout Revealer crowdsource this. KAL also rewrites Torn's page (grey area); we only read.
+- **FFScouter** knows only a combined score (no build split, gear or HP). Its colours and difficulty text are fixed. Our edge: build-aware fight sim, HP kept, gear, user-set bands, war mode.
+- **Discord:** no maintained tool pings personal timers in Discord. Cloudflare Worker cron every minute: free and reliable.
+- **Design:** see `docs/research-design-pipeline.md`. Jobs → moments → priority → priority guides → click map → calibrate one screen → build the rest.
+
+Research index: `docs/research-gym.md`, `research-builds-gympage.md`, `research-targets.md`, `research-torn-eye.md`, `research-discord.md`, `research-calm-ui.md`, `research-design-pipeline.md`, `task-map.md`, `torn-openapi.json` (Torn API v2 spec 6.13.6; query with node, it's 1.4 MB), `docs/reference/` (downloaded source of FFScouter V2, KAL/S&R loadout revealers, TWSE, GTG+, GymIQ, TornTools bits, BSP, items dump), `docs/sims/` (the simulations behind the numbers).
+
+## 6. How to work (the way the previous session did)
+
+- **Parallel research with subagents** (Agent tool, general-purpose or Explore) for anything unknown. Give each a precise brief and save its report into `docs/research-*.md` straight away, since sessions can end.
+- **Numbers from simulation, not intuition.** Before showing any gain or cost figure, compute it (`docs/sims/*.mjs` or the engine). Every mockup number traces to a sim.
+- **Specs before code; code before UI; UI to the mockups.** Pure core first with tests, then API, then UI.
+- **One milestone at a time.** Update the milestone table and add a dated "What this session did" entry at the bottom of this file after each one (newest first, like trading's HANDOFF).
+- **Memory:** project memory lives in `C:\Users\Abraham De Los Reyes\.claude\projects\D--torn-gym\memory\` (MEMORY.md index). Update `project-status.md` when milestones move.
+- **Browser checks:** the built-in browser pane often times out on screenshots when the window is hidden. Use `get_page_text`/`read_page` or Playwright via `test/ux-check.mjs`. Never open torn.com with browser tools. Use fixtures.
+- **Environment:** Windows 11. PowerShell is the primary shell and Git Bash is available. Files are CRLF-sensitive in string replacements (a PowerShell `.Replace` on CRLF text silently failed once; prefer the Edit tool). Node 24 is installed. Python is available for `http.server`.
+
+## 7. Rules (Torn ToS / scripting): inherited from trading, plus this app's
+
+1. Use only the Torn API or the page the user loaded and is viewing. No fetching torn.com pages; no hidden tabs or iframes.
+2. Never act for the user: no clicks on Torn buttons, no train, buy, use or attack. **Fill** only types a number.
+3. No alerts, sounds or title flashing from the Torn tab. Discord pings come only from the Worker, which uses the API.
+4. Rate limits: one shared 70/min budget across tabs for Torn; separate budgets for TornW3B, FFScouter and TornStats; nothing from hidden tabs.
+5. Show the ToS table (Data storage, Data sharing, Purpose, Key storage & sharing, Key access level) wherever a key is entered.
+6. Disclose third parties (TornW3B, FFScouter, TornStats, Cloudflare Worker). Never send a key to a service that didn't already get it from the user.
+7. Stop on a dead key (errors 2, 13, 18).
+8. The page hook is read-only: clone responses, never modify Torn's data or state.
+9. The Torn rules page (torn.com/rules.php) could never be fetched by tools. Ask the owner to read the scripting section before release.
+
+---
+
+## What each session did (newest first)
+
+### 2026-09-28/29: research, three mockup rounds, specs (no code)
+- The owner asked for a gym planner ("searches market, makes a plan, recalculates daily, happiness, choco/EDVD jumps, pings on Discord") for themselves and a returning friend, plus an FFScouter-like fight helper that's better ("sometimes it says I win but I end at 1 HP").
+- Research: the trading app's conventions, gym mechanics and tools, FFScouter and stat estimation, Torn→Discord, builds and the gym page, attack/war tools and opponent gear, calm dashboards, the design pipeline.
+- Simulations: 30-day strategies and build splits (`docs/sims`).
+- Mockups: round 1 (A/B/C/T), round 2 (D–I, too empty), then J blueprint + K home (approved: "make every page similar").
+- Wrote ENGINE-SPEC, DESIGN, BUILD-PLAN, this HANDOFF, CLAUDE.md, README draft. Saved memory.
