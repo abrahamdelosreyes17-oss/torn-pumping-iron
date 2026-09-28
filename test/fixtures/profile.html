@@ -1,0 +1,83 @@
+<!--
+  Profile page (profiles.php?XID=605123) + mini-profile popup, body fragment. NOT captured live.
+  Sources: TornTools profile-page.ts (.content-title), ff-scouter-profile.ts / profile-id.ts
+  (.basic-information .profile-container ul.info-table .user-info-value > *:first-child "Name [id]", h4#skip-to-content),
+  stats-estimate-profile.ts (.profile-right-wrapper > .profile-action .title-black, .box-info .box-value .digit-*),
+  profile-box.ts (.user.name[data-placeholder], li[id*='icon1'|'icon62'|'icon2'], .main-desc, .medals-wrapper);
+  docs/reference ffscouter-v2 (.links-top-wrap, .profile-status .description, #profile-mini-root .profile-container
+  .description .last-action, .honor-text-wrap), battle-stats-predictor (.buttons-wrap, .user-information);
+  trading/test/harness-live.html (profile-button ids).
+  [UNCERTAIN] exact ordering of boxes, status class names, attack button id (button0).
+-->
+<input type="hidden" id="torn-user" value='{"id":2139172,"playername":"TestUser"}'>
+<div class="content-wrapper">
+  <div class="content-title m-bottom10">
+    <h4 id="skip-to-content">BCS605's Profile</h4>
+    <div class="links-top-wrap"><a href="#" class="t-clear">Back</a></div>
+  </div>
+  <hr class="page-head-delimiter">
+  <div class="profile-wrapper m-top10">
+    <div class="user-information">
+      <div class="title-black">User Information</div>
+      <div class="box-info">
+        <div class="box-name">Level</div>
+        <div class="box-value">
+          <div class="digit-r"><span class="digit">0</span></div>
+          <div class="digit-m"><span class="digit">5</span></div>
+          <div class="digit-l"><span class="digit">7</span></div>
+        </div>
+      </div>
+      <ul class="big svg" id="iconTray">
+        <li id="icon1-profile-605123" class="user-status-16-Online" title="Online"></li>
+        <li id="icon9-profile-605123" title="Faction"></li>
+      </ul>
+    </div>
+  </div>
+  <div class="profile-wrapper">
+    <div class="basic-information">
+      <div class="title-black">Basic Information</div>
+      <div class="profile-container">
+        <ul class="info-table">
+          <li><div class="user-information-section"><span class="bold">Name</span></div><div class="user-info-value"><span class="bold">BCS605 [605123]</span></div></li>
+          <li><div class="user-information-section"><span class="bold">Level</span></div><div class="user-info-value"><span>57</span></div></li>
+          <li><div class="user-information-section"><span class="bold">Rank</span></div><div class="user-info-value"><span>Champion</span></div></li>
+          <li><div class="user-information-section"><span class="bold">Faction</span></div><div class="user-info-value"><a href="/factions.php?step=profile&amp;ID=9001">Test Faction</a></div></li>
+          <li><div class="user-information-section"><span class="bold">Last action</span></div><div class="user-info-value"><span>2 minutes ago</span></div></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  <div class="profile-right-wrapper">
+    <div class="profile-action">
+      <div class="title-black">Actions</div>
+      <div class="buttons-wrap">
+        <div class="profile-buttons">
+          <a id="button0-profile-605123" class="profile-button profile-button-attack active" aria-label="Attack" href="/loader.php?sid=attack&amp;user2ID=605123">attack</a>
+          <a id="button1-profile-605123" class="profile-button profile-button-sendMessage active" aria-label="Private message" href="#mail">mail</a>
+          <button id="button2-profile-605123" class="profile-button profile-button-initiateChat active withoutLink" aria-label="Start chat">chat</button>
+        </div>
+      </div>
+    </div>
+    <div class="profile-status okay">
+      <div class="title-black">Status</div>
+      <div class="profile-container">
+        <div class="description"><div class="main-desc">Okay</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="profile-wrapper medals-wrapper"><div class="title-black">Medals</div></div>
+</div>
+
+<!-- Mini-profile popup: appended to body on first hover, re-rendered per player. -->
+<div id="profile-mini-root">
+  <div class="mini-profile-wrapper">
+    <div class="profile-container travelling">
+      <a href="/profiles.php?XID=3886744" class="user name"><div class="honor-text-wrap"><span class="honor-text">Anon</span></div></a>
+      <ul class="big svg"><li id="icon2-mini-profile-3886744" class="user-status-16-Offline"></li></ul>
+      <div class="description">
+        <div class="main-desc">Traveling to Mexico</div>
+        <div class="last-action"><span class="last-action-desc">Last action: 3 hours ago</span></div>
+      </div>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,106 @@
+<!--
+  Faction pages body fragment: faction profile member list (factions.php?step=profile&ID=9001 / own faction info)
+  and a ranked-war list (factions.php?step=your#/war/rank). NOT captured live.
+  Sources: TornTools stats-estimate-faction-members.ts (.faction-info-wrap .table-body > .table-row, .lvl, icon77___),
+  ff-scouter-faction.ts ([class*='honorWrap___'] a[class*='linkWrap___'], .table-header > .lvl, .table-cell.lvl),
+  last-action-faction.ts, factions-page.ts (#react-root-faction-info, searchInput___), stats-estimate-faction-ranked-wars.ts
+  (ul.f-war-list, .descriptions, warListItem___ active___, .faction-war .members-list > li.enemy|li.your, [class*='honorWrap__'] > a, .level);
+  docs/reference torn-war-stuff-enhanced (#faction_war_list_id, ul.members-list, a[href^='/profiles.php'] aria-label "View profile of",
+  a[href^='/factions.php'], div.status/member/level/points, activeIcon__, status classes ok/not-ok/abroad/traveling);
+  ffscouter-v2 (.status child classes hospital/jail/federal/fallen, [class*="userStatusWrap"] aria-label "X is online").
+  [UNCERTAIN] cell order/classes other than those named, status text formats.
+-->
+<div id="react-root-faction-info">
+  <div class="faction-info-wrap">
+    <div class="members-list">
+      <div class="table-header">
+        <div class="table-cell member c-pointer">Members <input class="searchInput___Pz3Lk" type="text"></div>
+        <div class="table-cell lvl c-pointer">Lvl</div>
+        <div class="table-cell days c-pointer">Days</div>
+        <div class="table-cell position c-pointer">Position</div>
+        <div class="table-cell status c-pointer">Status</div>
+      </div>
+      <ul class="table-body">
+        <li class="table-row">
+          <div class="table-cell member">
+            <div class="userStatusWrap___ljSJG" aria-label="BCS605 is online"><svg></svg></div>
+            <div class="honorWrap___BHau4"><a class="linkWrap___ZS6r9" href="/profiles.php?XID=605123" aria-label="View profile of BCS605"><div class="honor-text-wrap"><span class="honor-text">BCS605</span></div></a></div>
+          </div>
+          <div class="table-cell lvl">57</div>
+          <div class="table-cell days">412</div>
+          <div class="table-cell position">Member</div>
+          <div class="table-cell status"><span class="okay">Okay</span></div>
+          <ul class="table-cell icons"><li id="icon9___x"></li></ul>
+        </li>
+        <li class="table-row">
+          <div class="table-cell member">
+            <div class="userStatusWrap___ljSJG" aria-label="Anon is idle"><svg></svg></div>
+            <div class="honorWrap___BHau4"><a class="linkWrap___ZS6r9" href="/profiles.php?XID=3886744" aria-label="View profile of Anon"><div class="honor-text-wrap"><span class="honor-text">Anon</span></div></a></div>
+          </div>
+          <div class="table-cell lvl">31</div>
+          <div class="table-cell days">20</div>
+          <div class="table-cell position">Recruit</div>
+          <div class="table-cell status"><span class="hospital">Hospital</span></div>
+          <ul class="table-cell icons"><li id="icon15___x"></li></ul>
+        </li>
+        <!-- Fallen player (skip). -->
+        <li class="table-row">
+          <div class="table-cell member">
+            <div class="userStatusWrap___ljSJG" aria-label="Ghost is offline"><svg></svg></div>
+            <div class="honorWrap___BHau4"><a class="linkWrap___ZS6r9" href="/profiles.php?XID=1111" aria-label="View profile of Ghost"><div class="honor-text-wrap"><span class="honor-text">Ghost</span></div></a></div>
+          </div>
+          <div class="table-cell lvl">12</div>
+          <div class="table-cell days">900</div>
+          <div class="table-cell position">Member</div>
+          <div class="table-cell status"><span class="fallen">Fallen</span></div>
+          <ul class="table-cell icons"><li id="icon77___x"></li></ul>
+        </li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<ul class="f-war-list war-new" id="faction_war_list_id">
+  <li class="warListItem___eE_Ve active___yHOuM"><div class="rankBox___OzP3D">Ranked war: Test Faction vs Enemy Co.</div></li>
+  <li class="descriptions">
+    <div class="faction-war">
+      <div class="tab-menu-cont">
+        <div class="enemy-faction left">
+          <div class="member"><div class="activeIcon___pGiua">Members</div></div>
+          <div class="level"><div>Level</div></div>
+          <div class="points"><div>Points</div></div>
+          <div class="status"><div>Status</div></div>
+          <ul class="members-list">
+            <li class="enemy">
+              <a href="/factions.php?step=profile&amp;ID=7777" hidden>Enemy Co.</a>
+              <div class="member icons left"><div class="userStatusWrap___ljSJG" aria-label="Rival is online"></div><div class="honorWrap___BHau4"><a href="/profiles.php?XID=424242" aria-label="View profile of Rival"><div class="honor-text-wrap">Rival</div></a></div></div>
+              <div class="level left">64</div>
+              <div class="points left">12</div>
+              <div class="status left ok">Okay</div>
+              <div class="clear"></div>
+            </li>
+            <li class="enemy">
+              <div class="member icons left"><div class="userStatusWrap___ljSJG" aria-label="Flyer is offline"></div><div class="honorWrap___BHau4"><a href="/profiles.php?XID=515151" aria-label="View profile of Flyer"><div class="honor-text-wrap">Flyer</div></a></div></div>
+              <div class="level left">40</div>
+              <div class="points left">0</div>
+              <div class="status left traveling">Traveling</div>
+              <div class="clear"></div>
+            </li>
+          </ul>
+        </div>
+        <div class="your-faction right">
+          <ul class="members-list">
+            <li class="your">
+              <a href="/factions.php?step=profile&amp;ID=9001" hidden>Test Faction</a>
+              <div class="member icons left"><div class="userStatusWrap___ljSJG" aria-label="BCS605 is online"></div><div class="honorWrap___BHau4"><a href="/profiles.php?XID=605123" aria-label="View profile of BCS605"><div class="honor-text-wrap">BCS605</div></a></div></div>
+              <div class="level left">57</div>
+              <div class="points left">30</div>
+              <div class="status left not-ok">Hospital</div>
+              <div class="clear"></div>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </li>
+</ul>

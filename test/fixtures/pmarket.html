@@ -1,0 +1,44 @@
+<!--
+  Points market (pmarket.php) body fragment. NOT captured live: modeled from source code only.
+  Sources: TornTools no-confirm-points-market.ts (.users-point-sell > li > span[href], ajax_action=buy|remove),
+  github Machiacelli/Sidekick mugcalculator.module.js (span.expander, span.user-info a.user.name[href*=XID],
+  span.points, span.cost-each, span.total-price, .wai label spans), seintzx/nst-script (.total-price, .action),
+  mumawQAQ greasyfork 874.js (.expander href, .action > button).
+  [UNCERTAIN] order of cells, the wrapping list header, exact .wai label text.
+-->
+<input type="hidden" id="torn-user" value='{"id":2139172,"playername":"TestUser"}'>
+<div class="content-wrapper">
+  <div class="content-title"><h4 id="skip-to-content">Points Market</h4></div>
+  <div class="points-market-wrap">
+    <ul class="users-point-sell">
+      <li>
+        <span class="expander clearfix" href="pmarket.php?ajax_action=buy&amp;ID=91827364&amp;points=25">
+          <span class="user-info"><a class="user name" href="profiles.php?XID=605123" title="BCS605 [605123]"><span>BCS605</span></a></span>
+          <span class="points"><span class="wai">Points: </span>25</span>
+          <span class="cost-each"><span class="wai">Cost each: </span>$45,120</span>
+          <span class="total-price"><span class="wai">Total price: </span>$1,128,000</span>
+          <span class="action"><button type="button" class="wai-btn">Buy</button></span>
+        </span>
+      </li>
+      <li>
+        <span class="expander clearfix" href="pmarket.php?ajax_action=buy&amp;ID=91827399&amp;points=1000">
+          <span class="user-info"><a class="user name" href="profiles.php?XID=3886744" title="Anon [3886744]"><span>Anon</span></a></span>
+          <span class="points"><span class="wai">Points: </span>1,000</span>
+          <span class="cost-each"><span class="wai">Cost each: </span>$45,150</span>
+          <span class="total-price"><span class="wai">Total price: </span>$45,150,000</span>
+          <span class="action"><button type="button" class="wai-btn">Buy</button></span>
+        </span>
+      </li>
+      <!-- Your own listing: remove instead of buy. -->
+      <li>
+        <span class="expander clearfix" href="pmarket.php?ajax_action=remove&amp;ID=91827400&amp;points=50">
+          <span class="user-info"><a class="user name" href="profiles.php?XID=2139172" title="TestUser [2139172]"><span>TestUser</span></a></span>
+          <span class="points"><span class="wai">Points: </span>50</span>
+          <span class="cost-each"><span class="wai">Cost each: </span>$45,300</span>
+          <span class="total-price"><span class="wai">Total price: </span>$2,265,000</span>
+          <span class="action"><button type="button" class="wai-btn">Remove</button></span>
+        </span>
+      </li>
+    </ul>
+  </div>
+</div>

@@ -20,9 +20,9 @@ Read this first. Then `docs/BUILD-PLAN.md` (what to build, in order), `docs/ENGI
 
 | | Milestone | Status |
 |---|---|---|
-| M0 | Scaffold from the trading app | ☐ |
-| M1 | Mockups for every page in K's style | ☐ |
-| M2 | Core engine + tests | ☐ |
+| M0 | Scaffold from the trading app | ☑ 29 tests, 2026-09-29 |
+| M1 | Mockups for every page in K's style | ☑ 7 mockups, checked, 2026-09-29 |
+| M2 | Core engine + tests | ☑ 135 tests, 2026-09-29 |
 | M3 | API and data layer | ☐ |
 | M4 | Webpage tabs | ☐ |
 | M5 | Overlay + marks on Torn pages | ☐ |
@@ -108,6 +108,16 @@ Research index: `docs/research-gym.md`, `research-builds-gympage.md`, `research-
 ---
 
 ## What each session did (newest first)
+
+### 2026-09-29: build session (M0 →)
+- **M0 ☑** Scaffold: `build.mjs` (trading's bundler; header per BUILD-PLAN, `PI_BUILD_VERSION`, outputs `dist/` + root `torn-pumping-iron.user.js`), `src/platform/{gm,idb,tab-window}.js` (prefix `pumpingIron.v1.`; `gmFetch(url, {method, headers, body})` now does POST/PUT for the Worker), `src/core/leader.js`, `src/api/client.js` (`comment=PumpingIron`), `src/ui/mask.js`, a new `src/sources/route.js` (every page we mark + every Torn link), `site/app.html` + `.nojekyll`, `test/harness.html` (GM stubs; `?page=gym` etc. stands in for Torn pages off torn.com; `?pi=app` boots the webpage). Local `git init` on `main`, no remote. Harness server: `harness` in `.claude/launch.json` (127.0.0.1:8785).
+- **M1 ☑** Mockups L–R in `mockups/` (Plan, Buy, Progress, Torn Eye tab, Settings, Overlay + gym/items/bazaar marks, Torn Eye on Torn's pages), all on the shared `mockups/pi.css` (K's CSS + new components; M4 lifts it into the userscript). Every number comes from `docs/sims/mockup-data.mjs` (→ `mockup-data.json`) and the new fight Monte Carlo `docs/sims/fight.mjs` (ENGINE §10). `test/mockup-check.mjs` (Playwright core + the installed Edge) passes for all 7: no sideways scroll at 1280, no text under 11px, the DESIGN section named on top.
+  - Sim fix found on the way: `split.mjs` never let happy recover between sessions, so multi-day splits under-counted gains. With happy back up each session: day 2 = DEX 123 / DEF 39, SPD joins day 5, STR day 7, balanced in about 7 days (ENGINE §7's "129/33, day 6" was the old run).
+  - Self-review vs J: daily jobs stay 0–1 clicks; ≤ 2 disclosure levels (only the ToS tables and "Not in your plan" fold); one chalk primary per page except Settings, where each key section's save is chalk (one action per section). Overlay card at 1280 px has only ~150 px of free space beside Torn's content, so the card overlaps while hovered; the pill never does.
+  - Research saved: `docs/research-api-shapes.md` (Torn v2 shapes + ambiguities), `docs/research-third-party-api.md` (FFScouter v1 spec: `get-stats` rows carry `bss_public`, `bs_estimate`, `fair_fight`, `last_updated`; data policy lives on ffscouter.com's home page; TornStats spy shapes; TornW3B `GET /api/marketplace/{itemId}` → `listings[]{player_id, player_name, quantity, price, …}`).
+- **M2 ☑** Engine in `src/core/` (pure, `node --test`): `gain.js` (Vladar V2, research table exact: 68/572/467/1,038), `perks.js` (API perk strings, Bliss from its item text, Music Store 30% gym experience, Goal Oriented happy loss), `gyms.js` (table + live merge, specialist rules at their boundaries, best gym per stat preferring the active gym on ties), `items.js` (Torn's item effects; 5 EDVD / 49 candy fill a 24 h booster cap), `bars.js` (regen, quarter ticks, Torn day, refill, `diffStates` for done steps), `builds.js` (7 presets, greedy split with specialist caps, `allowedTrains` → "stop at 18, Balboas"), `strategies.js` (6 strategies; reproduces sim30 exactly), `recommend.js` (budget-aware pick, deltas, warning text, re-check triggers), `plan.js` (day timeline re-timed from live state; jump steps strict with a T−5 min warning; refill always before midnight; done log from state diffs), `market.js` (need list, cheapest fill across sources, verdicts), `history.js` (daily lows, 7-day average; replaces trading's larger module), `format.js`.
+  - [calibrate] constants are named exports: `POST_50M_MODE`, `HAPPY_LOSS_PER_ENERGY`, `SSL_DRUG_LIMIT`, `SPECIALIST_NEEDS_GYM` (George's, unconfirmed), `XANAX_CD_MIN`/`ECSTASY_CD_MIN`.
+  - Finding: Apollo Gym (DEF 6.4) beats Gun Shop (6.2) for the friend's DEF; the plan says so once DEF starts (day 2).
 
 ### 2026-09-28/29: research, three mockup rounds, specs (no code)
 - The owner asked for a gym planner ("searches market, makes a plan, recalculates daily, happiness, choco/EDVD jumps, pings on Discord") for themselves and a returning friend, plus an FFScouter-like fight helper that's better ("sometimes it says I win but I end at 1 HP").

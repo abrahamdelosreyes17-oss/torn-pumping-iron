@@ -1,0 +1,111 @@
+{
+  "_fixture": "Modeled, not captured. Shape from TornTools attack-loader-page.ts (TornInternalAttackData), KAL Loadout Revealer (slot keys 1-9, 999 Fists, 1000 Kick, currentClips ammo fields, defenderAmmoStatus 'n/n (n)', attackStatus notStarted), S&R Loadout Revealer (DB wrapper, defenderItems['999'].item[0].ID check), TornBot LoadOuts/Models/Item.cs (equipSlot, ID, name, armouryID, dmg, acc, glowClass, currentBonuses{desc,title,hoverover,icon,value}, currentUpgrades[{title,hoverover,upgradeID,icon,desc}]). UNCERTAIN: armour value field name ('arm'), exact attackStatus strings after start, item id numeric vs string, bonus ids. This sample: fight started, defender items visible.",
+  "DB": {
+    "attackStatus": "started",
+    "fightID": 118273645,
+    "showEnemyItems": true,
+    "enablePoll": true,
+    "pollDelay": 3000,
+    "isHQ": false,
+    "viewStyle": "desktop",
+    "startButtonTitle": "Start fight",
+    "loadtime": ["0.0412"],
+    "joinBoxColor": null,
+    "queueTicket": null,
+    "queueCapacity": 0,
+    "attackerUser": {
+      "userID": 2139172,
+      "playername": "TestUser",
+      "gender": "Male",
+      "level": 50,
+      "status": "Okay",
+      "life": 7500,
+      "maxlife": 7500,
+      "factionID": 9001,
+      "corp": 0,
+      "featurebits": 0,
+      "chain": 12,
+      "chainEnd": 1790000000,
+      "lastAction": 1789999900,
+      "statsModifiers": {
+        "strength": { "value": 22, "legend": ["+10% from faction", "+12% from education"] },
+        "speed": { "value": 10, "legend": ["+10% from faction"] },
+        "dexterity": { "value": 0, "legend": [] },
+        "defense": { "value": 5, "legend": ["+5% from property"] },
+        "damage": { "value": 3, "legend": ["+3% from merits"] }
+      }
+    },
+    "defenderUser": {
+      "userID": 424242,
+      "playername": "Rival",
+      "gender": "Female",
+      "level": 64,
+      "status": "Okay",
+      "life": 9800,
+      "maxlife": 9800,
+      "factionID": 7777,
+      "corp": 0,
+      "featurebits": 0
+    },
+    "usersLife": {
+      "attacker": { "currentLife": 7500, "maxLife": 7500, "lifeBar": 100 },
+      "defender": { "currentLife": 9212, "maxLife": 9800, "lifeBar": 94 }
+    },
+    "attackerItems": {
+      "1": { "item": [{ "ID": 26, "name": "AK-47", "equipSlot": "1", "armouryID": "8812345678", "dmg": "55.12", "acc": "47.80", "glowClass": "glow-default", "currentBonuses": {}, "currentUpgrades": [] }] },
+      "2": { "item": [{ "ID": 12, "name": "Glock 17", "equipSlot": "2", "armouryID": "8812345679", "dmg": "33.40", "acc": "56.10", "glowClass": "glow-default", "currentBonuses": {}, "currentUpgrades": [] }] },
+      "3": { "item": [{ "ID": 6, "name": "Kitchen Knife", "equipSlot": "3", "armouryID": "8812345680", "dmg": "40.02", "acc": "55.00", "glowClass": "glow-default", "currentBonuses": {}, "currentUpgrades": [] }] },
+      "5": { "item": [{ "ID": 220, "name": "Grenade", "equipSlot": "5", "armouryID": "0", "dmg": "95.00", "acc": "45.00", "glowClass": "glow-default", "currentBonuses": {}, "currentUpgrades": [] }] },
+      "999": { "item": [{ "name": "Fists", "dmg": "0.00", "acc": 50, "ID": 999 }] },
+      "1000": { "item": [{ "name": "Kick", "dmg": "0.00", "acc": 40, "ID": 1000 }] }
+    },
+    "defenderItems": {
+      "1": { "item": [{
+        "ID": 26, "name": "AK-47", "equipSlot": "1", "armouryID": "9900112233",
+        "dmg": "57.33", "acc": "49.12", "glowClass": "glow-orange",
+        "currentBonuses": {
+          "54": { "title": "Powerful", "desc": "Increases damage by 23%", "hoverover": "Powerful: +23% damage", "icon": "powerful", "value": 23 },
+          "61": { "title": "Deadeye", "desc": "Increases critical hit damage by 41%", "hoverover": "Deadeye: +41% critical damage", "icon": "deadeye", "value": 41 }
+        },
+        "currentUpgrades": [
+          { "upgradeID": "3", "title": "Reflex Sight", "desc": "+4% accuracy", "hoverover": "Reflex Sight", "icon": "reflex-sight" },
+          { "upgradeID": "12", "title": "Extended Mags", "desc": "+20% clip size", "hoverover": "Extended Mags", "icon": "extended-mags" }
+        ]
+      }] },
+      "2": { "item": [{ "ID": 15, "name": "Beretta M9", "equipSlot": "2", "armouryID": "9900112234", "dmg": "31.87", "acc": "57.40", "glowClass": "glow-default", "currentBonuses": {}, "currentUpgrades": [] }] },
+      "3": { "item": [{ "ID": 173, "name": "Butterfly Knife", "equipSlot": "3", "armouryID": "9900112235", "dmg": "42.10", "acc": "56.20", "glowClass": "glow-yellow",
+        "currentBonuses": { "71": { "title": "Bleed", "desc": "Chance of causing bleed damage 34%", "hoverover": "Bleed: 34%", "icon": "bleed", "value": 34 } },
+        "currentUpgrades": [] }] },
+      "5": { "item": [{ "ID": 256, "name": "Tear Gas", "equipSlot": "5", "armouryID": "0", "dmg": "0.00", "acc": "0.00", "glowClass": "glow-default", "currentBonuses": {}, "currentUpgrades": [] }] },
+      "4": { "item": [{ "ID": 656, "name": "Riot Body", "equipSlot": "4", "armouryID": "9900112240", "arm": "41.20", "dmg": "0.00", "acc": "0.00", "glowClass": "glow-yellow",
+        "currentBonuses": { "83": { "title": "Impregnable", "desc": "Reduces melee damage by 12%", "hoverover": "Impregnable: 12%", "icon": "impregnable", "value": 12 } },
+        "currentUpgrades": [] }] },
+      "6": { "item": [{ "ID": 655, "name": "Riot Helmet", "equipSlot": "6", "armouryID": "9900112241", "arm": "40.10", "dmg": "0.00", "acc": "0.00", "glowClass": "glow-default", "currentBonuses": {}, "currentUpgrades": [] }] },
+      "7": { "item": [{ "ID": 657, "name": "Riot Pants", "equipSlot": "7", "armouryID": "9900112242", "arm": "40.55", "dmg": "0.00", "acc": "0.00", "glowClass": "glow-default", "currentBonuses": {}, "currentUpgrades": [] }] },
+      "8": { "item": [{ "ID": 658, "name": "Riot Boots", "equipSlot": "8", "armouryID": "9900112243", "arm": "39.90", "dmg": "0.00", "acc": "0.00", "glowClass": "glow-default", "currentBonuses": {}, "currentUpgrades": [] }] },
+      "9": { "item": [{ "ID": 659, "name": "Riot Gloves", "equipSlot": "9", "armouryID": "9900112244", "arm": "40.00", "dmg": "0.00", "acc": "0.00", "glowClass": "glow-default", "currentBonuses": {}, "currentUpgrades": [] }] },
+      "999": { "item": [{ "name": "Fists", "dmg": "0.00", "acc": 50, "ID": 999 }] },
+      "1000": { "item": [{ "name": "Kick", "dmg": "0.00", "acc": 40, "ID": 1000 }] }
+    },
+    "defenderAmmoStatus": { "1": "25/30 (2)", "2": "15/15 (3)" },
+    "attackerAmmoStatus": { "1": "30/30 (2)", "2": "17/17 (2)" },
+    "attackerAmmo": {
+      "1": [{ "ammoID": 11, "ammoCategoryID": 1, "ammoTitle": "7.62mm Rifle Rounds", "categoryTitle": "Standard", "priceMultiplier": 1, "amount": 420, "price": 0 }]
+    },
+    "currentClips": [
+      {
+        "fightID": 118273645,
+        "attackerID": 2139172,
+        "defenderPrimaryType": { "ammoID": 11, "ammoCategoryID": 2 },
+        "defenderPrimaryAmmoType": "Hollow Point",
+        "defenderPrimaryReloads": 2,
+        "defenderSecondaryType": { "ammoID": 3, "ammoCategoryID": 1 },
+        "defenderSecondaryAmmoType": "Standard",
+        "defenderSecondaryReloads": 3
+      }
+    ],
+    "currentTemporaryEffects": [],
+    "additionalInfo": { "defender": { "model": "body-f" } }
+  },
+  "viewStyle": "desktop"
+}

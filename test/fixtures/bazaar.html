@@ -1,0 +1,76 @@
+<!--
+  Bazaar (bazaar.php?userId=3886744) body fragment. NOT captured live here.
+  Sources: D:\torn\trading\src\sources\dom\owner.js (owner banner captured live 2026-09-24),
+  detect.js / scan.js (itemDescription___, item___ tile, isBlockedForBuying___, "(N in stock)"),
+  test/harness-live.html (bazaarcards: data-id, buyAmountInput); TornTools bazaar-fill-max.ts
+  ([data-testid='bazaar-items'], itemDescription__, controlPanelButton___, buyMenu__, amount__, price_, buyAmountInput_, buy_),
+  bazaar-worth.ts (.info-msg-cont .msg).
+  [UNCERTAIN] exact tile nesting and the name element class.
+-->
+<input type="hidden" id="torn-user" value='{"id":2139172,"playername":"TestUser"}'>
+<span id="user-money" data-money="25000000">$25,000,000</span>
+<div class="content-wrapper">
+  <div class="topSection___U7sVi">
+    <div class="linksContainer___LiOTN">
+      <a class="linkContainer___X16y4 inRow___VfDnd" href="#/">Back</a>
+    </div>
+  </div>
+  <div class="info-msg-cont border-round m-top10">
+    <div class="info-msg border-round">
+      <div class="msg right-round messageContent___cdSrs">
+        <a href="profiles.php?XID=3886744">Anon's</a> bazaar, favorited by <b>3</b> citizens, is currently <span class="bold">open.</span>
+      </div>
+    </div>
+  </div>
+  <div class="dropdownMenu___w2cQx"><div class="listItem___Hc8m1"><a href="profiles.php?XID=3886744">Profile</a></div></div>
+  <div class="itemsContainner___tVzIR" data-testid="bazaar-items">
+    <div class="row___LkdFI">
+      <div class="item___GYCYJ">
+        <div class="itemDescription___TknAN" data-testid="item-description">
+          <div class="imgBar___H65Bf" aria-label="Xanax" role="button">
+            <div class="imgContainer___dGTvI" data-testid="img-container"><img class="img___nhcAx" alt="Xanax" src="/images/items/206/large.png"></div>
+            <div class="controlPanel___sWR8Q" data-testid="control-panel">
+              <button class="controlPanelButton___TKkQA" aria-label="Show info: Xanax" type="button">i</button>
+              <button class="controlPanelButton___TKkQA" aria-label="Buy: Xanax" type="button">B</button>
+            </div>
+          </div>
+          <p class="name___B0RW3">Xanax</p>
+          <p class="price___dJqda">$840,000</p>
+          <p class="amount___K8oBa">(2 in stock)</p>
+        </div>
+      </div>
+      <div class="item___GYCYJ">
+        <div class="itemDescription___TknAN" data-testid="item-description">
+          <div class="imgBar___H65Bf" aria-label="Stick of Dynamite" role="button">
+            <div class="imgContainer___dGTvI"><img class="img___nhcAx" alt="Stick of Dynamite" src="/images/items/335/large.png"></div>
+            <div class="controlPanel___sWR8Q"><button class="controlPanelButton___TKkQA" aria-label="Buy: Stick of Dynamite" type="button">B</button></div>
+          </div>
+          <p class="name___B0RW3">Stick of Dynamite</p>
+          <p class="price___dJqda">$17,500</p>
+          <p class="amount___K8oBa">(60 in stock)</p>
+        </div>
+      </div>
+      <!-- $1 dollar-sale item locked for this viewer. -->
+      <div class="item___GYCYJ">
+        <div class="itemDescription___TknAN" data-testid="item-description">
+          <div class="imgBar___H65Bf" aria-label="Lollipop" role="button">
+            <div class="imgContainer___dGTvI"><img class="img___nhcAx" alt="Lollipop" src="/images/items/310/large.png"></div>
+            <div class="isBlockedForBuying___dv7DR" title="Dollar sale"></div>
+          </div>
+          <p class="name___B0RW3">Lollipop</p>
+          <p class="price___dJqda">$1</p>
+          <p class="amount___K8oBa">(1 in stock)</p>
+        </div>
+      </div>
+    </div>
+    <!-- Buy menu after pressing buy on Xanax. -->
+    <div class="buyMenu___MmDXJ">
+      <p class="price___dJqda">$840,000</p>
+      <p class="amount___K8oBa"><span>(2 in stock)</span></p>
+      <div class="buyForm___Zd9Sb">
+        <input class="buyAmountInput___Aooaf numberInput___yfOZQ" type="text" value="1">
+        <button class="buy___Dk32w torn-btn" type="button">Buy</button>
+      </div>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,113 @@
+/*
+ * Recommend a strategy, rank the others against it, and explain a worse
+ * pick in plain words. Pure. ENGINE-SPEC §5.
+ */
+
+import { STRATEGIES } from './strategies.js';
+import { fmtShort, fmtMoney } from './format.js';
+
+/** A pick this much worse in stats (or costlier without being this much better) gets the warning. */
+export const WARN_STATS_PCT = 5;
+
+/** Re-check when a price moves this much against its 7-day average. */
+export const PRICE_MOVE_PCT = 15;
+
+/** Re-check when total stats have grown this many times since the last check. */
+export const STATS_GROWTH_X = 2;
+
+/** The daily re-check, Torn time. */
+export const DAILY_CHECK_HOUR = 6;
+
+const JUMP_LIKE = new Set(['chocoJump', 'edvdJump', 'happy99k']);
+const HAPPY_BOUGHT = new Set(['dailyChoco', 'chocoJump', 'edvdJump', 'happy99k']);
+
+/**
+ * @param {object} results - {id: simulateStrategy result}
+ * @param {object} o
+ * @param {number} [o.budget] - money for the horizon; Infinity when unset
+ * @returns {{recommended:string, alternatives:object[], reasons:string[]}}
+ */
+export function recommend(results, { budget = Infinity } = {}) {
+    const list = Object.values(results).filter(Boolean);
+    if (!list.length) return { recommended: null, alternatives: [], reasons: [] };
+    const inBudget = list.filter((r) => r.cost <= budget);
+    const pool = inBudget.length ? inBudget : [list.reduce((a, b) => (b.cost < a.cost ? b : a))];
+    const perM = (r) => (r.cost > 0 ? r.gained / (r.cost / 1e6) : Infinity);
+    pool.sort((a, b) => b.gained - a.gained || perM(b) - perM(a));
+    const best = pool[0];
+    const alternatives = list
+        .filter((r) => r.id !== best.id)
+        .map((r) => {
+            const deltaStatsPct = best.gained > 0 ? (100 * (r.gained - best.gained)) / best.gained : 0;
+            const deltaCost = r.cost - best.cost;
+            const overBudget = r.cost > budget;
+            let verdict = 'worse';
+            if (overBudget && r.gained > best.gained) verdict = 'overBudget';
+            else if (Math.abs(deltaStatsPct) < 1 && Math.abs(deltaCost) < 1e6) verdict = 'same';
+            else if (deltaStatsPct > 0 && !overBudget) verdict = 'better';
+            return { id: r.id, gained: r.gained, cost: r.cost, deltaStatsPct, deltaCost, overBudget, verdict };
+        })
+        .sort((a, b) => b.gained - a.gained);
+    return { recommended: best.id, alternatives, reasons: whyRecommended(best, results, { budget }) };
+}
+
+/** One line on why the recommended plan wins. */
+function whyRecommended(best, results, { budget }) {
+    const out = [];
+    const beaten = Object.values(results).filter((r) => r && r.id !== best.id && r.gained > best.gained);
+    if (beaten.length && beaten.every((r) => r.cost > budget)) out.push('Anything that gains more is over your budget.');
+    if (best.id === 'steady') out.push('Stacking Xanax for a jump stops natural energy, so you end with fewer stats.');
+    if (best.id === 'blissSteady') out.push('Ignorance Is Bliss lets happy climb above your maximum, so boosters keep paying off.');
+    if (JUMP_LIKE.has(best.id)) out.push('At your stats a bigger happy multiplies each train more than the energy you lose while stacking.');
+    return out;
+}
+
+/**
+ * Should picking `picked` over `recommended` warn, and in which words?
+ * @returns {{warn:boolean, title:string, text:string, reasons:string[]}}
+ */
+export function pickWarning(recommended, picked, { bliss = false, days = 30 } = {}) {
+    if (!recommended || !picked || recommended.id === picked.id) return { warn: false, title: '', text: '', reasons: [] };
+    const dPct = recommended.gained > 0 ? (100 * (picked.gained - recommended.gained)) / recommended.gained : 0;
+    const dCost = picked.cost - recommended.cost;
+    const warn = dPct < -WARN_STATS_PCT || (dCost > 0 && dPct < WARN_STATS_PCT);
+    const reasons = [];
+    if (JUMP_LIKE.has(picked.id)) reasons.push('Holding four Xanax stops natural energy.');
+    if (HAPPY_BOUGHT.has(picked.id)) reasons.push('The Ecstasy uses a drug cooldown a Xanax would have filled.');
+    if (picked.id === 'dailyChoco') reasons.push('The candy lifts happy for one session a day only.');
+    if (HAPPY_BOUGHT.has(picked.id) && !bliss) reasons.push('Worth it only if you read Ignorance Is Bliss.');
+    const name = (STRATEGIES[picked.id] && STRATEGIES[picked.id].name) || picked.id;
+    const recName = (STRATEGIES[recommended.id] && STRATEGIES[recommended.id].short) || recommended.id;
+    const title = 'A ' + name.charAt(0).toLowerCase() + name.slice(1) + " isn't worth it for you";
+    const money = dCost > 0 ? ', and ' + fmtMoney(dCost) + ' more' : dCost < 0 ? ', for ' + fmtMoney(-dCost) + ' less' : '';
+    const text = days + ' days: about +' + fmtShort(picked.gained) + ' stats, against +' + fmtShort(recommended.gained) + ' on ' + recName.toLowerCase() + money + '.';
+    return { warn, title, text, reasons };
+}
+
+/**
+ * Things that should make the app look at the plan again (Home › Heads-up).
+ * @param {object} last - snapshot at the last check {at, bliss, statBooks, unlockedTop, total, budget}
+ * @param {object} now - the same, now; plus prices {[id]: {now, avg7}}
+ * @returns {{kind:string, text:string}[]}
+ */
+export function recheckTriggers(last, now) {
+    const out = [];
+    if (!last) return [{ kind: 'first', text: 'First plan check' }];
+    if (Boolean(now.bliss) !== Boolean(last.bliss)) out.push({ kind: 'book', text: now.bliss ? 'Ignorance Is Bliss is active: jumps may win now' : 'Ignorance Is Bliss ran out' });
+    if ((now.statBooks || 0) !== (last.statBooks || 0)) out.push({ kind: 'book', text: 'A gym book changed' });
+    if ((now.unlockedTop || 0) > (last.unlockedTop || 0)) out.push({ kind: 'gym', text: 'New gym unlocked' });
+    if (last.total > 0 && now.total >= STATS_GROWTH_X * last.total) out.push({ kind: 'stats', text: 'Your stats doubled since the last check' });
+    if ((now.budget || 0) !== (last.budget || 0)) out.push({ kind: 'budget', text: 'Budget changed' });
+    for (const [id, p] of Object.entries(now.prices || {})) {
+        if (p && p.avg7 > 0 && Math.abs(p.now / p.avg7 - 1) * 100 > PRICE_MOVE_PCT) out.push({ kind: 'price', item: id, text: 'A price moved more than ' + PRICE_MOVE_PCT + '%' });
+    }
+    return out;
+}
+
+/** Is the daily re-check due? (Once per Torn day, from 06:00 Torn time.) */
+export function dailyCheckDue(lastAt, now) {
+    const day = Math.floor(now / 86400000) * 86400000;
+    const due = day + DAILY_CHECK_HOUR * 3600000;
+    if (now < due) return lastAt < due - 86400000;
+    return !(lastAt >= due);
+}

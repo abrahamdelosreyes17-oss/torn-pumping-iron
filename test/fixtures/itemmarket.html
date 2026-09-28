@@ -1,0 +1,74 @@
+<!--
+  Item Market (page.php?sid=ItemMarket) body fragment. NOT captured live here.
+  Sources: D:\torn\trading\test\fixture.html (itemTile/buy aria-label/sellerRow markup captured live 2026-09-23),
+  D:\torn\trading\src\sources\dom\detect.js, scan.js, fill.js (selectors, "7 available", viewInfoButton aria-controls);
+  TornTools itemmarket-page.ts, highlight-cheap-items.ts, item-market-fill-max.ts
+  (#item-market-root, itemList___ > li, priceAndTotal___, sellerListWrapper___, sellerList___, rowWrapper___,
+  sellerRow___, price___, available___, .input-money-group input:not([type])).
+  [UNCERTAIN] the seller link/markup inside userInfoWrapper___, header row content.
+-->
+<input type="hidden" id="torn-user" value='{"id":2139172,"playername":"TestUser"}'>
+<span id="user-money" data-money="25000000">$25,000,000</span>
+<div id="item-market-root">
+  <div class="marketWrapper___S5pRm">
+    <!-- Category grid: one tile per item, cheapest price + market-wide total. -->
+    <ul class="itemList___u4Hx3">
+      <li class="itemListItem___BfxvO">
+        <div class="itemTile___gJeSo">
+          <div class="baseItemTileWrapper___tV9VZ">
+            <div class="tileImage___mbztJ">
+              <img class="torn-item image___S3vQy" alt="Xanax" src="/images/items/206/large.png" srcset="/images/items/206/large.png 1x">
+            </div>
+            <div class="actionsWrapper___t9l4N">
+              <button type="button" class="actionButton___okbi2" aria-label="View info for item Xanax." aria-controls="wai-itemInfo-206"><span class="title___Qu9TR">View Info</span></button>
+              <button type="button" class="actionButton___okbi2" aria-label="Buy item Xanax, $829,500, 13,531 in total." aria-controls="wai-ariaControls-buy-206">Buy</button>
+            </div>
+          </div>
+          <div class="name___AJKEd">Xanax</div>
+          <div class="priceAndTotal___eEVS7"><span>$829,500</span><span>(13,531)</span></div>
+        </div>
+      </li>
+      <li class="itemListItem___BfxvO">
+        <div class="itemTile___gJeSo">
+          <div class="baseItemTileWrapper___tV9VZ">
+            <div class="tileImage___mbztJ"><img class="torn-item image___S3vQy" alt="Can of Red Cow" src="/images/items/532/large.png"></div>
+            <div class="actionsWrapper___t9l4N">
+              <button type="button" class="actionButton___okbi2" aria-label="Buy item Can of Red Cow, $1,089,000, 2,210 in total.">Buy</button>
+            </div>
+          </div>
+          <div class="name___AJKEd">Can of Red Cow</div>
+          <div class="priceAndTotal___eEVS7"><span>$1,089,000</span><span>(2,210)</span></div>
+        </div>
+      </li>
+    </ul>
+
+    <!-- Seller list for one item (hash #/market/view=search&itemID=206). -->
+    <div class="itemInfoWrapper___nAOJx"><img class="torn-item" alt="Xanax" src="/images/items/206/large.png"></div>
+    <div class="sellerListWrapper___PN32N">
+      <ul class="sellerList___kgAh_">
+        <li class="sellerRow___AI0m6 header___Kp1Yf"><div>Seller</div><div>Price</div><div>Qty</div></li>
+        <li>
+          <div class="rowWrapper___me3Ox">
+            <div class="sellerRow___AI0m6">
+              <div class="userInfoWrapper___B2a1n"><a class="linkWrap___ZS6r9" href="/profiles.php?XID=605123"><span class="honorName___x">BCS605</span></a></div>
+              <div class="price___Uwiv2">$829,500</div>
+              <div class="available___xegl7">3 available</div>
+              <div class="buyForm___x1"><div class="input-money-group"><input class="input-money" value="1"></div><button type="button" class="torn-btn">Buy</button></div>
+            </div>
+          </div>
+        </li>
+        <li>
+          <div class="rowWrapper___me3Ox">
+            <div class="sellerRow___AI0m6">
+              <div class="userInfoWrapper___B2a1n"><a class="linkWrap___ZS6r9" href="/profiles.php?XID=3886744"><span class="honorName___x">Anon</span></a></div>
+              <div class="price___Uwiv2">$830,000</div>
+              <div class="available___xegl7">1,805 available</div>
+              <div class="buyForm___x1"><div class="input-money-group"><input class="input-money" value="1"></div><button type="button" class="torn-btn">Buy</button></div>
+            </div>
+          </div>
+        </li>
+      </ul>
+    </div>
+  </div>
+</div>
+<!-- Loading states: .react-loading-skeleton, .tornPreloader ; empty: [class*="noItems___"] -->

@@ -1,0 +1,94 @@
+<!--
+  Items page (item.php) body fragment. NOT captured live: modeled from source code only.
+  Sources: TornTools item-page.ts (#categoriesList, ul.items-cont.tab-menu-cont, li.ajax-item-loader),
+  item-values.ts (li[data-item], .name-wrap, .bonuses-wrap, .item-amount.qty, .info-wrap, button.group-arrow),
+  quick-items.ts (li[data-item][data-category], .title-wrap, aria-expanded list);
+  Torn PDA lib/utils/js_snippets/js_quick_items.dart (data-qty, data-sort, data-rowkey, data-armoryid,
+  ul.actions-wrap, [data-action="equip"]); trading/test/harness-live.html (bazaar-add row markup, same legacy style).
+  [UNCERTAIN] the Use control's class/markup (modeled as li.left > button.option-use), ids of category lists.
+-->
+<div class="content-wrapper">
+  <div class="content-title"><h4 id="skip-to-content">Items</h4></div>
+  <div class="items-wrap">
+    <ul id="categoriesList" class="tab-menu-cont">
+      <li data-type="All" class="ui-tabs-active"><a href="#">All</a></li>
+      <li data-type="Medical"><a href="#">Medical</a></li>
+      <li data-type="Drug"><a href="#">Drugs</a></li>
+      <li data-type="Energy Drink"><a href="#">Energy Drinks</a></li>
+      <li data-type="Candy"><a href="#">Candy</a></li>
+      <li data-type="Booster" class="no-items"><a href="#">Boosters</a></li>
+    </ul>
+    <div class="category-wrap" id="category-wrap">
+      <!-- Visible list: style display:block and aria-expanded=true. -->
+      <ul class="items-cont tab-menu-cont cont-gray" id="all-items" data-all="1" aria-expanded="true" style="display: block;">
+        <li data-item="206" data-category="Drug" data-qty="15" data-sort="Xanax" data-rowkey="g206" class="">
+          <div class="thumbnail-wrap"><div class="item-amount qty">15</div></div>
+          <div class="title-wrap">
+            <div class="image-wrap"><img src="/images/items/206/large.png" alt="Xanax"></div>
+            <div class="name-wrap bold"><span class="name">Xanax</span><span class="qty t-hide"> x15</span></div>
+          </div>
+          <div class="cont-wrap">
+            <ul class="actions-wrap">
+              <li class="left"><button type="button" class="option-use wai-btn" data-action="use" aria-label="Use Xanax"><span class="icon-h use-act"></span>Use</button></li>
+              <li class="left"><button type="button" class="option-send wai-btn" aria-label="Send Xanax">Send</button></li>
+              <li class="left"><button type="button" class="option-sell wai-btn" aria-label="Sell Xanax">Sell</button></li>
+            </ul>
+          </div>
+          <div class="info-wrap">$830,000</div>
+        </li>
+        <li data-item="532" data-category="Energy Drink" data-qty="4" data-sort="Can of Red Cow" data-rowkey="g532">
+          <div class="thumbnail-wrap"><div class="item-amount qty">4</div></div>
+          <div class="title-wrap">
+            <div class="image-wrap"><img src="/images/items/532/large.png" alt="Can of Red Cow"></div>
+            <div class="name-wrap bold"><span class="name">Can of Red Cow</span><span class="qty t-hide"> x4</span></div>
+          </div>
+          <div class="cont-wrap">
+            <ul class="actions-wrap">
+              <li class="left"><button type="button" class="option-use wai-btn" data-action="use" aria-label="Use Can of Red Cow">Use</button></li>
+              <li class="left"><button type="button" class="option-send wai-btn">Send</button></li>
+            </ul>
+          </div>
+          <div class="info-wrap">$1,090,000</div>
+        </li>
+        <li data-item="310" data-category="Candy" data-qty="40" data-sort="Lollipop" data-rowkey="g310">
+          <div class="thumbnail-wrap"><div class="item-amount qty">40</div></div>
+          <div class="title-wrap">
+            <div class="image-wrap"><img src="/images/items/310/large.png" alt="Lollipop"></div>
+            <div class="name-wrap bold"><span class="name">Lollipop</span><span class="qty t-hide"> x40</span></div>
+          </div>
+          <div class="cont-wrap">
+            <ul class="actions-wrap">
+              <li class="left"><button type="button" class="option-use wai-btn" data-action="use" aria-label="Use Lollipop">Use</button></li>
+            </ul>
+          </div>
+          <div class="info-wrap">$200,000</div>
+        </li>
+        <!-- A weapon: armoury id, bonuses, equip action instead of use. -->
+        <li data-item="26" data-category="Primary" data-qty="1" data-sort="AK-47" data-armoryid="8812345678" data-rowkey="a8812345678">
+          <div class="thumbnail-wrap"><div class="item-amount qty">1</div></div>
+          <div class="title-wrap">
+            <div class="image-wrap"><img src="/images/items/26/large.png" alt="AK-47"></div>
+            <div class="name-wrap bold"><span class="name">AK-47</span></div>
+          </div>
+          <ul class="bonuses-wrap"><li class="fl">55.12</li><li class="fl">47.80</li></ul>
+          <div class="cont-wrap">
+            <ul class="actions-wrap">
+              <li class="left"><button type="button" class="option-equip wai-btn" data-action="equip" name="equip">Equip</button></li>
+            </ul>
+          </div>
+        </li>
+      </ul>
+      <!-- A hidden category list: the same item appears again here. -->
+      <ul class="items-cont tab-menu-cont cont-gray" id="drugs-items" aria-expanded="false" style="display: none;">
+        <li data-item="206" data-category="Drug" data-qty="15" data-sort="Xanax" data-rowkey="g206">
+          <div class="thumbnail-wrap"><div class="item-amount qty">15</div></div>
+          <div class="title-wrap"><div class="name-wrap bold"><span class="name">Xanax</span></div></div>
+          <div class="cont-wrap"><ul class="actions-wrap"><li class="left"><button type="button" class="option-use wai-btn" data-action="use">Use</button></li></ul></div>
+        </li>
+      </ul>
+      <ul class="items-cont tab-menu-cont cont-gray" id="medical-items" aria-expanded="false" style="display: none;">
+        <li class="ajax-item-loader"></li>
+      </ul>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,70 @@
+<!--
+  Attack page (page.php?sid=attack&user2ID=424242, also loader.php?sid=attack&user2ID=) body fragment, before "Start fight".
+  NOT captured live. Sources: docs/reference kal-loadout-revealer (#attack-root, [class*='topSection'] > [class*='titleContainer'],
+  labelsContainer, linksContainer, weaponWrapper, #defender_Primary.., #weapon_main/#weapon_second/#weapon_melee/#weapon_temp),
+  sr-loadout-revealer (playerArea, player___, weaponImage img, top___, bottom___, bodyImage, armoursWrap, armourContainer___,
+  modal, bonusInfo___, props___, markerText___); TornTools hide-attack-buttons.ts (#defender [class*='defender__'] button),
+  attack-timeout-warning.ts (playerArea__ playerWindow__ dialogButtons__, span[id^='timeout-value'], labelContainer___ labelTitle___),
+  stats-estimate-attacks.ts / fair-attack.ts (playersModelWrap___ player___ headerWrapper___ rose___ textEntries___),
+  ff-scouter-attack.ts (topSection___).
+  [UNCERTAIN] nesting depth, attacker header colour class, where #attacker/#defender sit, text entry layout.
+-->
+<input type="hidden" id="torn-user" value='{"id":2139172,"playername":"TestUser"}'>
+<div class="content-wrapper">
+  <div id="attack-root">
+    <div class="coreWrap___LtSEy">
+      <div class="topSection___CvKSH">
+        <div class="titleContainer___QrlWP"><h4 class="title___rhtB4">Attacking Rival</h4></div>
+        <div class="labelsContainer___fHtaN">
+          <div class="labelContainer___Bw0Rs"><span class="labelTitle___ZtfnD">Fight time</span></div>
+          <div class="labelContainer___Bw0Rs"><span class="labelTitle___ZtfnD" id="timeout-value">5:00</span></div>
+        </div>
+        <div class="linksContainer___LiOTN"><a class="linkContainer___X16y4" href="/profiles.php?XID=424242">Profile</a></div>
+      </div>
+      <div class="playersModelWrap___rKxtd">
+        <div class="player___wiE8R" id="attacker">
+          <div class="headerWrapper___p6yrL blue___xYr9p">
+            <div class="textEntries___t3gJw"><span class="userName___loAWK">TestUser</span><span class="entry___f0x">Level 50</span><span class="entry___f0x">7,500 / 7,500</span></div>
+          </div>
+          <div class="playerArea___AEVBU">
+            <div class="playerWindow___aDeDI">
+              <div class="modelWrap___j3kfA"><img class="bodyImage___nSfHT" src="/images/v2/user_model/body-m.png" alt=""><div class="armoursWrap___xXFVY"></div></div>
+            </div>
+            <div class="weaponList___h1eTP">
+              <div class="weaponWrapper___h3buK" id="weapon_main"><div class="top___hrf3N"><div class="props___oL_Cw"></div></div><div class="weaponImage___tUzwP"><img src="/images/items/26/large.png" alt="AK-47"></div><div class="bottom___kmLS_"><div class="props___oL_Cw"><i class="bonus-attachment-item-damage-bonus" aria-label="Damage"></i><span class="bonusInfo___tXGYA">55.12</span></div><div class="bottomMarker___K5saZ"><span class="markerText___fXCwg">30/30 (2)</span></div><div class="props___oL_Cw"><i class="bonus-attachment-item-accuracy-bonus" aria-label="Accuracy"></i><span class="bonusInfo___tXGYA">47.80</span></div></div></div>
+              <div class="weaponWrapper___h3buK" id="weapon_second"><div class="weaponImage___tUzwP"><img src="/images/items/12/large.png" alt="Glock 17"></div></div>
+              <div class="weaponWrapper___h3buK" id="weapon_melee"><div class="weaponImage___tUzwP"><img src="/images/items/6/large.png" alt="Kitchen Knife"></div></div>
+              <div class="weaponWrapper___h3buK" id="weapon_temp"><div class="weaponImage___tUzwP"><img src="/images/items/220/large.png" alt="Grenade"></div></div>
+            </div>
+          </div>
+        </div>
+        <div class="player___wiE8R" id="defender">
+          <div class="headerWrapper___p6yrL rose___Mb4VT">
+            <div class="textEntries___t3gJw"><span class="userName___loAWK">Rival</span><span class="entry___f0x">Level 64</span><span class="entry___f0x">9,800 / 9,800</span></div>
+          </div>
+          <div class="playerArea___AEVBU defender___niX1M">
+            <div class="playerWindow___aDeDI">
+              <div class="modelWrap___j3kfA"><img class="bodyImage___nSfHT" src="/images/v2/user_model/body-f.png" alt=""><div class="armoursWrap___xXFVY"></div></div>
+              <div class="modal___lMj6N">
+                <div class="dialog___Q0GdI">
+                  <div class="title___kTRPz">Rival is not in combat</div>
+                  <div class="dialogButtons___nX4Bz"><button type="button" class="torn-btn btn___RxE8_">Start fight</button></div>
+                </div>
+              </div>
+            </div>
+            <!-- Hidden loadout: slots render as blank silhouettes. With items visible they carry #defender_Primary etc. -->
+            <div class="weaponList___h1eTP">
+              <div class="weaponWrapper___h3buK emptySlot___Mf1wL"><div class="weaponImage___tUzwP"><img class="blank___W6Kh5" src="/images/items/silhouettes/primary.svg" alt=""></div></div>
+              <div class="weaponWrapper___h3buK emptySlot___Mf1wL"><div class="weaponImage___tUzwP"><img class="blank___W6Kh5" src="/images/items/silhouettes/secondary.svg" alt=""></div></div>
+              <div class="weaponWrapper___h3buK emptySlot___Mf1wL"><div class="weaponImage___tUzwP"><img class="blank___W6Kh5" src="/images/items/silhouettes/melee.svg" alt=""></div></div>
+              <div class="weaponWrapper___h3buK emptySlot___Mf1wL"><div class="weaponImage___tUzwP"><img class="blank___W6Kh5" src="/images/items/silhouettes/temporary.svg" alt=""></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- Defender weapon slot once items are visible (after Start fight, or Gun Shop perk):
+<div class="weaponWrapper___h3buK glow-red"><div id="defender_Primary" class="weaponImage___tUzwP"><img src="/images/items/26/large.png" alt="AK-47"></div></div>
+-->
