@@ -1,0 +1,122 @@
+<!--
+  Variant of gym.html for the harness (the friend at Gun Shop, mockup Q1; Force Training 80% unlocked).
+  Gym page (gym.php) body fragment. NOT captured live: modeled from source code only.
+  Sources: TornTools gym-page.ts, stats-watcher.ts, gym-disable-stats.ts, gym-progress.ts,
+  specialist-gyms.svelte.ts; docs/reference steadfast-gym-guard (button[aria-label^="Train "]),
+  gymiq (propertyTitle/h3/propertyValue), stezoscu (li.strength___UwX1Y, gymButton, "energy per train"),
+  gym-gains-calculator-plus + energy-calc (gymIcon "gym-N", percentage), gym-page-usercss.css (class names).
+  State: Gym 3000 (id 27, 50 E/train, STR only) selected; George's (24) is the in-progress gym.
+  [UNCERTAIN] exact nesting of the gym list, input attributes, and gym name placement.
+-->
+<input type="hidden" id="torn-user" value='{"id":2139172,"playername":"TestUser"}'>
+<div id="sidebarroot">
+  <div class="bar___3xcUo energy___Up_Aj" id="barEnergy">
+    <p class="bar-name___x1Kd2">Energy:</p><p class="bar-value___uxnah">150/150</p>
+  </div>
+  <div class="bar___3xcUo happy___3emq2" id="barHappy">
+    <p class="bar-name___x1Kd2">Happy:</p><p class="bar-value___uxnah">4525/5025</p>
+  </div>
+</div>
+<div class="content-wrapper">
+  <div class="content-title"><h4 id="skip-to-content">Gym</h4></div>
+  <div id="gymroot">
+    <div class="gym___Mw1bE">
+      <div class="notification___2zQzG">
+        <div class="notificationText___aX9pL"><p>You walk into Gun Shop.</p></div>
+      </div>
+      <div class="gymContentWrapper___R4w9e">
+        <div class="gymContent___3aDhk">
+          <ul class="properties___Vhhr7">
+            <li class="strength___UwX1Y">
+              <div class="propertyTitle___GQu1w">
+                <h3 class="title___fA7jN">Strength</h3>
+                <span class="propertyValue___ho0pj">118,400.00</span>
+              </div>
+              <div class="propertyContent___1hg0-">
+                <div class="description___VLNWe">
+                  <p>Develop your muscles and power.</p>
+                  <p>10 energy per train</p>
+                </div>
+                <div class="inputWrapper___1j9Iv"><input class="input___2D0YE" type="text" value="1" aria-label="Number of trains for strength"></div>
+                <button type="button" class="torn-btn button___yWf9T" aria-label="Train strength">TRAIN</button>
+              </div>
+            </li>
+            <li class="defense___LITyA">
+              <div class="propertyTitle___GQu1w">
+                <h3 class="title___fA7jN">Defense</h3>
+                <span class="propertyValue___ho0pj">96,200.00</span>
+              </div>
+              <div class="propertyContent___1hg0-">
+                <div class="description___VLNWe">
+                  <p>Train your defense.</p>
+                  <p>10 energy per train</p>
+                </div>
+                <div class="inputWrapper___1j9Iv"><input class="input___2D0YE" type="text" value="1" aria-label="Number of trains"></div>
+                <button type="button" class="torn-btn button___yWf9T" aria-label="Train defense" >TRAIN</button>
+              </div>
+            </li>
+            <li class="speed___qNMTy">
+              <div class="propertyTitle___GQu1w">
+                <h3 class="title___fA7jN">Speed</h3>
+                <span class="propertyValue___ho0pj">110,900.00</span>
+              </div>
+              <div class="propertyContent___1hg0-">
+                <div class="description___VLNWe">
+                  <p>Train your speed.</p>
+                  <p>10 energy per train</p>
+                </div>
+                <div class="inputWrapper___1j9Iv"><input class="input___2D0YE" type="text" value="1" aria-label="Number of trains"></div>
+                <button type="button" class="torn-btn button___yWf9T" aria-label="Train speed" >TRAIN</button>
+              </div>
+            </li>
+            <li class="dexterity___6ayVQ">
+              <div class="propertyTitle___GQu1w">
+                <h3 class="title___fA7jN">Dexterity</h3>
+                <span class="propertyValue___ho0pj">82,700.00</span>
+              </div>
+              <div class="propertyContent___1hg0-">
+                <div class="description___VLNWe">
+                  <p>Train your dexterity.</p>
+                  <p>10 energy per train</p>
+                </div>
+                <div class="inputWrapper___1j9Iv"><input class="input___2D0YE" type="text" value="1" aria-label="Number of trains"></div>
+                <button type="button" class="torn-btn button___yWf9T" aria-label="Train dexterity" >TRAIN</button>
+              </div>
+            </li>
+          </ul>
+        </div>
+      </div>
+      <div class="gymList___2NGl7">
+        <div class="middleweight___x1">
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Gym 1"><div class="gymIcon___b4Rw1 gym-1"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Gym 2"><div class="gymIcon___b4Rw1 gym-2"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Gym 3"><div class="gymIcon___b4Rw1 gym-3"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Gym 4"><div class="gymIcon___b4Rw1 gym-4"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Gym 5"><div class="gymIcon___b4Rw1 gym-5"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Gym 6"><div class="gymIcon___b4Rw1 gym-6"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Gym 7"><div class="gymIcon___b4Rw1 gym-7"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Gym 8"><div class="gymIcon___b4Rw1 gym-8"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Gym 9"><div class="gymIcon___b4Rw1 gym-9"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Gym 10"><div class="gymIcon___b4Rw1 gym-10"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Gym 11"><div class="gymIcon___b4Rw1 gym-11"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Gym 12"><div class="gymIcon___b4Rw1 gym-12"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Gym 13"><div class="gymIcon___b4Rw1 gym-13"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Gym 14"><div class="gymIcon___b4Rw1 gym-14"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Gym 15"><div class="gymIcon___b4Rw1 gym-15"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Gym 16"><div class="gymIcon___b4Rw1 gym-16"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Gym 17"><div class="gymIcon___b4Rw1 gym-17"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf selected___2PmTc" aria-label="Gym 18"><div class="gymIcon___b4Rw1 gym-18"></div></button>
+          <button type="button" class="gymButton___3OFdI inProgress___1Nd26" aria-label="Force Training"><div class="gymIcon___b4Rw1 gym-19"></div><span class="percentage___k2Pw9">80%</span></button>
+          <button type="button" class="gymButton___3OFdI locked___3akPx" aria-label="Gym 20"><div class="gymIcon___b4Rw1 gym-20"></div></button>
+          <button type="button" class="gymButton___3OFdI locked___3akPx" aria-label="Gym 21"><div class="gymIcon___b4Rw1 gym-21"></div></button>
+          <button type="button" class="gymButton___3OFdI locked___3akPx" aria-label="Gym 22"><div class="gymIcon___b4Rw1 gym-22"></div></button>
+          <button type="button" class="gymButton___3OFdI locked___3akPx" aria-label="Gym 23"><div class="gymIcon___b4Rw1 gym-23"></div></button>
+          <button type="button" class="gymButton___3OFdI locked___3akPx" aria-label="Gym 24"><div class="gymIcon___b4Rw1 gym-24"></div></button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- Loading variant (TornTools waits for this to disappear):
+<div id="gymroot"><div class="gym___Mw1bE"><div class="skeletonWrapper___p1Zs0"></div></div></div>
+-->

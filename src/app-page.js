@@ -38,7 +38,7 @@ export function ffsClient() {
 }
 
 /** Fetch listings for the items the Buy list shows, if older than 5 minutes. */
-async function loadPrices(ids) {
+export async function loadPrices(ids) {
     if (!getKey(K.apiKey)) return;
     const prices = { ...(get(K.prices, {}) || {}) };
     const now = Date.now();
@@ -80,6 +80,7 @@ async function loadPrices(ids) {
     refresh();
     if (page.app) page.app.render(true);
 }
+
 
 async function saveTornKey(v) {
     if (!v) return { ok: false, text: 'Paste a key first.' };

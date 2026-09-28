@@ -1,0 +1,111 @@
+<!--
+  Variant of gym.html for the harness (the owner on Hank's: Balboas usable, stats as in mockup Q2).
+  Gym page (gym.php) body fragment. NOT captured live: modeled from source code only.
+  Sources: TornTools gym-page.ts, stats-watcher.ts, gym-disable-stats.ts, gym-progress.ts,
+  specialist-gyms.svelte.ts; docs/reference steadfast-gym-guard (button[aria-label^="Train "]),
+  gymiq (propertyTitle/h3/propertyValue), stezoscu (li.strength___UwX1Y, gymButton, "energy per train"),
+  gym-gains-calculator-plus + energy-calc (gymIcon "gym-N", percentage), gym-page-usercss.css (class names).
+  State: Gym 3000 (id 27, 50 E/train, STR only) selected; George's (24) is the in-progress gym.
+  [UNCERTAIN] exact nesting of the gym list, input attributes, and gym name placement.
+-->
+<input type="hidden" id="torn-user" value='{"id":2139172,"playername":"TestUser"}'>
+<div id="sidebarroot">
+  <div class="bar___3xcUo energy___Up_Aj" id="barEnergy">
+    <p class="bar-name___x1Kd2">Energy:</p><p class="bar-value___uxnah">150/150</p>
+  </div>
+  <div class="bar___3xcUo happy___3emq2" id="barHappy">
+    <p class="bar-name___x1Kd2">Happy:</p><p class="bar-value___uxnah">4525/5025</p>
+  </div>
+</div>
+<div class="content-wrapper">
+  <div class="content-title"><h4 id="skip-to-content">Gym</h4></div>
+  <div id="gymroot">
+    <div class="gym___Mw1bE">
+      <div class="notification___2zQzG">
+        <div class="notificationText___aX9pL"><p>You walk into Gym 3000. It smells of sweat and chalk.</p></div>
+      </div>
+      <div class="gymContentWrapper___R4w9e">
+        <div class="gymContent___3aDhk">
+          <ul class="properties___Vhhr7">
+            <li class="strength___UwX1Y">
+              <div class="propertyTitle___GQu1w">
+                <h3 class="title___fA7jN">Strength</h3>
+                <span class="propertyValue___ho0pj">360,000,000.00</span>
+              </div>
+              <div class="propertyContent___1hg0-">
+                <div class="description___VLNWe">
+                  <p>Develop your muscles and power.</p>
+                  <p>50 energy per train</p>
+                </div>
+                <div class="inputWrapper___1j9Iv"><input class="input___2D0YE" type="text" value="1" aria-label="Number of trains for strength"></div>
+                <button type="button" class="torn-btn button___yWf9T" aria-label="Train strength">TRAIN</button>
+              </div>
+            </li>
+            <li class="defense___LITyA locked___Dq6Tl">
+              <div class="propertyTitle___GQu1w">
+                <h3 class="title___fA7jN">Defense</h3>
+                <span class="propertyValue___ho0pj">288,000,000.00</span>
+              </div>
+              <div class="propertyContent___1hg0-">
+                <div class="description___VLNWe">
+                  <p>This gym does not offer defense training.</p>
+                </div>
+                <div class="inputWrapper___1j9Iv"><input class="input___2D0YE" type="text" value="1" disabled></div>
+                <button type="button" class="torn-btn button___yWf9T" aria-label="Train defense" disabled>TRAIN</button>
+              </div>
+            </li>
+            <li class="speed___qNMTy locked___Dq6Tl">
+              <div class="propertyTitle___GQu1w">
+                <h3 class="title___fA7jN">Speed</h3>
+                <span class="propertyValue___ho0pj">98,400,000.00</span>
+              </div>
+              <div class="propertyContent___1hg0-">
+                <div class="description___VLNWe">
+                  <p>This gym does not offer speed training.</p>
+                </div>
+                <div class="inputWrapper___1j9Iv"><input class="input___2D0YE" type="text" value="1" disabled></div>
+                <button type="button" class="torn-btn button___yWf9T" aria-label="Train speed" disabled>TRAIN</button>
+              </div>
+            </li>
+            <li class="dexterity___6ayVQ locked___Dq6Tl">
+              <div class="propertyTitle___GQu1w">
+                <h3 class="title___fA7jN">Dexterity</h3>
+                <span class="propertyValue___ho0pj">288,000,000.00</span>
+              </div>
+              <div class="propertyContent___1hg0-">
+                <div class="description___VLNWe">
+                  <p>This gym does not offer dexterity training.</p>
+                </div>
+                <div class="inputWrapper___1j9Iv"><input class="input___2D0YE" type="text" value="1" disabled></div>
+                <button type="button" class="torn-btn button___yWf9T" aria-label="Train dexterity" disabled>TRAIN</button>
+              </div>
+            </li>
+          </ul>
+        </div>
+      </div>
+      <div class="gymList___2NGl7">
+        <div class="lightweight___8nNY7">
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Premier Fitness"><div class="gymIcon___b4Rw1 gym-1"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Average Joes"><div class="gymIcon___b4Rw1 gym-2"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Woody's Workout"><div class="gymIcon___b4Rw1 gym-3"></div></button>
+        </div>
+        <div class="heavyweight___1y5gJ">
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="The Edge"><div class="gymIcon___b4Rw1 gym-23"></div></button>
+          <button type="button" class="gymButton___3OFdI inProgress___1Nd26" aria-label="George's"><div class="gymIcon___b4Rw1 gym-24"></div><span class="percentage___k2Pw9">57%</span></button>
+        </div>
+        <div class="specialist___22lni">
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Balboas Gym"><div class="gymIcon___b4Rw1 gym-25"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf" aria-label="Frontline Fitness"><div class="gymIcon___b4Rw1 gym-26"></div></button>
+          <button type="button" class="gymButton___3OFdI active___Iwizf selected___2PmTc" aria-label="Gym 3000"><div class="gymIcon___b4Rw1 gym-27"></div></button>
+          <button type="button" class="gymButton___3OFdI locked___3akPx" aria-label="Mr. Isoyamas"><div class="gymIcon___b4Rw1 gym-28"></div></button>
+          <button type="button" class="gymButton___3OFdI locked___3akPx" aria-label="Total Rebound"><div class="gymIcon___b4Rw1 gym-29"></div></button>
+          <button type="button" class="gymButton___3OFdI locked___3akPx" aria-label="Elites"><div class="gymIcon___b4Rw1 gym-30"></div></button>
+          <button type="button" class="gymButton___3OFdI locked___3akPx" aria-label="Sports Science Lab"><div class="gymIcon___b4Rw1 gym-31"></div></button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- Loading variant (TornTools waits for this to disappear):
+<div id="gymroot"><div class="gym___Mw1bE"><div class="skeletonWrapper___p1Zs0"></div></div></div>
+-->

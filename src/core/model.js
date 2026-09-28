@@ -128,8 +128,10 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     // Build ETA and next gym
     const energyPerDay = Math.round(((e.interval <= 600 ? 720 : 480) + 250 * Math.floor(1440 / 420) + e.maximum) / 10) * 10;
     const proj = projectBuild({ stats: pc.stats, shares, energyPerDay, happy: state.happy.maximum + 300, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: 30, active: state.gymId, table: pc.table });
-    const progressE = gymProgress && Number(gymProgress.gymId) === Number(state.gymId) ? gymProgress.energy : null;
-    const ng = state.gymId && state.gymId < 24 ? nextGym(state.gymId, progressE, energyPerDay, { gymExpMult: pc.perks.gymExpMult, table: pc.table }) : null;
+    // The next ladder gym after the highest one unlocked; its progress comes from the gym page (percentage on the button).
+    const ladderTop = Math.max(0, ...pc.unlocked.filter((id) => id <= 24));
+    const progressE = gymProgress && Number(gymProgress.nextId) === ladderTop + 1 ? gymProgress.energy : null;
+    const ng = ladderTop >= 1 && ladderTop < 24 ? nextGym(ladderTop, progressE, energyPerDay, { gymExpMult: pc.perks.gymExpMult, table: pc.table }) : null;
     if (ng) ng.known = progressE !== null && progressE !== undefined;
 
     // Buy today

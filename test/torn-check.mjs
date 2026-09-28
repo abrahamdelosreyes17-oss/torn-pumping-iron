@@ -1,0 +1,185 @@
+/*
+ * Marks and overlay on saved Torn pages (test/fixtures), in a real browser,
+ * with the built script and canned API answers (harness-live.html):
+ *   - the gym page shows the strip, the outline, the panel and Fill N;
+ *     Fill types N into Torn's box, makes no request, never clicks TRAIN;
+ *   - the specialist stop ("Stop at 18 trains … Balboas") caps Fill;
+ *   - items, bazaar, Item Market and points market outline the chosen thing;
+ *   - the pill shows, its card opens on hover, Alt+P hides it;
+ *   - a hidden tab asks nothing; nothing loads from torn.com.
+ *
+ *   npm run build
+ *   PWPATH=<dir>/node_modules/playwright-core SHOTS=<dir> node test/torn-check.mjs
+ */
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import http from 'node:http';
+import { readFile } from 'node:fs/promises';
+
+const require = createRequire(import.meta.url);
+const { chromium } = require(process.env.PWPATH || 'playwright-core');
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const shots = process.env.SHOTS || tmpdir();
+
+const types = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json' };
+const server = http.createServer(async (req, res) => {
+    const path = decodeURIComponent(req.url.split('?')[0]);
+    try {
+        const body = await readFile(root + path);
+        res.writeHead(200, { 'content-type': types[path.slice(path.lastIndexOf('.'))] || 'application/octet-stream' });
+        res.end(body);
+    } catch {
+        res.writeHead(404);
+        res.end();
+    }
+}).listen(8783);
+
+const browser = await chromium.launch({ channel: process.env.PWCHANNEL || 'msedge' });
+let failures = 0;
+const ok = (cond, msg) => {
+    console.log((cond ? 'PASS ' : 'FAIL ') + msg);
+    if (!cond) failures++;
+};
+
+async function open(query, { wait = 4500 } = {}) {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(String(e)));
+    let tornHits = 0;
+    await page.route(/torn\.com/, (r) => {
+        tornHits++;
+        r.abort();
+    });
+    await page.goto('http://127.0.0.1:8783/test/harness-live.html?key=1&at=2026-09-29T10:48:00Z&wait=100000&' + query);
+    await page.waitForTimeout(wait);
+    return { page, errors, tornHits: () => tornHits };
+}
+
+const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s)].map((e) => e.textContent.replace(/\s+/g, ' ').trim()), sel);
+
+/* Gym page: the friend right after Xanax #2 (275 energy) at Gun Shop. */
+{
+    const { page, errors, tornHits } = await open('page=gym&fixture=gym-friend&energy=275');
+    const strip = (await text(page, '.pi-strip'))[0] || '';
+    ok(strip.includes('Balanced') && strip.includes('DEX is furthest behind'), 'gym: strip names the build and the stat behind (' + strip + ')');
+    ok(/Force Training in [\d,]+ E/.test(strip), 'gym: next gym from the page\'s 80% (' + strip + ')');
+    const on = await page.evaluate(() => [...document.querySelectorAll('li.pi-on')].map((li) => li.className.match(/(strength|speed|defense|dexterity)/)[1]));
+    ok(on.length === 1 && on[0] === 'dexterity', 'gym: DEX outlined, and only DEX (' + on + ')');
+    const panel = (await text(page, 'li.pi-on .pi-panel'))[0] || '';
+    ok(/27 trains/.test(panel) && /all your energy/.test(panel) && /Fill 27/.test(panel), 'gym: panel "27 trains · all your energy · Fill 27" (' + panel + ')');
+    const greys = await text(page, '.pi-grey');
+    ok(greys.some((g) => /over target/.test(g)), 'gym: over-target stats get a grey word (' + greys.join(' | ') + ')');
+    await page.evaluate(() => {
+        window.__trainClicks = 0;
+        for (const b of document.querySelectorAll('button[aria-label^="Train "]')) b.addEventListener('click', () => window.__trainClicks++);
+        window.__callsBefore = window.__calls.length;
+        window.__inputEvents = 0;
+        document.querySelector('li[class*="dexterity___"] input').addEventListener('input', () => window.__inputEvents++);
+    });
+    await page.locator('li.pi-on .pi-fill').click();
+    await page.waitForTimeout(300);
+    const after = await page.evaluate(() => ({ v: document.querySelector('li[class*="dexterity___"] input').value, train: window.__trainClicks, calls: window.__calls.length - window.__callsBefore, events: window.__inputEvents }));
+    ok(after.v === '27', 'gym: Fill typed 27 into Torn\'s box (' + after.v + ')');
+    ok(after.events >= 1, 'gym: an input event told React about it');
+    ok(after.train === 0, 'gym: TRAIN was never clicked');
+    ok(after.calls === 0, 'gym: Fill made no request');
+    const pill = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.querySelector('.pill').textContent);
+    ok(/Train DEX × 27/.test(pill), 'gym: the pill says "Train DEX × 27" (' + pill + ')');
+    const stored = await page.evaluate(() => ({ u: JSON.parse(_store['pumpingIron.v1.unlockedGyms'] || 'null'), p: JSON.parse(_store['pumpingIron.v1.gymProgress'] || 'null') }));
+    ok(stored.u && stored.u.length === 18 && stored.p && stored.p.nextId === 19 && stored.p.energy === Math.round(36610 * 0.8), 'gym: unlocked gyms and progress read from the page');
+    ok(errors.length === 0, 'gym: no page errors ' + JSON.stringify(errors));
+    ok(tornHits() === 0, 'gym: nothing loaded from torn.com');
+    await page.screenshot({ path: resolve(shots, 'torn-gym-friend.png'), fullPage: true });
+    await page.close();
+}
+
+/* Gym page: the owner on Hank's, 1,000 energy at Gym 3000. */
+{
+    const { page, errors } = await open('page=gym&fixture=gym-owner&who=owner&build=hank');
+    const warn = (await text(page, 'li.pi-on .pi-warn'))[0] || '';
+    ok(/Stop at 18 trains/.test(warn) && /Balboas/.test(warn) && /Fill 18/.test(warn), 'gym (Hank\'s): stop at 18 before Balboas is lost (' + warn + ')');
+    await page.locator('li.pi-on .pi-fill').click();
+    const v = await page.evaluate(() => document.querySelector('li[class*="strength___"] input').value);
+    ok(v === '18', 'gym (Hank\'s): Fill uses the capped number (' + v + ')');
+    ok(errors.length === 0, 'gym (Hank\'s): no page errors ' + JSON.stringify(errors));
+    await page.screenshot({ path: resolve(shots, 'torn-gym-owner.png'), fullPage: true });
+    await page.close();
+}
+
+/* Items page: the Xanax the next step uses. */
+{
+    const { page, errors } = await open('page=items&fixture=items');
+    const labels = await text(page, '.pi-outlined .pi-label');
+    ok(labels.length >= 1 && /Step 1 of today · Xanax #1/.test(labels[0]), 'items: Xanax outlined with its step (' + labels.join(' | ') + ')');
+    const onlyVisible = await page.evaluate(() => [...document.querySelectorAll('.pi-outlined')].every((el) => el.closest('ul').getAttribute('aria-expanded') === 'true'));
+    ok(onlyVisible, 'items: only the list that shows is marked');
+    ok(errors.length === 0, 'items: no page errors');
+    await page.close();
+}
+
+/* Bazaar, Item Market, points market: the chosen listings. */
+{
+    const { page, errors } = await open('page=bazaar&userId=1234567&fixture=bazaar', { wait: 6000 });
+    const labels = await text(page, '.pi-outlined .pi-label');
+    ok(labels.some((l) => l === 'Take 3 · $2,479,500'), 'bazaar: Iron_Monk\'s Xanax outlined "Take 3 · $2,479,500" (' + labels.join(' | ') + ')');
+    const pe = await page.evaluate(() => getComputedStyle(document.querySelector('.pi-label')).pointerEvents);
+    ok(pe === 'none', 'bazaar: the label never takes the pointer');
+    ok(errors.length === 0, 'bazaar: no page errors');
+    await page.close();
+}
+{
+    const { page } = await open('page=itemmarket&win=week&fixture=itemmarket#/market/view=search&itemID=206', { wait: 6000 });
+    const labels = await text(page, '.pi-outlined .pi-label');
+    ok(labels.some((l) => /^Take 3 · \$2,488,500$/.test(l)), 'item market: the $829,500 row outlined (' + labels.join(' | ') + ')');
+    await page.close();
+}
+{
+    const { page } = await open('page=points&fixture=pmarket', { wait: 6000 });
+    const labels = await text(page, '.pi-outlined .pi-label');
+    ok(labels.includes('Take 25 · $1,128,000') && labels.some((l) => /^Take 65 · /.test(l)), 'points: 25 + 65 from the two lots (' + labels.join(' | ') + ')');
+    await page.close();
+}
+
+/* The pill and its card on any page; Alt+P. */
+{
+    const { page, errors } = await open('page=other');
+    const pill = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.querySelector('.pill').textContent);
+    ok(/3:5\d\s*Xanax #1/.test(pill.replace(/\s+/g, ' ')), 'pill: countdown and step (' + pill + ')');
+    const box = await page.evaluate(() => {
+        const r = document.getElementById('pi-overlay').shadowRoot.querySelector('.pill').getBoundingClientRect();
+        return { x: r.x, y: r.y, w: r.width, h: r.height };
+    });
+    ok(box.h === 36 || Math.abs(box.h - 36) <= 1, 'pill: 36 px tall (' + box.h + ')');
+    await page.mouse.move(box.x + 10, box.y + 10);
+    await page.waitForTimeout(200);
+    const card = await page.evaluate(() => {
+        const c = document.getElementById('pi-overlay').shadowRoot.querySelector('.card');
+        return { hidden: c.hidden, text: c.textContent };
+    });
+    ok(!card.hidden && /Take Xanax #1, then train DEX/.test(card.text) && /Open Pumping Iron/.test(card.text), 'card: opens on hover with the step and the link');
+    await page.locator('#pi-overlay .open').click();
+    const opened = await page.evaluate(() => window.__opened || []);
+    ok(opened[0] === 'https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html', 'card: Open Pumping Iron opens the webpage in a new tab');
+    await page.mouse.move(5, 800);
+    await page.keyboard.press('Alt+P');
+    await page.waitForTimeout(100);
+    const hidden = await page.evaluate(() => getComputedStyle(document.getElementById('pi-overlay').shadowRoot.querySelector('.wrap')).display);
+    ok(hidden === 'none', 'Alt+P hides the pill');
+    ok(errors.length === 0, 'pill: no page errors');
+    await page.close();
+}
+
+/* A hidden tab asks Torn nothing. */
+{
+    const { page } = await open('page=gym&fixture=gym-friend&hidden=1', { wait: 5000 });
+    const calls = await page.evaluate(() => window.__calls.length);
+    ok(calls === 0, 'hidden tab: no requests (' + calls + ')');
+    await page.close();
+}
+
+await browser.close();
+server.close();
+console.log(failures ? failures + ' FAILED' : 'ALL PASSED');
+process.exit(failures ? 1 : 0);

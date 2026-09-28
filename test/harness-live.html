@@ -15,6 +15,12 @@
  *   &drug=0       drug cooldown already over
  *   &calls=1      list every request made in the output
  *   &at=2026-09-29T10:48:00Z   run the page's clock from this Torn time
+ *   &fixture=gym-friend   write test/fixtures/<name>.html into the page first (a saved Torn page)
+ *   &who=owner    the owner's account (Hank's build: 360M STR, Gym 3000, 1,000 energy)
+ *   &build=hank   save this build in the plan
+ *   &energy=275   the friend's energy now (default 20)
+ *   &win=week     the Buy window (today, three, week)
+ *   &hidden=1     the tab reports itself hidden (nothing may be asked)
  */
 const Q = new URLSearchParams(location.search);
 if (Q.get('at')) {
@@ -34,9 +40,16 @@ window.__calls = [];
 
 const now = Date.now();
 const drug = Q.has('drug') ? Number(Q.get('drug')) : 232;
+const OWNER = Q.get('who') === 'owner';
 const CANNED = {
-  '/v2/user': () => ({
-    bars: { energy: { current: 20, maximum: 150, increment: 5, interval: 600, tick_time: 120, full_time: 15600 },
+  '/v2/user': () => OWNER ? ({
+    bars: { energy: { current: 1000, maximum: 150, increment: 5, interval: 600, tick_time: 120, full_time: 0 },
+            happy: { current: 5025, maximum: 5025, increment: 5, interval: 900, tick_time: 300, full_time: 0 } },
+    cooldowns: { drug, medical: 0, booster: 0 }, refills: { energy: true },
+    battlestats: { strength: { value: 360000000 }, defense: { value: 288000000 }, speed: { value: 98400000 }, dexterity: { value: 288000000 }, total: 1034400000 },
+    gym: { id: 27, name: 'Gym 3000' },
+  }) : ({
+    bars: { energy: { current: Number(Q.get('energy') || 20), maximum: 150, increment: 5, interval: 600, tick_time: 120, full_time: 15600 },
             happy: { current: 5100, maximum: 5025, increment: 5, interval: 900, tick_time: 300, full_time: 0 },
             nerve: { current: 40, maximum: 60, increment: 1, interval: 300, tick_time: 12, full_time: 6012 },
             life: { current: 7500, maximum: 7500, increment: 450, interval: 300, tick_time: 90, full_time: 0 }, chain: null },
@@ -51,8 +64,8 @@ const CANNED = {
   '/v2/torn/gyms': () => ({ gyms: [{ id: 18, name: 'Gun Shop', class: 'Middleweight', energy_cost: 10, cost: 10000000, modifiers: { strength: 6.5, speed: 6.4, defense: 6.2, dexterity: 6.2 }, note: null }] }),
   '/v2/user/inventory': (u) => ({ inventory: { items: u.searchParams.get('cat') === 'Drug' ? [{ id: 206, amount: 1, name: 'Xanax' }] : [] } }),
   '/v2/key/info': () => ({ info: { access: { level: 3, type: 'Limited Access' }, user: { id: 2345678 }, selections: {} } }),
-  '/v2/market/206/itemmarket': () => ({ itemmarket: { item: { id: 206, name: 'Xanax' }, listings: [{ price: 829900, amount: 12 }, { price: 831000, amount: 40 }] } }),
-  '/v2/market/pointsmarket': () => ({ pointsmarket: [{ id: 1, cost: 44900, quantity: 60 }, { id: 2, cost: 45000, quantity: 100 }] }),
+  '/v2/market/206/itemmarket': () => ({ itemmarket: { item: { id: 206, name: 'Xanax' }, listings: [{ price: 829500, amount: 3 }, { price: 830000, amount: 1805 }] } }),
+  '/v2/market/pointsmarket': () => ({ pointsmarket: [{ id: 91827364, cost: 45120, quantity: 25 }, { id: 91827399, cost: 45150, quantity: 1000 }] }),
   '/api/marketplace/206': () => ({ item_id: 206, listings: [{ player_id: 1234567, player_name: 'Iron_Monk', price: 826500, quantity: 3 }, { player_id: 2345678, player_name: 'LuckyLefty', price: 828000, quantity: 6 }] }),
 };
 
@@ -67,6 +80,15 @@ window.GM_xmlhttpRequest = (o) => {
   }, 20);
 };
 if (Q.get('key')) _store['pumpingIron.v1.apiKey'] = JSON.stringify('HarnessKey123456');
+if (Q.get('win')) _store['pumpingIron.v1.settings'] = JSON.stringify({ buyWindow: Q.get('win') });
+if (Q.get('hidden')) Object.defineProperty(document, 'visibilityState', { get: () => 'hidden' });
+if (Q.get('build')) _store['pumpingIron.v1.plan'] = JSON.stringify({ type: 'steady', strategy: 'steady', build: Q.get('build'), goal: null, createdAt: 1 });
+if (Q.get('fixture')) {
+  const x = new XMLHttpRequest();
+  x.open('GET', 'fixtures/' + Q.get('fixture').replace(/[^a-z-]/g, '') + '.html', false);
+  x.send();
+  document.write(x.responseText);
+}
 window.onerror = (m) => { document.getElementById('out').textContent = 'BOOT ERROR: ' + m; };
 </script>
 <script>document.write('<script src="../torn-pumping-iron.user.js?v=' + Date.now() + '"><\/script>');</script>

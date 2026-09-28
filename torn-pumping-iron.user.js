@@ -3228,8 +3228,10 @@
         // Build ETA and next gym
         const energyPerDay = Math.round(((e.interval <= 600 ? 720 : 480) + 250 * Math.floor(1440 / 420) + e.maximum) / 10) * 10;
         const proj = projectBuild({ stats: pc.stats, shares, energyPerDay, happy: state.happy.maximum + 300, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: 30, active: state.gymId, table: pc.table });
-        const progressE = gymProgress && Number(gymProgress.gymId) === Number(state.gymId) ? gymProgress.energy : null;
-        const ng = state.gymId && state.gymId < 24 ? nextGym(state.gymId, progressE, energyPerDay, { gymExpMult: pc.perks.gymExpMult, table: pc.table }) : null;
+        // The next ladder gym after the highest one unlocked; its progress comes from the gym page (percentage on the button).
+        const ladderTop = Math.max(0, ...pc.unlocked.filter((id) => id <= 24));
+        const progressE = gymProgress && Number(gymProgress.nextId) === ladderTop + 1 ? gymProgress.energy : null;
+        const ng = ladderTop >= 1 && ladderTop < 24 ? nextGym(ladderTop, progressE, energyPerDay, { gymExpMult: pc.perks.gymExpMult, table: pc.table }) : null;
         if (ng) ng.known = progressE !== null && progressE !== undefined;
 
         // Buy today
@@ -5680,6 +5682,7 @@
         if (page.app) page.app.render(true);
     }
 
+
     async function saveTornKey(v) {
         if (!v) return { ok: false, text: 'Paste a key first.' };
         if (!/^[A-Za-z0-9]{16}$/.test(v)) return { ok: false, text: 'A Torn key is 16 letters and numbers.' };
@@ -5788,6 +5791,776 @@
         return page.app;
     }
 
+    /* ===== src/ui/overlay.js ===== */
+    /*
+     * The overlay on torn.com (DESIGN §4): a 36px pill with the countdown and
+     * the step, and a card on hover or click. In its own shadow root
+     * (:host{all:initial}) so Torn's CSS and ours never meet. It sits in the
+     * free space right of Torn's content, can be dragged (the spot is kept),
+     * and Alt+P hides it. No sounds, pop-ups or title changes, ever.
+     */
+
+
+
+
+    const OVERLAY_CSS = `
+    :host { all: initial; }
+    * { box-sizing: border-box; font-family: Arial, Helvetica, sans-serif; }
+    .wrap { position: fixed; z-index: 99990; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+    .pill { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px 0 6px; border-radius: 18px; background: #1b1e21; border: 1px solid #3a4046; box-shadow: 0 4px 14px rgba(0,0,0,.4); font: bold 13px Arial, sans-serif; color: #e3e5e8; cursor: grab; user-select: none; white-space: nowrap; }
+    .pill:focus-visible { outline: 2px solid #efebe2; outline-offset: 2px; }
+    .pill .cd { font: bold 16px "Arial Narrow", Arial, sans-serif; color: #efebe2; font-variant-numeric: tabular-nums; }
+    .plate { width: 24px; height: 24px; border-radius: 50%; background: #efebe2; display: grid; place-items: center; box-shadow: inset 0 0 0 4px #efebe2, inset 0 0 0 5px #2a2d31; flex: none; }
+    .plate i { width: 5px; height: 5px; border-radius: 50%; background: #15171a; }
+    .card { width: 280px; background: #1b1e21; border: 1px solid #3a4046; border-radius: 10px; padding: 12px 14px; box-shadow: 0 8px 24px rgba(0,0,0,.5); display: flex; flex-direction: column; gap: 8px; color: #e3e5e8; font-size: 13px; }
+    .card[hidden] { display: none; }
+    .lab { font-size: 11px; font-weight: bold; letter-spacing: .5px; text-transform: uppercase; color: #939aa1; }
+    .big { font: bold 34px/1 "Arial Narrow", Arial, sans-serif; color: #efebe2; font-variant-numeric: tabular-nums; }
+    .step { font-weight: bold; color: #fff; }
+    .sub { font-size: 12px; color: #939aa1; }
+    .mini { display: grid; grid-template-columns: 48px 1fr 64px; gap: 6px; align-items: center; font-size: 11px; color: #939aa1; font-variant-numeric: tabular-nums; }
+    .bar { height: 5px; border-radius: 3px; background: #24282c; overflow: hidden; }
+    .bar i { display: block; height: 100%; border-radius: 3px; }
+    .later { font-size: 12px; color: #939aa1; border-top: 1px solid #2c3136; padding-top: 6px; display: flex; flex-direction: column; gap: 3px; font-variant-numeric: tabular-nums; }
+    .open { height: 28px; border-radius: 5px; border: 0; background: #efebe2; color: #15171a; font: bold 12px Arial, sans-serif; cursor: pointer; }
+    .open:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+    .warn { color: #e8a33d; font-size: 12px; font-weight: bold; }
+    `;
+
+    /** Where the pill goes by default: just right of Torn's content column, or the right edge. */
+    function defaultPosition(viewW, contentRight, pillW = 200) {
+        const free = viewW - contentRight;
+        if (free >= pillW + 24) return { x: contentRight + 12, y: 110 };
+        return { x: Math.max(8, viewW - pillW - 12), y: 110 };
+    }
+
+    /** Keep a stored spot on screen after a resize. */
+    function clampPosition(pos, viewW, viewH, w = 200, hgt = 40) {
+        return { x: Math.max(4, Math.min(viewW - w - 4, pos.x)), y: Math.max(4, Math.min(viewH - hgt - 4, pos.y)) };
+    }
+
+    class Overlay {
+        /**
+         * @param {object} o - {onOpen, loadPos, savePos, loadHidden, saveHidden, contentRight}
+         */
+        constructor({ onOpen, loadPos, savePos, loadHidden, saveHidden, contentRight }) {
+            this.onOpen = onOpen;
+            this.loadPos = loadPos;
+            this.savePos = savePos;
+            this.loadHidden = loadHidden;
+            this.saveHidden = saveHidden;
+            this.contentRight = contentRight;
+            this.cardOpen = false;
+            this.pinned = false;
+        }
+
+        mount(doc = document) {
+            this.host = doc.getElementById('pi-overlay') || h('div', { id: 'pi-overlay' });
+            if (!this.host.parentNode) (doc.body || doc.documentElement).appendChild(this.host);
+            this.shadow = this.host.shadowRoot || this.host.attachShadow({ mode: 'open' });
+            this.wrap = h('div', { class: 'wrap' });
+            this.pill = h('div', { class: 'pill', role: 'button', tabindex: '0', 'aria-label': 'Pumping Iron: next step' });
+            this.card = h('div', { class: 'card', hidden: true });
+            this.wrap.append(this.pill, this.card);
+            fill(this.shadow, [h('style', { text: OVERLAY_CSS }), this.wrap]);
+            this.place();
+            this.bindDrag();
+            this.wrap.addEventListener('mouseenter', () => this.showCard(true));
+            this.wrap.addEventListener('mouseleave', () => !this.pinned && this.showCard(false));
+            this.pill.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    this.pinned = !this.pinned;
+                    this.showCard(this.pinned);
+                }
+            });
+            doc.addEventListener('keydown', (e) => {
+                if (e.altKey && (e.key === 'p' || e.key === 'P')) {
+                    const hidden = !this.isHidden();
+                    this.saveHidden(hidden);
+                    this.applyHidden();
+                }
+            });
+            window.addEventListener('resize', () => this.place());
+            this.applyHidden();
+        }
+
+        isHidden() {
+            return Boolean(this.loadHidden());
+        }
+
+        applyHidden() {
+            this.wrap.style.display = this.isHidden() || this.off ? 'none' : 'flex';
+        }
+
+        place() {
+            const vw = window.innerWidth;
+            const vh = window.innerHeight;
+            const stored = this.loadPos();
+            const pos = stored && Number.isFinite(stored.x) ? clampPosition(stored, vw, vh) : defaultPosition(vw, this.contentRight());
+            this.wrap.style.left = pos.x + 'px';
+            this.wrap.style.top = pos.y + 'px';
+            // Open the card toward the side with room.
+            this.wrap.style.alignItems = pos.x + 290 > vw ? 'flex-end' : 'flex-start';
+        }
+
+        bindDrag() {
+            let start = null;
+            this.pill.addEventListener('pointerdown', (e) => {
+                start = { x: e.clientX, y: e.clientY, left: parseFloat(this.wrap.style.left), top: parseFloat(this.wrap.style.top), moved: false };
+                this.pill.setPointerCapture(e.pointerId);
+            });
+            this.pill.addEventListener('pointermove', (e) => {
+                if (!start) return;
+                const dx = e.clientX - start.x;
+                const dy = e.clientY - start.y;
+                if (Math.abs(dx) + Math.abs(dy) > 4) start.moved = true;
+                if (!start.moved) return;
+                const p = clampPosition({ x: start.left + dx, y: start.top + dy }, window.innerWidth, window.innerHeight);
+                this.wrap.style.left = p.x + 'px';
+                this.wrap.style.top = p.y + 'px';
+            });
+            this.pill.addEventListener('pointerup', () => {
+                if (!start) return;
+                if (start.moved) this.savePos({ x: parseFloat(this.wrap.style.left), y: parseFloat(this.wrap.style.top) });
+                else {
+                    this.pinned = !this.pinned;
+                    this.showCard(this.pinned);
+                }
+                start = null;
+            });
+        }
+
+        showCard(on) {
+            this.cardOpen = on;
+            this.card.hidden = !on;
+        }
+
+        /**
+         * @param {object} v - {off, cdAt, pillText, pillNow, cardStep, cardSub, warn, energy:{current,max}, happy:{current,max}, later:[string]}
+         */
+        update(v) {
+            this.off = Boolean(v.off);
+            this.applyHidden();
+            if (this.off) return;
+            const now = Date.now();
+            const cdText = v.pillNow || (v.cdAt ? countdown(v.cdAt - now) : '');
+            fill(this.pill, [h('span', { class: 'plate' }, [h('i')]), cdText ? h('span', { class: 'cd', 'data-cd': v.cdAt && !v.pillNow ? String(v.cdAt) : null, text: cdText }) : null, h('span', { text: v.pillText || 'Pumping Iron' })]);
+            const bars = [];
+            if (v.energy) bars.push(h('div', { class: 'mini' }, [h('span', { text: 'Energy' }), h('div', { class: 'bar' }, [h('i', { style: 'width:' + Math.min(100, (100 * v.energy.current) / Math.max(1, v.energy.max)) + '%;background:#efebe2' })]), h('span', { text: v.energy.current + ' / ' + v.energy.max })]));
+            if (v.happy) bars.push(h('div', { class: 'mini' }, [h('span', { text: 'Happy' }), h('div', { class: 'bar' }, [h('i', { style: 'width:' + Math.min(100, (100 * v.happy.current) / Math.max(1, v.happy.max)) + '%;background:#9bdc8a' })]), h('span', { text: String(v.happy.current).replace(/\B(?=(\d{3})+(?!\d))/g, ',') })]));
+            fill(this.card, [
+                h('span', { class: 'lab', text: 'Next' }),
+                h('span', { class: 'big', 'data-cd': v.cdAt ? String(v.cdAt) : null, text: v.cdAt ? countdown(v.cdAt - now) : 'Now' }),
+                h('span', { class: 'step', text: v.cardStep || '' }),
+                v.cardSub ? h('span', { class: 'sub', text: v.cardSub }) : null,
+                v.warn ? h('span', { class: 'warn', text: v.warn }) : null,
+                ...bars,
+                v.later && v.later.length ? h('div', { class: 'later' }, v.later.map((x) => h('span', { text: x }))) : null,
+                h('button', { class: 'open', type: 'button', onclick: () => this.onOpen(), text: 'Open Pumping Iron' }),
+            ]);
+        }
+
+        /** Every second: the countdowns only. */
+        tick() {
+            if (!this.shadow) return;
+            const now = Date.now();
+            for (const el of this.shadow.querySelectorAll('[data-cd]')) el.textContent = countdown(Number(el.getAttribute('data-cd')) - now);
+        }
+    }
+
+    /* ===== src/sources/dom/gym.js ===== */
+    /*
+     * Reading Torn's gym page (the one the user is viewing). React with hashed
+     * class names, so everything matches by prefix ([class*="strength___"]).
+     * Selectors: docs/research-dom.md §1. Nothing here clicks; `fillTrains`
+     * only types a number into Torn's box, on the user's click.
+     */
+
+    const STAT_OF_CLASS = [
+        ['strength', 'str'],
+        ['speed', 'spd'],
+        ['defense', 'def'],
+        ['dexterity', 'dex'],
+    ];
+
+    function gymRoot(doc = document) {
+        return doc.getElementById('gymroot');
+    }
+
+    /** The page is still loading (skeleton) or not a gym page. */
+    function gymLoading(root) {
+        return !root || Boolean(root.querySelector('[class*="skeletonWrapper___"]')) || !root.querySelector('ul[class*="properties___"]');
+    }
+
+    function gymNum(text) {
+        const v = Number(String(text || '').replace(/[^\d.]/g, ''));
+        return Number.isFinite(v) ? v : null;
+    }
+
+    /**
+     * The four stat boxes.
+     * @returns {{stat, li, value, energyPerTrain, input, button, locked}[]}
+     */
+    function readStatBoxes(root) {
+        const out = [];
+        const list = root && root.querySelector('ul[class*="properties___"]');
+        if (!list) return out;
+        for (const li of list.children) {
+            const cls = String(li.className || '');
+            const hit = STAT_OF_CLASS.find(([word]) => cls.includes(word + '___'));
+            if (!hit) continue;
+            const desc = li.querySelector('[class*="description___"]');
+            const m = desc && String(desc.textContent || '').match(/(\d+)\s*energy per train/i);
+            out.push({
+                stat: hit[1],
+                li,
+                value: gymNum((li.querySelector('[class*="propertyValue___"]') || {}).textContent),
+                energyPerTrain: m ? Number(m[1]) : null,
+                input: li.querySelector('[class*="inputWrapper___"] input') || li.querySelector('input'),
+                button: li.querySelector('button[aria-label^="Train "]'),
+                locked: /locked___/.test(cls),
+                content: li.querySelector('[class*="propertyContent___"]') || li,
+            });
+        }
+        return out;
+    }
+
+    /**
+     * The gym list: id (from the icon's gym-N class), state and progress.
+     * @returns {{id, state, percent}[]}
+     */
+    function readGymButtons(root) {
+        const out = [];
+        for (const b of (root && root.querySelectorAll('[class*="gymButton___"]')) || []) {
+            const icon = b.querySelector('[class*="gymIcon___"]');
+            const m = icon && String(icon.className).match(/\bgym-(\d+)\b/);
+            if (!m) continue;
+            const cls = String(b.className);
+            const state = /selected___/.test(cls) ? 'selected' : /inProgress___/.test(cls) ? 'inProgress' : /lockedPurchased___/.test(cls) ? 'lockedPurchased' : /locked___/.test(cls) ? 'locked' : /active___/.test(cls) ? 'active' : 'unknown';
+            const pct = b.querySelector('[class*="percentage___"]');
+            out.push({ id: Number(m[1]), state, percent: pct ? gymNum(pct.textContent) : null, name: b.getAttribute('aria-label') || null });
+        }
+        return out;
+    }
+
+    /** Unlocked gym ids (usable now), the gym you're in, and the one being unlocked. */
+    function gymListSummary(buttons) {
+        const unlocked = buttons.filter((b) => b.state === 'active' || b.state === 'selected').map((b) => b.id);
+        const selected = buttons.find((b) => b.state === 'selected');
+        const inProgress = buttons.find((b) => b.state === 'inProgress');
+        return { unlocked, selectedId: selected ? selected.id : null, inProgress: inProgress ? { id: inProgress.id, percent: inProgress.percent } : null };
+    }
+
+    /**
+     * Type a number into Torn's trains box, the way a person would: React
+     * ignores a plain `.value =`, so the native setter plus an input event.
+     * Never submits and never clicks TRAIN.
+     */
+    function fillTrains(input, n) {
+        if (!input || input.disabled) return false;
+        const proto = Object.getPrototypeOf(input);
+        const desc = Object.getOwnPropertyDescriptor(proto, 'value') || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+        if (desc && desc.set) desc.set.call(input, String(n));
+        else input.value = String(n);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+    }
+
+    /* ===== src/ui/marks/marks.js ===== */
+    /*
+     * Marks on Torn's own pages (DESIGN §5): an outline and a small label on
+     * the thing the plan uses, a one-line strip on the gym page, and Fill N,
+     * which types into Torn's reps box on your click. Labels never take the
+     * pointer (trading's pattern), so Torn's buttons are never covered.
+     * Everything we add carries the class `pi-mark` and can be removed at once.
+     */
+
+
+
+
+    const MARK_CSS = `
+    .pi-mark, .pi-mark * { box-sizing: border-box; font-family: Arial, Helvetica, sans-serif; }
+    .pi-strip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 7px 10px; margin: 0 0 10px; background: #1b1e21; border: 1px solid #3a4046; border-radius: 6px; font-size: 12px; line-height: 1.4; color: #e3e5e8; }
+    .pi-strip b { color: #fff; }
+    .pi-strip .pi-sep { color: #6c737a; }
+    .pi-strip .pi-hint { color: #e8a33d; font-weight: bold; }
+    .pi-plate { width: 18px; height: 18px; border-radius: 50%; background: #efebe2; display: inline-grid; place-items: center; box-shadow: inset 0 0 0 3px #efebe2, inset 0 0 0 4px #2a2d31; flex: none; }
+    .pi-plate i { width: 4px; height: 4px; border-radius: 50%; background: #15171a; }
+    .pi-on { box-shadow: 0 0 0 2px #efebe2 !important; border-radius: 5px; position: relative; }
+    .pi-panel { display: flex; align-items: center; gap: 10px; padding: 7px 10px; margin: 6px 0; background: #1b1e21; border-radius: 5px; font-size: 12px; color: #e3e5e8; }
+    .pi-panel b { color: #fff; font-size: 13px; }
+    .pi-fill { white-space: nowrap; height: 26px; padding: 0 12px; border-radius: 13px; background: #efebe2; color: #15171a; font: bold 12px Arial, sans-serif; border: 0; cursor: pointer; margin-left: auto; }
+    .pi-fill:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+    .pi-grey { color: #8a9096; font-size: 12px; margin: 4px 0; }
+    .pi-warn { display: flex; align-items: center; gap: 10px; padding: 7px 10px; margin: 6px 0; background: #2a1f10; border-left: 3px solid #e8a33d; border-radius: 0 5px 5px 0; font-size: 12px; color: #ffd79a; }
+    .pi-warn b { color: #ffe3b3; }
+    .pi-outlined { box-shadow: inset 0 0 0 2px #efebe2 !important; position: relative; }
+    .pi-label { position: absolute; top: -9px; right: 10px; height: 18px; line-height: 18px; padding: 0 8px; border-radius: 9px; background: #efebe2; color: #15171a; font: bold 11px Arial, sans-serif; pointer-events: none; z-index: 2; white-space: nowrap; }
+    `;
+
+    /** Our page CSS, once per page (torn.com: no outside fonts). */
+    function ensureMarkCss(doc = document) {
+        if (doc.getElementById('pi-mark-css')) return;
+        const st = doc.createElement('style');
+        st.id = 'pi-mark-css';
+        st.textContent = MARK_CSS;
+        (doc.head || doc.documentElement).appendChild(st);
+    }
+
+    /** Remove every mark we drew inside `scope`. */
+    function clearMarks(scope = document) {
+        for (const el of scope.querySelectorAll('.pi-mark')) el.remove();
+        for (const el of scope.querySelectorAll('.pi-on, .pi-outlined')) el.classList.remove('pi-on', 'pi-outlined');
+    }
+
+    function plate() {
+        return h('span', { class: 'pi-plate' }, [h('i')]);
+    }
+
+    /**
+     * Draw the gym page marks from planGymPage() output.
+     * @param {Element} root - #gymroot
+     * @param {object} plan - planGymPage(model, page)
+     * @param {object[]} boxes - readStatBoxes(root)
+     * @param {function} rereadBox - (stat) => the box as it is now (React may have replaced the input)
+     */
+    function drawGymMarks(root, plan, boxes, rereadBox) {
+        clearMarks(root);
+        const list = root.querySelector('ul[class*="properties___"]');
+        if (!list) return;
+        const strip = h('div', { class: 'pi-mark pi-strip' }, [plate()]);
+        plan.strip.forEach((p, i) => {
+            if (i) strip.appendChild(h('span', { class: 'pi-sep', text: '·' }));
+            strip.appendChild(i === 0 ? h('b', { text: p }) : h('span', { text: p }));
+        });
+        if (plan.switchHint) {
+            strip.appendChild(h('span', { class: 'pi-sep', text: '·' }));
+            strip.appendChild(h('span', { class: 'pi-hint', text: plan.switchHint }));
+        }
+        list.parentNode.insertBefore(strip, list);
+        for (const box of boxes) {
+            const p = plan.perStat[box.stat];
+            if (!p) continue;
+            if (p.kind === 'train') {
+                box.li.classList.add('pi-on');
+                box.li.appendChild(h('span', { class: 'pi-mark pi-label', text: 'Train this' }));
+                const fill = h('button', {
+                    class: 'pi-fill',
+                    type: 'button',
+                    text: 'Fill ' + p.trains,
+                    disabled: p.trains <= 0,
+                    onclick: (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const now = rereadBox(box.stat) || box;
+                        fillTrains(now.input, p.trains);
+                    },
+                });
+                const panel = p.warn ? h('div', { class: 'pi-mark pi-warn' }, [h('span', {}, [h('b', { text: p.warn.split('. ')[0] + '.' }), ' ' + p.warn.split('. ').slice(1).join('. ')]), fill]) : h('div', { class: 'pi-mark pi-panel' }, [h('b', { text: p.text }), h('span', { text: p.sub }), fill]);
+                box.content.insertBefore(panel, box.content.firstChild);
+            } else {
+                box.content.insertBefore(h('div', { class: 'pi-mark pi-grey', text: p.text }), box.content.firstChild);
+            }
+        }
+    }
+
+    /** Outline one element with a label (items, bazaar cards, market rows, points lots). */
+    function outline(el, label) {
+        if (!el) return;
+        el.classList.add('pi-outlined');
+        el.appendChild(h('span', { class: 'pi-mark pi-label', text: label }));
+    }
+
+    /* ===== src/sources/dom/market.js ===== */
+    /*
+     * Reading the items page, bazaars, the Item Market and the points market
+     * the user is viewing (docs/research-dom.md §2–5). Read only.
+     */
+
+    function pageMoney(text) {
+        const v = Number(String(text || '').replace(/[^\d]/g, ''));
+        return Number.isFinite(v) && v > 0 ? v : null;
+    }
+
+    function pageVisible(el) {
+        return Boolean(el && el.getClientRects && el.getClientRects().length);
+    }
+
+    /** Item rows on item.php in the list that's showing: [{itemId, el}]. */
+    function readItemRows(doc = document) {
+        const lists = [...doc.querySelectorAll('ul.items-cont')];
+        const shown = lists.filter((ul) => ul.getAttribute('aria-expanded') === 'true' || (ul.style && ul.style.display === 'block')) || [];
+        const out = [];
+        for (const ul of shown.length ? shown : lists.filter(pageVisible)) {
+            for (const li of ul.querySelectorAll(':scope > li[data-item]')) out.push({ itemId: Number(li.getAttribute('data-item')), el: li, qty: Number(li.getAttribute('data-qty')) || null });
+        }
+        return out;
+    }
+
+    /** Bazaar cards: [{itemId, price, qty, el}] (item id from the image path). */
+    function readBazaarCards(doc = document) {
+        const out = [];
+        for (const d of doc.querySelectorAll('[class*="itemDescription___"]')) {
+            const img = d.querySelector('img[src*="/images/items/"]');
+            const m = img && String(img.getAttribute('src')).match(/\/images\/items\/(\d+)\//);
+            if (!m) continue;
+            const amount = d.querySelector('[class*="amount___"]');
+            out.push({ itemId: Number(m[1]), price: pageMoney((d.querySelector('[class*="price___"]') || {}).textContent), qty: amount ? pageMoney(amount.textContent) : null, el: d.closest('[class*="item___"]') || d, blocked: Boolean(d.querySelector('[class*="isBlockedForBuying___"]')) });
+        }
+        return out;
+    }
+
+    /** Item Market seller rows for the item in view: [{price, qty, el}]. */
+    function readItemMarketRows(doc = document) {
+        const out = [];
+        for (const row of doc.querySelectorAll('[class*="rowWrapper___"] [class*="sellerRow___"]')) {
+            const price = pageMoney((row.querySelector('[class*="price___"]') || {}).textContent);
+            if (!price) continue;
+            out.push({ price, qty: pageMoney((row.querySelector('[class*="available___"]') || {}).textContent), el: row.closest('[class*="rowWrapper___"]') || row });
+        }
+        return out;
+    }
+
+    /** Points market lots: [{listingId, price, qty, el}]; your own (remove) lots are skipped. */
+    function readPointsRows(doc = document) {
+        const out = [];
+        for (const li of doc.querySelectorAll('ul.users-point-sell > li')) {
+            const ex = li.querySelector('.expander[href]');
+            const href = ex ? ex.getAttribute('href') : '';
+            if (!/ajax_action=buy/.test(href)) continue;
+            const id = (href.match(/[?&]ID=(\d+)/) || [])[1] || null;
+            const cell = (sel) => {
+                const c = li.querySelector(sel);
+                if (!c) return '';
+                const clone = c.cloneNode(true);
+                for (const w of clone.querySelectorAll('.wai')) w.remove();
+                return clone.textContent;
+            };
+            out.push({ listingId: id, price: pageMoney(cell('.cost-each')), qty: pageMoney(cell('.points')), el: li });
+        }
+        return out;
+    }
+
+    /* ===== src/core/gympage.js ===== */
+    /*
+     * What the gym page marks say, worked out purely (DESIGN §5): which stat to
+     * train in the gym you're in and how many trains, a stop before a train
+     * would lose a specialist gym, a grey word for the other stats, and whether
+     * a better unlocked gym exists. The UI only draws this.
+     */
+
+
+
+
+
+
+    /**
+     * @param {object} m - buildModel() output
+     * @param {object} page - {selectedId, boxes: [{stat, locked, energyPerTrain}]}
+     * @returns {{strip: string[], switchHint: string|null, perStat: object, pill: string|null}}
+     */
+    function planGymPage(m, page = {}) {
+        const table = m.pc.table;
+        const selectedId = Number(page.selectedId || m.state.gymId);
+        const gym = gymById(selectedId, table);
+        const stats = m.pc.stats;
+        const energy = m.strip.energy.current;
+        const happy = m.strip.happy.current;
+        const perStat = {};
+        const out = { strip: [], switchHint: null, perStat, pill: null, gym };
+        if (!gym) return out;
+
+        const here = splitSession({ stats, shares: m.shares, energy, happy, unlocked: [selectedId], perks: m.pc.perks.mult, keep: m.keep, table, active: selectedId, happyLossMult: m.pc.perks.happyLossMult });
+        const best = splitSession({ stats, shares: m.shares, energy: Math.max(energy, 100), happy, unlocked: m.pc.unlocked, perks: m.pc.perks.mult, keep: m.keep, table, active: selectedId, happyLossMult: m.pc.perks.happyLossMult });
+        const total = totalOf(stats);
+        const behind = STATS.reduce((a, k) => (m.shares[k] - stats[k] / total > m.shares[a] - stats[a] / total ? k : a), 'str');
+        const tomorrow = (m.projection && m.projection[1]) || {};
+        const boxes = new Map((page.boxes || []).map((b) => [b.stat, b]));
+
+        for (const k of STATS) {
+            const p = here.perStat[k];
+            const box = boxes.get(k);
+            const locked = (box && box.locked) || !(gym.dots[k] > 0);
+            const share = stats[k] / total;
+            if (p.trains > 0 || p.stopAt !== null) {
+                const n = p.trains;
+                const allEnergy = n * gym.energy > energy - gym.energy;
+                perStat[k] = {
+                    kind: 'train',
+                    trains: n,
+                    gain: Math.round(p.gain),
+                    text: fmtInt(n) + ' train' + (n === 1 ? '' : 's'),
+                    sub: (allEnergy ? 'all your energy' : fmtInt(n * gym.energy) + ' energy') + ' · about ' + fmtSigned(p.gain),
+                    warn: p.stopAt !== null ? 'Stop at ' + p.stopAt + ' trains. More puts you under the rule for ' + p.stopReason + ' and you lose it.' : null,
+                };
+            } else if (locked) {
+                perStat[k] = { kind: 'none', text: 'Not trained here' };
+            } else if (share > m.shares[k] + 0.005) {
+                perStat[k] = { kind: 'skip', text: 'Skip · ' + (share * 100).toFixed(0) + '% of total, over target' };
+            } else if (tomorrow[k] > 0) {
+                perStat[k] = { kind: 'next', text: 'Next · starts tomorrow' };
+            } else {
+                perStat[k] = { kind: 'skip', text: 'Skip · others are further behind' };
+            }
+        }
+
+        // A better unlocked gym for the stat the plan trains first?
+        const first = best.order[0];
+        if (first) {
+            const b = bestGymFor(first, stats, m.pc.unlocked, { table, active: selectedId });
+            if (b && b.id !== selectedId && (!(gym.dots[first] > 0) || b.dots[first] > gym.dots[first])) {
+                out.switchHint = 'Switch to ' + b.name + ' for ' + STAT_LABEL[first] + ' (' + b.dots[first] + (gym.dots[first] > 0 ? ' vs ' + gym.dots[first] : '') + ')';
+            }
+        }
+
+        out.strip.push(m.build.name);
+        out.strip.push(STAT_LABEL[behind] + ' is furthest behind');
+        if (m.nextGym && m.nextGym.gym) {
+            const ng = m.nextGym.gym;
+            out.strip.push(ng.name + (m.nextGym.known ? ' in ' + fmtInt(m.nextGym.energyLeft) + ' E' : ' next') + ', ' + STAT_LABEL[behind] + ' ' + ng.dots[behind] + ' there');
+        }
+        const trainable = STATS.filter((k) => perStat[k].kind === 'train' && perStat[k].trains > 0);
+        out.pill = trainable.length ? 'Train ' + trainable.map((k) => STAT_LABEL[k] + ' × ' + perStat[k].trains).join(' · ') : out.switchHint ? out.switchHint : energy < gym.energy ? 'Energy ' + energy + ' · wait for the next step' : null;
+        return out;
+    }
+
+    /* ===== src/torn-page.js ===== */
+    /*
+     * On torn.com: the overlay pill and the marks on the page being viewed.
+     * Reads only the page the user opened; types into Torn's reps box only on
+     * a Fill click; never clicks Torn's buttons; nothing from a hidden tab.
+     */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    const tp = { overlay: null, model: null, observer: null, drawing: false, lastGymPlan: null };
+
+    function contentRight() {
+        const el = document.querySelector('.content-wrapper') || document.getElementById('mainContainer') || document.querySelector('.container');
+        const r = el && el.getBoundingClientRect();
+        return r && r.width ? r.right : Math.min(window.innerWidth, (window.innerWidth + 976) / 2);
+    }
+
+    /* ---------------------------------------------------------------- pill */
+
+    function overlayView(m, page) {
+        const s = getSettings();
+        const relevant = [PAGE_GYM, PAGE_ITEMS, PAGE_BAZAAR, PAGE_ITEM_MARKET, PAGE_POINTS].includes(page);
+        if (!s.pill && !relevant) return { off: true };
+        if (!m || !m.ready) return { pillText: get(K.apiKeyDead, false) ? 'Key refused · open Settings' : 'Open to set up', cardStep: 'Add your Torn key in Pumping Iron’s Settings.' };
+        const next = m.next;
+        const later = m.steps.slice(1, 3).map((x) => tornClock(x.at) + ' · ' + x.label + (trainsText(x.trains) ? ', ' + trainsText(x.trains) : ''));
+        const v = { energy: m.strip.energy, happy: m.strip.happy, later };
+        if (page === PAGE_GYM && tp.lastGymPlan && tp.lastGymPlan.pill) {
+            v.pillNow = 'Now';
+            v.pillText = tp.lastGymPlan.pill;
+        }
+        if (next) {
+            const due = next.at <= Date.now();
+            if (!v.pillText) {
+                if (due) {
+                    v.pillNow = 'Now';
+                    v.pillText = next.kind === 'natural' ? 'Train ' + trainsText(next.trains) : next.label.split(' · ')[0];
+                } else {
+                    v.cdAt = next.at;
+                    v.pillText = next.label.split(' · ')[0];
+                }
+            } else if (!due) v.cdAt = next.at;
+            v.cardStep = stepWords(next);
+            v.cardSub = next.gain ? 'about +' + fmtInt(next.gain) + (next.energy ? ' · ' + fmtInt(next.energy) + ' energy' : '') : null;
+            if (next.strict && next.warnAt !== null && Date.now() >= next.warnAt) v.warn = 'Strict: ' + (next.note || 'on the tick');
+        } else {
+            v.pillText = 'Done for today';
+            v.cardStep = 'Nothing left today';
+        }
+        return v;
+    }
+
+    /* ----------------------------------------------------------- gym marks */
+
+    function drawGym(m) {
+        const root = gymRoot();
+        if (!root || gymLoading(root)) return;
+        const buttons = readGymButtons(root);
+        const sum = gymListSummary(buttons);
+        // What the gym page tells us that the API doesn't: unlocked gyms and progress to the next.
+        if (sum.unlocked.length) {
+            const prev = get(K.unlocked, null);
+            const next = [...new Set(sum.unlocked)].sort((a, b) => a - b);
+            if (JSON.stringify(prev) !== JSON.stringify(next)) set(K.unlocked, next);
+        }
+        if (sum.inProgress && sum.inProgress.percent !== null) {
+            const need = unlockEnergyAfter(sum.inProgress.id - 1, m && m.pc ? m.pc.perks.gymExpMult : 1) || 0;
+            const gp = { nextId: sum.inProgress.id, energy: Math.round((need * sum.inProgress.percent) / 100), at: Date.now() };
+            const prev = get(K.gymProgress, null);
+            if (!prev || prev.nextId !== gp.nextId || prev.energy !== gp.energy) set(K.gymProgress, gp);
+        }
+        if (!m || !m.ready || !getSettings().gymMarks) {
+            clearMarks(root);
+            return;
+        }
+        const boxes = readStatBoxes(root);
+        const plan = planGymPage(m, { selectedId: sum.selectedId || m.state.gymId, boxes });
+        tp.lastGymPlan = plan;
+        tp.drawing = true;
+        try {
+            drawGymMarks(root, plan, boxes, (stat) => readStatBoxes(gymRoot()).find((b) => b.stat === stat));
+        } finally {
+            tp.drawing = false;
+        }
+    }
+
+    function watchGym() {
+        if (tp.observer) return;
+        const root = gymRoot();
+        if (!root) return;
+        let timer = null;
+        tp.observer = new MutationObserver((muts) => {
+            if (tp.drawing) return;
+            // Our own marks changing is not Torn re-rendering.
+            if (muts.every((mu) => [...mu.addedNodes, ...mu.removedNodes].every((n) => n.nodeType === 1 && n.classList && n.classList.contains('pi-mark')))) return;
+            clearTimeout(timer);
+            timer = setTimeout(() => drawGym(tp.model), 150);
+        });
+        tp.observer.observe(root, { childList: true, subtree: true });
+    }
+
+    /* -------------------------------------------------- items and markets */
+
+    function drawItems(m) {
+        clearMarks(document.querySelector('.content-wrapper') || document);
+        if (!m || !m.ready || !getSettings().marketMarks) return;
+        const idx = m.steps.findIndex((s) => (s.items || []).some((it) => it.id !== POINTS));
+        if (idx < 0) return;
+        const step = m.steps[idx];
+        const n = m.done.length + idx + 1;
+        for (const it of step.items) {
+            for (const row of readItemRows().filter((r) => r.itemId === Number(it.id))) outline(row.el, 'Step ' + n + ' of today · ' + step.label.split(' · ')[0]);
+        }
+    }
+
+    /** The Buy list's chosen listings (same window as the Buy tab). */
+    function chosenFills(m) {
+        const s = getSettings();
+        const statics = get(K.userStatic, {}) || {};
+        const prices = get(K.prices, {}) || {};
+        const needs = needList(needsForWindow(m, m.compare, getPlan(), s.buyWindow || 'three', s.horizonDays), statics.inventory || {});
+        const out = [];
+        for (const n of needs) {
+            const p = prices[n.id];
+            if (n.buy > 0 && p && p.listings) out.push({ id: n.id, fill: fillCheapest(p.listings, n.buy, n.id) });
+        }
+        return out;
+    }
+
+    function drawMarket(m, page) {
+        clearMarks(document.querySelector('.content-wrapper') || document);
+        if (!m || !m.ready || !getSettings().marketMarks) return;
+        // On a market page, the Buy list's prices are refreshed (at most every 5 minutes) so the outline is current.
+        const s = getSettings();
+        const want = needList(needsForWindow(m, m.compare, getPlan(), s.buyWindow || 'three', s.horizonDays), (get(K.userStatic, {}) || {}).inventory || {}).filter((n) => n.buy > 0).map((n) => n.id);
+        if (want.length) loadPrices(want).catch(() => {});
+        const fills = chosenFills(m);
+        const label = (r) => 'Take ' + fmtInt(r.qty) + ' · $' + fmtInt(r.subtotal);
+        if (page === PAGE_BAZAAR) {
+            const owner = bazaarOwnerId(location.href);
+            const cards = readBazaarCards();
+            for (const f of fills) for (const r of f.fill.rows) if (r.source === SOURCE_BAZAAR && r.sellerId === owner) {
+                const card = cards.find((c) => c.itemId === Number(f.id) && c.price === r.price);
+                if (card) outline(card.el, label(r));
+            }
+        } else if (page === PAGE_ITEM_MARKET) {
+            const item = Number(itemMarketItemOf(location.href));
+            const rows = readItemMarketRows();
+            for (const f of fills) if (Number(f.id) === item) for (const r of f.fill.rows) if (r.source === SOURCE_ITEM_MARKET) {
+                const row = rows.find((x) => x.price === r.price);
+                if (row) outline(row.el, label(r));
+            }
+        } else if (page === PAGE_POINTS) {
+            const rows = readPointsRows();
+            for (const f of fills) if (f.id === POINTS) for (const r of f.fill.rows) if (r.source === SOURCE_POINTS) {
+                const row = rows.find((x) => (r.listingId && x.listingId === r.listingId) || x.price === r.price);
+                if (row) outline(row.el, label(r));
+            }
+        }
+    }
+
+    /* ------------------------------------------------------------- wiring */
+
+    /** How many rows the page shows now: lists load after the page does. */
+    function pageRowsCount(p) {
+        if (p === PAGE_ITEMS) return readItemRows().length;
+        if (p === PAGE_BAZAAR) return readBazaarCards().length;
+        if (p === PAGE_ITEM_MARKET) return readItemMarketRows().length;
+        if (p === PAGE_POINTS) return readPointsRows().length;
+        return 0;
+    }
+
+    function bootTornPage() {
+        ensureMarkCss();
+        tp.overlay = new Overlay({
+            onOpen: () => gmOpenTab(APP_PAGE_URL),
+            loadPos: () => get(K.overlayPos, null),
+            savePos: (p) => set(K.overlayPos, p),
+            loadHidden: () => Boolean(get('overlayHidden', false)),
+            saveHidden: (v) => set('overlayHidden', v),
+            contentRight,
+        });
+        tp.overlay.mount();
+        gmMenu('Reset overlay position', () => {
+            set(K.overlayPos, null);
+            set('overlayHidden', false);
+            tp.overlay.place();
+            tp.overlay.applyHidden();
+        });
+        let lastSig = '';
+        let lastView = '';
+        onModel((m) => {
+            tp.model = m;
+            if (!isVisible()) return;
+            const p = detectPage(location.href);
+            const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), Object.values(get(K.prices, {}) || {}).map((x) => x.at).join(), pageRowsCount(p)].join('|');
+            if (sig !== lastSig) {
+                lastSig = sig;
+                if (p === PAGE_GYM) {
+                    watchGym();
+                    drawGym(m);
+                } else if (p === PAGE_ITEMS) drawItems(m);
+                else if (p === PAGE_BAZAAR || p === PAGE_ITEM_MARKET || p === PAGE_POINTS) drawMarket(m, p);
+            }
+            const view = overlayView(m, p);
+            const vs = JSON.stringify(view);
+            if (vs !== lastView) {
+                lastView = vs;
+                tp.overlay.update(view);
+            }
+        });
+        setInterval(() => tp.overlay.tick(), 1000);
+        // Torn's pages change the hash without a load (Item Market search, items tabs).
+        window.addEventListener('hashchange', () => {
+            lastSig = '';
+        });
+    }
+
     /* ===== src/main.js ===== */
     /*
      * Wiring. The only file that knows it is a userscript; core/ and api/ are
@@ -5799,6 +6572,7 @@
      *   - the webpage (GitHub Pages app.html): the full tabs, drawn over the
      *     placeholder the page shows without the script.
      */
+
 
 
 
@@ -5819,6 +6593,7 @@
         if (typeof window === 'undefined' || typeof document === 'undefined' || !document.body) return;
         menus();
         if (where === 'app') bootAppPage();
+        else bootTornPage();
         startFeed();
         // Off torn.com (the harness), expose the model for checks. On torn.com the sandbox keeps it private anyway.
         if (!isTornHost(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed };

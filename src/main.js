@@ -13,6 +13,7 @@ import { gmMenu, gmOpenTab } from './platform/gm.js';
 import { set } from './platform/store.js';
 import { pi, startFeed, refresh } from './runtime.js';
 import { bootAppPage } from './app-page.js';
+import { bootTornPage } from './torn-page.js';
 import { detectPage, isAppPageUrl, isTornHost, APP_PAGE_URL } from './sources/route.js';
 
 function menus() {
@@ -28,6 +29,7 @@ export function boot() {
     if (typeof window === 'undefined' || typeof document === 'undefined' || !document.body) return;
     menus();
     if (where === 'app') bootAppPage();
+    else bootTornPage();
     startFeed();
     // Off torn.com (the harness), expose the model for checks. On torn.com the sandbox keeps it private anyway.
     if (!isTornHost(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed };
