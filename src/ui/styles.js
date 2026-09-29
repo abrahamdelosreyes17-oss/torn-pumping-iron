@@ -288,6 +288,9 @@ details.dis[open] > summary::before { content: "▾ "; }
 /* ---- Round 3 (mockups/round3/r3.css): control bars, tick chips, cards with more room, charts, the Plan chooser. ---- */
 .tab .n { margin-left: 5px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--card2); color: var(--text); font-size: 11px; line-height: 16px; text-align: center; }
 .tab .dotw { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); margin-left: 5px; }
+.topwarn { display: inline-flex; align-items: center; gap: 7px; margin-right: 14px; padding: 3px 10px; border: 1px solid var(--warn); border-radius: 12px; color: var(--warn); font-size: 12px; font-weight: bold; text-decoration: none; white-space: nowrap; }
+.topwarn i { font-style: normal; width: 15px; height: 15px; border-radius: 50%; background: var(--warn); color: #15171a; display: inline-grid; place-items: center; font-size: 11px; }
+.topwarn:hover, .topwarn:focus-visible { background: #231d12; outline: none; }
 .strip.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .ctl { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 12px 24px; border-bottom: 1px solid var(--line); background: #171a1c; font-size: 13px; }
 .ctl + .ctl { padding-top: 4px; }

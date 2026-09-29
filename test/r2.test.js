@@ -112,7 +112,7 @@ test('Max gains, no budget: FHC every time the cooldown allows beats steady, at 
     const max = recommend(c, { budget: 150e6, pickBy: 'max' });
     assert.equal(max.recommended, 'steadyMax');
     assert.equal(recommend(c, { budget: 150e6 }).recommended, 'steady');
-    assert.equal(Object.keys(PICK_BY).join(), 'most,value,max');
+    assert.equal(Object.keys(PICK_BY).join(), 'auto,most,value,max');
 });
 
 test('a budget with room buys a middle rung: Steady + energy boosters', () => {

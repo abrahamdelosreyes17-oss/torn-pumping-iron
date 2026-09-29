@@ -4,11 +4,12 @@
  * secret this browser made. The userscript never posts to Discord itself
  * (no alerts from a Torn tab); the Worker does, from the API.
  *
- * What goes to the Worker: the plan's next steps, the Discord webhook and
- * user id you enter, a separate custom Torn key you make for it, and (for
- * the bot's /targets and /war) Torn Eye's list and bands, your player and
- * faction id. Your main Torn key never does, nor your FFScouter or
- * TornStats keys (worker/USERSCRIPT-INTERFACE.md).
+ * What goes to the Worker: the plan's next steps, your Torn key once you
+ * log in with Discord (stored encrypted there, used only for your pings and
+ * the bot's commands; owner's decision 2026-09-29), the Discord webhook if
+ * you run your own service, and (for the bot's /targets, /war and watch
+ * pings) Torn Eye's lists and bands, your player and faction id. Never your
+ * Full key, FFScouter or TornStats keys (worker/USERSCRIPT-INTERFACE.md).
  */
 
 import { gmFetch } from '../platform/gm.js';
@@ -109,4 +110,17 @@ export function workerTest({ base, secret, fetchImpl }) {
 
 export function workerForget({ base, secret, fetchImpl }) {
     return workerCall(base, '/plan', { method: 'DELETE', secret, fetchImpl });
+}
+
+/** The Pumping Iron service everyone logs in to (the owner's Worker); "your own service" can replace it. */
+export const DEFAULT_WORKER = 'https://pumping-iron.pumping-iron-worker.workers.dev';
+
+/** Log in with Discord, step 1: an address to open (15 minutes, this browser's secret). */
+export function workerLoginStart({ base, secret, fetchImpl }) {
+    return workerCall(base, '/login/start', { method: 'POST', secret, fetchImpl });
+}
+
+/** Log in with Discord, step 2: how it went ({state: open|done|not_member|denied|full|failed|expired, name}). */
+export function workerLoginStatus({ base, secret, id, fetchImpl }) {
+    return workerCall(base, '/login/status', { method: 'POST', secret, body: { id }, fetchImpl });
 }

@@ -181,6 +181,8 @@ export class PiApp {
             h('span', { class: 'brand', text: 'Pumping Iron' }),
             ...tabs,
             h('div', { class: 'grow' }),
+            // Auto mode (the default plan) without its Full key: said on top of every page until a key is in or a manual plan is picked.
+            m && m.ready && m.auto && m.auto.needsKey ? h('a', { class: 'topwarn', href: '#settings', role: 'alert', onclick: (e) => { e.preventDefault(); this.go('settings'); } }, [h('i', { 'aria-hidden': 'true', text: '!' }), 'Auto mode needs a Full key · Add it in Settings']) : null,
             this.clockEl,
         ]);
     }

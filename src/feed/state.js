@@ -16,7 +16,8 @@ import { totalOf } from '../core/gain.js';
 import { calibrationSample, addCalibration } from '../core/calibration.js';
 import { mergeLiveGyms, GYMS } from '../core/gyms.js';
 import { parsePerks } from '../core/perks.js';
-import { fetchUserState, fetchPerks, fetchProperty, fetchGyms, fetchInventory, fetchMoney, fetchCalendar, fetchKeyInfo } from '../api/torn.js';
+import { fetchUserState, fetchPerks, fetchProperty, fetchGyms, fetchInventory, fetchMoney, fetchCalendar, fetchKeyInfo, fetchNetworthHistory } from '../api/torn.js';
+import { NETWORTH_STATS, INCOME_DAYS } from '../core/auto.js';
 import { POINTS } from '../core/items.js';
 import { TRADING_SEEN_KEY } from '../core/turns.js';
 import { KEY_DEAD_CODES } from '../api/client.js';
@@ -37,6 +38,8 @@ export const STATIC_EVERY = {
     inventory: 30 * 60 * 1000,
     keyInfo: 24 * 60 * 60 * 1000,
     calendar: 12 * 60 * 60 * 1000,
+    // Auto mode's income: networth now, a week ago and a month ago (3 calls).
+    income: 6 * 60 * 60 * 1000,
 };
 
 /** A slow part that failed is asked again after this long (not after its whole period). */
@@ -193,6 +196,13 @@ export class StateFeed {
                 },
             ],
             ['calendar', () => fetchCalendar(this.client)],
+            [
+                'income',
+                () => {
+                    const nowS = Math.floor(at / 1000);
+                    return fetchNetworthHistory(this.client, { stats: NETWORTH_STATS, dates: [nowS - INCOME_DAYS * 86400, nowS - 7 * 86400, null] });
+                },
+            ],
         ];
         for (const [k, fn] of jobs) {
             if (!due(k)) continue;

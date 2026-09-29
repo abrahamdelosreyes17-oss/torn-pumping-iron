@@ -24,7 +24,8 @@ const BOOSTERS = new Set(['steadyBoost', 'steadyMax']);
 
 /** The Plan dropdown: what "best" means. */
 export const PICK_BY = {
-    most: { id: 'most', name: 'Most stats in my budget', what: 'The most stats the budget allows. Default.' },
+    auto: { id: 'auto', name: 'Auto (from your income)', what: 'Picks the plan and items your income affords, and plans around events. Needs a Full key. Default.' },
+    most: { id: 'most', name: 'Most stats in my budget', what: 'The most stats the budget you set allows.' },
     value: { id: 'value', name: 'Best value for money', what: 'The most stats for each $1M: cheaper plans can win.' },
     max: { id: 'max', name: 'Max gains, no budget', what: 'Adds FHC and cans on top whenever they add stats; says what it costs a day.' },
 };
@@ -47,10 +48,11 @@ export function perMillion(r) {
  * @param {object} results - {id: simulateStrategy result}
  * @param {object} o
  * @param {number} [o.budget] - money for the horizon; Infinity when unset
- * @param {string} [o.pickBy] - 'most' (default: most stats in the budget), 'value' (most per $1M in the budget), 'max' (most stats, no budget)
+ * @param {string} [o.pickBy] - 'auto' (most stats in the income budget), 'most' (most stats in the budget), 'value' (most per $1M in the budget), 'max' (most stats, no budget)
+ * @param {string} [o.goal] - 'unlock': the plan that puts the most energy through the gym (unlocks soonest) in the budget
  * @returns {{recommended:string, pickBy:string, alternatives:object[], reasons:string[]}}
  */
-export function recommend(results, { budget = Infinity, bliss = false, pickBy = 'most' } = {}) {
+export function recommend(results, { budget = Infinity, bliss = false, pickBy = 'most', goal = null } = {}) {
     const list = Object.values(results).filter(Boolean);
     if (!list.length) return { recommended: null, pickBy, alternatives: [], reasons: [] };
     const limit = pickBy === 'max' ? Infinity : budget;
@@ -59,7 +61,8 @@ export function recommend(results, { budget = Infinity, bliss = false, pickBy = 
     const inBudget = (pickable.length ? pickable : list).filter((r) => r.cost <= limit);
     const pool = inBudget.length ? inBudget : [(pickable.length ? pickable : list).reduce((a, b) => (b.cost < a.cost ? b : a))];
     const perM = perMillion;
-    if (pickBy === 'value') pool.sort((a, b) => perM(b) - perM(a) || b.gained - a.gained);
+    if (goal === 'unlock') pool.sort((a, b) => (b.energyTrained || 0) - (a.energyTrained || 0) || b.gained - a.gained);
+    else if (pickBy === 'value') pool.sort((a, b) => perM(b) - perM(a) || b.gained - a.gained);
     else pool.sort((a, b) => b.gained - a.gained || perM(b) - perM(a));
     const best = pool[0];
     budget = limit;
@@ -77,12 +80,13 @@ export function recommend(results, { budget = Infinity, bliss = false, pickBy = 
             return { ...alt, why: whyNot(best, alt, { bliss, budget, pickBy }) };
         })
         .sort((a, b) => b.gained - a.gained);
-    return { recommended: best.id, pickBy, perM: perM(best), alternatives, reasons: whyRecommended(best, results, { budget, pickBy }) };
+    return { recommended: best.id, pickBy, goal, perM: perM(best), alternatives, reasons: whyRecommended(best, results, { budget, pickBy, goal }) };
 }
 
 /** One line on why the recommended plan wins. */
-function whyRecommended(best, results, { budget, pickBy = 'most' }) {
+function whyRecommended(best, results, { budget, pickBy = 'most', goal = null }) {
     const out = [];
+    if (goal === 'unlock') out.push('It puts the most energy through the gym, so the next gym opens soonest.');
     if (pickBy === 'value') out.push('The most stats for each $1M you spend.');
     if (pickBy === 'max') out.push('The most stats, whatever it costs.');
     if (BOOSTERS.has(best.id)) out.push('FHC and cans use the booster cooldown, so they add to your Xanax instead of replacing it.');

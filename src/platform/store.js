@@ -14,6 +14,10 @@ export const K = {
     ffsKey: 'ffsKey',
     ffsState: 'ffsState',
     tsKey: 'tsKey',
+    // Auto mode: the Full key (only for your money log) and what it read.
+    fullKey: 'fullKey',
+    fullKeyState: 'fullKeyState',
+    moneyLog: 'moneyLog',
     worker: 'worker',
     settings: 'settings',
     plan: 'plan',
@@ -62,13 +66,15 @@ export const DEFAULT_SETTINGS = {
     donator: true,
     odRisk: 0,
     w3b: true,
+    // Auto mode: energy kept for a faction war (0 = you decide).
+    warReserve: 0,
 };
 
 /**
- * pickBy: the Plan dropdown (most | value | max). specialUse: special refills the plan may use (0 until the
+ * pickBy: the Plan dropdown (auto | most | value | max; Auto is the default, owner 2026-09-29). specialUse: special refills the plan may use (0 until the
  * player sets it); specialStart: how many the account had when it was set (the rest are counted from there).
  */
-export const DEFAULT_PLAN = { type: 'steady', strategy: 'steady', build: 'baldr', buildPicked: false, goal: null, createdAt: 0, strategyPicked: false, pickBy: 'most', specialUse: 0, specialStart: null };
+export const DEFAULT_PLAN = { type: 'steady', strategy: 'steady', build: 'baldr', buildPicked: false, goal: null, createdAt: 0, strategyPicked: false, pickBy: 'auto', specialUse: 0, specialStart: null };
 
 function merged(stored, defaults) {
     return stored && typeof stored === 'object' && !Array.isArray(stored) ? { ...defaults, ...stored } : { ...defaults };
@@ -87,7 +93,13 @@ export function setSettings(partial) {
 }
 
 export function getPlan() {
-    return merged(gmGet(K.plan, null), DEFAULT_PLAN);
+    const p = merged(gmGet(K.plan, null), DEFAULT_PLAN);
+    // Plans saved before Auto existed kept the old default ("most"): they move to Auto once, unless the player chose it.
+    if (p.pickBy === 'most' && !p.pickByPicked && !p.autoMigrated) {
+        p.pickBy = 'auto';
+        p.autoMigrated = true;
+    }
+    return p;
 }
 
 export function setPlan(plan) {
@@ -140,7 +152,7 @@ export function del(name) {
 
 /** What "Your data" in Settings can clear, by group. */
 export const DATA_GROUPS = {
-    keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker],
+    keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker, K.fullKey, K.fullKeyState, K.moneyLog],
     plan: [K.plan, K.recheck],
     progress: [K.statsHistory, K.dayLog, K.dayTotals, K.planLine],
     learning: ['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions],

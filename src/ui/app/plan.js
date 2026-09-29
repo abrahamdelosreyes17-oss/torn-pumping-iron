@@ -60,7 +60,7 @@ function planChooser(ctx) {
             'div',
             { class: 'menu', role: 'listbox', 'aria-label': 'What to plan for' },
             Object.values(PICK_BY).map((o) =>
-                h('button', { type: 'button', class: 'opt' + (o.id === cur ? ' on' : ''), role: 'option', 'aria-selected': String(o.id === cur), onclick: () => { det.open = false; ctx.setPlan({ pickBy: o.id }); } }, [h('b', { text: o.name }), h('span', { text: o.what })]),
+                h('button', { type: 'button', class: 'opt' + (o.id === cur ? ' on' : ''), role: 'option', 'aria-selected': String(o.id === cur), onclick: () => { det.open = false; ctx.setPlan({ pickBy: o.id, pickByPicked: true }); } }, [h('b', { text: o.name }), h('span', { text: o.what })]),
             ),
         );
     det.addEventListener('toggle', () => {
@@ -103,6 +103,23 @@ function buildSelect(ctx) {
     return sel;
 }
 
+/**
+ * The money part of the bar: Auto shows what your income affords (no box to
+ * fill); the manual plans keep the budget box; "Max gains" has none.
+ */
+function budgetControls(m, ctx) {
+    const s = ctx.settings;
+    const pickBy = ctx.plan.pickBy;
+    const a = m.auto;
+    if (pickBy === 'max') return [h('span', { class: 'muted', text: '· no budget' })];
+    if (pickBy === 'auto' && a && a.ready) {
+        return [t('lab', 'with'), h('b', { class: 'white num', text: fmtMoney(Math.round(a.budgetPerDay)) + ' a day' }), h('span', { class: 'muted', text: 'from your income (last ' + Math.round(a.days) + ' days)' }), h('span', { class: 'info', title: 'Income = how fast your networth grew, read from Torn’s own history, plus what the gym cost you in that time. Auto spends at most that a day.', text: 'i' })];
+    }
+    const box = [t('lab', 'with'), numberInput(s.budget || 0, 130, (v) => (v > 0 ? ctx.setSettings({ budget: v }) : ctx.rerender()), { money: true, label: 'Budget' }), h('span', { class: 'muted', text: 'budget' })];
+    if (pickBy === 'auto' && a && a.wait) box.push(h('span', { class: 'tag warn', title: a.wait, text: a.needsKey ? 'Auto needs a Full key' : 'Reading your income…' }));
+    return box;
+}
+
 function controls(m, ctx) {
     const plan = ctx.plan;
     const s = ctx.settings;
@@ -119,9 +136,7 @@ function controls(m, ctx) {
         t('lab', 'for'),
         numberInput(days, 52, (v) => ctx.setSettings({ horizonDays: Math.max(3, Math.min(90, v || 30)) }), { label: 'Days' }),
         h('span', { class: 'muted', text: 'days' }),
-        ctx.plan.pickBy === 'max' ? h('span', { class: 'muted', text: '· no budget' }) : t('lab', 'with'),
-        ctx.plan.pickBy === 'max' ? null : numberInput(s.budget || 0, 130, (v) => (v > 0 ? ctx.setSettings({ budget: v }) : ctx.rerender()), { money: true, label: 'Budget' }),
-        ctx.plan.pickBy === 'max' ? null : h('span', { class: 'muted', text: 'budget' }),
+        ...budgetControls(m, ctx),
         h('span', { class: 'sep' }),
         t('lab', 'Train toward'),
         goalChip,
@@ -186,16 +201,22 @@ function recommendedCard(m, ctx, rec, compare, days) {
     ];
     const reasons = rec.reasons.length ? rec.reasons.join(' ') : 'It gains the most stats inside your budget.';
     const spend = m.spend && m.spend.lastsDays !== null && m.spend.cash !== null ? ' Your ' + fmtMoney(m.spend.cash) + ' on hand lasts about ' + Math.round(m.spend.lastsDays) + ' days at ' + fmtMoney(m.spend.perDay) + ' a day.' : '';
+    const a = m.auto;
+    const autoOn = Boolean(a && a.ready && ctx.plan.pickBy === 'auto');
+    const money = autoOn ? 'Auto · ' + fmtMoney(Math.round(a.budgetPerDay)) + ' a day from your income' : pickBy === 'max' || !(ctx.settings.budget > 0) ? 'no budget' : fmtMoney(ctx.settings.budget);
     const kids = [
-        sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + (pickBy === 'max' || !(ctx.settings.budget > 0) ? 'no budget' : fmtMoney(ctx.settings.budget)) + ' · ' + days + ' days'])),
+        sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + money + ' · ' + days + ' days'])),
         h('div', { class: 'prime num' }, [
             h('div', {}, [h('span', { class: 'pill-tag chalk', text: kindOf(rec.recommended) }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: S.what })]),
             h('div', { class: 'figs' }, figs),
             h('div', { class: 'why' }, [
-                'Wins because: ' + reasons + spend + ' ',
-                using === rec.recommended ? h('span', { class: 'c-good', text: 'You’re on it.' }) : h('a', { href: '#', onclick: (e) => { e.preventDefault(); ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Use it' }),
+                'Wins because: ' + reasons + (autoOn && a.afford ? ' ' + a.afford : spend) + ' ',
+                autoOn ? h('span', { class: 'c-good', text: 'Auto keeps you on it.' }) : using === rec.recommended ? h('span', { class: 'c-good', text: 'You’re on it.' }) : h('a', { href: '#', onclick: (e) => { e.preventDefault(); ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Use it' }),
             ]),
         ]),
+        ctx.plan.pickBy === 'auto' && a && a.wait ? h('div', { class: 'warnb', style: 'margin-top:10px' }, [h('b', { text: a.needsKey ? 'Auto mode needs a Full key' : 'Reading your income' }), h('p', { text: a.wait }), a.needsKey ? h('div', { class: 'acts' }, [h('button', { class: 'btn primary sm', type: 'button', onclick: () => ctx.go('settings'), text: 'Add it in Settings' })]) : null]) : null,
+        autoOn && a.breakdown && a.breakdown.lines.length ? incomeLines(a.breakdown) : null,
+        m.unlock ? unlockBlock(m, ctx, days) : null,
         h('div', { class: 'note2', text: 'If you’re late: steady and goal plans re-time by themselves. Jump plans warn 5 min before the tick, then re-time.' }),
     ];
     if (ctx.ui.goalForm) kids.push(goalForm(m, ctx));
@@ -214,6 +235,33 @@ function recommendedCard(m, ctx, rec, compare, days) {
         );
     }
     return h('div', { class: 'lead' }, kids);
+}
+
+/** Where Auto's income comes from, from the money log (the Full key). */
+function incomeLines(b) {
+    const top = b.lines.filter((l) => l.dir === 'in').slice(0, 4);
+    if (!top.length) return null;
+    return h('div', { class: 'note2 num', style: 'margin-top:8px' }, ['Coming in (your money log, ' + Math.round(b.days) + ' days): ', top.map((l) => l.title + ' ' + fmtMoney(Math.round(l.perDay)) + '/day').join(' · ')]);
+}
+
+/** Unlock goal: when the gym opens on each plan, and what each costs in stats against the plan that gains most. */
+function unlockBlock(m, ctx, days) {
+    const u = m.unlock;
+    const rows = Object.entries(u.rows)
+        .filter(([, r]) => r.days !== null)
+        .sort((x, y) => x[1].days - y[1].days)
+        .slice(0, 6)
+        .map(([id, r]) =>
+            h('tr', { class: id === ctx.plan.strategy ? 'sel' : '' }, [
+                h('td', {}, [h('b', { class: 'w', text: (STRATEGIES[id] || {}).name || id })]),
+                h('td', { class: 'r', text: r.days < 1 ? 'today' : 'in ' + Math.ceil(r.days) + ' days' }),
+                h('td', { class: 'r ' + (r.statsPct < -0.5 ? 'c-bad' : 'muted'), text: r.statsPct < -0.5 ? fmtPct(r.statsPct) + ' stats' : 'most stats' }),
+            ]),
+        );
+    return h('div', { style: 'margin-top:12px' }, [
+        sectionHead('Unlock ' + u.gym.name, meta([fmtInt(u.energyLeft) + ' energy through the gym to go · stats against the plan that gains most in ' + days + ' days']), null, 'h3'),
+        h('table', { class: 'tbl num' }, [h('tbody', {}, rows)]),
+    ]);
 }
 
 function otherPlans(m, ctx, rec, compare, days) {

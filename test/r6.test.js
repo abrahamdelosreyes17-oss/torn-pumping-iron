@@ -69,7 +69,7 @@ test('acks: a skip is remembered for a day and drops that step; a done is only a
     assert.ok(Array.isArray(gmGet('skippedSteps', null)));
 });
 
-test('the Worker never gets the main Torn key, the FFScouter key or the TornStats key', async () => {
+test('the Worker never gets the FFScouter, TornStats or Full key; the main key only after Log in with Discord', async () => {
     const f = recorder({ ok: true });
     const main = 'MainTornKey12345';
     const ffs = 'FfsKeyHarness123';
@@ -81,5 +81,5 @@ test('the Worker never gets the main Torn key, the FFScouter key or the TornStat
     const sent = JSON.stringify(f.calls);
     for (const k of [main, ffs, ts]) assert.ok(!sent.includes(k));
     const { connectDiscord } = await import('../src/discord.js');
-    await assert.rejects(connectDiscord({ base: BASE, tornKey: ffs }, null), /main key/);
+    await assert.rejects(connectDiscord({ base: BASE, tornKey: ffs }, null), /FFScouter, TornStats or Full key/);
 });

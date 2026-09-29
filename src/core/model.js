@@ -20,6 +20,7 @@ import { PICK_BY } from './recommend.js';
 import { XANAX, SAMPLE_PRICES, ITEMS, XANAX_CD_MIN } from './items.js';
 import { HAPPY_CAP } from './gain.js';
 import { JUMP_STACK } from './strategies.js';
+import { effectivePickBy, eventSwitchHeads, affordLine, autoWaitLine, unlockDays, unlockEnergyLeft } from './auto.js';
 
 /*
  * The 30-day build projection is the heavy part of a model (thousands of
@@ -198,7 +199,7 @@ export function drugNotBefore(skipped, now) {
     return Math.max(...today.map((x) => x.stepAt)) + XANAX_CD_MIN * 60 * 1000;
 }
 
-export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, now }) {
+export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, autoSwitch = null, now }) {
     if (!state) return { ready: false };
     // One player context per refresh: the comparison's, when the caller has it.
     const pc = pcIn || playerContext(state, statics, { unlockedKnown, learnedMult });
@@ -317,9 +318,14 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     if (hold) heads.push({ tone: 'warn', text: 'Booster cooldown kept free', sub: hold.name + ' starts within a day: your plan’s ' + (hold.id === 'diabetes' ? 'candy' : 'cans and FHC') + ' count ' + (hold.canMult || hold.candyMult || 1) + '× then' });
     let rec = null;
     let ladder = null;
-    const pickBy = PICK_BY[plan.pickBy] ? plan.pickBy : 'most';
+    // Auto without its Full key (or before the income is read) runs as "most stats in my budget".
+    const pickBy = effectivePickBy(PICK_BY[plan.pickBy] ? plan.pickBy : 'most', auto);
+    const goalKind = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
+    if (auto && auto.needsKey) heads.unshift({ tone: 'warn', text: 'Auto mode needs a Full key', sub: 'Settings › Full key · until then the plan uses your budget', go: 'settings' });
+    const sw = eventSwitchHeads(autoSwitch, now);
+    if (sw) heads.push({ ...sw, go: 'plan' });
     if (compare) {
-        const r = recommend(compare, { budget: settings.budget || Infinity, bliss: pc.perks.bliss, pickBy });
+        const r = recommend(compare, { budget: settings.budget || Infinity, bliss: pc.perks.bliss, pickBy, goal: goalKind });
         rec = r;
         const mine = compare[plan.strategy];
         if (r.recommended === plan.strategy) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is still best' });
@@ -334,6 +340,18 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const recRow = rec && compare ? compare[rec.recommended] : null;
     const cash = statics.inventory && Number.isFinite(statics.inventory.cash) ? statics.inventory.cash : null;
     const spend = recRow ? { perDay: recRow.cost / horizon, budgetPerDay: Number.isFinite(settings.budget) ? settings.budget / horizon : null, cash, lastsDays: cash !== null && recRow.cost > 0 ? cash / (recRow.cost / horizon) : null } : null;
+    // Unlock goal: when the gym opens on each plan (energy through the gym), and what it costs in stats against the best plan.
+    let unlock = null;
+    if (goalKind && compare) {
+        const gym = gymById(plan.goal.gymId, pc.table);
+        const left = unlockEnergyLeft(pc.unlocked, plan.goal.gymId, gymProgress, pc.perks.gymExpMult);
+        if (gym && left !== null) {
+            const most = Object.values(compare).filter(Boolean).reduce((a, b) => (b.gained > a.gained ? b : a), { gained: 0 });
+            const rows = {};
+            for (const [id, r] of Object.entries(compare)) if (r) rows[id] = { days: unlockDays(r, left, horizon), statsPct: most.gained > 0 ? (100 * (r.gained - most.gained)) / most.gained : 0 };
+            unlock = { gym, energyLeft: left, rows, best: most.id || null };
+        }
+    }
 
     return {
         ready: true,
@@ -365,6 +383,8 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         spend,
         events,
         pickBy,
+        auto: auto ? { ...auto, afford: affordLine(auto, recRow ? recRow.cost / horizon : 0), wait: autoWaitLine(auto), switch: autoSwitch } : null,
+        unlock,
         special: { have: state.specialRefills, left: specialLeft(plan, state), use: plan.specialUse || 0 },
         prices,
     };

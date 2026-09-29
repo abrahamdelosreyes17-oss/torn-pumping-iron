@@ -14,7 +14,8 @@ import { W3bClient, fetchW3bListings } from './api/w3b.js';
 import { makeFfsClient, checkFfsKey, fetchFfsTargets } from './api/ffscouter.js';
 import { renderEye } from './ui/app/eye-tab.js';
 import { wantPlayers, eyeView, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient } from './eye-service.js';
-import { discordState, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId, linkDiscord, setTargetsForSync } from './discord.js';
+import { discordState, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId, linkDiscord, setTargetsForSync, loginDiscord, cancelLogin } from './discord.js';
+import { saveFullKey, forgetFullKey, refreshMoneyLog } from './income.js';
 import { WORKER_SETUP_URL } from './api/worker.js';
 import { tabWindow } from './platform/tab-window.js';
 import { listingsFromItemMarket, listingsFromW3b, listingsFromPoints } from './core/market.js';
@@ -27,6 +28,13 @@ import { keyProblem } from './ui/key-status.js';
 import { isPaused, onPauseChange } from './turns.js';
 import { joinFights } from './core/learndata.js';
 import { maybeLearn } from './runtime.js';
+
+/** What Settings shows about the Full key (never the key itself). */
+function fullKeyView() {
+    const st = get(K.fullKeyState, null) || {};
+    const ml = get(K.moneyLog, null);
+    return { has: Boolean(getKey(K.fullKey)), ok: Boolean(st.ok && !st.dead), error: st.error || null, logAt: ml ? ml.at : null, logLines: ml && ml.log ? ml.log.length : 0 };
+}
 
 /** How long fetched prices count as fresh. */
 export const PRICE_FRESH_MS = 5 * 60 * 1000;
@@ -273,7 +281,8 @@ function getCtx() {
         flags: { hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)), hasFfs: Boolean(getKey(K.ffsKey)), ffsDead: Boolean(ffsState && ffsState.registered === false), hasTs: Boolean(getKey(K.tsKey)) },
         keyProblem: keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: statics.keyInfo || null }),
         planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
-        sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), (get(K.planLine, null) || {}).key || ''].join('|'),
+        fullKey: fullKeyView(),
+        sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (get(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), (get(K.planLine, null) || {}).key || ''].join('|'),
         setSettings: (p) => {
             setSettings(p);
             refresh();
@@ -290,6 +299,17 @@ function getCtx() {
             if (isVisible()) setTimeout(() => loadPrices(ids).catch(() => {}), 0);
         },
         saveTornKey,
+        saveFullKey: async (v) => {
+            const r = await saveFullKey(v);
+            refresh();
+            page.app.render(true);
+            return r;
+        },
+        forgetFullKey: () => {
+            forgetFullKey();
+            refresh();
+            page.app.render(true);
+        },
         saveFfsKey,
         saveTsKey,
         revealKey: (name) => getKey(name),
@@ -307,6 +327,8 @@ function getCtx() {
             forget: forgetDiscord,
             linkedId: linkedDiscordId,
             linkCode: linkDiscord,
+            login: (o) => loginDiscord(pi.model, o),
+            cancel: cancelLogin,
             setupUrl: WORKER_SETUP_URL,
         },
         dev: {
@@ -357,6 +379,12 @@ export function bootAppPage({ renderers = {} } = {}) {
     // War mode: the faction you last watched, read every 10 s while that view is open.
     war.fid = getSettings().warFaction || null;
     setInterval(() => pollWarTab().catch(() => {}), 2000);
+    // Auto mode's money log (Full key): at most every 6 hours, visible tab only.
+    const moneyLog = () => {
+        if (isVisible()) refreshMoneyLog().then((r) => { if (r) refresh(); }).catch(() => {});
+    };
+    setTimeout(moneyLog, 5000);
+    setInterval(moneyLog, 10 * 60 * 1000);
     page.app.render(true);
     return page.app;
 }

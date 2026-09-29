@@ -1,6 +1,6 @@
 /*
- * Settings › Discord and the plan sync. The plan's next steps go to the
- * user's own Worker when they change, and at least every 10 minutes (at
+ * Settings › Discord (Log in with Discord) and the plan sync. The plan's
+ * next steps go to the Pumping Iron service when they change, and at least every 10 minutes (at
  * most once a minute, from a visible tab); the Worker reads Torn and pings
  * Discord. Its answer brings the bot's button presses back ("acks"): a
  * Skip re-times the plan, a Done is information only (the done log still
@@ -11,7 +11,8 @@ import { K, get, set, getKey } from './platform/store.js';
 import { tornClient, isVisible } from './runtime.js';
 import { isPaused } from './turns.js';
 import { fetchDiscord } from './api/torn.js';
-import { workerBase, newSecret, stepsForWorker, workerSync, workerTest, workerForget, workerLink } from './api/worker.js';
+import { workerBase, newSecret, stepsForWorker, workerSync, workerTest, workerForget, workerLink, workerLoginStart, workerLoginStatus, DEFAULT_WORKER } from './api/worker.js';
+import { gmOpenTab } from './platform/gm.js';
 
 export const SYNC_MIN_MS = 60 * 1000;
 
@@ -84,7 +85,7 @@ export async function linkedDiscordId() {
  */
 export async function connectDiscord(f, model) {
     const base = workerBase(f.base);
-    if (f.tornKey && [getKey(K.apiKey), getKey(K.ffsKey), getKey(K.tsKey)].filter(Boolean).includes(f.tornKey.trim())) throw new Error('That is your main key. Make a separate custom key for the Worker (user: basic, bars, cooldowns, refills, travel · faction: members, chain, wars · market: itemmarket).');
+    if (f.tornKey && [getKey(K.ffsKey), getKey(K.tsKey), getKey(K.fullKey)].filter(Boolean).includes(f.tornKey.trim())) throw new Error('That is your FFScouter, TornStats or Full key. Use a Torn key made for Pumping Iron (Limited, or a custom key with user: basic, bars, cooldowns, refills, travel).');
     const prev = discordState();
     // A new address: the old Worker forgets you (best-effort), so your key and webhook don't stay there.
     if (prev && prev.base !== base) {
@@ -102,6 +103,84 @@ export async function connectDiscord(f, model) {
     const r = await workerSync(body);
     set(K.worker, { base, secret, discordId: body.discordId || (prev && prev.discordId) || null, connectedAt: Date.now(), lastSync: Date.now(), lastSig: null, ready: Boolean(r.ready) || Boolean(prev && prev.ready), linked: Boolean(r.linked), bot: Boolean(r.bot), lastError: pausedText(r) });
     return r;
+}
+
+/** A short fingerprint of the main key, so a changed key is sent again (the key itself isn't copied). */
+export function keyTag(key) {
+    let h = 2166136261;
+    for (const c of String(key || '')) h = Math.imul(h ^ c.charCodeAt(0), 16777619) >>> 0;
+    return key ? h.toString(36) : '';
+}
+
+/** How long Log in with Discord waits for you on Discord's page, and how often it asks. */
+export const LOGIN_WAIT_MS = 15 * 60 * 1000;
+export const LOGIN_POLL_MS = 3000;
+
+const LOGIN_FAIL = {
+    not_member: 'You’re not in the Pumping Iron Discord server yet. Ask whoever runs it for an invite, then log in again.',
+    denied: 'You cancelled on Discord. Press Log in with Discord again whenever you like.',
+    full: 'The Pumping Iron service is full. Ask whoever runs it.',
+    failed: 'Discord didn’t finish the login. Try again in a minute.',
+    expired: 'The login timed out. Press Log in with Discord again.',
+};
+
+/**
+ * Log in with Discord: open Discord's page in a new tab, wait until you've
+ * said yes there, then connect this browser: the plan and your Torn key go to
+ * the service (encrypted there), and pings start. Being a member of the
+ * Pumping Iron Discord server is what lets you in.
+ * @param {object} model
+ * @param {object} [o] - {onUpdate(text), base (your own service), sleep, open}
+ * @returns {Promise<{ok:boolean, name?:string, text:string}>}
+ */
+export async function loginDiscord(model, { onUpdate = () => {}, base: baseIn = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), open = gmOpenTab } = {}) {
+    const prev = discordState();
+    const base = workerBase(baseIn || (prev && prev.base) || DEFAULT_WORKER);
+    const secret = prev && prev.base === base ? prev.secret : newSecret();
+    const start = await workerLoginStart({ base, secret });
+    open(start.url);
+    set(K.worker, { ...(prev && prev.base === base ? prev : {}), base, secret, login: { id: start.id, at: Date.now() } });
+    onUpdate('Waiting for you on Discord…');
+    const until = Date.now() + LOGIN_WAIT_MS;
+    while (Date.now() < until) {
+        await sleep(LOGIN_POLL_MS);
+        const w = discordState();
+        // Cancelled here, or another login started meanwhile.
+        if (!w || !w.login || w.login.id !== start.id) return { ok: false, text: 'Login cancelled.' };
+        let st;
+        try {
+            st = await workerLoginStatus({ base, secret, id: start.id });
+        } catch (e) {
+            if (e && e.http === 404) return finishLogin(false, LOGIN_FAIL.expired);
+            continue; // A blip: ask again.
+        }
+        if (st.state === 'open') continue;
+        if (st.state !== 'done') return finishLogin(false, LOGIN_FAIL[st.state] || LOGIN_FAIL.failed);
+        // In: the plan and the key go now, so pings start without waiting for the next sync.
+        const key = getKey(K.apiKey);
+        const statics = get(K.userStatic, {}) || {};
+        const ki = statics.keyInfo || {};
+        const body = { base, secret, plan: planPayload(model) };
+        if (key) body.tornKey = key;
+        if (ki.userId) body.playerId = ki.userId;
+        if (ki.factionId !== undefined) body.factionId = ki.factionId || null;
+        const r = await workerSync(body);
+        set(K.worker, { ...(discordState() || {}), base, secret, login: null, discordName: st.name || null, linked: Boolean(r.linked), bot: Boolean(r.bot), ready: Boolean(r.ready), keyTag: keyTag(key), connectedAt: Date.now(), lastSync: Date.now(), lastSig: null, lastError: pausedText(r) });
+        return { ok: true, name: st.name || null, text: 'Connected as ' + (st.name || 'you') + '. Pings come as DMs from the Pumping Iron bot.' };
+    }
+    return finishLogin(false, LOGIN_FAIL.expired);
+}
+
+function finishLogin(ok, text) {
+    const w = discordState();
+    if (w) set(K.worker, { ...w, login: null });
+    return { ok, text };
+}
+
+/** Stop waiting for a login (the Cancel button). */
+export function cancelLogin() {
+    const w = discordState();
+    if (w && w.login) set(K.worker, { ...w, login: null });
 }
 
 /** Link Discord: a one-time code from your Worker (on a click only; never stored). */
@@ -144,7 +223,11 @@ export function maybeSyncPlan(m, now = Date.now()) {
     const sig = JSON.stringify(plan.steps.map((s) => [s.kind, s.label, Math.round(s.at / 300)]));
     const pendingAcks = w.pendingAcks || [];
     const targetsDue = sync.targets && sync.targetsSig !== w.targetsSig && now - (w.targetsAt || 0) >= TARGETS_EVERY_MS;
-    const due = sig !== w.lastSig || now - (w.lastSync || 0) >= SYNC_EVERY_MS || pendingAcks.length > 0 || targetsDue;
+    // Logged in with Discord: a new main key goes along once (the service pauses pings on a refused key until then).
+    const key = getKey(K.apiKey);
+    const tag = keyTag(key);
+    const keyDue = Boolean(w.discordName && key && w.keyTag !== tag);
+    const due = sig !== w.lastSig || now - (w.lastSync || 0) >= SYNC_EVERY_MS || pendingAcks.length > 0 || targetsDue || keyDue;
     if (!due || now - (w.lastSync || 0) < SYNC_MIN_MS) return false;
     const statics = get(K.userStatic, {}) || {};
     const ki = statics.keyInfo || {};
@@ -152,13 +235,14 @@ export function maybeSyncPlan(m, now = Date.now()) {
     if (ki.userId) body.playerId = ki.userId;
     if (ki.factionId !== undefined) body.factionId = ki.factionId || null;
     if (targetsDue) body.targets = sync.targets;
-    set(K.worker, { ...w, lastSync: now, lastSig: sig, pendingAcks: [], ...(targetsDue ? { targetsSig: sync.targetsSig, targetsAt: now } : {}) });
+    if (keyDue) body.tornKey = key;
+    set(K.worker, { ...w, lastSync: now, lastSig: sig, pendingAcks: [], ...(targetsDue ? { targetsSig: sync.targetsSig, targetsAt: now } : {}), ...(keyDue ? { keyTag: tag } : {}) });
     workerSync(body)
         .then((r) => {
             const acked = applyAcks(r.acks, Date.now());
             set(K.worker, { ...(get(K.worker, {}) || {}), lastError: pausedText(r), ready: Boolean(r.ready), linked: Boolean(r.linked), bot: Boolean(r.bot), pendingAcks: acked });
         })
         // Failed: the plan counts as unsent (next minute tries again); the acks wait too.
-        .catch((e) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks, lastSig: w.lastSig }));
+        .catch((e) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks, lastSig: w.lastSig, ...(keyDue ? { keyTag: w.keyTag } : {}) }));
     return true;
 }

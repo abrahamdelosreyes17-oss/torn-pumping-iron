@@ -233,3 +233,54 @@ export function keyIsEnough(info) {
     const missing = missingSelections(info);
     return missing === null ? null : missing.length === 0;
 }
+
+/**
+ * Networth now and at past dates (Auto mode's income), from personal stats:
+ * one call per date, the `timestamp` form gives the values then. Public
+ * access, so the main key reads it.
+ * @param {object} client
+ * @param {object} o - {stats: names (≤10), dates: unix seconds (null = now)}
+ * @returns {Promise<{at:number, networth:number, cash:number}[]>} ms times, oldest first
+ */
+export async function fetchNetworthHistory(client, { stats, dates }) {
+    const out = [];
+    for (const ts of dates) {
+        const ps = await fetchPersonalStats(client, { stat: stats, timestamp: ts || null });
+        const v = personalStatValues(ps);
+        if (!Number.isFinite(v.networth) || !(v.networth || v.networthwallet)) continue;
+        // Money you can spend: wallet, vault, Cayman (as fetchMoney counts it; the city bank is locked in).
+        const cash = (v.networthwallet || 0) + (v.networthvault || 0) + (v.networthcayman || 0);
+        out.push({ at: ts ? ts * 1000 : Date.now(), networth: v.networth, cash });
+    }
+    return out.sort((a, b) => a.at - b.at);
+}
+
+/** Torn's log categories ({id, title}); public. */
+export async function fetchLogCategories(client) {
+    const d = await client.get('v2/torn/logcategories');
+    return (d && d.logcategories) || [];
+}
+
+/**
+ * Your money log since a time (Full key only): the categories whose titles
+ * are about money, newest first, as {at, title, category, money} where money
+ * is the entry's main amount (0 when it has none).
+ */
+export async function fetchMoneyLog(client, { from, categories, perCategory = 100 }) {
+    const out = [];
+    for (const c of categories) {
+        const d = await client.get('v2/user/log', { cat: c.id, from, limit: perCategory });
+        for (const e of (d && d.log) || []) out.push({ at: Number(e.timestamp) * 1000, title: String((e.details && e.details.title) || ''), category: c.title, money: moneyOf(e.data) });
+    }
+    return out.sort((a, b) => b.at - a.at);
+}
+
+/** The amount a log entry is about: the first money-like field it carries. */
+export function moneyOf(data) {
+    if (!data || typeof data !== 'object') return 0;
+    for (const k of ['money', 'total_value', 'value', 'cost', 'total_cost', 'price', 'amount', 'worth']) {
+        const n = Number(data[k]);
+        if (Number.isFinite(n) && n > 0) return n;
+    }
+    return 0;
+}

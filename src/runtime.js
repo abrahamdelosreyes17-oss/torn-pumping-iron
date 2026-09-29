@@ -5,7 +5,7 @@
  */
 
 import { gmOnChange } from './platform/gm.js';
-import { K, get, set, del, getKey, getSettings, getPlan, getPrices, getShared } from './platform/store.js';
+import { K, get, set, del, getKey, getSettings, getPlan, setPlan, getPrices, getShared } from './platform/store.js';
 import { tabWindow } from './platform/tab-window.js';
 import { makeTabId, LEADER_HEARTBEAT_MS } from './core/leader.js';
 import { TornApiClient } from './api/client.js';
@@ -13,6 +13,9 @@ import { StateFeed } from './feed/state.js';
 import { normalizeState, tornDayStart } from './core/bars.js';
 import { buildModel, compareStrategies, blissWhatIf, playerContext, buildOf, isDrugEntry, specialLeft } from './core/model.js';
 import { targetShares } from './core/plan.js';
+import { recommend } from './core/recommend.js';
+import { upcomingEvents } from './core/events.js';
+import { incomeFrom, autoState, effectiveSettings, eventToPlan, eventSwitch, incomeBreakdown } from './core/auto.js';
 import { livePrices } from './core/market.js';
 import { TORN_PER_MINUTE_ALONE } from './core/turns.js';
 import { isPaused } from './turns.js';
@@ -66,6 +69,62 @@ export function tornClient() {
     return pi.client;
 }
 
+/**
+ * The Full key's own client (Auto mode: only your money log). Same shared
+ * 70-a-minute window as the main client; a refused key is marked, never retried.
+ */
+export function fullKeyClient() {
+    if (pi.fullClient) return pi.fullClient;
+    const win = tabWindow('apiWindow', pi.tabId, storeApi);
+    pi.fullClient = new TornApiClient({
+        maxPerMinute: TORN_PER_MINUTE,
+        getKey: () => ((get(K.fullKeyState, {}) || {}).dead ? '' : getKey(K.fullKey)),
+        loadWindow: () => win.load(),
+        addToWindow: (at) => win.add(at),
+        loadPause: () => get(K.apiPause, null),
+        savePause: (p) => set(K.apiPause, p),
+        isVisible,
+        onDeadKey: () => set(K.fullKeyState, { ...(get(K.fullKeyState, {}) || {}), ok: false, dead: true, error: 'Torn refused the Full key', at: Date.now() }),
+        isPaused: () => isPaused(),
+    });
+    return pi.fullClient;
+}
+
+/** Is a working Full key saved (Auto mode's condition)? */
+export function hasFullKey() {
+    const st = get(K.fullKeyState, {}) || {};
+    return Boolean(getKey(K.fullKey)) && st.ok === true && !st.dead;
+}
+
+/**
+ * Auto mode for this refresh: income from the networth history (plus what
+ * the plan spent meanwhile), the budget it affords, and whether a coming
+ * event wins enough to switch the plan for it.
+ */
+function autoFor(plan, settings, statics) {
+    const horizon = settings.horizonDays || 30;
+    const r = pi.compare && pi.compare[plan.strategy];
+    const income = incomeFrom(statics.income || [], { spentPerDay: r ? r.cost / horizon : 0 });
+    const auto = autoState({ plan, settings, hasFullKey: hasFullKey(), income });
+    const ml = get(K.moneyLog, null);
+    auto.breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now()) : null;
+    auto.income = income;
+    return auto;
+}
+
+/** The comparison over a coming event's days, with and without its multiplier (cached per event and inputs). */
+function eventComparisonFor(event, state, pc, shares, settings, budgetPerDay) {
+    const days = Math.max(1, Math.round((event.end - event.start) / (24 * 3600e3)));
+    const key = [event.id, event.start, pi.compareKey, days, Math.round(budgetPerDay || 0)].join('|');
+    if (pi.eventCompare && pi.eventCompare.key === key) return pi.eventCompare;
+    const es = { ...settings, horizonDays: days, budget: Number.isFinite(budgetPerDay) ? budgetPerDay * days : Infinity };
+    const prices = getPrices();
+    const special = 0;
+    const boosted = { ...pc, perks: { ...pc.perks, candyMult: (pc.perks.candyMult || 1) * (event.candyMult || 1), canMult: (pc.perks.canMult || 1) * (event.canMult || 1) } };
+    pi.eventCompare = { key, eventCompare: compareStrategies({ state, pc: boosted, shares, settings: es, prices, special }), normalCompare: compareStrategies({ state, pc, shares, settings: es, prices, special }) };
+    return pi.eventCompare;
+}
+
 /** Re-run the strategy comparison at most once per Torn hour or when inputs change. */
 function comparisonFor(state, statics, plan, settings) {
     const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult });
@@ -104,10 +163,28 @@ export function currentModel(now = Date.now()) {
     const state = s && s.api ? normalizeState(s.api, s.at) : null;
     if (!state) return { ready: false, hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)) };
     const statics = getShared(K.userStatic, {}) || {};
-    const plan = getPlan();
-    const settings = getSettings();
+    let plan = getPlan();
+    const auto = autoFor(plan, getSettings(), statics);
+    // Auto: the plans run inside what your income affords; without its Full key it's "most stats in my budget".
+    const settings = effectiveSettings(getSettings(), auto);
     const { compare, pc } = comparisonFor(state, statics, plan, settings);
-    return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, whatIf: pi.whatIf || null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+    let autoSwitch = null;
+    if (auto.ready && compare) {
+        const goal = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
+        let strategy = recommend(compare, { budget: settings.budget, bliss: pc.perks.bliss, pickBy: 'auto', goal }).recommended;
+        // A coming event that multiplies what a plan uses: switch for it when it wins clearly (stacking skips natural energy).
+        const events = statics.calendar ? upcomingEvents(statics.calendar.calendar, now, { startTime: statics.calendar.startTime }) : [];
+        const ev = eventToPlan(events, now);
+        if (ev) {
+            const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
+            const ec = eventComparisonFor(ev, state, pc, shares, settings, auto.budgetPerDay);
+            autoSwitch = eventSwitch({ event: ev, eventCompare: ec.eventCompare, normalCompare: ec.normalCompare, budgetPerDay: auto.budgetPerDay, now });
+            if (autoSwitch && autoSwitch.active) strategy = autoSwitch.id;
+        }
+        // The plan follows Auto's pick (saved, so the day plan, Discord and Progress all see the same plan).
+        if (strategy && strategy !== plan.strategy) plan = setPlan({ ...plan, strategy, strategyPicked: false, createdAt: now });
+    }
+    return buildModel({ state, statics, plan, settings, auto, autoSwitch, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, whatIf: pi.whatIf || null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
 }
 
 /**

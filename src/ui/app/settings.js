@@ -20,12 +20,12 @@ import { developerSection, renderDeveloper } from './developer.js';
 
 /** Torn's API ToS disclosure for the userscript's Torn key. */
 export const TOS_TORN = [
-    ['Data storage', 'Only locally, in this browser'],
-    ['Data sharing', 'Nobody. (Other data, never this key: player ids you look at go to FFScouter and TornStats if you connect them; item ids go to TornW3B; if you set up your own Discord service, it gets your plan\u2019s next steps, your player and faction id, and Torn Eye\u2019s list: player ids, names, levels and colour bands.)'],
+    ['Data storage', 'In this browser. If you log in with Discord, also on the Pumping Iron service (a Cloudflare Worker run by the Pumping Iron owner), the key encrypted (AES-GCM), until you press Disconnect'],
+    ['Data sharing', 'Nobody. (Other data, never this key: player ids you look at go to FFScouter and TornStats if you connect them; item ids go to TornW3B; with Discord pings on, the Pumping Iron service gets your plan\u2019s next steps, your player and faction id, and Torn Eye\u2019s lists: player ids, names, levels, colour bands, win % and watch tags.)'],
     ['Purpose of use', 'Personal gain: gym planning and fight estimates'],
-    ['Key storage & sharing', 'Stored locally / Not shared'],
+    ['Key storage & sharing', 'Stored locally / With Discord pings: stored (encrypted) on the Pumping Iron service and used only for your own pings and the bot commands you type; shared with nobody'],
     ['Key access level', 'Limited (user: bars, cooldowns, refills, battlestats, gym, perks, property, equipment, inventory, attacks, personalstats, discord, profile; torn: gyms, items, itemdetails, attacklog; market: itemmarket, pointsmarket; faction: members; key: info)'],
-    ['Other services', 'This key goes only to api.torn.com. FFScouter and TornStats use the key you give them in their own sections (it may be the same Torn key, which they already hold). TornW3B and your Discord service never receive it. The webpage\u2019s font comes from fonts.googleapis.com (no data of yours).'],
+    ['Other services', 'This key goes to api.torn.com, and to the Pumping Iron service only if you log in with Discord. FFScouter and TornStats use the key you give them in their own sections (it may be the same Torn key, which they already hold). TornW3B never receives it. The webpage\u2019s font comes from fonts.googleapis.com (no data of yours).'],
 ];
 
 export const TOS_FFS = [
@@ -44,7 +44,16 @@ export const TOS_TS = [
     ['Key access level', 'The key on your TornStats account; we only read spies'],
 ];
 
-/** The Worker's own key (a custom key made for it), stored on the user's Cloudflare Worker. */
+/** Auto mode's Full key: only in this browser, only for the money log. */
+export const TOS_FULL = [
+    ['Data storage', 'Only locally, in this browser: the key, and a summary of your money log (titles, amounts, times; 30 days)'],
+    ['Data sharing', 'Nobody. Never sent to the Pumping Iron service, FFScouter, TornStats or TornW3B'],
+    ['Purpose of use', 'Personal gain: Auto mode sizes your gym plan to your income'],
+    ['Key storage & sharing', 'Stored locally / Not shared'],
+    ['Key access level', 'Full (used only for user: log, the money categories; nothing else is read with it)'],
+];
+
+/** Your own service (Advanced): the key you give it, stored on your own Cloudflare Worker. */
 export const TOS_WORKER = [
     ['Data storage', 'On your own Cloudflare Worker (D1), the key encrypted, until you press Forget'],
     ['Data sharing', 'Nobody: pings and replies only you can see (DMs, replies only you see, or your own webhook channel). It also holds what Pumping Iron syncs: your plan\u2019s next steps, your player and faction id, and Torn Eye\u2019s list (player ids, names, levels, colour bands) for /targets and /war.'],
@@ -167,9 +176,79 @@ function linkRow(ctx) {
     return box;
 }
 
+/** Settings › Discord: one button (Log in with Discord); connected, one line; the old form under Advanced. */
 function discordSection(ctx) {
     const d = ctx.discord;
     const st = d.state();
+    const msg = h('span', { class: 'msg' });
+    const say = (tone, text) => {
+        msg.className = 'msg' + (tone ? ' ' + tone : '');
+        msg.textContent = text;
+    };
+    if (ctx.ui.discordLogin) say('', ctx.ui.discordLogin);
+    const login = async () => {
+        ctx.ui.discordLogin = 'Opening Discord…';
+        ctx.rerender();
+        try {
+            const r = await d.login({ onUpdate: (t) => { ctx.ui.discordLogin = t; ctx.rerender(); } });
+            ctx.ui.discordLogin = null;
+            ctx.ui.discordResult = { ok: r.ok, text: r.text };
+        } catch (e) {
+            ctx.ui.discordLogin = null;
+            ctx.ui.discordResult = { ok: false, text: String((e && e.message) || e) };
+        }
+        ctx.rerender();
+    };
+    const result = ctx.ui.discordResult ? h('span', { class: 'msg ' + (ctx.ui.discordResult.ok ? 'ok' : 'bad'), text: ctx.ui.discordResult.text }) : null;
+    const waiting = Boolean(st && st.login);
+    const connected = Boolean(st && st.discordName && !waiting);
+    if (!ctx.ui.discordAdvanced && (!st || !st.base || st.discordName || waiting)) {
+        if (connected) {
+            const test = async () => {
+                say('', 'Sending…');
+                try {
+                    await d.test();
+                    say('ok', 'Sent. Check your Discord DMs.');
+                } catch (e) {
+                    say('bad', String((e && e.message) || e));
+                }
+            };
+            const tag = st.lastError ? stateTag('bad', 'Paused') : st.ready ? stateTag('ok', 'Working') : stateTag('bad', 'Not pinging yet');
+            return settingsSection('Discord pings', tag, [
+                h('div', { class: 'row', style: 'flex-wrap:wrap' }, [
+                    h('span', {}, ['Connected as ', h('b', { class: 'white', text: st.discordName })]),
+                    h('span', { class: 'muted num', text: '· last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') }),
+                    h('span', { class: 'grow' }),
+                    h('button', { class: 'btn sm', type: 'button', onclick: test, text: 'Send a test ping' }),
+                    confirmButton(ctx, 'discord-forget', 'Disconnect', async () => { try { await d.forget(); } finally { ctx.ui.discordResult = { ok: true, text: 'Disconnected: the service forgot your key, plan and pings.' }; ctx.rerender(); } }),
+                ]),
+                st.lastError ? h('div', { class: 'warnb' }, [h('b', { text: 'Pings are paused' }), h('p', { text: st.lastError + ' Save a working Torn key above; it goes to the service by itself.' })]) : null,
+                !st.ready && !st.lastError ? h('p', { class: 'muted', text: 'Waiting for the first sync (open Home once).' }) : null,
+                h('p', { class: 'muted', text: 'DMs from the Pumping Iron bot when a step is due, with Done / Snooze / Skip. In the server: /timers, /next, /war, /settings.' }),
+                msg,
+                result,
+                h('details', { class: 'dis' }, [h('summary', { text: 'How your Torn key is used there' }), tosTable(TOS_TORN)]),
+            ]);
+        }
+        return settingsSection('Discord pings', waiting ? stateTag('off', 'Waiting for Discord') : stateTag('off', 'Not connected'), [
+            h('p', { text: 'Get a Discord DM when a step is due, even with your PC off: "Drug cooldown ends in 5 min · Xanax #2, then DEX × 27". You need to be in the Pumping Iron Discord server.' }),
+            h('div', { class: 'row' }, [
+                waiting ? h('button', { class: 'btn', type: 'button', onclick: () => { d.cancel(); ctx.ui.discordLogin = null; ctx.rerender(); }, text: 'Cancel' }) : h('button', { class: 'btn primary', type: 'button', onclick: login, text: 'Log in with Discord' }),
+                waiting ? h('span', { class: 'muted', text: ctx.ui.discordLogin || 'Waiting for you on Discord… (the tab it opened)' }) : null,
+            ]),
+            msg,
+            result,
+            h('p', { class: 'muted', text: 'Your Torn key goes to the Pumping Iron service, encrypted, so it can read your timers while you’re away. Disconnect removes it.' }),
+            h('details', { class: 'dis' }, [h('summary', { text: 'How your Torn key is used there' }), tosTable(TOS_TORN)]),
+            h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.discordAdvanced = true; ctx.rerender(); }, text: 'Advanced: your own service' }),
+        ]);
+    }
+    return advancedDiscordSection(ctx, st);
+}
+
+/** Advanced: your own Cloudflare Worker (SETUP.md), the webhook, a link code. */
+function advancedDiscordSection(ctx, st) {
+    const d = ctx.discord;
     // Working: one line (owner). Edit opens the full form again.
     if (st && st.ready && !st.lastError && !ctx.ui.discordEdit) {
         const msg1 = h('span', { class: 'msg' });
@@ -238,7 +317,8 @@ function discordSection(ctx) {
         st ? h('p', { class: 'num', text: 'Last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') + (st.lastError ? ' · ' + st.lastError : '') + (st.bot ? ' · the bot is set up: DMs with Done / Snooze / Skip, /plan, /timers' : '') }) : null,
         st && st.bot && !st.linked ? linkRow(ctx) : null,
         st && st.ready ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.discordEdit = false; ctx.rerender(); }, text: 'Done' }) : null,
-        h('details', { class: 'dis' }, [h('summary', { text: 'How the Worker’s key is used' }), tosTable(TOS_WORKER), h('p', { style: 'margin-top:6px', text: 'Make a new custom key for the Worker in Torn (API settings). Your main key never goes to the Worker.' })]),
+        h('details', { class: 'dis' }, [h('summary', { text: 'How the Worker’s key is used' }), tosTable(TOS_WORKER), h('p', { style: 'margin-top:6px', text: 'Your own service: the key you paste here is stored encrypted on your Cloudflare Worker.' })]),
+        h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.discordAdvanced = false; ctx.rerender(); }, text: 'Back to Log in with Discord' }),
     ];
     return settingsSection('Discord pings', tag, rows);
 }
@@ -278,6 +358,20 @@ export function renderSettings(m, ctx) {
 
     const discordSec = discordSection(ctx);
 
+    // Auto mode's Full key: only for the money log.
+    const fk = ctx.fullKey || {};
+    const full = keyRow({ label: 'Full key', placeholder: fk.has ? 'Saved · paste a new one to replace it' : 'Paste a Full access key', saveText: 'Check and save', onSave: ctx.saveFullKey, onReveal: () => ctx.revealKey(K.fullKey) });
+    const fullState = !fk.has ? stateTag('off', ctx.plan && ctx.plan.pickBy === 'auto' ? 'Auto mode needs it' : 'Optional') : fk.ok ? stateTag('ok', 'Connected · Full') : stateTag('bad', fk.error || 'Not a Full key');
+    const fullSec = settingsSection('Full key (Auto mode)', fullState, [
+        h('p', { text: 'Auto mode, the default plan, sizes your gym spending to your income. It needs a Full key, used for one thing only: reading your money log to see where your income comes from. It never leaves this browser.' }),
+        full.row,
+        full.msg,
+        fk.has ? h('div', { class: 'row' }, [fk.logAt ? h('span', { class: 'muted num', text: 'Money log read ' + new Date(fk.logAt).toISOString().slice(11, 16) + ' UTC' + (fk.logLines ? ' · ' + fk.logLines + ' lines' : '') }) : h('span', { class: 'muted', text: 'Money log not read yet' }), confirmButton(ctx, 'full-forget', 'Forget the Full key', () => { ctx.forgetFullKey(); ctx.rerender(); })]) : null,
+        h('div', { class: 'row' }, [t('lab', 'Keep for war days'), h('input', { class: 'inp num', style: 'width:72px', inputmode: 'numeric', 'aria-label': 'Energy kept for war days', value: String(s.warReserve || 0), onchange: (ev) => ctx.setSettings({ warReserve: Math.max(0, Math.min(1000, Math.round(Number(ev.target.value) || 0))) }) }), h('span', { class: 'muted', text: 'energy · during a faction war the plan never trains below this (0 = you decide)' })]),
+        h('p', {}, ['No Full key? Pick a manual plan on Plan (Most stats in my budget) and set the budget yourself. ', h('a', { href: apiKeyPageUrl(), target: '_blank', rel: 'noopener', text: 'Make a Full key' })]),
+        h('details', { class: 'dis', open: !fk.has }, [h('summary', { text: 'How this key is used' }), tosTable(TOS_FULL)]),
+    ]);
+
     // Torn Eye's colour bands (moved here from the Torn Eye pane).
     const limits = { ...DEFAULT_BAND_LIMITS, ...(s.bands || {}) };
     const bandCell = (band) => h('span', { class: 'band2' }, [h('i', { style: 'background:' + BAND_COLORS[band] }), BAND_WORDS[band]]);
@@ -311,7 +405,7 @@ export function renderSettings(m, ctx) {
     const devSec = developerSection(m, ctx);
 
     const dataRows = [
-        ['keys', 'Keys', 'Torn, FFScouter, TornStats, Discord service', 'Forget keys'],
+        ['keys', 'Keys', 'Torn, Full, FFScouter, TornStats, Discord service', 'Forget keys'],
         ['plan', 'Plan and build', ctx.planLine, 'Reset'],
         ['progress', 'Progress history', d.historyDays + ' day' + (d.historyDays === 1 ? '' : 's') + ' of stats', 'Clear'],
         ['prices', 'Price history', d.priceItems + ' item' + (d.priceItems === 1 ? '' : 's'), 'Clear'],
@@ -324,6 +418,6 @@ export function renderSettings(m, ctx) {
         h('div', {}, [sectionHead('What it never does', null, null, 'h3'), headsList([{ tone: 'plain', text: 'Train, buy, use or attack', sub: 'Fill only types a number' }, { tone: 'plain', text: 'Load a Torn page by itself' }, { tone: 'plain', text: 'Ping from a Torn tab', sub: 'only your Discord service does' }])]),
     ];
     // One card per section, ordered by use.
-    return { main: [tornSec, discordSec, ffsSec, tsSec, bandsSec, overlaySec, displaySec, devSec].filter(Boolean), pane };
+    return { main: [tornSec, fullSec, discordSec, ffsSec, tsSec, bandsSec, overlaySec, displaySec, devSec].filter(Boolean), pane };
 }
 
