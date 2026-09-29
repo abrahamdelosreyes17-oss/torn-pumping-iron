@@ -35,6 +35,8 @@ test('each Torn page is recognised by its own address', () => {
         ['https://www.torn.com/profiles.php?XID=4', PAGE_PROFILE],
         ['https://www.torn.com/factions.php?step=profile&ID=9', PAGE_FACTION],
         ['https://www.torn.com/loader.php?sid=attack&user2ID=77', PAGE_ATTACK],
+        ['https://www.torn.com/page.php?sid=attack&user2ID=77', PAGE_ATTACK],
+        ['https://www.torn.com/page.php?sid=attackData', PAGE_OTHER],
         ['https://www.torn.com/index.php', PAGE_OTHER],
         ['', PAGE_OTHER],
         [null, PAGE_OTHER],

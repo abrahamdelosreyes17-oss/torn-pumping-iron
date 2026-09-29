@@ -323,6 +323,7 @@
         plan: [K.plan, K.recheck],
         progress: [K.statsHistory, K.dayLog, K.dayTotals],
         prices: [K.priceHistory, K.prices],
+        eye: ['eyeTargets', 'myAttacks'],
     };
 
     function clearGroup(group) {
@@ -2892,7 +2893,7 @@
         if (url.includes('/pmarket.php')) return PAGE_POINTS;
         if (url.includes('/profiles.php')) return PAGE_PROFILE;
         if (url.includes('/factions.php')) return PAGE_FACTION;
-        if (url.includes('sid=attack') && url.includes('loader.php')) return PAGE_ATTACK;
+        if (/[?&]sid=attack(&|#|$)/.test(url) && (url.includes('loader.php') || url.includes('page.php'))) return PAGE_ATTACK;
         return PAGE_OTHER;
     }
 
@@ -5549,6 +5550,872 @@
         }
     }
 
+    /* ===== src/core/eye/bands.js ===== */
+    /*
+     * Torn Eye's colour bands (user-set in the Torn Eye tab; ENGINE-SPEC §10):
+     * Stomp, Good, Tough, Can't win, or No data. Never "FF".
+     */
+
+    const BAND_ORDER = ['stomp', 'good', 'tough', 'cant', 'none'];
+    const BAND_WORDS = { stomp: 'Stomp', good: 'Good', tough: 'Tough', cant: "Can't win", none: 'No data' };
+    const BAND_COLORS = { stomp: '#3fbf5a', good: '#a6e08a', tough: '#f0a040', cant: '#ff5a4e', none: '#6c737a' };
+    const DEFAULT_BAND_LIMITS = { stomp: { win: 99, keep: 75 }, good: { win: 90, keep: 40 }, tough: { win: 60, keep: 0 } };
+
+    /**
+     * @param {object|null} f - forecast() output (pWin 0..1, keep 0..1)
+     * @param {object} [limits] - {stomp:{win,keep}, good:{win,keep}, tough:{win}} in percent
+     */
+    function bandOf(f, limits = DEFAULT_BAND_LIMITS) {
+        if (!f || !Number.isFinite(f.pWin)) return 'none';
+        const win = f.pWin * 100;
+        const keep = (f.keep || 0) * 100;
+        const L = { ...DEFAULT_BAND_LIMITS, ...(limits || {}) };
+        if (win >= L.stomp.win && keep >= L.stomp.keep) return 'stomp';
+        if (win >= L.good.win && keep >= L.good.keep) return 'good';
+        if (win >= L.tough.win) return 'tough';
+        return 'cant';
+    }
+
+    /** "win 96% · keep ~62% · 2.80 respect" (no "~" when the stats are exact). */
+    function chipFigures(f, est, respect) {
+        if (!f) return 'no estimate yet';
+        const parts = ['win ' + Math.round(f.pWin * 100) + '%'];
+        if (f.pWin >= 0.05 && f.keep !== null && f.keep !== undefined) parts.push('keep ' + (est && est.confidence === 'exact' ? '' : '~') + Math.round(f.keep * 100) + '%');
+        if (f.pWin < 0.05 && est && est.confidence === 'rough') parts.push('rough estimate');
+        else if (respect) parts.push(respect.toFixed(2) + ' respect');
+        return parts.join(' · ');
+    }
+
+    /* ===== src/ui/app/eye-tab.js ===== */
+    /*
+     * Torn Eye tab (mockups/O-torn-eye.html): targets from FFScouter ranked by
+     * our own fight estimate (easy ↔ respect slider), the colour bands you set,
+     * and where the numbers come from.
+     */
+
+
+
+
+
+
+
+    /** Rank targets: 0 = easiest first (win × HP kept), 1 = most respect you can still win. */
+    function rankTargets(rows, slider) {
+        const s = Math.max(0, Math.min(1, slider));
+        const maxR = Math.max(1e-9, ...rows.map((r) => r.respect || 0));
+        const score = (r) => {
+            if (!r.forecast) return -1;
+            const easy = r.forecast.pWin * (r.forecast.keep || 0);
+            const resp = ((r.respect || 0) / maxR) * r.forecast.pWin;
+            return (1 - s) * easy + s * resp;
+        };
+        return [...rows].sort((a, b) => score(b) - score(a));
+    }
+
+    function bandCell(band) {
+        return h('span', { class: 'band', style: 'color:' + BAND_COLORS[band] }, [h('i', { class: 'dot' }), BAND_WORDS[band]]);
+    }
+
+    function ago(ts, now) {
+        if (!ts) return '—';
+        const d = Math.round((now - ts) / 86400000);
+        return d < 1 ? 'today' : d + ' d';
+    }
+
+    function renderEye(m, ctx) {
+        const e = ctx.eye;
+        const s = ctx.settings;
+        const f = ctx.ui.eyeFilters || (ctx.ui.eyeFilters = { minLevel: 1, maxLevel: 100, inactive: true, factionless: false, hideCant: true, slider: 50 });
+        const now = Date.now();
+        const rowsAll = e.rows();
+        const shown = rankTargets(rowsAll.filter((r) => !(f.hideCant && r.band === 'cant')), f.slider / 100);
+        const hidden = rowsAll.filter((r) => f.hideCant && r.band === 'cant');
+        const inputs = {};
+        const refresh = () => {
+            f.minLevel = Math.max(1, Math.min(100, Number(inputs.min.value) || 1));
+            f.maxLevel = Math.max(f.minLevel, Math.min(100, Number(inputs.max.value) || 100));
+            e.load({ minLevel: f.minLevel, maxLevel: f.maxLevel, inactiveOnly: f.inactive ? 1 : 0, factionless: f.factionless ? 1 : null });
+        };
+        const check = (label, key, reload) => h('label', { class: 'check' }, [h('input', { type: 'checkbox', checked: f[key], onchange: (ev) => { f[key] = ev.target.checked; if (reload) refresh(); else ctx.rerender(); } }), label]);
+        const filters = h('div', { class: 'filters num' }, [
+            h('label', { class: 'row' }, [t('lab', 'Level'), (inputs.min = h('input', { class: 'inp', inputmode: 'numeric', value: String(f.minLevel), 'aria-label': 'Lowest level', onchange: refresh })), '–', (inputs.max = h('input', { class: 'inp', inputmode: 'numeric', value: String(f.maxLevel), 'aria-label': 'Highest level', onchange: refresh }))]),
+            check('Inactive 14+ days', 'inactive', true),
+            check('No faction', 'factionless', true),
+            check('Hide Can’t win', 'hideCant', false),
+            h('span', { class: 'grow' }),
+            h('label', { class: 'slider' }, ['Easy ', h('input', { type: 'range', min: '0', max: '100', value: String(f.slider), 'aria-label': 'Easy to respect', onchange: (ev) => { f.slider = Number(ev.target.value); ctx.rerender(); } }), ' Respect']),
+        ]);
+        let table;
+        if (!ctx.flags.hasFfs) {
+            table = h('p', { class: 'muted', style: 'margin:0' }, ['Targets come from FFScouter. ', h('a', { href: '#settings', onclick: (ev) => { ev.preventDefault(); ctx.go('settings'); }, text: 'Connect it in Settings' }), '; chips on Torn’s pages work without it (your fights and public stats).']);
+        } else {
+            const body = shown.map((r) =>
+                h('tr', {}, [
+                    h('td', {}, [h('a', { href: profileUrl(r.id), target: '_blank', rel: 'noopener', text: r.name || String(r.id) })]),
+                    h('td', { class: 'r', text: r.level ? String(r.level) : '—' }),
+                    h('td', {}, [bandCell(r.band)]),
+                    h('td', { class: 'r', text: r.forecast ? Math.round(r.forecast.pWin * 100) + '%' : '—' }),
+                    h('td', { class: 'r', text: r.forecast && r.forecast.keep !== null ? (r.est && r.est.confidence === 'exact' ? '' : '~') + Math.round(r.forecast.keep * 100) + '%' : '—' }),
+                    h('td', { class: 'r' }, [h('b', { class: 'w', text: r.respect ? r.respect.toFixed(2) : '—' })]),
+                    h('td', { class: r.hospitalUntil && r.hospitalUntil > now ? 'sthos' : 'stok', text: r.hospitalUntil && r.hospitalUntil > now ? 'Hospital · ' + Math.ceil((r.hospitalUntil - now) / 60000) + ' min' : 'Okay' }),
+                    h('td', { class: 'r muted', text: ago(r.lastAction, now) }),
+                    h('td', { class: 'r' }, [h('a', { class: 'btn sm', href: attackUrl(r.id), target: '_blank', rel: 'noopener', text: 'Attack' })]),
+                ]),
+            );
+            table = h('table', { class: 'tbl num' }, [
+                h('thead', {}, [h('tr', {}, ['Player', 'Level', 'Band', 'Win', 'HP kept', 'Respect', 'Status', 'Last active', ''].map((x, i) => h('th', { class: [1, 3, 4, 5, 7].includes(i) ? 'r' : null, text: x })))]),
+                h('tbody', {}, body.length ? body : [h('tr', {}, [h('td', { colspan: '9', class: 'muted', text: e.loading() ? 'Asking FFScouter for targets…' : e.error() || 'No targets yet: press Refresh.' })])]),
+                h('tfoot', {}, [h('tr', {}, [h('td', { colspan: '9' }, [hidden.length ? 'Hidden: ' + hidden.length + ' Can’t win · ' : '', 'Targets from ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }), ', ranked by our fight estimate · "~" means an estimate, not a spy'])])]),
+            ]);
+        }
+        const main = [h('div', {}, [sectionHead('Targets', meta([rowsAll.length + ' players · win and HP kept from your stats against theirs']), ctx.flags.hasFfs ? h('button', { class: 'btn sm', type: 'button', onclick: refresh, text: 'Refresh' }) : null), filters, table])];
+
+        const limits = { ...DEFAULT_BAND_LIMITS, ...(s.bands || {}) };
+        const bandInput = (band, key) => h('input', { class: 'inp', inputmode: 'numeric', value: String(limits[band][key]), 'aria-label': BAND_WORDS[band] + ' ' + key, onchange: (ev) => { const v = Math.max(0, Math.min(100, Number(ev.target.value) || 0)); ctx.setSettings({ bands: { ...limits, [band]: { ...limits[band], [key]: v } } }); } });
+        const src = e.sources();
+        const pane = [
+            h('div', {}, [
+                sectionHead('Colours', meta(['where each band starts'])),
+                h('div', { class: 'bands num' }, [
+                    h('div', { class: 'bandr' }, [bandCell('stomp'), h('span', { class: 'row' }, ['win ', bandInput('stomp', 'win'), ' % · keep ', bandInput('stomp', 'keep'), ' %'])]),
+                    h('div', { class: 'bandr' }, [bandCell('good'), h('span', { class: 'row' }, ['win ', bandInput('good', 'win'), ' % · keep ', bandInput('good', 'keep'), ' %'])]),
+                    h('div', { class: 'bandr' }, [bandCell('tough'), h('span', { class: 'row' }, ['win ', bandInput('tough', 'win'), ' %'])]),
+                    h('div', { class: 'bandr' }, [bandCell('cant'), h('span', { class: 'muted', text: 'everything below' })]),
+                    h('div', { class: 'bandr' }, [bandCell('none'), h('span', { class: 'muted', text: 'no estimate yet' })]),
+                ]),
+            ]),
+            h('div', {}, [
+                sectionHead('Sources', meta(['best first']), null, 'h3'),
+                headsList([
+                    { tone: ctx.flags.hasTs ? 'good' : 'plain', text: 'TornStats spies', sub: ctx.flags.hasTs ? 'connected' : 'optional · add a key in Settings' },
+                    { tone: src.fights ? 'good' : 'plain', text: 'Your fights', sub: src.fights + ' attacks read' },
+                    { tone: ctx.flags.hasFfs ? 'good' : 'plain', text: 'FFScouter', sub: ctx.flags.hasFfs ? 'connected · ' + src.ffsFree + ' of 60 a minute free' : 'not connected' },
+                    { tone: 'plain', text: 'Public stats', sub: 'always on, labelled rough' },
+                ]),
+            ]),
+            h('div', {}, [sectionHead('Gear seen', null, null, 'h3'), h('dl', { class: 'kv num' }, [h('dt', { text: 'Players with gear' }), h('dd', { text: String(src.gear) }), h('dt', { text: 'Stored' }), h('dd', { text: 'on this computer only' })])]),
+        ];
+        return { main, pane };
+    }
+
+    /* ===== src/platform/idb.js ===== */
+    /*
+     * A small key-value store in the page's own IndexedDB, for data only ONE page
+     * needs. Tampermonkey hands every stored GM value to the script before it
+     * starts, on every page it runs on - so the Torn Ledger's rows (which only
+     * Torn Bids reads, and which grow with every trade) slowed every Torn page
+     * they were never shown on. Here they cost Torn pages nothing.
+     *
+     * Every call rejects where IndexedDB is missing or refused (some private
+     * windows); the caller then keeps the GM store.
+     */
+
+    const IDB_NAME = 'pumpingIron';
+    const IDB_STORE = 'kv';
+
+    let idbOpening = null;
+
+    function idbOpen() {
+        if (!idbOpening) {
+            idbOpening = new Promise((resolve, reject) => {
+                if (typeof indexedDB === 'undefined' || !indexedDB) {
+                    reject(new Error('No IndexedDB.'));
+                    return;
+                }
+                const req = indexedDB.open(IDB_NAME, 1);
+                req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error || new Error('IndexedDB refused.'));
+                req.onblocked = () => reject(new Error('IndexedDB blocked.'));
+            });
+            // A failed open is tried again next time rather than remembered.
+            idbOpening.catch(() => {
+                idbOpening = null;
+            });
+        }
+        return idbOpening;
+    }
+
+    function idbRun(mode, fn) {
+        return idbOpen().then(
+            (db) =>
+                new Promise((resolve, reject) => {
+                    const tx = db.transaction(IDB_STORE, mode);
+                    const req = fn(tx.objectStore(IDB_STORE));
+                    tx.oncomplete = () => resolve(req ? req.result : undefined);
+                    tx.onerror = () => reject(tx.error || new Error('IndexedDB error.'));
+                    tx.onabort = () => reject(tx.error || new Error('IndexedDB aborted.'));
+                }),
+        );
+    }
+
+    /** @returns {Promise<any|null>} */
+    function idbGet(key) {
+        return idbRun('readonly', (s) => s.get(key)).then((v) => (v === undefined ? null : v));
+    }
+
+    function idbSet(key, value) {
+        return idbRun('readwrite', (s) => s.put(value, key));
+    }
+
+    function idbDel(key) {
+        return idbRun('readwrite', (s) => s.delete(key));
+    }
+
+    /* ===== src/core/eye/fight.js ===== */
+    /*
+     * Fight simulation (ENGINE-SPEC §10): Monte Carlo over the builds a player
+     * might have at their estimated battle-stat score, with gear when known.
+     * Pure and seeded (the same player gives the same numbers every time).
+     * The formulas are the community's (research-targets.md "Fight model");
+     * the ones marked [calibrate] are fitted guesses to check against real logs.
+     */
+
+    /** Chance to hit from SPD (attacker) against DEX (defender). */
+    function hitChance(spdAtt, dexDef) {
+        if (!(dexDef > 0)) return 1;
+        const r = spdAtt / dexDef;
+        if (r >= 64) return 1;
+        if (r >= 1) return (100 - (50 / 7) * (8 * Math.sqrt(1 / r) - 1)) / 100;
+        if (r > 1 / 64) return ((50 / 7) * (8 * Math.sqrt(r) - 1)) / 100;
+        return 0;
+    }
+
+    /** Share of damage stopped by DEF (defender) against STR (attacker). */
+    function mitigation(defDef, strAtt) {
+        if (!(strAtt > 0)) return 1;
+        const q = defDef / strAtt;
+        if (q >= 14) return 1;
+        if (q >= 1) return (50 + (50 * Math.log(q)) / Math.log(14)) / 100;
+        if (q > 1 / 32) return (50 + (50 * Math.log(q)) / Math.log(32)) / 100;
+        return 0;
+    }
+
+    /** [calibrate] Base damage from STR (community fit, research-targets.md). */
+    function baseDamage(str) {
+        const l = Math.log10(Math.max(10, str) / 10);
+        return 7 * l * l + 27 * l + 30;
+    }
+
+    /**
+     * [calibrate] Weapon accuracy (shown as 50 ± modifier) moves the hit chance
+     * most near 50% and fades toward 0/100%.
+     */
+    function withAccuracy(p, acc = 50) {
+        return Math.max(0, Math.min(1, p + ((acc - 50) / 100) * 4 * p * (1 - p)));
+    }
+
+    /** [calibrate] Where hits land: crits 12% (×3.5), chest/stomach/groin 35% (×2), limbs 40% (×1), hands/feet 13% (×0.7). */
+    const HIT_ZONES = [
+        [0.12, 3.5],
+        [0.47, 2],
+        [0.87, 1],
+        [1, 0.7],
+    ];
+
+    /** Torn's stalemate: a fight ends after 25 turns. */
+    const MAX_TURNS = 25;
+
+    /** Gear assumed when unknown: an ordinary weapon and light armour [calibrate]. */
+    const DEFAULT_GEAR = { dmg: 50, acc: 50, armour: 25, dmgBonus: 0 };
+
+    /** The builds a player of unknown split might have (share of total). */
+    const LIKELY_BUILDS = {
+        balanced: { str: 0.25, spd: 0.25, def: 0.25, dex: 0.25 },
+        defHeavy: { str: 0.2, spd: 0.2, def: 0.35, dex: 0.25 },
+        dexHeavy: { str: 0.2, spd: 0.2, def: 0.25, dex: 0.35 },
+        hank: { str: 0.347, spd: 0.097, def: 0.278, dex: 0.278 },
+        baldr: { str: 0.309, spd: 0.247, def: 0.222, dex: 0.222 },
+    };
+
+    const BUILD_WORDS = { balanced: 'Balanced', defHeavy: 'DEF-heavy', dexHeavy: 'DEX-heavy', hank: "Hank's", baldr: "Baldr's" };
+
+    function bssOf(s) {
+        return Math.sqrt(s.str || 0) + Math.sqrt(s.spd || 0) + Math.sqrt(s.def || 0) + Math.sqrt(s.dex || 0);
+    }
+
+    /** Stats of a build that has a given battle-stat score: total = (BSS / Σ√share)². */
+    function statsFromBss(shares, bss) {
+        const k = Math.sqrt(shares.str) + Math.sqrt(shares.spd) + Math.sqrt(shares.def) + Math.sqrt(shares.dex);
+        const total = (bss / k) ** 2;
+        return { str: shares.str * total, spd: shares.spd * total, def: shares.def * total, dex: shares.dex * total, total };
+    }
+
+    function mulberry32(seed) {
+        let a = seed | 0;
+        return function () {
+            a = (a + 0x6d2b79f5) | 0;
+            let t = Math.imul(a ^ (a >>> 15), 1 | a);
+            t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+
+    function hitZone(rnd) {
+        const x = rnd();
+        for (const [p, m] of HIT_ZONES) if (x < p) return m;
+        return 0.7;
+    }
+
+    /**
+     * One fight: you attack, they answer, turn by turn.
+     * @param {object} me - {str,spd,def,dex, life}
+     * @param {object} them - same
+     * @returns {{win:boolean, kept:number, turns:number, stalemate?:boolean}}
+     */
+    function fightOnce(me, them, rnd, gMe = DEFAULT_GEAR, gThem = DEFAULT_GEAR) {
+        let hpMe = me.life;
+        let hpThem = them.life;
+        const hcMe = withAccuracy(hitChance(me.spd, them.dex), gMe.acc);
+        const hcThem = withAccuracy(hitChance(them.spd, me.dex), gThem.acc);
+        const dmgMe = baseDamage(me.str) * (gMe.dmg / 10) * (1 - mitigation(them.def, me.str)) * (1 - gThem.armour / 100) * (1 + (gMe.dmgBonus || 0) / 100);
+        const dmgThem = baseDamage(them.str) * (gThem.dmg / 10) * (1 - mitigation(me.def, them.str)) * (1 - gMe.armour / 100) * (1 + (gThem.dmgBonus || 0) / 100);
+        for (let t = 1; t <= MAX_TURNS; t++) {
+            if (rnd() < hcMe) hpThem -= dmgMe * hitZone(rnd);
+            if (hpThem <= 0) return { win: true, kept: Math.max(0, hpMe) / me.life, turns: t };
+            if (rnd() < hcThem) hpMe -= dmgThem * hitZone(rnd);
+            if (hpMe <= 0) return { win: false, kept: 0, turns: t };
+        }
+        return { win: false, kept: Math.max(0, hpMe) / me.life, turns: MAX_TURNS, stalemate: true };
+    }
+
+    function fightMedian(a) {
+        if (!a.length) return null;
+        const s = [...a].sort((x, y) => x - y);
+        return s[Math.floor(s.length / 2)];
+    }
+
+    /** n fights against one stat line. */
+    function simulateFights(me, them, { n = 300, seed = 1, gearMe = DEFAULT_GEAR, gearThem = DEFAULT_GEAR } = {}) {
+        const rnd = mulberry32(seed);
+        let wins = 0;
+        const kept = [];
+        const turns = [];
+        for (let i = 0; i < n; i++) {
+            const r = fightOnce(me, them, rnd, gearMe, gearThem);
+            if (r.win) {
+                wins++;
+                kept.push(r.kept);
+                turns.push(r.turns);
+            }
+        }
+        return { pWin: wins / n, keptMedian: fightMedian(kept), turnsMedian: fightMedian(turns) };
+    }
+
+    /**
+     * The forecast Torn Eye shows: win chance and HP kept, over the likely
+     * builds (or the exact stats when a spy gave them).
+     * @param {object} o
+     * @param {object} o.me - {str,spd,def,dex,life}
+     * @param {object} o.target - {stats?} or {bss}, and {life, id}
+     * @returns {{pWin, keep, turns, perBuild:{[build]:{pWin, keep}}, exact:boolean}}
+     */
+    function forecast({ me, target, gearMe = DEFAULT_GEAR, gearThem = DEFAULT_GEAR, n = 300 }) {
+        const seed = (Number(target.id) || 7) * 2654435761;
+        const lines = target.stats && target.stats.str ? { exact: target.stats } : Object.fromEntries(Object.entries(LIKELY_BUILDS).map(([k, sh]) => [k, statsFromBss(sh, target.bss)]));
+        const perBuild = {};
+        let pw = 0;
+        const keeps = [];
+        const turns = [];
+        for (const [k, st] of Object.entries(lines)) {
+            const r = simulateFights(me, { ...st, life: target.life }, { n, seed: seed + k.length, gearMe, gearThem });
+            perBuild[k] = { pWin: r.pWin, keep: r.keptMedian };
+            pw += r.pWin;
+            if (r.keptMedian !== null) keeps.push(r.keptMedian);
+            if (r.turnsMedian !== null) turns.push(r.turnsMedian);
+        }
+        const count = Object.keys(lines).length;
+        return { pWin: pw / count, keep: fightMedian(keeps), turns: fightMedian(turns), perBuild, exact: Boolean(lines.exact) };
+    }
+
+    /** [calibrate] Respect for a win: base(level) × fair fight (Torn's, ≤ 3) × chain/war/retal/overseas. */
+    function respectFor(level, ff, { chainHit = 0, war = false, retal = false, overseas = false } = {}) {
+        const base = 1 + (Number(level) || 1) / 200;
+        const chain = chainHit >= 11 ? 0.25 * Math.log10(chainHit) + 0.75 : 1;
+        return base * Math.max(1, Math.min(3, ff || 1)) * chain * (war ? 2 : 1) * (retal ? 1.5 : 1) * (overseas ? 1.25 : 1);
+    }
+
+    /** Torn's fair fight modifier from the two battle-stat scores (capped at 3). */
+    function fairFight(bssDef, bssAtt) {
+        return Math.min(3, 1 + (8 / 3) * (bssDef / bssAtt));
+    }
+
+    /* ===== src/core/eye/estimate.js ===== */
+    /*
+     * How strong is this player? Layered, best source first (ENGINE-SPEC §9):
+     *   1. a spy (TornStats), when newer than 30 days: exact stats;
+     *   2. your own fights with them: Torn's fair-fight modifier gives their
+     *      battle-stat score against yours (1.05 < FF < 3 is informative);
+     *   3. FFScouter: their estimate (credited wherever it shows);
+     *   4. public stats: TornTools' rank buckets (level, crimes and networth
+     *      triggers against the rank title), labelled rough.
+     * Every result says where it came from and how old it is.
+     */
+
+
+
+    const SPY_FRESH_DAYS = 30;
+    const FIGHT_FRESH_DAYS = 60;
+    const DAY_MS_EYE = 86400000;
+
+    /** BSS of the defender from Torn's fair-fight modifier: BSS_def = (3/8)(FF − 1) · BSS_me. */
+    function bssFromFairFight(ff, myBss) {
+        return (3 / 8) * (ff - 1) * myBss;
+    }
+
+    /** Only 1.05 < FF < 3 tells us something; 3 (Torn's cap) is a lower bound. */
+    function fairFightInformative(ff) {
+        return ff > 1.05 && ff < 3;
+    }
+
+    /** A total for a balanced player with this BSS: BSS = 2√total. */
+    function totalFromBss(bss) {
+        return (bss / 2) ** 2;
+    }
+
+    function bssFromTotal(total) {
+        return 2 * Math.sqrt(Math.max(0, total));
+    }
+
+    /* TornTools' rank estimate (docs/reference/torntools-torn-utils.ts RANK_TRIGGERS, RANKS). */
+    const RANK_TRIGGERS = {
+        level: [2, 6, 11, 26, 31, 50, 71, 100],
+        crimes: [100, 5000, 10000, 20000, 30000, 50000],
+        networth: [5e6, 5e7, 5e8, 5e9, 5e10],
+    };
+    const STAT_BUCKETS = [
+        ['under 2k', 0, 2e3],
+        ['2k – 25k', 2e3, 25e3],
+        ['20k – 250k', 2e4, 25e4],
+        ['200k – 2.5M', 2e5, 2.5e6],
+        ['2M – 25M', 2e6, 2.5e7],
+        ['20M – 250M', 2e7, 2.5e8],
+        ['over 200M', 2e8, null],
+    ];
+    const RANK_NAMES = ['Absolute beginner', 'Beginner', 'Inexperienced', 'Rookie', 'Novice', 'Below average', 'Average', 'Reasonable', 'Above average', 'Competent', 'Highly competent', 'Veteran', 'Distinguished', 'Highly distinguished', 'Professional', 'Star', 'Master', 'Outstanding', 'Celebrity', 'Supreme', 'Idolized', 'Champion', 'Heroic', 'Legendary', 'Elite', 'Invincible'];
+
+    /** "Heroic Hitman" → 23 (the longest known prefix wins: "Highly competent" before "Competent"). */
+    function rankNumber(rankTitle) {
+        const t = String(rankTitle || '').toLowerCase();
+        let best = null;
+        RANK_NAMES.forEach((name, i) => {
+            if (t.startsWith(name.toLowerCase()) && (!best || name.length > best.len)) best = { n: i + 1, len: name.length };
+        });
+        return best ? best.n : null;
+    }
+
+    /** The stat bucket TornTools reads from a profile: index into STAT_BUCKETS, or null. */
+    function rankBucket({ rank, level, crimes, networth }) {
+        const r = typeof rank === 'number' ? rank : rankNumber(rank);
+        if (!r) return null;
+        const passed = (list, v) => list.filter((x) => (Number(v) || 0) >= x).length;
+        const idx = r - passed(RANK_TRIGGERS.level, level) - passed(RANK_TRIGGERS.crimes, crimes) - passed(RANK_TRIGGERS.networth, networth) - 1;
+        return idx >= 0 && idx < STAT_BUCKETS.length ? idx : null;
+    }
+
+    /**
+     * @param {object} o
+     * @param {object} o.me - your stats {str,spd,def,dex}
+     * @param {object} [o.spy] - {str,spd,def,dex,total,at}
+     * @param {object[]} [o.fights] - your attacks on them, newest first: {ended (s), ff}
+     * @param {object} [o.ffs] - normalizeFfsRow() output
+     * @param {object} [o.pub] - {rank, level, crimes, networth}
+     * @param {number} o.now
+     * @returns {{bss, total, stats, source, sourceText, ageDays, confidence, lowerBound, range}|null}
+     */
+    function estimatePlayer({ me, spy = null, fights = [], ffs = null, pub = null, now }) {
+        const myBss = bssOf(me || {});
+        const age = (at) => (at ? Math.max(0, Math.round((now - at) / DAY_MS_EYE)) : null);
+        if (spy && spy.str && spy.at && now - spy.at < SPY_FRESH_DAYS * DAY_MS_EYE) {
+            const stats = { str: spy.str, spd: spy.spd, def: spy.def, dex: spy.dex };
+            return { bss: bssOf(stats), total: spy.total || stats.str + stats.spd + stats.def + stats.dex, stats, source: 'spy', sourceText: 'spy ' + age(spy.at) + ' d', ageDays: age(spy.at), confidence: 'exact', lowerBound: false };
+        }
+        const fight = (fights || []).find((f) => f && fairFightInformative(f.ff) && now - f.ended * 1000 < FIGHT_FRESH_DAYS * DAY_MS_EYE);
+        if (fight && myBss > 0) {
+            const bss = bssFromFairFight(fight.ff, myBss);
+            return { bss, total: totalFromBss(bss), stats: null, source: 'fight', sourceText: 'your fight ' + age(fight.ended * 1000) + ' d', ageDays: age(fight.ended * 1000), confidence: 'good', lowerBound: false };
+        }
+        const capped = (fights || []).find((f) => f && f.ff >= 3);
+        if (ffs && (ffs.fairFight || ffs.bssPublic || ffs.bsEstimate)) {
+            let bss;
+            if (ffs.fairFight && myBss > 0) bss = bssFromFairFight(ffs.fairFight, myBss);
+            else if (ffs.bssPublic) bss = ffs.bssPublic;
+            else bss = bssFromTotal(ffs.bsEstimate);
+            return { bss, total: ffs.bsEstimate || totalFromBss(bss), stats: null, source: 'ffscouter', sourceText: 'FFScouter ' + (age(ffs.updatedAt) ?? '?') + ' d', ageDays: age(ffs.updatedAt), confidence: 'good', lowerBound: false, distribution: ffs.distribution || null };
+        }
+        if (capped && myBss > 0) {
+            const bss = bssFromFairFight(3, myBss);
+            return { bss, total: totalFromBss(bss), stats: null, source: 'fight', sourceText: 'your fight · at least', ageDays: age(capped.ended * 1000), confidence: 'rough', lowerBound: true };
+        }
+        if (pub) {
+            const i = rankBucket(pub);
+            if (i !== null) {
+                const [label, lo, hi] = STAT_BUCKETS[i];
+                // The middle of the bucket on a log scale; the top bucket is open, so its floor ×2.5.
+                const total = hi ? Math.sqrt(Math.max(lo, 500) * hi) : lo * 2.5;
+                return { bss: bssFromTotal(total), total, stats: null, source: 'public', sourceText: 'public stats', ageDays: 0, confidence: 'rough', lowerBound: !hi, range: label };
+            }
+        }
+        return null;
+    }
+
+    /* ===== src/core/eye/gear.js ===== */
+    /*
+     * Gear (ENGINE-SPEC §11): the defender's items from the attack page's
+     * `attackData` answer (read-only, when Torn shows them), and your own from
+     * /user/equipment. Reduced to what the fight sim uses: best weapon damage
+     * and accuracy, damage bonuses, average armour.
+     */
+
+
+
+    const WEAPON_SLOTS = ['1', '2', '3'];
+    const ARMOUR_SLOTS = ['4', '6', '7', '8', '9'];
+    const DAMAGE_BONUSES = /^(Powerful|Specialist|Empower|Deadeye)$/i;
+
+    function numOr(v, d = 0) {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : d;
+    }
+
+    /** The attackData JSON (with or without the DB wrapper) → the defender's side. */
+    function parseAttackData(json) {
+        const db = json && (json.DB || json);
+        if (!db || typeof db !== 'object') return null;
+        const du = db.defenderUser || {};
+        const items = [];
+        for (const [slot, box] of Object.entries(db.defenderItems || {})) {
+            const list = box && Array.isArray(box.item) ? box.item : [];
+            for (const it of list) {
+                if (!it) continue;
+                items.push({
+                    slot: String(slot),
+                    id: numOr(it.ID, null),
+                    name: String(it.name || ''),
+                    armouryId: it.armouryID || it.armoryID ? String(it.armouryID || it.armoryID) : null,
+                    dmg: numOr(it.dmg),
+                    acc: numOr(it.acc, 50),
+                    armour: numOr(it.arm ?? it.armor ?? it.armour),
+                    bonuses: Object.values(it.currentBonuses || {}).map((b) => ({ title: String(b.title || ''), value: numOr(b.value) })),
+                });
+            }
+        }
+        const real = items.filter((i) => Number(i.slot) >= 1 && Number(i.slot) <= 9 && i.armouryId && i.armouryId !== '0');
+        return {
+            defenderId: numOr(du.userID, null),
+            defenderName: du.playername || null,
+            level: numOr(du.level, null),
+            maxLife: numOr(du.maxlife ?? (db.usersLife && db.usersLife.defender && db.usersLife.defender.maxLife), null),
+            attackerId: db.attackerUser ? numOr(db.attackerUser.userID, null) : null,
+            status: db.attackStatus || null,
+            visible: real.length > 0 || db.showEnemyItems === true,
+            items: real,
+        };
+    }
+
+    /** What the sim uses from a set of items: {dmg, acc, armour, dmgBonus, text}. */
+    function gearSummary(items) {
+        const list = items || [];
+        const weapons = list.filter((i) => WEAPON_SLOTS.includes(String(i.slot)) && i.dmg > 0);
+        const armours = list.filter((i) => ARMOUR_SLOTS.includes(String(i.slot)) && i.armour > 0);
+        if (!weapons.length && !armours.length) return null;
+        const best = weapons.reduce((a, w) => (!a || w.dmg > a.dmg ? w : a), null);
+        const dmgBonus = best ? best.bonuses.filter((b) => DAMAGE_BONUSES.test(b.title) && !/deadeye/i.test(b.title)).reduce((a, b) => a + b.value, 0) : 0;
+        const armour = armours.length ? armours.reduce((a, x) => a + x.armour, 0) / Math.max(armours.length, 5) : DEFAULT_GEAR.armour;
+        const words = [];
+        if (best) words.push(best.name + (best.bonuses.length ? ' · ' + best.bonuses.map((b) => b.title + ' ' + b.value + '%').join(', ') : ''));
+        const sets = [...new Set(armours.map((a) => a.name.split(' ')[0]))];
+        if (sets.length) words.push(sets.join('/') + ' armour');
+        return { dmg: best ? best.dmg : DEFAULT_GEAR.dmg, acc: best ? best.acc : DEFAULT_GEAR.acc, armour, dmgBonus, text: words.join(' · ') };
+    }
+
+    /** Your own gear from /v2/user/equipment. */
+    function myGear(equipment) {
+        const list = (equipment && equipment.equipment) || [];
+        const items = list.map((e) => ({
+            slot: e.type === 'Weapon' || e.sub_type === 'Primary' || e.sub_type === 'Secondary' || e.sub_type === 'Melee' ? '1' : e.type === 'Armor' || e.type === 'Defensive' ? '4' : String(e.slot || ''),
+            name: e.name || '',
+            dmg: numOr(e.stats && e.stats.damage),
+            acc: numOr(e.stats && e.stats.accuracy, 50),
+            armour: numOr(e.stats && (e.stats.armor ?? e.stats.armour)),
+            bonuses: (e.bonuses || []).map((b) => ({ title: String(b.title || ''), value: numOr(b.value) })),
+        }));
+        return gearSummary(items) || DEFAULT_GEAR;
+    }
+
+    /* ===== src/eye-service.js ===== */
+    /*
+     * Torn Eye's data: for each player shown, the best estimate we can get
+     * (spy → your fights → FFScouter → public stats), a fight forecast against
+     * you, a band, respect and the chip's words. Requests only from a visible
+     * tab, inside each service's own budget; answers are cached (FFScouter 5
+     * min in memory and 1 h stored, as its guidance asks).
+     */
+
+
+
+
+
+
+
+
+
+
+
+
+    const PROFILE_FRESH_MS = 10 * 60 * 1000;
+    const PUBLIC_FRESH_MS = 24 * 60 * 60 * 1000;
+    const SPY_FRESH_MS = 60 * 60 * 1000;
+    const ATTACKS_FRESH_MS = 60 * 60 * 1000;
+    const EQUIPMENT_FRESH_MS = 6 * 60 * 60 * 1000;
+
+    /** [calibrate] Max life from level when no profile was read: Torn's base plus typical merits and perks. */
+    function lifeFromLevel(level) {
+        return Math.round((100 + 50 * Math.max(0, (Number(level) || 1) - 1)) * 1.25);
+    }
+
+    const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(), timer: null, listeners: [], mem: new Map() };
+
+    function clients() {
+        if (!eye.ffs) eye.ffs = makeFfsClient({ getKey: () => getKey(K.ffsKey), isVisible, loadShared: () => get('ffsWindow', {}), saveShared: (s) => set('ffsWindow', s) });
+        if (!eye.ts) eye.ts = makeTsClient({ getKey: () => getKey(K.tsKey), isVisible });
+        return eye;
+    }
+
+    /** The stored per-player cache (IndexedDB; memory if refused). */
+    async function cache() {
+        if (eye.cache) return eye.cache;
+        if (!eye.loading) {
+            eye.loading = idbGet('eye')
+                .then((v) => (eye.cache = v && v.players ? v : { players: {}, gear: {} }))
+                .catch(() => (eye.cache = { players: {}, gear: {} }));
+        }
+        return eye.loading;
+    }
+
+    let saveTimer = null;
+    function saveSoon() {
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => {
+            const c = eye.cache;
+            if (!c) return;
+            // Keep the newest 3,000 players.
+            const ids = Object.keys(c.players);
+            if (ids.length > 3000) {
+                ids.sort((a, b) => (c.players[a].seen || 0) - (c.players[b].seen || 0));
+                for (const id of ids.slice(0, ids.length - 3000)) delete c.players[id];
+            }
+            idbSet('eye', c).catch(() => {});
+        }, 1500);
+    }
+
+    function onEye(fn) {
+        eye.listeners.push(fn);
+    }
+
+    function notify() {
+        for (const fn of eye.listeners) {
+            try {
+                fn();
+            } catch {
+                // a listener's problem stays there
+            }
+        }
+    }
+
+    /** Remember a player's gear from the attack page. */
+    async function saveGear(playerId, items) {
+        const c = await cache();
+        c.gear[playerId] = { items, seenAt: Date.now() };
+        saveSoon();
+        notify();
+    }
+
+    async function gearCount() {
+        const c = await cache();
+        return Object.keys(c.gear || {}).length;
+    }
+
+    async function clearEye() {
+        eye.cache = { players: {}, gear: {} };
+        eye.mem.clear();
+        await idbSet('eye', eye.cache).catch(() => {});
+        set('myAttacks', null);
+        notify();
+    }
+
+    /** Your attacks (for the "your fight" layer), refreshed hourly by whichever tab needs them. */
+    async function myAttacks() {
+        const stored = get('myAttacks', null);
+        if (stored && Date.now() - stored.at < ATTACKS_FRESH_MS) return stored.list;
+        if (!isVisible() || !getKey(K.apiKey)) return stored ? stored.list : [];
+        try {
+            const list = await fetchAttacks(tornClient(), { limit: 100 });
+            const me = (get(K.userStatic, {}) || {}).keyInfo;
+            const myId = me && me.userId;
+            const slim = list
+                .filter((a) => a && a.defender && (!myId || (a.attacker && a.attacker.id === myId)))
+                .map((a) => ({ def: a.defender.id, ended: a.ended, ff: a.modifiers ? Number(a.modifiers.fair_fight) : null, result: a.result, respect: a.respect_gain, level: a.defender.level }));
+            set('myAttacks', { at: Date.now(), list: slim });
+            return slim;
+        } catch {
+            return stored ? stored.list : [];
+        }
+    }
+
+    async function myEquipment() {
+        const statics = get(K.userStatic, {}) || {};
+        if (statics.equipment && Date.now() - (statics.equipmentAt || 0) < EQUIPMENT_FRESH_MS) return statics.equipment;
+        if (!isVisible() || !getKey(K.apiKey)) return statics.equipment || null;
+        try {
+            const eq = await fetchEquipment(tornClient());
+            set(K.userStatic, { ...(get(K.userStatic, {}) || {}), equipment: eq, equipmentAt: Date.now() });
+            return eq;
+        } catch {
+            return statics.equipment || null;
+        }
+    }
+
+    /**
+     * Fetch what's missing for these players (batched), then notify. Safe to
+     * call often: it coalesces and only asks for what's stale.
+     * @param {number[]} ids
+     * @param {object} [o] - {profiles: also read public profiles (level, life, rank, status)}
+     */
+    function wantPlayers(ids, { profiles = false } = {}) {
+        for (const id of ids) if (Number(id) > 0) eye.pending.add(Number(id) + (profiles ? ':p' : ''));
+        clearTimeout(eye.timer);
+        eye.timer = setTimeout(flush, 120);
+    }
+
+    async function flush() {
+        if (!isVisible()) return;
+        const want = [...eye.pending];
+        eye.pending.clear();
+        const ids = [...new Set(want.map((x) => Number(String(x).split(':')[0])))];
+        const withProfile = new Set(want.filter((x) => String(x).endsWith(':p')).map((x) => Number(String(x).split(':')[0])));
+        const c = await cache();
+        const now = Date.now();
+        const rec = (id) => (c.players[id] = c.players[id] || {});
+        clients();
+        // FFScouter, batched, for anything not fresh.
+        if (getKey(K.ffsKey)) {
+            const need = ids.filter((id) => !(eye.mem.has(id) && now - eye.mem.get(id) < FFS_MEMORY_MS) && !(c.players[id] && c.players[id].ffsAt && now - c.players[id].ffsAt < FFS_STORED_MS));
+            if (need.length) {
+                try {
+                    const rows = await fetchFfsStats(eye.ffs, need);
+                    for (const [id, row] of rows) {
+                        rec(id).ffs = row;
+                        rec(id).ffsAt = Date.now();
+                        eye.mem.set(id, Date.now());
+                    }
+                } catch {
+                    // FFScouter off or paused: the other layers still work.
+                }
+            }
+        }
+        // TornStats spies (optional), one by one, only for players shown alone (profile/attack).
+        if (getKey(K.tsKey)) {
+            for (const id of ids.filter((x) => withProfile.has(x)).slice(0, 3)) {
+                if (c.players[id] && c.players[id].spyAt && now - c.players[id].spyAt < SPY_FRESH_MS) continue;
+                try {
+                    rec(id).spy = await fetchSpyUser(eye.ts, id);
+                } catch {
+                    rec(id).spy = null;
+                }
+                rec(id).spyAt = Date.now();
+            }
+        }
+        // Public profiles (life, level, rank, status) where asked.
+        for (const id of ids.filter((x) => withProfile.has(x)).slice(0, 5)) {
+            if (!getKey(K.apiKey)) break;
+            const r = rec(id);
+            if (!(r.profileAt && now - r.profileAt < PROFILE_FRESH_MS)) {
+                try {
+                    const p = await fetchProfile(tornClient(), id);
+                    if (p) r.profile = { level: p.level, rank: p.rank, life: p.life && p.life.maximum, status: p.status || null, name: p.name, faction: p.faction_id || null };
+                    r.profileAt = Date.now();
+                } catch {
+                    r.profileAt = Date.now();
+                }
+            }
+            // Public stats only when nothing better exists.
+            if (!r.ffs || !r.ffs.bsEstimate) {
+                if (!(r.pubAt && now - r.pubAt < PUBLIC_FRESH_MS)) {
+                    try {
+                        // The public "popular" group has crimes.total and networth.total (research-api-shapes.md §2).
+                        const ps = (await fetchPersonalStats(tornClient(), { id, cat: 'popular' })) || {};
+                        r.pub = { crimes: Number(ps.crimes && ps.crimes.total) || 0, networth: Number(ps.networth && ps.networth.total) || 0 };
+                    } catch {
+                        r.pub = null;
+                    }
+                    r.pubAt = Date.now();
+                }
+            }
+        }
+        for (const id of ids) rec(id).seen = Date.now();
+        saveSoon();
+        await myAttacks();
+        await myEquipment();
+        notify();
+    }
+
+    /**
+     * Everything the chip and card show for one player, from cached data (sync
+     * once the cache is loaded). `extra` gives what the page itself shows
+     * (level, life, name), which fills gaps without a request.
+     */
+    function eyeView(id, extra = {}, { war = false } = {}) {
+        const m = pi.model;
+        const c = eye.cache;
+        if (!m || !m.ready || !c) return null;
+        const r = c.players[id] || {};
+        const prof = r.profile || {};
+        const level = prof.level || extra.level || null;
+        const life = prof.life || extra.life || lifeFromLevel(level);
+        const meStats = m.pc.stats;
+        const attacks = (get('myAttacks', null) || {}).list || [];
+        const fights = attacks.filter((a) => Number(a.def) === Number(id)).sort((a, b) => b.ended - a.ended);
+        const pub = r.pub && (prof.rank || extra.rank) ? { rank: prof.rank || extra.rank, level, crimes: r.pub.crimes, networth: r.pub.networth } : null;
+        const est = estimatePlayer({ me: meStats, spy: r.spy || null, fights, ffs: r.ffs || null, pub, now: Date.now() });
+        const gearRec = c.gear[id];
+        const gThem = gearRec ? gearSummary(gearRec.items) : null;
+        const statics = get(K.userStatic, {}) || {};
+        const gMe = statics.equipment ? myGear(statics.equipment) : DEFAULT_GEAR;
+        const myLife = (m.state.life && m.state.life.maximum) || 7500;
+        let f = null;
+        let fGear = null;
+        if (est) {
+            const target = { id, life, bss: est.bss, stats: est.stats };
+            f = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe });
+            if (gThem) fGear = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe, gearThem: gThem });
+        }
+        const main = fGear || f;
+        const band = bandOf(main, getSettings().bands);
+        const ff = est ? fairFight(est.bss, bssOf(meStats)) : null;
+        const respect = est && level ? respectFor(level, ff, { war }) : null;
+        return {
+            id,
+            name: prof.name || extra.name || null,
+            level,
+            life,
+            est,
+            forecast: main,
+            plain: f,
+            withGear: fGear,
+            gear: gearRec ? { text: gThem ? gThem.text : '', seenAt: gearRec.seenAt } : null,
+            band,
+            respect,
+            figures: chipFigures(main, est, respect),
+            source: est ? est.sourceText : null,
+            status: prof.status || null,
+        };
+    }
+
+    function eyeReady() {
+        return Boolean(eye.cache);
+    }
+
     /* ===== src/core/history.js ===== */
     /*
      * The lowest price we saw each Torn day, per item, for the last few weeks.
@@ -5620,10 +6487,12 @@
 
 
 
+
+
     /** How long fetched prices count as fresh. */
     const PRICE_FRESH_MS = 5 * 60 * 1000;
 
-    const page = { app: null, w3b: null, ffs: null, loading: new Set() };
+    const page = { app: null, w3b: null, ffs: null, loading: new Set(), eye: { loading: false, error: null, gear: 0 } };
 
     function w3bClient() {
         if (!page.w3b) {
@@ -5731,8 +6600,31 @@
             version: PI_BUILD_VERSION,
             historyDays: Object.keys(get(K.statsHistory, {}) || {}).length,
             priceItems: Object.keys((readPriceHistory(get(K.priceHistory, null)) || {}).items || {}).length,
-            eyeLine: 'estimates and gear seen',
+            eyeLine: 'targets, estimates and gear for ' + page.eye.gear + ' player' + (page.eye.gear === 1 ? '' : 's'),
         };
+    }
+
+    /** Targets for the Torn Eye tab: FFScouter's list, estimated against you. */
+    async function loadTargets(params) {
+        if (!getKey(K.ffsKey)) return;
+        page.eye.loading = true;
+        page.eye.error = null;
+        page.app.render(true);
+        try {
+            const list = await fetchFfsTargets(ffsClient(), { ...params, limit: 50 });
+            set('eyeTargets', { at: Date.now(), params, list });
+            wantPlayers(list.map((x) => x.playerId));
+        } catch (error) {
+            page.eye.error = String((error && error.message) || error);
+        }
+        page.eye.loading = false;
+        page.app.render(true);
+    }
+
+    function eyeRows() {
+        const stored = get('eyeTargets', null);
+        if (!stored) return [];
+        return stored.list.map((x) => ({ ...(eyeView(x.playerId, { level: x.level, name: x.name }) || { id: x.playerId, band: 'none' }), name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId }));
     }
 
     function getCtx() {
@@ -5774,16 +6666,31 @@
             saveTsKey,
             revealKey: (name) => getKey(name),
             clearGroup: (g) => {
+                if (g === 'eye') clearEye();
                 clearGroup(g);
                 refresh();
                 page.app.render(true);
             },
             diagnostics,
+            eye: {
+                rows: eyeRows,
+                load: (params) => loadTargets(params).catch(() => {}),
+                loading: () => page.eye.loading,
+                error: () => page.eye.error,
+                sources: () => ({ fights: ((get('myAttacks', null) || {}).list || []).length, ffsFree: page.ffs ? page.ffs.stats().remaining : 60, gear: page.eye.gear }),
+            },
         };
     }
 
     function bootAppPage({ renderers = {} } = {}) {
-        page.app = new PiApp({ getCtx, renderers, getUpdated: () => (get(K.userState, null) || {}).at || null });
+        page.app = new PiApp({ getCtx, renderers: { eye: renderEye, ...renderers }, getUpdated: () => (get(K.userState, null) || {}).at || null });
+        onEye(() => {
+            gearCount().then((n) => (page.eye.gear = n));
+            page.app.render(true);
+        });
+        gearCount().then((n) => (page.eye.gear = n));
+        const stored = get('eyeTargets', null);
+        if (stored) setTimeout(() => wantPlayers(stored.list.map((x) => x.playerId)), 500);
         page.app.mount();
         onModel(() => page.app.render());
         for (const k of [K.prices, K.settings, K.plan, K.userStatic]) gmOnChange(k, () => page.app.render());
@@ -6561,6 +7468,619 @@
         });
     }
 
+    /* ===== src/platform/page-hook.js ===== */
+    /*
+     * Reading the attack page's `page.php?sid=attackData` answer, read-only
+     * (ENGINE-SPEC §11). We wrap the page's fetch ONCE and hand Torn back its
+     * own, untouched promise and response; we read a clone, later, off to the
+     * side. Nothing is rebuilt, rewritten or injected into Torn's state (KAL
+     * does that; we don't). Any error inside falls back to doing nothing.
+     */
+
+    const HOOK_FLAG = '__piAttackHook';
+
+    function isAttackDataUrl(url, base) {
+        try {
+            const u = new URL(String(url), base || 'https://www.torn.com/');
+            return /(^|\.)torn\.com$/.test(u.hostname) || u.hostname === '127.0.0.1' || u.hostname === 'localhost' ? u.searchParams.get('sid') === 'attackData' : false;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * @param {object} win - the page's window (unsafeWindow)
+     * @param {function} onData - (json) => void, called with a copy of each attackData answer
+     * @returns {boolean} installed now
+     */
+    function installAttackHook(win, onData) {
+        try {
+            if (!win || win[HOOK_FLAG] || typeof win.fetch !== 'function') return false;
+            const original = win.fetch;
+            const wrapped = function (input, init) {
+                // Torn's call goes through exactly as it would have.
+                const promise = original.apply(this, arguments);
+                try {
+                    const url = typeof input === 'string' ? input : input && input.url;
+                    if (isAttackDataUrl(url, win.location && win.location.href)) {
+                        promise.then(
+                            (res) => {
+                                try {
+                                    res.clone()
+                                        .json()
+                                        .then(
+                                            (j) => {
+                                                try {
+                                                    onData(j);
+                                                } catch {
+                                                    // our problem, never Torn's
+                                                }
+                                            },
+                                            () => {},
+                                        );
+                                } catch {
+                                    // a body we can't copy: skip it
+                                }
+                            },
+                            () => {},
+                        );
+                    }
+                } catch {
+                    // never let our reading touch Torn's call
+                }
+                return promise;
+            };
+            win.fetch = wrapped;
+            win[HOOK_FLAG] = true;
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    /* ===== src/core/eye/war.js ===== */
+    /*
+     * War mode (ENGINE-SPEC §12): an enemy faction's members, sorted by what
+     * you can do now. Out early (left hospital before their time: revived or
+     * medded) first, then Okay by band and respect, then Hospital by time out,
+     * then Traveling, then Abroad; a summary line on top.
+     */
+
+
+
+    function memberState(m) {
+        const st = (m && m.status) || {};
+        const s = String(st.state || st.description || '').toLowerCase();
+        if (s.includes('hospital')) return 'hospital';
+        if (s.includes('travel')) return 'traveling';
+        if (s.includes('abroad')) return 'abroad';
+        if (s.includes('jail') || s.includes('federal')) return 'jail';
+        if (s.includes('fallen')) return 'fallen';
+        return 'okay';
+    }
+
+    /**
+     * Members that left hospital early: Hospital with a future `until` before,
+     * Okay now, before that time.
+     * @returns {Set<number>}
+     */
+    function outEarly(prevMembers, members, nowS) {
+        const prev = new Map((prevMembers || []).map((m) => [Number(m.id), m]));
+        const out = new Set();
+        for (const m of members || []) {
+            const p = prev.get(Number(m.id));
+            if (!p || memberState(p) !== 'hospital' || memberState(m) !== 'okay') continue;
+            const until = Number(p.status && p.status.until) || 0;
+            if (until > nowS + 30) out.add(Number(m.id));
+        }
+        return out;
+    }
+
+    const STATE_RANK = { early: 0, okay: 1, hospital: 2, traveling: 3, abroad: 4, jail: 5, fallen: 6 };
+
+    /**
+     * @param {object[]} members - /faction/{id}/members rows
+     * @param {object} o - {bands: {id: band}, respect: {id: number}, early: Set, nowS}
+     * @returns {object[]} rows {m, id, state, band, respect, until}
+     */
+    function sortWar(members, { bands = {}, respect = {}, early = new Set(), nowS = 0 } = {}) {
+        const rows = (members || []).map((m) => {
+            const id = Number(m.id);
+            const state = early.has(id) ? 'early' : memberState(m);
+            return { m, id, state, band: bands[id] || 'none', respect: respect[id] || 0, until: Number(m.status && m.status.until) || 0 };
+        });
+        rows.sort((a, b) => {
+            const s = STATE_RANK[a.state] - STATE_RANK[b.state];
+            if (s) return s;
+            if (a.state === 'okay' || a.state === 'early') {
+                const bd = BAND_ORDER.indexOf(a.band) - BAND_ORDER.indexOf(b.band);
+                if (bd) return bd;
+                return b.respect - a.respect;
+            }
+            if (a.state === 'hospital' || a.state === 'traveling') return (a.until || Infinity) - (b.until || Infinity);
+            return a.id - b.id;
+        });
+        return rows;
+    }
+
+    /** "7 attackable now · 0:48 until the next one is out · 3 traveling" as numbers. */
+    function warSummary(rows, nowS) {
+        const attackable = rows.filter((r) => r.state === 'okay' || r.state === 'early').length;
+        const outs = rows.filter((r) => r.state === 'hospital' && r.until > nowS).map((r) => r.until - nowS);
+        return { attackable, nextOutS: outs.length ? Math.min(...outs) : null, traveling: rows.filter((r) => r.state === 'traveling').length, early: rows.filter((r) => r.state === 'early').length };
+    }
+
+    /* ===== src/sources/dom/eye.js ===== */
+    /*
+     * Reading player rows on the pages Torn Eye marks (docs/research-dom.md
+     * §6–8): profiles, the mini-profile popup, faction member lists and ranked
+     * war lists. Read only.
+     */
+
+    function idFromHref(a) {
+        const m = a && String(a.getAttribute('href') || '').match(/XID=(\d+)/i);
+        return m ? Number(m[1]) : null;
+    }
+
+    /** Level on a profile page (three digit boxes, TornTools' reading). */
+    function profileLevel(doc = document) {
+        const box = doc.querySelector('.box-info .box-value');
+        if (!box) return null;
+        const d = (cls) => Number((box.querySelector('.' + cls + ' .digit') || {}).textContent) || 0;
+        const v = d('digit-r') * 100 + d('digit-m') * 10 + d('digit-l');
+        return v > 0 ? v : null;
+    }
+
+    function profileAnchor(doc = document) {
+        return doc.querySelector('.content-title');
+    }
+
+    /** Faction member list rows: [{id, level, status, el, cell}] (fallen players skipped). */
+    function readFactionRows(doc = document) {
+        const out = [];
+        for (const li of doc.querySelectorAll('.members-list .table-body > li.table-row')) {
+            if (li.querySelector('[id*="icon77___"]')) continue;
+            const a = li.querySelector('[class*="honorWrap___"] a[href*="XID="]') || li.querySelector('a[href*="profiles.php?XID="]');
+            const id = idFromHref(a);
+            if (!id) continue;
+            out.push({ id, level: Number((li.querySelector('.lvl') || {}).textContent) || null, status: String((li.querySelector('.status') || {}).textContent || '').trim(), el: li, cell: li.querySelector('.member') || li, name: a.getAttribute('aria-label') ? a.getAttribute('aria-label').replace(/^View profile of /, '') : null });
+        }
+        return out;
+    }
+
+    /** Ranked-war rows on one side: [{id, level, status, el, cell}]. */
+    function readWarRows(doc = document, side = 'enemy') {
+        const out = [];
+        for (const li of doc.querySelectorAll('#faction_war_list_id ul.members-list > li.' + side)) {
+            const a = li.querySelector('.member a[href*="XID="]');
+            const id = idFromHref(a);
+            if (!id) continue;
+            out.push({ id, level: Number((li.querySelector('.level') || {}).textContent) || null, status: String((li.querySelector('.status') || {}).textContent || '').trim(), el: li, cell: li.querySelector('.member') || li, name: a.getAttribute('aria-label') ? a.getAttribute('aria-label').replace(/^View profile of /, '') : null });
+        }
+        return out;
+    }
+
+    /** The enemy faction's id on a ranked-war list. */
+    function enemyFactionId(doc = document) {
+        const a = doc.querySelector('#faction_war_list_id .enemy-faction a[href*="factions.php?step=profile&ID="], #faction_war_list_id li.enemy a[href*="step=profile"]');
+        const m = a && String(a.getAttribute('href')).match(/ID=(\d+)/);
+        return m ? Number(m[1]) : null;
+    }
+
+    /** The player the mini-profile popup is showing. */
+    function miniProfileId(doc = document) {
+        const root = doc.getElementById('profile-mini-root');
+        if (!root) return null;
+        return idFromHref(root.querySelector('a[href*="XID="]'));
+    }
+
+    /** Where the attack page's own layout is, to sit beside it. */
+    function attackRoot(doc = document) {
+        return doc.getElementById('attack-root') || doc.querySelector('[class*="playersModelWrap___"]');
+    }
+
+    /* ===== src/ui/eye/eye-ui.js ===== */
+    /*
+     * Torn Eye on Torn's pages (DESIGN §6, mockup R): a one-line chip (band,
+     * win, HP kept, respect, source), a hover card, the war list's column,
+     * summary and order, and a side panel on the attack page. Never the words
+     * FF or fair fight. FFScouter is credited wherever its numbers show.
+     */
+
+
+
+
+
+
+    const EYE_CSS = `
+    .pi-chip { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px 0 8px; margin: 6px 0; border-radius: 14px; background: #1e2124; border: 1px solid #3a4046; font: 12px Arial, sans-serif; color: #e3e5e8; white-space: nowrap; cursor: default; vertical-align: middle; }
+    .pi-chip .pi-dot { width: 12px; height: 12px; border-radius: 50%; box-shadow: inset 0 0 0 3px currentColor; background: #111; flex: none; }
+    .pi-chip b { font-weight: bold; }
+    .pi-chip .pi-src { color: #6c737a; font-size: 11px; }
+    .pi-chip.pi-mini { height: 22px; margin: 0 0 0 6px; padding: 0 8px 0 6px; gap: 6px; font-size: 11px; }
+    .pi-chip.pi-mini .pi-dot { width: 10px; height: 10px; }
+    .pi-eyecard { position: fixed; z-index: 99991; width: 330px; background: #1c1f22; border: 1px solid #3a4046; border-radius: 10px; padding: 12px 14px; box-shadow: 0 8px 24px rgba(0,0,0,.45); display: flex; flex-direction: column; gap: 10px; font: 12px/1.4 Arial, sans-serif; color: #e3e5e8; pointer-events: none; }
+    .pi-eyecard .pi-hh { display: flex; align-items: baseline; gap: 8px; }
+    .pi-eyecard .pi-hh b.pi-name { color: #fff; font-size: 14px; }
+    .pi-eyecard .pi-lab { font-size: 11px; font-weight: bold; letter-spacing: .5px; text-transform: uppercase; color: #939aa1; }
+    .pi-kept { display: grid; grid-template-columns: 80px minmax(0,1fr) 40px; gap: 8px; align-items: center; }
+    .pi-kept .pi-bar { height: 6px; border-radius: 3px; background: #24282c; overflow: hidden; }
+    .pi-kept .pi-bar i { display: block; height: 100%; }
+    .pi-eyecard .pi-foot { font-size: 11px; color: #939aa1; border-top: 1px solid #2c3136; padding-top: 8px; }
+    .pi-eyecard .pi-warnline { color: #e8a33d; font-weight: bold; }
+    .pi-warsum { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; padding: 7px 10px; margin: 6px 0 8px; background: #1b1e21; border: 1px solid #3a4046; border-radius: 6px; font: 12px Arial, sans-serif; color: #e3e5e8; }
+    .pi-warsum b { color: #fff; font-size: 14px; }
+    .pi-warsum .pi-muted { color: #939aa1; margin-left: auto; }
+    .pi-early { background: #1f2a1d !important; }
+    .pi-earlytag { color: #9bdc8a; font-weight: bold; font-size: 11px; margin-left: 6px; }
+    `;
+
+    function ensureEyeCss(doc = document) {
+        if (doc.getElementById('pi-eye-css')) return;
+        const st = doc.createElement('style');
+        st.id = 'pi-eye-css';
+        st.textContent = EYE_CSS;
+        (doc.head || doc.documentElement).appendChild(st);
+    }
+
+    /** The short figure on a list row: HP kept where you'd win, else the win chance (or "rough"). */
+    function miniFigure(v) {
+        const f = v.forecast;
+        if (v.est && v.est.confidence === 'rough' && f.pWin < 0.6) return 'rough';
+        if (v.band === 'cant' || f.keep === null || f.keep === undefined) return 'win ' + Math.round(f.pWin * 100) + '%';
+        return 'keep ' + (v.est && v.est.confidence === 'exact' ? '' : '~') + Math.round(f.keep * 100) + '%';
+    }
+
+    /** The chip for one player view (eyeView()). */
+    function chipEl(v, { mini = false, id = null } = {}) {
+        const band = v ? v.band : 'none';
+        const color = BAND_COLORS[band];
+        const kids = [h('i', { class: 'pi-dot', style: 'color:' + color }), h('b', { style: 'color:' + color, text: BAND_WORDS[band] })];
+        if (v && v.forecast) kids.push(h('span', { text: mini ? miniFigure(v) : v.figures }));
+        else kids.push(h('span', { text: mini ? '' : 'no estimate yet' }));
+        if (!mini && v && v.source) kids.push(h('span', { class: 'pi-src', text: v.source }));
+        // The player id is always on the chip, estimate or not: redraw checks compare it.
+        return h('span', { class: 'pi-mark pi-chip' + (mini ? ' pi-mini' : ''), 'data-pi-player': String(id || (v && v.id) || '') }, kids);
+    }
+
+    /** The hover card: HP kept by likely build, gear, sources with credit. */
+    function cardEl(v) {
+        const band = v.band;
+        const kids = [h('div', { class: 'pi-hh' }, [h('b', { style: 'color:' + BAND_COLORS[band], text: BAND_WORDS[band] }), h('b', { class: 'pi-name', text: (v.name || 'Player') + (v.level ? ' [' + v.level + ']' : '') })])];
+        const f = v.plain || v.forecast;
+        if (f && f.perBuild && !f.exact) {
+            kids.push(h('span', { class: 'pi-lab', text: 'HP you keep, by their likely build' }));
+            const rows = Object.entries(f.perBuild).sort((a, b) => (b[1].keep || 0) - (a[1].keep || 0)).slice(0, 3);
+            for (const [k, r] of rows) {
+                const pct = Math.round((r.keep || 0) * 100);
+                kids.push(h('div', { class: 'pi-kept' }, [h('span', { text: BUILD_WORDS[k] || k }), h('div', { class: 'pi-bar' }, [h('i', { style: 'width:' + pct + '%;background:' + BAND_COLORS[band] })]), h('span', { text: r.pWin < 0.05 ? 'lose' : pct + '%' })]));
+            }
+        } else if (f) {
+            kids.push(h('span', { text: 'Their exact stats (spy): win ' + Math.round(f.pWin * 100) + '% · keep ' + Math.round((f.keep || 0) * 100) + '%' }));
+        }
+        if (v.gear) {
+            const days = Math.max(0, Math.round((Date.now() - v.gear.seenAt) / 86400000));
+            kids.push(h('div', {}, [h('span', { style: 'color:#939aa1', text: 'Their gear, seen ' + (days ? days + ' days ago' : 'today') + ' on your attack:' }), h('br'), v.gear.text || 'no weapons shown']));
+            if (v.withGear) kids.push(h('span', { class: 'pi-warnline', text: 'With their gear: win ' + Math.round(v.withGear.pWin * 100) + '% · keep ~' + Math.round((v.withGear.keep || 0) * 100) + '%' }));
+        }
+        const src = v.est ? v.est.source : null;
+        const foot = src === 'ffscouter' ? ['Stats: ', h('b', { text: 'FFScouter' }), ' (' + FFS_SITE_URL.replace('https://', '').replace(/\/$/, '') + '), ' + (v.est.ageDays ?? '?') + ' days old.'] : src === 'spy' ? ['Stats: a spy, ' + v.est.ageDays + ' days old.'] : src === 'fight' ? ['Stats: from your own fight with them' + (v.est.lowerBound ? ' (at least this strong)' : '') + '.'] : src === 'public' ? ['Stats: rough, from public stats (' + v.est.range + ').'] : ['No estimate yet. Connect FFScouter or fight them once.'];
+        if (v.forecast && v.forecast.turns) foot.push(' About ' + v.forecast.turns + ' turns.');
+        kids.push(h('div', { class: 'pi-foot' }, foot));
+        return h('div', { class: 'pi-mark pi-eyecard' }, kids);
+    }
+
+    /** One floating card for the page, shown next to the chip under the pointer. */
+    function bindCard(doc, getView) {
+        let card = null;
+        const hide = () => {
+            if (card) card.remove();
+            card = null;
+        };
+        doc.addEventListener('mouseover', (e) => {
+            const chip = e.target && e.target.closest ? e.target.closest('.pi-chip[data-pi-player]') : null;
+            if (!chip) return hide();
+            const v = getView(Number(chip.getAttribute('data-pi-player')));
+            if (!v) return;
+            hide();
+            card = cardEl(v);
+            doc.body.appendChild(card);
+            const r = chip.getBoundingClientRect();
+            const x = Math.min(window.innerWidth - 340, Math.max(8, r.left));
+            const below = r.bottom + 8 + card.offsetHeight < window.innerHeight;
+            card.style.left = x + 'px';
+            card.style.top = (below ? r.bottom + 6 : Math.max(8, r.top - card.offsetHeight - 6)) + 'px';
+        });
+        doc.addEventListener('scroll', hide, true);
+    }
+
+    /** The war summary line: "5 attackable now · 0:48 until the next one is out · 1 traveling". */
+    function warSummaryEl(sum, updatedAgoS) {
+        const mmss = (s) => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+        return h('div', { class: 'pi-mark pi-warsum' }, [
+            h('span', { class: 'pi-plate' }, [h('i')]),
+            h('span', {}, [h('b', { text: String(sum.attackable) }), ' attackable now' + (sum.early ? ' (' + sum.early + ' out early)' : '')]),
+            sum.nextOutS !== null ? h('span', {}, [h('b', { text: mmss(sum.nextOutS) }), ' until the next one is out']) : null,
+            h('span', {}, [h('b', { text: String(sum.traveling) }), ' traveling']),
+            h('span', { class: 'pi-muted', text: 'updated ' + (updatedAgoS ?? 0) + 's ago · every 10 s while this tab is open' }),
+        ]);
+    }
+
+    /**
+     * The attack page's side panel (a shadow host beside Torn's layout).
+     * @param {object} v - eyeView() or null
+     * @param {object} s - {gearVisible, gearSaved}
+     */
+    function attackPanelContent(v, s) {
+        const kids = [h('span', { class: 'row' }, [h('span', { class: 'plate' }, [h('i')]), h('b', { class: 'white', text: 'Torn Eye' })])];
+        if (!v) {
+            kids.push(h('span', { class: 'muted', text: 'No estimate yet.' }));
+            return kids;
+        }
+        const f = v.forecast;
+        kids.push(h('span', { class: 'big', style: 'color:' + BAND_COLORS[v.band], text: BAND_WORDS[v.band] + (f && f.pWin >= 0.05 && f.keep !== null ? ' · keep ' + (v.est && v.est.confidence === 'exact' ? '' : '~') + Math.round(f.keep * 100) + '%' : '') }));
+        if (f) kids.push(h('span', { text: 'Win ' + Math.round(f.pWin * 100) + '%' + (v.respect ? ' · ' + v.respect.toFixed(2) + ' respect' : '') + (f.turns ? ' · about ' + f.turns + ' turns' : '') }));
+        if (s.gearSaved) kids.push(h('span', { class: 'good', text: 'Their gear is saved for next time.' }));
+        else if (!s.gearVisible) kids.push(h('span', { class: 'muted', text: 'Their gear isn’t shown yet. Torn shows it after Start Fight (earlier with the Gun Shop job perk). We’ll save it for next time.' }));
+        if (v.gear) kids.push(h('span', { class: 'muted', text: 'Last seen: ' + (v.gear.text || 'gear') + ' · ' + Math.max(0, Math.round((Date.now() - v.gear.seenAt) / 86400000)) + ' days ago' }));
+        if (v.source) kids.push(h('span', { class: 'muted', text: 'Stats: ' + v.source + (v.est && v.est.source === 'ffscouter' ? ' (credit: FFScouter)' : '') }));
+        return kids;
+    }
+
+    const ATTACK_PANEL_CSS = `
+    :host { all: initial; }
+    * { box-sizing: border-box; font-family: Arial, Helvetica, sans-serif; }
+    .panel { position: fixed; z-index: 99989; width: 250px; background: #1b1e21; border: 1px solid #3a4046; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: #e3e5e8; box-shadow: 0 6px 18px rgba(0,0,0,.4); }
+    .row { display: flex; align-items: center; gap: 8px; }
+    .plate { width: 18px; height: 18px; border-radius: 50%; background: #efebe2; display: inline-grid; place-items: center; box-shadow: inset 0 0 0 3px #efebe2, inset 0 0 0 4px #2a2d31; }
+    .plate i { width: 4px; height: 4px; border-radius: 50%; background: #15171a; }
+    .white { color: #fff; }
+    .big { font: bold 22px "Arial Narrow", Arial, sans-serif; }
+    .muted { color: #939aa1; }
+    .good { color: #9bdc8a; font-weight: bold; }
+    `;
+
+    function attackPanel(doc = document) {
+        let host = doc.getElementById('pi-attack');
+        if (!host) {
+            host = h('div', { id: 'pi-attack' });
+            (doc.body || doc.documentElement).appendChild(host);
+            const sr = host.attachShadow({ mode: 'open' });
+            fill(sr, [h('style', { text: ATTACK_PANEL_CSS }), h('div', { class: 'panel' })]);
+        }
+        return host.shadowRoot.querySelector('.panel');
+    }
+
+    /* ===== src/eye-page.js ===== */
+    /*
+     * Torn Eye on torn.com: chips on profiles, the mini-profile popup and
+     * faction lists; war mode on ranked-war lists (the enemy faction read every
+     * 10 s while the tab is visible); the attack page's panel and the
+     * read-only attackData reader that saves their gear.
+     */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    /** War mode asks for the enemy faction this often, and only from a visible tab. */
+    const WAR_POLL_MS = 10000;
+
+    const ep = { extras: new Map(), war: { factionId: null, members: null, prev: null, at: 0, polling: false }, attack: { gearVisible: false, gearSaved: false }, drawing: false };
+
+    function view(id) {
+        return eyeView(id, ep.extras.get(id) || {}, { war: Boolean(ep.war.members) });
+    }
+
+    function removeChips(scope) {
+        for (const el of scope.querySelectorAll('.pi-chip, .pi-warsum, .pi-earlytag')) el.remove();
+        for (const el of scope.querySelectorAll('.pi-early')) el.classList.remove('pi-early');
+    }
+
+    /* ------------------------------------------------------------ profile */
+
+    function drawProfile() {
+        const id = Number(profileIdOf(location.href));
+        const anchor = profileAnchor();
+        if (!id || !anchor) return;
+        ep.extras.set(id, { ...(ep.extras.get(id) || {}), level: profileLevel() });
+        removeChips(anchor.parentNode);
+        const chip = chipEl(view(id), { id });
+        anchor.parentNode.insertBefore(chip, anchor.nextSibling);
+    }
+
+    function drawMini() {
+        const id = miniProfileId();
+        const root = document.getElementById('profile-mini-root');
+        if (!id || !root) return;
+        const at = root.querySelector('.profile-container .description .last-action') || root.querySelector('.description') || root;
+        removeChips(root);
+        at.appendChild(chipEl(view(id), { mini: true, id }));
+    }
+
+    /* ------------------------------------------------------ faction + war */
+
+    function drawFaction() {
+        const rows = readFactionRows();
+        for (const r of rows) ep.extras.set(r.id, { level: r.level, name: r.name });
+        for (const r of rows) {
+            for (const c of r.cell.querySelectorAll('.pi-chip')) c.remove();
+            r.cell.appendChild(chipEl(view(r.id), { mini: true, id: r.id }));
+        }
+    }
+
+    async function pollWar() {
+        const fid = enemyFactionId();
+        if (!fid || ep.war.polling || !isVisible()) return;
+        if (ep.war.factionId === fid && Date.now() - ep.war.at < WAR_POLL_MS) return;
+        ep.war.polling = true;
+        try {
+            const members = await fetchFactionMembers(tornClient(), fid);
+            ep.war.prev = ep.war.factionId === fid ? ep.war.members : null;
+            ep.war.members = members;
+            ep.war.factionId = fid;
+            ep.war.at = Date.now();
+            for (const m of members) ep.extras.set(Number(m.id), { level: m.level, name: m.name });
+            wantPlayers(members.map((m) => Number(m.id)));
+            drawWar();
+        } catch {
+            ep.war.at = Date.now();
+        } finally {
+            ep.war.polling = false;
+        }
+    }
+
+    function drawWar() {
+        const rows = readWarRows(document, 'enemy');
+        if (!rows.length) return;
+        const list = rows[0].el.parentNode;
+        const nowS = Math.floor(Date.now() / 1000);
+        const members = ep.war.members || rows.map((r) => ({ id: r.id, level: r.level, status: { state: r.status } }));
+        const bands = {};
+        const respect = {};
+        for (const m of members) {
+            const v = view(Number(m.id));
+            if (v) {
+                bands[m.id] = v.band;
+                respect[m.id] = v.respect || 0;
+            }
+        }
+        const early = ep.war.prev ? outEarly(ep.war.prev, members, nowS) : new Set();
+        const sorted = sortWar(members, { bands, respect, early, nowS });
+        ep.drawing = true;
+        try {
+            removeChips(list.parentNode);
+            const byId = new Map(rows.map((r) => [r.id, r]));
+            for (const s of sorted) {
+                const r = byId.get(s.id);
+                if (!r) continue;
+                list.appendChild(r.el); // Torn's own row, moved: nothing clicked, nothing changed inside it
+                r.cell.appendChild(chipEl(view(s.id), { mini: true, id: s.id }));
+                if (s.state === 'early') {
+                    r.el.classList.add('pi-early');
+                    const st = r.el.querySelector('.status');
+                    if (st) st.appendChild(Object.assign(document.createElement('span'), { className: 'pi-mark pi-earlytag', textContent: 'out early' }));
+                }
+            }
+            list.parentNode.insertBefore(warSummaryEl(warSummary(sorted, nowS), ep.war.at ? Math.round((Date.now() - ep.war.at) / 1000) : null), list);
+        } finally {
+            ep.drawing = false;
+        }
+    }
+
+    /* ------------------------------------------------------------- attack */
+
+    function drawAttack() {
+        const id = Number(attackTargetOf(location.href));
+        if (!id) return;
+        const panel = attackPanel();
+        const root = document.getElementById('attack-root');
+        const r = root ? root.getBoundingClientRect() : null;
+        const x = r && r.right + 262 < window.innerWidth ? r.right + 12 : window.innerWidth - 262;
+        panel.style.left = Math.max(8, x) + 'px';
+        panel.style.top = (r ? Math.max(8, r.top) : 110) + 'px';
+        fill(panel, attackPanelContent(view(id), ep.attack));
+    }
+
+    function onAttackData(json) {
+        const d = parseAttackData(json);
+        if (!d || !d.defenderId) return;
+        ep.extras.set(d.defenderId, { ...(ep.extras.get(d.defenderId) || {}), level: d.level, life: d.maxLife, name: d.defenderName });
+        ep.attack.gearVisible = d.visible;
+        if (d.visible && d.items.length) {
+            ep.attack.gearSaved = true;
+            saveGear(d.defenderId, d.items);
+        }
+        drawAttack();
+    }
+
+    /* ------------------------------------------------------------- wiring */
+
+    function drawAll() {
+        if (!getSettings().eyeChips || !isVisible()) return;
+        const p = detectPage(location.href);
+        if (p === PAGE_PROFILE) drawProfile();
+        if (p === PAGE_FACTION) {
+            if (document.getElementById('faction_war_list_id')) drawWar();
+            drawFaction();
+        }
+        if (p === PAGE_ATTACK) drawAttack();
+        drawMini();
+    }
+
+    function bootEyePage() {
+        ensureMarkCss();
+        ensureEyeCss();
+        bindCard(document, (id) => view(id));
+        const p = detectPage(location.href);
+        if (p === PAGE_ATTACK) {
+            // unsafeWindow is the page's own window in Tampermonkey; the harness has only window.
+            const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+            installAttackHook(pageWin, onAttackData);
+        }
+        const ask = () => {
+            if (!getSettings().eyeChips || !isVisible()) return;
+            const pg = detectPage(location.href);
+            if (pg === PAGE_PROFILE) wantPlayers([Number(profileIdOf(location.href))], { profiles: true });
+            if (pg === PAGE_ATTACK) wantPlayers([Number(attackTargetOf(location.href))], { profiles: true });
+            if (pg === PAGE_FACTION) {
+                wantPlayers(readFactionRows().map((r) => r.id));
+                if (document.getElementById('faction_war_list_id')) pollWar();
+            }
+            const mini = miniProfileId();
+            if (mini) wantPlayers([mini], { profiles: true });
+        };
+        onEye(() => drawAll());
+        let lastSig = '';
+        onModel((m) => {
+            if (!m || !m.ready) return;
+            const sig = [location.href, m.state.at, readFactionRows().length, readWarRows().length, miniProfileId()].join('|');
+            if (sig !== lastSig) {
+                lastSig = sig;
+                ask();
+                drawAll();
+            }
+        });
+        // War mode: every 10 s while visible.
+        setInterval(() => {
+            if (detectPage(location.href) === PAGE_FACTION && document.getElementById('faction_war_list_id')) pollWar();
+        }, 2000);
+        // The mini-profile popup is added to the body on the first hover, then re-drawn for each player.
+        let watchedRoot = null;
+        const onMini = () => {
+            if (ep.drawing) return;
+            const root = document.getElementById('profile-mini-root');
+            if (root && root !== watchedRoot) {
+                watchedRoot = root;
+                new MutationObserver(onMini).observe(root, { childList: true, subtree: true });
+            }
+            const id = miniProfileId();
+            const shown = document.querySelector('#profile-mini-root .pi-chip');
+            if (id && (!shown || shown.getAttribute('data-pi-player') !== String(id)) && !(ep.miniAt && ep.miniId === id && Date.now() - ep.miniAt < 500)) {
+                ep.miniId = id;
+                ep.miniAt = Date.now();
+                wantPlayers([id], { profiles: true });
+                ep.drawing = true;
+                try {
+                    drawMini();
+                } finally {
+                    ep.drawing = false;
+                }
+            }
+        };
+        new MutationObserver(onMini).observe(document.body, { childList: true });
+        onMini();
+    }
+
     /* ===== src/main.js ===== */
     /*
      * Wiring. The only file that knows it is a userscript; core/ and api/ are
@@ -6572,6 +8092,7 @@
      *   - the webpage (GitHub Pages app.html): the full tabs, drawn over the
      *     placeholder the page shows without the script.
      */
+
 
 
 
@@ -6593,7 +8114,10 @@
         if (typeof window === 'undefined' || typeof document === 'undefined' || !document.body) return;
         menus();
         if (where === 'app') bootAppPage();
-        else bootTornPage();
+        else {
+            bootTornPage();
+            bootEyePage();
+        }
         startFeed();
         // Off torn.com (the harness), expose the model for checks. On torn.com the sandbox keeps it private anyway.
         if (!isTornHost(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed };

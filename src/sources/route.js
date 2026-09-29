@@ -83,7 +83,7 @@ export function detectPage(href) {
     if (url.includes('/pmarket.php')) return PAGE_POINTS;
     if (url.includes('/profiles.php')) return PAGE_PROFILE;
     if (url.includes('/factions.php')) return PAGE_FACTION;
-    if (url.includes('sid=attack') && url.includes('loader.php')) return PAGE_ATTACK;
+    if (/[?&]sid=attack(&|#|$)/.test(url) && (url.includes('loader.php') || url.includes('page.php'))) return PAGE_ATTACK;
     return PAGE_OTHER;
 }
 

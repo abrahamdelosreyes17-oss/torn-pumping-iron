@@ -171,6 +171,58 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     await page.close();
 }
 
+/* Torn Eye: a profile chip with its card, the mini-profile, war mode, the attack page. */
+{
+    const { page, errors, tornHits } = await open('page=profile&XID=605123&fixture=profile&ffs=1&who=owner', { wait: 6000 });
+    const chip = (await text(page, '.content-title + .pi-chip'))[0] || '';
+    ok(/^Stomp/.test(chip) && /win 100%/.test(chip) && /FFScouter 3 d/.test(chip), 'eye: profile chip after the title (' + chip + ')');
+    ok(!/FF|fair fight/i.test(chip), 'eye: never says FF or fair fight');
+    const box = await page.locator('.content-title + .pi-chip').boundingBox();
+    await page.mouse.move(box.x + 20, box.y + 10);
+    await page.waitForTimeout(200);
+    const card = (await text(page, '.pi-eyecard'))[0] || '';
+    ok(/HP you keep, by their likely build/.test(card) && /FFScouter/.test(card), 'eye: hover card with builds and the FFScouter credit');
+    const mini = (await text(page, '#profile-mini-root .pi-chip'))[0] || '';
+    ok(/^(Stomp|Good|Tough|Can't win)/.test(mini), 'eye: mini-profile chip (' + mini + ')');
+    ok(errors.length === 0, 'eye: no page errors ' + JSON.stringify(errors));
+    ok(tornHits() === 0, 'eye: nothing loaded from torn.com');
+    await page.screenshot({ path: resolve(shots, 'torn-eye-profile.png'), fullPage: true });
+    await page.close();
+}
+{
+    const { page, errors } = await open('page=faction&ID=7777&fixture=faction&ffs=1&who=owner', { wait: 6500 });
+    const order = await page.evaluate(() => [...document.querySelectorAll('#faction_war_list_id li.enemy .member a[href*="XID"]')].map((a) => a.getAttribute('aria-label').replace('View profile of ', '')));
+    ok(JSON.stringify(order) === JSON.stringify(['Rival', 'Brix', 'Mira_Vex', 'Flyer']), 'war: Okay first, then Hospital by time out, then Traveling (' + order + ')');
+    const sum = (await text(page, '.pi-warsum'))[0] || '';
+    ok(/1 attackable now/.test(sum) && /0:4\d until the next one is out/.test(sum) && /1 traveling/.test(sum), 'war: summary line (' + sum + ')');
+    const chips = await page.evaluate(() => document.querySelectorAll('#faction_war_list_id li.enemy .pi-chip').length);
+    ok(chips === 4, 'war: a chip on every enemy row (' + chips + ')');
+    const yours = await page.evaluate(() => document.querySelectorAll('#faction_war_list_id li.your .pi-chip').length);
+    ok(yours === 0, 'war: your own side is left alone');
+    const memberChips = await page.evaluate(() => document.querySelectorAll('.members-list .table-body .pi-chip').length);
+    ok(memberChips === 2, 'faction list: chips on members, not the fallen one (' + memberChips + ')');
+    const calls = await page.evaluate(() => window.__calls.filter((c) => c.includes('/faction/7777/members')).length);
+    ok(calls >= 1 && calls <= 2, 'war: the enemy faction read at most every 10 s (' + calls + ' in ~6 s)');
+    ok(errors.length === 0, 'war: no page errors ' + JSON.stringify(errors));
+    await page.screenshot({ path: resolve(shots, 'torn-eye-war.png'), fullPage: true });
+    await page.close();
+}
+{
+    const { page, errors } = await open('page=attack&user2ID=424242&fixture=attack&ffs=1&who=owner', { wait: 6000 });
+    const panel = () => page.evaluate(() => document.getElementById('pi-attack').shadowRoot.querySelector('.panel').textContent);
+    const before = await panel();
+    ok(/Torn Eye/.test(before) && /(Stomp|Good|Tough|Can't win)/.test(before) && /isn.t shown yet/.test(before), 'attack: panel before Start Fight (' + before.slice(0, 90) + ')');
+    await page.evaluate(() => fetch('fixtures/attackData.json?sid=attackData').then((r) => r.json()));
+    await page.waitForTimeout(2200); // the cache is written 1.5 s after the last change
+    const after = await panel();
+    ok(/saved for next time/.test(after) && /AK-47/.test(after), 'attack: gear read from attackData and saved (' + after.slice(0, 160) + ')');
+    const stored = await page.evaluate(() => new Promise((res) => { const r = indexedDB.open('pumpingIron', 1); r.onsuccess = () => { const tx = r.result.transaction('kv', 'readonly'); const g = tx.objectStore('kv').get('eye'); g.onsuccess = () => res(g.result && g.result.gear && Object.keys(g.result.gear)); }; r.onerror = () => res(null); }));
+    ok(Array.isArray(stored) && stored.includes('424242'), 'attack: gear kept in IndexedDB for next time');
+    ok(errors.length === 0, 'attack: no page errors ' + JSON.stringify(errors));
+    await page.screenshot({ path: resolve(shots, 'torn-eye-attack.png'), fullPage: true });
+    await page.close();
+}
+
 /* A hidden tab asks Torn nothing. */
 {
     const { page } = await open('page=gym&fixture=gym-friend&hidden=1', { wait: 5000 });

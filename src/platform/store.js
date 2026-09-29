@@ -114,6 +114,7 @@ export const DATA_GROUPS = {
     plan: [K.plan, K.recheck],
     progress: [K.statsHistory, K.dayLog, K.dayTotals],
     prices: [K.priceHistory, K.prices],
+    eye: ['eyeTargets', 'myAttacks'],
 };
 
 export function clearGroup(group) {

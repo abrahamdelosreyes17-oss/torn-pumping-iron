@@ -21,6 +21,7 @@
  *   &energy=275   the friend's energy now (default 20)
  *   &win=week     the Buy window (today, three, week)
  *   &hidden=1     the tab reports itself hidden (nothing may be asked)
+ *   &ffs=1        save an FFScouter key (canned estimates for the fixture players)
  */
 const Q = new URLSearchParams(location.search);
 if (Q.get('at')) {
@@ -69,17 +70,35 @@ const CANNED = {
   '/api/marketplace/206': () => ({ item_id: 206, listings: [{ player_id: 1234567, player_name: 'Iron_Monk', price: 826500, quantity: 3 }, { player_id: 2345678, player_name: 'LuckyLefty', price: 828000, quantity: 6 }] }),
 };
 
+// Torn Eye: canned estimates (total stats) and profiles for the fixture players.
+const FFS_TOTALS = { 605123: 150e6, 424242: 600e6, 515151: 2.6e9, 3886744: 780e6, 1111: 1e8, 777001: 640e6, 777002: 140e6 };
+const NOW_S = Math.floor(Date.now() / 1000);
+CANNED['/api/v1/get-stats'] = (u) => (u.searchParams.get('targets') || '').split(',').map((id) => FFS_TOTALS[id] ? { player_id: Number(id), bs_estimate: FFS_TOTALS[id], bs_estimate_human: '', bss_public: null, fair_fight: null, last_updated: NOW_S - 3 * 86400, source: 'bss' } : { player_id: Number(id), bs_estimate: null, last_updated: null });
+CANNED['/api/v1/check-key'] = () => ({ is_registered: true, is_premium: false, policy_update_required: false });
+CANNED['/api/v1/get-targets'] = () => ({ parameters: {}, targets: Object.entries(FFS_TOTALS).map(([id, t], i) => ({ player_id: Number(id), name: 'Target' + i, level: 50 + i * 3, bs_estimate: t, fair_fight: 2, last_action: NOW_S - (10 + i) * 86400 })) });
+CANNED['/v2/faction/7777/members'] = () => ({ members: [
+  { id: 424242, name: 'Rival', level: 64, status: { state: 'Okay', until: null, description: 'Okay' } },
+  { id: 515151, name: 'Flyer', level: 40, status: { state: 'Traveling', until: null, description: 'Traveling to Mexico' } },
+  { id: 777001, name: 'Brix', level: 67, status: { state: 'Hospital', until: NOW_S + 48, description: 'In hospital' } },
+  { id: 777002, name: 'Mira_Vex', level: 61, status: { state: 'Hospital', until: NOW_S + 252, description: 'In hospital' } },
+] });
+CANNED['/v2/user/attacks'] = () => ({ attacks: [] });
+CANNED['/v2/user/equipment'] = () => ({ equipment: [{ type: 'Weapon', sub_type: 'Primary', name: 'Minigun', stats: { damage: 71.2, accuracy: 51 }, bonuses: [] }], clothing: [] });
+const profileOf = (id) => ({ profile: { id: Number(id), name: 'P' + id, level: 60, rank: 'Supreme Hitman', life: { current: 7300, maximum: 7300 }, status: { state: 'Okay', description: 'Okay' } } });
+
 window.GM_xmlhttpRequest = (o) => {
   const u = new URL(o.url);
   window.__calls.push(u.hostname + u.pathname + (u.searchParams.get('selections') ? '?selections=' + u.searchParams.get('selections') : '') + (u.searchParams.get('cat') ? '?cat=' + u.searchParams.get('cat') : ''));
   setTimeout(() => {
     let body;
     if (Q.get('dead') && u.hostname === 'api.torn.com') body = { error: { code: 2, error: 'Incorrect key' } };
+    else if (/^\/v2\/user\/\d+\/profile$/.test(u.pathname)) body = profileOf(u.pathname.split('/')[3]);
     else body = (CANNED[u.pathname] || (() => ({})))(u);
     o.onload({ status: 200, responseText: JSON.stringify(body) });
   }, 20);
 };
 if (Q.get('key')) _store['pumpingIron.v1.apiKey'] = JSON.stringify('HarnessKey123456');
+if (Q.get('ffs')) _store['pumpingIron.v1.ffsKey'] = JSON.stringify('FfsKeyHarness123');
 if (Q.get('win')) _store['pumpingIron.v1.settings'] = JSON.stringify({ buyWindow: Q.get('win') });
 if (Q.get('hidden')) Object.defineProperty(document, 'visibilityState', { get: () => 'hidden' });
 if (Q.get('build')) _store['pumpingIron.v1.plan'] = JSON.stringify({ type: 'steady', strategy: 'steady', build: Q.get('build'), goal: null, createdAt: 1 });

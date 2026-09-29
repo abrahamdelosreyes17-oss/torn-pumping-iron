@@ -122,6 +122,7 @@ const TABS = {
     plan: ['Recommended', 'Steady training', 'Other plans', 'Choco jump', 'Build', "Hank's", 'You vs Balanced'],
     buy: ['Buy for', 'Xanax', 'Iron_Monk', 'Points market', '7-day prices', 'TornW3B'],
     progress: ['Stats', 'Gyms', 'Force Training', 'This week'],
+    eye: ['Targets', 'Colours', 'Sources', 'FFScouter', 'Gear seen'],
     settings: ['Torn API key', 'How this key is used', 'FFScouter', 'data policy', 'TornStats', 'Your data', 'Diagnostics'],
 };
 
@@ -155,6 +156,20 @@ if (!only.length || only.includes('plan')) {
 }
 
 ok(tornHits() === 0, 'nothing loaded from torn.com');
+
+// Torn Eye tab with FFScouter: Refresh lists targets ranked by our estimate.
+{
+    const o = await openApp('&ffs=1&who=owner');
+    await o.page.evaluate(() => (location.hash = 'eye'));
+    await o.page.waitForTimeout(500);
+    await o.page.locator('#pi-app button', { hasText: 'Refresh' }).click();
+    await o.page.waitForTimeout(2500);
+    const m = await checkTab(o.page, 'eye', o.errors, ['Targets', 'Stomp', 'Attack', 'ranked by our fight estimate']);
+    const rows = await o.page.evaluate(() => document.getElementById('pi-app').shadowRoot.querySelectorAll('.tbl tbody tr').length);
+    ok(rows >= 5, 'eye: targets listed (' + rows + ')');
+    ok(/Hidden: \d+ Can.t win/.test(m.text), "eye: can't-win targets hidden by default");
+    await o.page.close();
+}
 
 // No key: the page opens on Settings with the ToS table open.
 {

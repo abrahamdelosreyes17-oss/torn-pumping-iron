@@ -10,7 +10,9 @@ import { pi, tornClient, refresh, onModel, isVisible } from './runtime.js';
 import { PiApp } from './ui/app/app.js';
 import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, keyIsEnough } from './api/torn.js';
 import { W3bClient, fetchW3bListings } from './api/w3b.js';
-import { makeFfsClient, checkFfsKey } from './api/ffscouter.js';
+import { makeFfsClient, checkFfsKey, fetchFfsTargets } from './api/ffscouter.js';
+import { renderEye } from './ui/app/eye-tab.js';
+import { wantPlayers, eyeView, onEye, gearCount, clearEye } from './eye-service.js';
 import { tabWindow } from './platform/tab-window.js';
 import { listingsFromItemMarket, listingsFromW3b, listingsFromPoints } from './core/market.js';
 import { recordPrice, average7, dailyLows, readPriceHistory } from './core/history.js';
@@ -22,7 +24,7 @@ import { redactKey } from './api/client.js';
 /** How long fetched prices count as fresh. */
 export const PRICE_FRESH_MS = 5 * 60 * 1000;
 
-const page = { app: null, w3b: null, ffs: null, loading: new Set() };
+const page = { app: null, w3b: null, ffs: null, loading: new Set(), eye: { loading: false, error: null, gear: 0 } };
 
 function w3bClient() {
     if (!page.w3b) {
@@ -130,8 +132,31 @@ function diagnostics() {
         version: PI_BUILD_VERSION,
         historyDays: Object.keys(get(K.statsHistory, {}) || {}).length,
         priceItems: Object.keys((readPriceHistory(get(K.priceHistory, null)) || {}).items || {}).length,
-        eyeLine: 'estimates and gear seen',
+        eyeLine: 'targets, estimates and gear for ' + page.eye.gear + ' player' + (page.eye.gear === 1 ? '' : 's'),
     };
+}
+
+/** Targets for the Torn Eye tab: FFScouter's list, estimated against you. */
+async function loadTargets(params) {
+    if (!getKey(K.ffsKey)) return;
+    page.eye.loading = true;
+    page.eye.error = null;
+    page.app.render(true);
+    try {
+        const list = await fetchFfsTargets(ffsClient(), { ...params, limit: 50 });
+        set('eyeTargets', { at: Date.now(), params, list });
+        wantPlayers(list.map((x) => x.playerId));
+    } catch (error) {
+        page.eye.error = String((error && error.message) || error);
+    }
+    page.eye.loading = false;
+    page.app.render(true);
+}
+
+function eyeRows() {
+    const stored = get('eyeTargets', null);
+    if (!stored) return [];
+    return stored.list.map((x) => ({ ...(eyeView(x.playerId, { level: x.level, name: x.name }) || { id: x.playerId, band: 'none' }), name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId }));
 }
 
 function getCtx() {
@@ -173,16 +198,31 @@ function getCtx() {
         saveTsKey,
         revealKey: (name) => getKey(name),
         clearGroup: (g) => {
+            if (g === 'eye') clearEye();
             clearGroup(g);
             refresh();
             page.app.render(true);
         },
         diagnostics,
+        eye: {
+            rows: eyeRows,
+            load: (params) => loadTargets(params).catch(() => {}),
+            loading: () => page.eye.loading,
+            error: () => page.eye.error,
+            sources: () => ({ fights: ((get('myAttacks', null) || {}).list || []).length, ffsFree: page.ffs ? page.ffs.stats().remaining : 60, gear: page.eye.gear }),
+        },
     };
 }
 
 export function bootAppPage({ renderers = {} } = {}) {
-    page.app = new PiApp({ getCtx, renderers, getUpdated: () => (get(K.userState, null) || {}).at || null });
+    page.app = new PiApp({ getCtx, renderers: { eye: renderEye, ...renderers }, getUpdated: () => (get(K.userState, null) || {}).at || null });
+    onEye(() => {
+        gearCount().then((n) => (page.eye.gear = n));
+        page.app.render(true);
+    });
+    gearCount().then((n) => (page.eye.gear = n));
+    const stored = get('eyeTargets', null);
+    if (stored) setTimeout(() => wantPlayers(stored.list.map((x) => x.playerId)), 500);
     page.app.mount();
     onModel(() => page.app.render());
     for (const k of [K.prices, K.settings, K.plan, K.userStatic]) gmOnChange(k, () => page.app.render());

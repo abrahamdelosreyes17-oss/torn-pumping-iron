@@ -132,6 +132,11 @@ function analyse(source, filePath) {
         deps.push(match[1]);
     }
 
+    // "export { a as b }" would survive stripping and break the bundle.
+    if (/^[ 	]*export\s*\{/m.test(source)) {
+        throw new Error(`${filePath}: "export { ... }" lists are not supported by this bundler.`);
+    }
+
     const declared = new Set();
     for (const match of source.matchAll(DECL_RE)) {
         declared.add(match[1]);
