@@ -3117,6 +3117,22 @@
 
 
 
+    /*
+     * The 30-day build projection is the heavy part of a model (thousands of
+     * simulated trains) and only changes when the stats, build or gyms do, so
+     * the last one is kept.
+     */
+    const projectionMemo = { key: '', value: null };
+
+    function projectionFor(args) {
+        const key = JSON.stringify([args.stats, args.shares, args.energyPerDay, args.happy, args.unlocked, args.perks, args.keep, args.days, args.active, args.table.map((g) => [g.id, g.dots])]);
+        if (key !== projectionMemo.key) {
+            projectionMemo.key = key;
+            projectionMemo.value = projectBuild(args);
+        }
+        return projectionMemo.value;
+    }
+
     /** Build shares for a plan's build id ("baldr" or "baldr:dex"). */
     function buildOf(id) {
         const [base, high] = String(id || DEFAULT_BUILD).split(':');
@@ -3228,7 +3244,7 @@
 
         // Build ETA and next gym
         const energyPerDay = Math.round(((e.interval <= 600 ? 720 : 480) + 250 * Math.floor(1440 / 420) + e.maximum) / 10) * 10;
-        const proj = projectBuild({ stats: pc.stats, shares, energyPerDay, happy: state.happy.maximum + 300, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: 30, active: state.gymId, table: pc.table });
+        const proj = projectionFor({ stats: pc.stats, shares, energyPerDay, happy: state.happy.maximum + 300, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: 30, active: state.gymId, table: pc.table });
         // The next ladder gym after the highest one unlocked; its progress comes from the gym page (percentage on the button).
         const ladderTop = Math.max(0, ...pc.unlocked.filter((id) => id <= 24));
         const progressE = gymProgress && Number(gymProgress.nextId) === ladderTop + 1 ? gymProgress.energy : null;
@@ -3322,7 +3338,8 @@
         if (pi.client) return pi.client;
         const win = tabWindow('apiWindow', pi.tabId, storeApi);
         pi.client = new TornApiClient({
-            getKey: () => getKey(K.apiKey),
+            // A key Torn refused (2, 13, 18) is not used again, by any part of any tab, until a new one is saved.
+            getKey: () => (get(K.apiKeyDead, false) ? '' : getKey(K.apiKey)),
             loadWindow: () => win.load(),
             addToWindow: (at) => win.add(at),
             loadPause: () => get(K.apiPause, null),
@@ -3418,7 +3435,8 @@
         gmOnChange(K.userStatic, refresh);
         gmOnChange(K.plan, refresh);
         gmOnChange(K.settings, refresh);
-        setInterval(refresh, 1000);
+        // Countdowns tick by themselves every second; the model itself is worked out again every 5 s.
+        setInterval(refresh, 5000);
         refresh();
     }
 
@@ -6426,8 +6444,10 @@
     async function cache() {
         if (eye.cache) return eye.cache;
         if (!eye.loading) {
+            // torn.com and the webpage keep separate IndexedDBs; a Clear on either reaches both through this mark.
+            const clearedAt = Number(get('eyeClearAt', 0)) || 0;
             eye.loading = idbGet('eye')
-                .then((v) => (eye.cache = v && v.players ? v : { players: {}, gear: {} }))
+                .then((v) => (eye.cache = v && v.players && !((v.savedAt || 0) < clearedAt) ? v : { players: {}, gear: {} }))
                 .catch(() => (eye.cache = { players: {}, gear: {} }));
         }
         return eye.loading;
@@ -6445,6 +6465,7 @@
                 ids.sort((a, b) => (c.players[a].seen || 0) - (c.players[b].seen || 0));
                 for (const id of ids.slice(0, ids.length - 3000)) delete c.players[id];
             }
+            c.savedAt = Date.now();
             idbSet('eye', c).catch(() => {});
         }, 1500);
     }
@@ -6467,18 +6488,22 @@
     async function saveGear(playerId, items) {
         const c = await cache();
         c.gear[playerId] = { items, seenAt: Date.now() };
+        // The count is shared (GM storage) so the webpage can show it; the gear itself stays with Torn's pages.
+        set('eyeGearCount', Object.keys(c.gear).length);
         saveSoon();
         notify();
     }
 
     async function gearCount() {
         const c = await cache();
-        return Object.keys(c.gear || {}).length;
+        return Math.max(Object.keys(c.gear || {}).length, Number(get('eyeGearCount', 0)) || 0);
     }
 
     async function clearEye() {
-        eye.cache = { players: {}, gear: {} };
+        eye.cache = { players: {}, gear: {}, savedAt: Date.now() };
         eye.mem.clear();
+        set('eyeClearAt', Date.now());
+        set('eyeGearCount', 0);
         await idbSet('eye', eye.cache).catch(() => {});
         set('myAttacks', null);
         notify();

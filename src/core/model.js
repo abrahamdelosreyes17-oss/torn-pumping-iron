@@ -16,6 +16,22 @@ import { recommend, pickWarning } from './recommend.js';
 import { needList } from './market.js';
 import { XANAX, SAMPLE_PRICES } from './items.js';
 
+/*
+ * The 30-day build projection is the heavy part of a model (thousands of
+ * simulated trains) and only changes when the stats, build or gyms do, so
+ * the last one is kept.
+ */
+const projectionMemo = { key: '', value: null };
+
+export function projectionFor(args) {
+    const key = JSON.stringify([args.stats, args.shares, args.energyPerDay, args.happy, args.unlocked, args.perks, args.keep, args.days, args.active, args.table.map((g) => [g.id, g.dots])]);
+    if (key !== projectionMemo.key) {
+        projectionMemo.key = key;
+        projectionMemo.value = projectBuild(args);
+    }
+    return projectionMemo.value;
+}
+
 /** Build shares for a plan's build id ("baldr" or "baldr:dex"). */
 export function buildOf(id) {
     const [base, high] = String(id || DEFAULT_BUILD).split(':');
@@ -127,7 +143,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
 
     // Build ETA and next gym
     const energyPerDay = Math.round(((e.interval <= 600 ? 720 : 480) + 250 * Math.floor(1440 / 420) + e.maximum) / 10) * 10;
-    const proj = projectBuild({ stats: pc.stats, shares, energyPerDay, happy: state.happy.maximum + 300, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: 30, active: state.gymId, table: pc.table });
+    const proj = projectionFor({ stats: pc.stats, shares, energyPerDay, happy: state.happy.maximum + 300, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: 30, active: state.gymId, table: pc.table });
     // The next ladder gym after the highest one unlocked; its progress comes from the gym page (percentage on the button).
     const ladderTop = Math.max(0, ...pc.unlocked.filter((id) => id <= 24));
     const progressE = gymProgress && Number(gymProgress.nextId) === ladderTop + 1 ? gymProgress.energy : null;

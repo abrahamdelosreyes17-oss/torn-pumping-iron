@@ -40,8 +40,10 @@ function clients() {
 async function cache() {
     if (eye.cache) return eye.cache;
     if (!eye.loading) {
+        // torn.com and the webpage keep separate IndexedDBs; a Clear on either reaches both through this mark.
+        const clearedAt = Number(get('eyeClearAt', 0)) || 0;
         eye.loading = idbGet('eye')
-            .then((v) => (eye.cache = v && v.players ? v : { players: {}, gear: {} }))
+            .then((v) => (eye.cache = v && v.players && !((v.savedAt || 0) < clearedAt) ? v : { players: {}, gear: {} }))
             .catch(() => (eye.cache = { players: {}, gear: {} }));
     }
     return eye.loading;
@@ -59,6 +61,7 @@ function saveSoon() {
             ids.sort((a, b) => (c.players[a].seen || 0) - (c.players[b].seen || 0));
             for (const id of ids.slice(0, ids.length - 3000)) delete c.players[id];
         }
+        c.savedAt = Date.now();
         idbSet('eye', c).catch(() => {});
     }, 1500);
 }
@@ -81,18 +84,22 @@ function notify() {
 export async function saveGear(playerId, items) {
     const c = await cache();
     c.gear[playerId] = { items, seenAt: Date.now() };
+    // The count is shared (GM storage) so the webpage can show it; the gear itself stays with Torn's pages.
+    set('eyeGearCount', Object.keys(c.gear).length);
     saveSoon();
     notify();
 }
 
 export async function gearCount() {
     const c = await cache();
-    return Object.keys(c.gear || {}).length;
+    return Math.max(Object.keys(c.gear || {}).length, Number(get('eyeGearCount', 0)) || 0);
 }
 
 export async function clearEye() {
-    eye.cache = { players: {}, gear: {} };
+    eye.cache = { players: {}, gear: {}, savedAt: Date.now() };
     eye.mem.clear();
+    set('eyeClearAt', Date.now());
+    set('eyeGearCount', 0);
     await idbSet('eye', eye.cache).catch(() => {});
     set('myAttacks', null);
     notify();

@@ -12,7 +12,7 @@ Read this first. Then `docs/BUILD-PLAN.md` (what to build, in order), `docs/ENGI
   - a **webpage** the script opens (GitHub Pages host page);
   - an optional **Discord pinger** (a Cloudflare Worker).
 - **Users:** the owner (13B networth, ~1B total stats, Private Island) and a returning friend (low stats, under $200M liquid, Private Island).
-- **Where it stands (2026-09-29):** research done. Design settled on `mockups/K-home.html` ("make every page similar"). **No code yet.** Next step: **M0** in BUILD-PLAN.
+- **Where it stands (2026-09-29, end of the build session):** M0–M8 built; **1.0.0 is ready locally and waiting for the owner's go-ahead** to commit to the release repo, push and publish the page (§8 below has the exact steps). Local git on `main`, no remote. Nothing is on GitHub yet.
 - **The owner checks in only at the first release (1.0.0).** Build M0–M8 without asking. Stop at the end of M8 and ask before any commit to GitHub, push or release.
 - **Release repo:** https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron. Release like the trading app (one file at the repo root, `@updateURL` on `main`, a `gh-pages` host page, pinned `<sha>` install links). Not like the poker app: the owner says poker "uninstalls itself from Tampermonkey every release". Its headers were stable, so the cause is unknown. Never change `@name`/`@namespace`.
 
@@ -73,6 +73,8 @@ Read this first. Then `docs/BUILD-PLAN.md` (what to build, in order), `docs/ENGI
 | Pill on every Torn page | Yes (setting to limit) |
 
 ## 5. Key findings (details in docs/)
+
+- **(2026-09-29, from the engine)** With all four stats trained toward a build (not STR alone as the first sims did), happy boosts pay more at ~100k per stat: for the friend over 30 days, steady +338k/$126M, daily choco +9% for +$35M, EDVD jump +86% for +$387M, choco jump −2% for +$15M. On a $150M budget steady stays recommended; the choco jump is still warned against.
 
 - **The friend should NOT choco jump.** Stacking stops natural energy and Ecstasy eats a drug cooldown. Steady training (Xanax on cooldown + refill) wins at his stats; his Private Island's happy is the big lever. EDVD jumps beat steady only with far more money.
 - **For the owner at ~250M per stat,** one EDVD jump adds ~12% (+297k DEF for $18.6M). Over a month steady still wins, unless **Ignorance Is Bliss** (item 770: happy regenerates above max for 31 days) is active.

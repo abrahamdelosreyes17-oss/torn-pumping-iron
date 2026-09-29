@@ -35,7 +35,8 @@ export function tornClient() {
     if (pi.client) return pi.client;
     const win = tabWindow('apiWindow', pi.tabId, storeApi);
     pi.client = new TornApiClient({
-        getKey: () => getKey(K.apiKey),
+        // A key Torn refused (2, 13, 18) is not used again, by any part of any tab, until a new one is saved.
+        getKey: () => (get(K.apiKeyDead, false) ? '' : getKey(K.apiKey)),
         loadWindow: () => win.load(),
         addToWindow: (at) => win.add(at),
         loadPause: () => get(K.apiPause, null),
@@ -131,7 +132,8 @@ export function startFeed() {
     gmOnChange(K.userStatic, refresh);
     gmOnChange(K.plan, refresh);
     gmOnChange(K.settings, refresh);
-    setInterval(refresh, 1000);
+    // Countdowns tick by themselves every second; the model itself is worked out again every 5 s.
+    setInterval(refresh, 5000);
     refresh();
 }
 
