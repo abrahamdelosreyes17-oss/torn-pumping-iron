@@ -118,7 +118,7 @@ test('POST /test sends one ping to the saved webhook', async () => {
     const r = await handle(req('POST', '/test'), env, f);
     assert.equal(r.status, 200);
     assert.equal(f.calls.length, 1);
-    assert.equal(f.calls[0].url, HOOK);
+    assert.equal(f.calls[0].url, HOOK + '?wait=true');
     assert.match(JSON.parse(f.calls[0].init.body).content, new RegExp('^<@' + DISCORD + '> test ping'));
 });
 
@@ -156,13 +156,13 @@ test('cron: one Torn read per user with the Worker key in a header, one ping per
     assert.equal(torn[0].url, TORN_URL);
     assert.equal(torn[0].init.headers.Authorization, 'ApiKey ' + KEY);
     assert.ok(!torn[0].url.includes(KEY), 'the key never goes in the URL');
-    const hooks = f.calls.filter((c) => c.url === HOOK);
+    const hooks = f.calls.filter((c) => c.url.startsWith(HOOK));
     assert.equal(hooks.length, 1);
     assert.match(JSON.parse(hooks[0].init.body).embeds[0].description, /Xanax #2, then DEX × 27/);
     // A minute later, still due: no second ping.
     now = T + 60;
     await runCron(env, now, f);
-    assert.equal(f.calls.filter((c) => c.url === HOOK).length, 1);
+    assert.equal(f.calls.filter((c) => c.url.startsWith(HOOK)).length, 1);
 });
 
 test('cron: a dead Torn key pauses that user; nothing more is asked', async () => {
@@ -182,7 +182,7 @@ test('cron: a user without a webhook or key is skipped; old sent rows are cleare
     await handle(req('PUT', '/plan', { invite: 'x', body: { plan } }), env);
     env.DB.sent.set('old|x', { user: 'old', alert: 'x', at: T - 3 * 86400 });
     const f = recorder(() => new Response('{}'));
-    const out = await runCron(env, T, f);
+    const out = await runCron(env, T + 120, f);
     assert.deepEqual(out, [{ sent: 0, skipped: true }]);
     assert.equal(f.calls.length, 0);
     assert.equal(env.DB.sent.size, 0);

@@ -99,6 +99,33 @@ export async function linkedEnv(extra = {}, body = {}) {
     return { env, id, user: () => env.DB.users.get(id) };
 }
 
+/** Torn's answer to /v2/user?selections=bars,cooldowns,refills,travel. */
+export function tornState({ drug = 232, booster = 0, medical = 0, energy = 20, max = 150, refill = false, travel = 0, destination = 'Torn' } = {}) {
+    return { bars: { energy: { current: energy, maximum: max, fulltime: Math.max(0, (max - energy) * 36) } }, cooldowns: { drug, booster, medical }, refills: { energy: refill, nerve: false, token: false }, travel: { destination, time_left: travel, arrival_at: travel ? T0 + travel : 0 } };
+}
+
+/**
+ * A fake outside world: Torn answers `torn` (object or function of url),
+ * Discord answers per route. Records every call; fails on other hosts.
+ */
+export function world({ torn = () => tornState(), dmOpen = () => jsonRes({ id: 'dm-chan-1' }), dmPost = () => jsonRes({ id: 'msg-' + ++world.n, channel_id: 'dm-chan-1' }), hook = () => jsonRes({ id: 'hook-msg-' + ++world.n }), edit = () => jsonRes({ id: 'edited' }), w3b = () => jsonRes({ listings: [], total_listings: 0 }), followup = () => jsonRes({ id: 'orig' }) } = {}) {
+    return recorder((url, init) => {
+        const u = new URL(url);
+        if (u.hostname === 'api.torn.com') {
+            const t = typeof torn === 'function' ? torn(url, init) : torn;
+            return t instanceof Response ? t : jsonRes(t);
+        }
+        if (u.hostname === 'weav3r.dev') return w3b(url, init);
+        if (u.pathname.endsWith('/users/@me/channels')) return dmOpen(url, init);
+        if (u.pathname.includes('/webhooks/111/')) return followup(url, init);
+        if (init.method === 'PATCH') return edit(url, init);
+        if (/\/channels\/[^/]+\/messages$/.test(u.pathname)) return dmPost(url, init);
+        if (u.pathname.startsWith('/api/webhooks/')) return hook(url, init);
+        throw new Error('world: no answer for ' + url);
+    });
+}
+world.n = 0;
+
 export async function body(res) {
     return (await res).json();
 }

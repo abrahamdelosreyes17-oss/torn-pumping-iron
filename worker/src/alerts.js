@@ -11,6 +11,9 @@ export const DAY_S = 86400;
 
 const clock = (s) => new Date(s * 1000).toISOString().slice(11, 16);
 
+const TORN = 'https://www.torn.com/';
+export const LINKS = { items: TORN + 'item.php', gym: TORN + 'gym.php', points: TORN + 'points.php' };
+
 /** The first planned step at or after `nowS` matching a test. */
 function nextStep(plan, nowS, test) {
     const steps = (plan && Array.isArray(plan.steps) ? plan.steps : []).filter((s) => s && Number(s.at) >= nowS - 60 && test(s));
@@ -23,7 +26,7 @@ function nextStep(plan, nowS, test) {
  * @param {object} plan - {type, steps:[{at (s), kind, label, train, strict, tick (s)}]}
  * @param {number} nowS - unix seconds
  * @param {object} [rules] - {drug, energy, refill, jump} booleans (default all on)
- * @returns {{id, title, text, step}[]}
+ * @returns {{id, kind, title, text, link, step}[]}
  */
 export function dueAlerts(state, plan, nowS, rules = {}) {
     const on = { drug: true, energy: true, refill: true, jump: true, ...rules };
@@ -39,7 +42,7 @@ export function dueAlerts(state, plan, nowS, rules = {}) {
         const step = nextStep(plan, nowS, (s) => s.kind === 'xanax' || s.kind === 'stack' || s.kind === 'hold' || s.kind === 'boost' || s.kind === 'jump');
         const endS = nowS + drug;
         // A 5-minute bucket: cron runs can drift a few seconds, the ping must not repeat.
-        out.push({ id: 'drug:' + Math.round(endS / 300), title: 'Drug cooldown ends in ' + Math.max(1, Math.round(drug / 60)) + ' min', text: step ? step.label + (step.train ? ', then ' + step.train : '') : 'Ready for the next drug', step: step || null });
+        out.push({ id: 'drug:' + Math.round(endS / 300), kind: 'drug', link: LINKS.items, title: 'Drug cooldown ends in ' + Math.max(1, Math.round(drug / 60)) + ' min', text: step ? step.label + (step.train ? ', then ' + step.train : '') : 'Ready for the next drug', step: step || null });
     }
 
     // Energy full while the plan trains natural energy (not while stacking for a jump).
@@ -47,13 +50,13 @@ export function dueAlerts(state, plan, nowS, rules = {}) {
     const stacking = plan && plan.type === 'jump';
     if (on.energy && !stacking && Number(e.maximum) > 0 && Number(e.current) >= Number(e.maximum)) {
         const step = nextStep(plan, nowS, (s) => s.kind === 'natural' || !!s.train);
-        out.push({ id: 'energy:' + Math.floor(nowS / 3600), title: 'Energy is full', text: step && step.train ? 'Train ' + step.train : 'Train your energy so none is wasted', step: step || null });
+        out.push({ id: 'energy:' + Math.floor(nowS / 3600), kind: 'energy', link: LINKS.gym, title: 'Energy is full', text: step && step.train ? 'Train ' + step.train : 'Train your energy so none is wasted', step: step || null });
     }
 
     // Refill unused, two hours before Torn midnight (UTC).
     const toMidnight = DAY_S - (nowS % DAY_S);
     if (on.refill && refills.energy === false && toMidnight <= REFILL_WARN_S) {
-        out.push({ id: 'refill:' + Math.floor(nowS / DAY_S), title: 'Refill unused', text: 'Use it before 00:00 Torn time (' + Math.round(toMidnight / 60) + ' min left)', step: null });
+        out.push({ id: 'refill:' + Math.floor(nowS / DAY_S), kind: 'refill', link: LINKS.points, title: 'Refill unused', text: 'Use it before 00:00 Torn time (' + Math.round(toMidnight / 60) + ' min left)', step: null });
     }
 
     // A strict jump step: 5 minutes before its tick.
@@ -61,7 +64,7 @@ export function dueAlerts(state, plan, nowS, rules = {}) {
         for (const s of (plan && plan.steps) || []) {
             if (!s || !s.strict || !s.tick) continue;
             const lead = s.tick - nowS;
-            if (lead > 0 && lead <= JUMP_LEAD_S) out.push({ id: 'jump:' + s.tick, title: 'Jump in ' + Math.max(1, Math.round(lead / 60)) + ' min', text: s.label + ', right after the ' + clock(s.tick) + ' tick', step: s });
+            if (lead > 0 && lead <= JUMP_LEAD_S) out.push({ id: 'jump:' + s.tick, kind: 'jump', link: LINKS.items, title: 'Jump in ' + Math.max(1, Math.round(lead / 60)) + ' min', text: s.label + ', right after the ' + clock(s.tick) + ' tick', step: s });
         }
     }
 
@@ -74,7 +77,7 @@ export function webhookBody(alert, discordId) {
     const id = String(discordId || '').replace(/\D/g, '');
     return {
         content: (id ? '<@' + id + '> ' : '') + alert.title.charAt(0).toLowerCase() + alert.title.slice(1),
-        embeds: [{ title: alert.title, description: alert.text, color: 0xefebe2 }],
+        embeds: [{ title: alert.title, description: alert.text, color: 0xefebe2, ...(alert.link ? { url: alert.link } : {}) }],
         allowed_mentions: { users: id ? [id] : [], parse: [] },
     };
 }

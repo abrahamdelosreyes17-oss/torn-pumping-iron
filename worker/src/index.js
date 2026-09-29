@@ -15,7 +15,9 @@
  *   POST /interactions    Discord's slash commands and buttons (Ed25519-signed)
  */
 
-import { dueAlerts, webhookBody, isDiscordWebhook } from './alerts.js';
+import { isDiscordWebhook, LINKS } from './alerts.js';
+import { runCron, sendAlerts } from './cron.js';
+import { canDeliver } from './deliver.js';
 import { Q, SCHEMA, ensureSchema } from './db.js';
 import { guard } from './net.js';
 import { interactionsRoute } from './interactions.js';
@@ -23,9 +25,8 @@ import { newLinkCode } from './cmd-core.js';
 
 export { SCHEMA };
 
-export const TORN_URL = 'https://api.torn.com/v2/user?selections=bars,cooldowns,refills,travel&comment=PumpingIronPings';
-export const DEAD_KEY_CODES = [2, 13, 18];
-const SENT_KEEP_S = 2 * 86400;
+export { TORN_URL, DEAD_KEY_CODES } from './torn.js';
+export { runUser, runCron } from './cron.js';
 
 async function sha256(text) {
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
@@ -99,18 +100,16 @@ async function linkCode(req, env) {
     return json({ ok: true, code, expiresAt, command: '/link ' + code });
 }
 
-async function postWebhook(fetchImpl, url, body) {
-    const res = await fetchImpl(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-    return res.status >= 200 && res.status < 300;
-}
-
 async function testPing(req, env, fetchImpl) {
     const { row, error } = await userFor(req, env);
     if (error) return error;
     if (!row) return json({ ok: false, error: 'Unknown secret' }, 403);
-    if (!row.webhook) return json({ ok: false, error: 'No webhook saved' }, 400);
-    const ok = await postWebhook(fetchImpl, row.webhook, webhookBody({ title: 'Test ping from Pumping Iron', text: 'Pings will look like this: "Drug cooldown ends in 5 min · Xanax #2, then DEX × 27".' }, row.discord_id));
-    return json({ ok }, ok ? 200 : 502);
+    if (!canDeliver(env, row)) return json({ ok: false, error: 'No webhook saved and Discord not linked' }, 400);
+    const nowS = Math.floor(Date.now() / 1000);
+    // A step of kind "test": its Skip button can be tried; the userscript ignores that ack.
+    const alert = { id: 'test:' + nowS, kind: 'test', link: LINKS.items, title: 'Test ping from Pumping Iron', text: 'Pings will look like this: "Drug cooldown ends in 5 min · Xanax #2, then DEX × 27".', step: { at: nowS + 300, kind: 'test', label: 'Test step' } };
+    const sent = await sendAlerts(env, guard(fetchImpl), env.DB, row, [alert], nowS);
+    return json({ ok: sent > 0 }, sent > 0 ? 200 : 502);
 }
 
 async function forget(req, env) {
@@ -118,65 +117,6 @@ async function forget(req, env) {
     if (error) return error;
     for (const sql of [Q.userDelete, Q.sentDeleteUser, Q.ackDeleteUser, Q.watchDeleteUser, Q.linkDeleteUser, Q.priceDeleteUser]) await env.DB.prepare(sql).bind(id).run();
     return json({ ok: true });
-}
-
-/** One user's minute: read Torn, work out what's due, ping once per alert. */
-export async function runUser(env, row, nowS, fetchImpl = fetch) {
-    if (!row.torn_key || !row.webhook || row.paused) return { sent: 0, skipped: true };
-    const res = await fetchImpl(TORN_URL, { headers: { Authorization: 'ApiKey ' + row.torn_key } });
-    let state;
-    try {
-        state = await res.json();
-    } catch {
-        return { sent: 0, error: 'Torn answered with something that is not JSON' };
-    }
-    const err = state && state.error;
-    if (err) {
-        const code = Number(err.code);
-        if (DEAD_KEY_CODES.includes(code)) {
-            // Stop on a dead key: Torn warns that repeated bad-key calls can block the IP.
-            await env.DB.prepare(Q.userPause).bind('Torn error ' + code + ': ' + String(err.error || ''), row.id).run();
-        }
-        return { sent: 0, error: 'Torn error ' + code };
-    }
-    let plan = null;
-    try {
-        plan = JSON.parse(row.plan || 'null');
-    } catch {
-        plan = null;
-    }
-    let rules = {};
-    try {
-        rules = JSON.parse(row.rules || '{}') || {};
-    } catch {
-        rules = {};
-    }
-    let sent = 0;
-    for (const a of dueAlerts(state, plan, nowS, rules)) {
-        const seen = await env.DB.prepare(Q.sentOne).bind(row.id, a.id).first();
-        if (seen) continue;
-        const ok = await postWebhook(fetchImpl, row.webhook, webhookBody(a, row.discord_id));
-        if (ok) {
-            await env.DB.prepare(Q.sentPut).bind(row.id, a.id, nowS, 'sent', null, null, null, null, 'hook').run();
-            sent++;
-        }
-    }
-    return { sent };
-}
-
-export async function runCron(env, nowS = Math.floor(Date.now() / 1000), fetchImpl = fetch) {
-    await ensureSchema(env.DB);
-    const { results } = await env.DB.prepare(Q.usersDue).bind(20).all();
-    const out = [];
-    for (const row of results || []) {
-        try {
-            out.push(await runUser(env, row, nowS, fetchImpl));
-        } catch (e) {
-            out.push({ sent: 0, error: String((e && e.message) || e) });
-        }
-    }
-    await env.DB.prepare(Q.sentClean).bind(nowS - SENT_KEEP_S).run();
-    return out;
 }
 
 const NO_CTX = { waitUntil: () => {} };
