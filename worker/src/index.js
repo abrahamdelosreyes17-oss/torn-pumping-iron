@@ -19,7 +19,7 @@
 
 import { isDiscordWebhook, LINKS } from './alerts.js';
 import { runCron, sendAlerts } from './cron.js';
-import { canDeliver } from './deliver.js';
+import { canDeliver, hookUrl } from './deliver.js';
 import { pendingAcks } from './buttons.js';
 import { sealKey, openKey } from './keys.js';
 import { cleanTargets } from './cmd-torn.js';
@@ -82,6 +82,8 @@ async function putPlan(req, env) {
     }
     const webhook = body.webhookUrl !== undefined ? String(body.webhookUrl || '') : row ? row.webhook : '';
     if (webhook && !isDiscordWebhook(webhook)) return json({ ok: false, error: 'That is not a Discord webhook URL' }, 400);
+    // Kept on discord.com: the Worker calls no other host.
+    const hook = webhook && body.webhookUrl !== undefined ? hookUrl(webhook) : webhook;
     const sentKey = body.tornKey !== undefined ? String(body.tornKey || '') : null;
     if (sentKey && !/^[A-Za-z0-9]{16}$/.test(sentKey)) return json({ ok: false, error: 'A Torn key is 16 letters and numbers' }, 400);
     // Keys are stored sealed (AES-GCM, KEY_ENC); the old one is opened only to see if this is a new key.
@@ -116,8 +118,8 @@ async function putPlan(req, env) {
     const idOrKeep = (v, old) => (v === undefined ? old || null : Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
     const factionId = idOrKeep(body.factionId, row && row.faction_id);
     const playerId = idOrKeep(body.playerId, row && row.player_id);
-    if (row) await env.DB.prepare(Q.userSync).bind(tornKey, discordId, webhook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId, id).run();
-    else await env.DB.prepare(Q.userInsert).bind(id, tornKey, discordId, webhook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId).run();
+    if (row) await env.DB.prepare(Q.userSync).bind(tornKey, discordId, hook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId, id).run();
+    else await env.DB.prepare(Q.userInsert).bind(id, tornKey, discordId, hook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId).run();
     // Acks (Done / Skip in Discord): the userscript says which it applied; the rest go back to it.
     if (Array.isArray(body.ackIds)) for (const a of body.ackIds.slice(0, 50)) if (typeof a === 'string' && a.length <= 120) await env.DB.prepare(Q.ackDelete).bind(id, a).run();
     const acks = await pendingAcks(env.DB, id);

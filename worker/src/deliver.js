@@ -91,6 +91,21 @@ export function webhookMessage(rows, discordId) {
 
 const dry = (env) => String(env.DRY_RUN || '') === '1';
 
+/**
+ * A webhook address to call: always on discord.com (discordapp.com is the
+ * same service), with `extra` added to the path; a thread_id is kept.
+ */
+export function hookUrl(webhook, extra = '', params = {}) {
+    const u = new URL(String(webhook));
+    u.hostname = 'discord.com';
+    u.pathname = u.pathname.replace(/\/+$/, '') + extra;
+    const thread = u.searchParams.get('thread_id');
+    u.search = '';
+    if (thread) u.searchParams.set('thread_id', thread);
+    for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
+    return u.toString();
+}
+
 /** Can this user get a ping at all? */
 export function canDeliver(env, user) {
     return Boolean(user.webhook) || dmPossible(env, user);
@@ -132,7 +147,7 @@ export async function deliver(env, fetchImpl, db, user, rows, nowS) {
         }
     }
     if (user.webhook) {
-        const r = await discordCall(env, fetchImpl, db, { url: user.webhook + '?wait=true', body: webhookMessage(rows, user.discord_id), bot: false, route: 'hook' });
+        const r = await discordCall(env, fetchImpl, db, { url: hookUrl(user.webhook, '', { wait: 'true' }), body: webhookMessage(rows, user.discord_id), bot: false, route: 'hook' });
         if (r.ok) return { ok: true, via: dry(env) ? 'dry' : 'hook', channel: null, message: r.data && r.data.id ? String(r.data.id) : null };
         return { ok: false, retry: true };
     }
@@ -144,7 +159,7 @@ export async function editAlertMessage(env, fetchImpl, db, user, rows) {
     const first = rows[0];
     if (!first || !first.message) return { ok: false };
     if (first.via === 'dm' && first.channel) return discordCall(env, fetchImpl, db, { method: 'PATCH', url: DISCORD_API + '/channels/' + first.channel + '/messages/' + first.message, body: alertMessage(rows), route: 'edit-dm' });
-    if (first.via === 'hook' && user.webhook) return discordCall(env, fetchImpl, db, { method: 'PATCH', url: user.webhook + '/messages/' + first.message, body: webhookMessage(rows, user.discord_id), bot: false, route: 'edit-hook' });
+    if (first.via === 'hook' && user.webhook) return discordCall(env, fetchImpl, db, { method: 'PATCH', url: hookUrl(user.webhook, '/messages/' + first.message), body: webhookMessage(rows, user.discord_id), bot: false, route: 'edit-hook' });
     if (first.via === 'dry') return discordCall(env, fetchImpl, db, { method: 'PATCH', url: DISCORD_API + '/channels/dry/messages/' + first.message, body: alertMessage(rows), route: 'edit-dry' });
     return { ok: false };
 }

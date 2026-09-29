@@ -120,6 +120,18 @@ test('POST /test goes through the same path: a DM with buttons when linked', asy
     assert.deepEqual(post.body.components[0].components.map((b) => b.label), ['Done', 'Snooze 10 min', 'Skip step', 'Open in Torn']);
 });
 
+test('a discordapp.com webhook is kept on discord.com (the only Discord host called); a thread is kept', async () => {
+    const { hookUrl } = await import('../src/deliver.js');
+    assert.equal(hookUrl('https://discordapp.com/api/webhooks/1/abc'), 'https://discord.com/api/webhooks/1/abc');
+    assert.equal(hookUrl('https://discord.com/api/webhooks/1/abc?thread_id=9&x=1', '/messages/5', { wait: 'true' }), 'https://discord.com/api/webhooks/1/abc/messages/5?thread_id=9&wait=true');
+    const { env, user } = await linkedEnv({}, { webhookUrl: 'https://discordapp.com/api/webhooks/123/abc' });
+    assert.equal(user().webhook, 'https://discord.com/api/webhooks/123/abc');
+    user().linked = 0;
+    const f = world();
+    await runCron(env, T0, f);
+    assert.deepEqual(discordCalls(f).map((c) => c.url), ['https://discord.com/api/webhooks/123/abc?wait=true']);
+});
+
 test('a user with neither webhook nor link is skipped without a Torn read', async () => {
     const { env, user } = await linkedEnv();
     user().linked = 0;
