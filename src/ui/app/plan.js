@@ -447,7 +447,7 @@ function buildCard(m, ctx) {
     const lines = [
         tin ? h('div', { class: 'note2' }, ['Train in ', h('b', { class: 'white', text: tin })]) : null,
         why ? h('div', { class: 'note2' }, [why.text + ' · ', h('a', { href: '#plan', onclick: focusBuild, text: 'Change build' })]) : null,
-        ng ? h('div', { class: 'note2' }, ['Next gym unlock: ', h('b', { class: 'white', text: ng.gym.name }), ng.known && ng.days !== null ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' day' + (Math.max(1, Math.round(ng.days)) === 1 ? '' : 's') : ' · open Torn’s gym page once to track it']) : null,
+        ng ? h('div', { class: 'note2' }, ['Next gym unlock: ', h('b', { class: 'white', text: ng.gym.name }), ng.known && ng.days !== null ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' day' + (Math.max(1, Math.round(ng.days)) === 1 ? '' : 's') : ' · open Torn’s gym page once to track it', ng.cost ? ' · ' + fmtMoney(ng.cost) + ' to buy once it opens' : '']) : null,
     ].filter(Boolean);
     return h('div', {}, [
         sectionHead('Build', meta([plan.buildPicked ? 'what the plan trains toward' : 'pick yours: the plan trains toward it']), null, 'h3'),

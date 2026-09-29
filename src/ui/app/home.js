@@ -10,12 +10,14 @@ import { STATS, STAT_LABEL } from '../../core/gain.js';
 import { fmtInt, fmtSigned, fmtMoney, fmtShort } from '../../core/format.js';
 import { POINTS, XANAX, REFILL_POINTS, ITEMS } from '../../core/items.js';
 import { STRATEGIES } from '../../core/strategies.js';
-import { fillCheapest, whereText, priceVerdict, unitPrice } from '../../core/market.js';
+import { fillCheapest, whereText, priceVerdict, unitPrice, npcListing } from '../../core/market.js';
+import { itemContext } from '../../core/model.js';
 import { tornDayStart, DAY } from '../../core/bars.js';
 import { itemsUrl, gymUrl, pointsUrl, itemMarketUrl, pointsMarketUrl } from '../../sources/route.js';
 import { stackBars } from '../charts.js';
 import { clock, cd, sectionHead, meta, trainsText, headsList, STAT_COLOR, DAY_NAMES, MONTH_NAMES } from './common.js';
 import { partsText, trainInText } from '../../core/gympage.js';
+import { summarizeReceipts } from '../../core/receipts.js';
 
 const DAYS = DAY_NAMES;
 const MONTHS = MONTH_NAMES;
@@ -75,10 +77,13 @@ function stepLinks(s) {
 }
 
 /** Cheapest fill for one need, from stored listings. */
-export function buyRow(need, prices) {
-    const p = prices && prices[need.id];
-    if (!p || !Array.isArray(p.listings) || !p.listings.length) return { need, fill: null, verdict: null };
-    const fill = fillCheapest(p.listings, need.buy, need.id);
+export function buyRow(need, prices, ic = null) {
+    const p = (prices && prices[need.id]) || {};
+    // A city shop you ticked (Buy › Shops I can buy from) joins the listings, as on the Buy tab.
+    const shop = ic && ic.npc && ic.npc[need.id] ? npcListing(ic.npc[need.id], need.buy) : null;
+    const listings = (Array.isArray(p.listings) ? p.listings : []).concat(shop ? [shop] : []);
+    if (!listings.length) return { need, fill: null, verdict: null };
+    const fill = fillCheapest(listings, need.buy, need.id);
     const cheapest = fill.rows[0] ? fill.rows[0].price : null;
     return { need, fill, verdict: priceVerdict(cheapest, p.avg7 || null) };
 }
@@ -87,7 +92,8 @@ function buyCard(m, ctx) {
     const needs = m.buyToday.filter((n) => n.buy > 0);
     // Home refreshes today's prices too, at most every 5 minutes.
     if (needs.length && ctx.wantPrices) ctx.wantPrices(needs.map((n) => n.id));
-    const rows = needs.map((n) => buyRow(n, ctx.prices));
+    const ic = itemContext(ctx.statics || {}, ctx.settings || {});
+    const rows = needs.map((n) => buyRow(n, ctx.prices, ic));
     const total = rows.reduce((a, r) => a + (r.fill ? r.fill.total : 0), 0);
     const trs = rows.map(({ need, fill }) => {
         const first = fill && fill.rows[0];
@@ -175,7 +181,9 @@ function weekCard(m, ctx) {
     const refills = sum('refills');
     const xp = unitPrice((ctx.prices || {})[XANAX]) || 0;
     const pp = unitPrice((ctx.prices || {})[POINTS], 300) || 0;
-    const spent = xan * xp + refills * REFILL_POINTS * pp;
+    // Money really spent this week (receipts: every item and refill at that day's price); before receipts, Xanax and refills.
+    const rc = ctx.receipts ? summarizeReceipts(ctx.receipts, today - 6 * DAY, today, { priceHistory: ctx.priceHistory, prices: ctx.prices || {} }) : null;
+    const spent = rc && rc.days > 0 ? rc.cost : xan * xp + refills * REFILL_POINTS * pp;
     const pct = planned > 0 ? Math.min(100, (100 * gained) / planned) : 0;
     return h('div', {}, [
         sectionHead('This week', meta([days.length ? days.length + ' day' + (days.length === 1 ? '' : 's') + ' recorded' : 'from today']), null, 'h3'),
@@ -212,8 +220,10 @@ export function renderHome(m, ctx) {
     const now = m.now;
     const next = m.next;
     const late = next && next.kind === 'xanax' && m.strip.drug.left === 0;
+    // "On plan" only while no step is waiting on you (the plan re-times, so a due step is the one sign of being behind).
+    const overdue = Boolean(next && next.at <= now - 5 * 60 * 1000);
     const buyTotal = m.buyToday.reduce((a, n) => {
-        const r = buyRow(n, ctx.prices);
+        const r = buyRow(n, ctx.prices, itemContext(ctx.statics || {}, ctx.settings || {}));
         return a + (r.fill ? r.fill.total : 0);
     }, 0);
 
@@ -225,7 +235,7 @@ export function renderHome(m, ctx) {
             ' planned',
             buyTotal ? ' · ' + fmtMoney(buyTotal) + ' to spend' : '',
             ' · ',
-            h('b', { style: late ? 'color:var(--warn)' : null, text: late ? 'Xanax ready' : 'on plan' }),
+            h('b', { style: late || overdue ? 'color:var(--warn)' : null, text: late ? 'Xanax ready' : overdue ? 'a step is due' : 'on plan' }),
         ]),
     );
 

@@ -160,7 +160,9 @@ function weekFacts(m, ctx) {
     const p = sum('planned');
     const xp = unitPrice((ctx.prices || {})[XANAX]) || 0;
     const pp = unitPrice((ctx.prices || {})[POINTS], 300) || 0;
-    const spent = sum('xanax') * xp + sum('refills') * REFILL_POINTS * pp;
+    // Money really spent this week (receipts: every item and refill at that day's price); before receipts, Xanax and refills.
+    const rc = ctx.receipts ? summarizeReceipts(ctx.receipts, today - 6 * DAY, today, { priceHistory: ctx.priceHistory, prices: ctx.prices || {} }) : null;
+    const spent = rc && rc.days > 0 ? rc.cost : sum('xanax') * xp + sum('refills') * REFILL_POINTS * pp;
     const first = new Date(today - 6 * DAY);
     return h('div', {}, [
         sectionHead('This week', meta([DAY_NAMES[first.getUTCDay()] + '–' + DAY_NAMES[new Date(today).getUTCDay()] + ' · ' + days.length + ' of 7 days']), null, 'h3'),

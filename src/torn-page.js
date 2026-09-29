@@ -15,9 +15,10 @@ import { gymRoot, gymLoading, readStatBoxes, readGymButtons, gymListSummary, rea
 import { readItemRows, readBazaarCards, readItemMarketRows, readPointsRows } from './sources/dom/market.js';
 import { planGymPage, pageReading, nextSession } from './core/gympage.js';
 import { unlockEnergyAfter } from './core/gyms.js';
-import { needsForWindow } from './ui/app/buy.js';
+import { needsForWindow, shownTypes, typeOf } from './ui/app/buy.js';
+import { itemContext } from './core/model.js';
 import { loadPrices } from './app-page.js';
-import { needList, fillCheapest, SOURCE_BAZAAR, SOURCE_ITEM_MARKET, SOURCE_POINTS } from './core/market.js';
+import { needList, fillCheapest, npcListing, SOURCE_BAZAAR, SOURCE_ITEM_MARKET, SOURCE_POINTS } from './core/market.js';
 import { stepWords } from './ui/app/home.js';
 import { trainsText } from './ui/app/common.js';
 import { tornClock } from './core/bars.js';
@@ -189,10 +190,16 @@ function chosenFills(m) {
     const statics = get(K.userStatic, {}) || {};
     const prices = getPrices();
     const needs = needList(needsForWindow(m, m.compare, getPlan(), s.buyWindow || 'three', s.horizonDays), statics.inventory || {});
+    // The same list as the Buy tab: its type ticks, and a city shop you ticked joins the listings.
+    const show = shownTypes(s, [...new Set(needs.map((n) => typeOf(n.id)))]);
+    const ic = itemContext(statics, s);
     const out = [];
     for (const n of needs) {
-        const p = prices[n.id];
-        if (n.buy > 0 && p && p.listings) out.push({ id: n.id, fill: fillCheapest(p.listings, n.buy, n.id) });
+        if (!(n.buy > 0) || !show.has(typeOf(n.id))) continue;
+        const p = prices[n.id] || {};
+        const shop = ic.npc[n.id] ? npcListing(ic.npc[n.id], n.buy) : null;
+        const listings = (Array.isArray(p.listings) ? p.listings : []).concat(shop ? [shop] : []);
+        if (listings.length) out.push({ id: n.id, fill: fillCheapest(listings, n.buy, n.id) });
     }
     return out;
 }
