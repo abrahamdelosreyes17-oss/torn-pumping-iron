@@ -33,6 +33,12 @@ export const K = {
     apiPause: 'apiPause',
     lastError: 'lastError',
     stateError: 'stateError',
+    planLine: 'planLine',
+    learned: 'learned',
+    learnLog: 'learnLog',
+    fightLog: 'fightLog',
+    eyePredictions: 'eyePredictions',
+    devUnlocked: 'devUnlocked',
 };
 
 /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */
@@ -121,7 +127,8 @@ export function del(name) {
 export const DATA_GROUPS = {
     keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker],
     plan: [K.plan, K.recheck],
-    progress: [K.statsHistory, K.dayLog, K.dayTotals],
+    progress: [K.statsHistory, K.dayLog, K.dayTotals, K.planLine],
+    learning: ['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions],
     prices: [K.priceHistory, K.prices],
     eye: ['eyeTargets', 'myAttacks'],
 };

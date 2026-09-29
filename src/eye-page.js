@@ -5,7 +5,8 @@
  * read-only attackData reader that saves their gear.
  */
 
-import { getSettings } from './platform/store.js';
+import { K, get, set, getSettings } from './platform/store.js';
+import { addPrediction } from './core/learndata.js';
 import { onModel, tornClient, isVisible } from './runtime.js';
 import { isPaused, onPauseChange } from './turns.js';
 import { installAttackHook } from './platform/page-hook.js';
@@ -144,7 +145,14 @@ function drawAttack() {
     const x = r && r.right + 262 < window.innerWidth ? r.right + 12 : window.innerWidth - 262;
     panel.style.left = Math.max(8, x) + 'px';
     panel.style.top = (r ? Math.max(8, r.top) : 110) + 'px';
-    fill(panel, attackPanelContent(view(id), ep.attack));
+    const v = view(id);
+    fill(panel, attackPanelContent(v, ep.attack));
+    // What Torn Eye said before this fight: the fight learner compares it with how the fight went.
+    if (v && v.forecast && Number.isFinite(v.forecast.pWin)) {
+        const list = get(K.eyePredictions, []) || [];
+        const next = addPrediction(list, { def: id, at: Date.now(), pWin: v.forecast.pWin, keep: v.forecast.keep });
+        if (next !== list) set(K.eyePredictions, next);
+    }
 }
 
 function onAttackData(json) {

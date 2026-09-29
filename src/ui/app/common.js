@@ -9,6 +9,9 @@ import { countdown, tornClock } from '../../core/bars.js';
 import { fmtInt, fmtSigned } from '../../core/format.js';
 import { itemName } from '../../core/items.js';
 
+export const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+export const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
 export const STAT_COLOR = { str: '#e5534b', spd: '#f0c02f', def: '#4a8ff0', dex: '#43b86c' };
 
 /** A clock in the user's chosen time (Torn time is UTC). */
@@ -51,14 +54,15 @@ function stCell(label, value, valueCls, pct, color, small) {
     ]);
 }
 
-/** Energy · Happy · Drug · Booster · Refill (Home and Plan only). */
+/** Energy · Happy · Drug · (Booster, only when the plan uses one) · Refill (Home). */
 export function statusStrip(m, settings) {
     const s = m.strip;
     const now = m.now;
     const drugTxt = s.drug.left > 0 ? countdown(s.drug.left) : 'Ready';
     const drugPct = s.drug.left > 0 && s.drug.total > 0 ? (100 * s.drug.left) / s.drug.total : 0;
     const boosterTxt = s.booster.left > 0 ? countdown(s.booster.left) : 'Ready';
-    return h('div', { class: 'strip num' }, [
+    const withBooster = s.booster.used || s.booster.left > 0;
+    return h('div', { class: 'strip num' + (withBooster ? '' : ' four') }, [
         stCell('Energy', s.energy.current + ' / ' + s.energy.max, null, (100 * s.energy.current) / Math.max(1, s.energy.max), 'var(--chalk)', s.energy.fullAt ? 'Full at ' + clock(s.energy.fullAt, settings) : 'Full'),
         stCell('Happy', fmtInt(s.happy.current), null, (100 * Math.min(s.happy.current, s.happy.max)) / Math.max(1, s.happy.max), 'var(--good)', 'Max ' + fmtInt(s.happy.max) + (s.happy.property ? ' · ' + s.happy.property : '')),
         (() => {
@@ -66,7 +70,7 @@ export function statusStrip(m, settings) {
             if (s.drug.left > 0) c.querySelector('b').setAttribute('data-cd', String(now + s.drug.left));
             return c;
         })(),
-        stCell('Booster', boosterTxt, s.booster.left > 0 ? null : 'good', 0, 'var(--chalk)', s.booster.used ? 'Used by this plan' : 'Not used by this plan'),
+        withBooster ? stCell('Booster', boosterTxt, s.booster.left > 0 ? null : 'good', 0, 'var(--chalk)', s.booster.used ? 'Used by this plan' : 'Not used by this plan') : null,
         stCell('Refill', s.refill.free ? 'Unused' : 'Used', null, s.refill.free ? 0 : 100, 'var(--chalk)', s.refill.free ? (s.refill.plannedAt ? 'Planned ' + clock(s.refill.plannedAt, settings) : 'Use before 00:00') : 'Next at 00:00 Torn time'),
     ]);
 }

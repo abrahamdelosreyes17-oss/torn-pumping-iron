@@ -8,7 +8,8 @@ import { gmOnChange } from './platform/gm.js';
 import { K, get, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup } from './platform/store.js';
 import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE } from './runtime.js';
 import { PiApp } from './ui/app/app.js';
-import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, keyIsEnough } from './api/torn.js';
+import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, fetchFactionMembers, keyIsEnough } from './api/torn.js';
+import { outEarly, memberState } from './core/eye/war.js';
 import { W3bClient, fetchW3bListings } from './api/w3b.js';
 import { makeFfsClient, checkFfsKey, fetchFfsTargets } from './api/ffscouter.js';
 import { renderEye } from './ui/app/eye-tab.js';
@@ -24,6 +25,8 @@ import { STRATEGIES } from './core/strategies.js';
 import { redactKey } from './api/client.js';
 import { keyProblem } from './ui/key-status.js';
 import { isPaused, onPauseChange } from './turns.js';
+import { joinFights } from './core/learndata.js';
+import { maybeLearn } from './runtime.js';
 
 /** How long fetched prices count as fresh. */
 export const PRICE_FRESH_MS = 5 * 60 * 1000;
@@ -155,6 +158,7 @@ function diagnostics() {
         historyDays: Object.keys(get(K.statsHistory, {}) || {}).length,
         priceItems: Object.keys((readPriceHistory(get(K.priceHistory, null)) || {}).items || {}).length,
         eyeLine: 'targets, estimates and gear for ' + page.eye.gear + ' player' + (page.eye.gear === 1 ? '' : 's'),
+        learnLine: (((get('calibration', null) || {}).samples) || []).length + ' sessions · ' + (get(K.fightLog, []) || []).length + ' fights · what it learned',
     };
 }
 
@@ -173,6 +177,42 @@ async function loadTargets(params) {
     }
     page.eye.loading = false;
     page.app.render(true);
+}
+
+/* War mode on the webpage: the enemy faction read every 10 s while the Torn Eye tab shows War. */
+const war = { fid: null, name: null, members: [], prev: null, early: new Set(), seen: new Map(), at: 0, loading: false, error: null, timer: null };
+
+export const WAR_TAB_POLL_MS = 10000;
+
+async function pollWarTab() {
+    if (!war.fid || war.loading || !isVisible() || isPaused()) return;
+    if (!page.app || page.app.tab !== 'eye' || (page.app.ui.eyeMode || 'targets') !== 'war') return;
+    if (Date.now() - war.at < WAR_TAB_POLL_MS) return;
+    war.loading = true;
+    try {
+        const members = await fetchFactionMembers(tornClient(), war.fid);
+        const nowMs = Date.now();
+        war.early = outEarly(war.members, members, Math.floor(nowMs / 1000));
+        // When each flight was first seen: the landing estimate counts from it.
+        for (const m of members) {
+            const id = Number(m.id);
+            const st = memberState(m);
+            const desc = (m.status && m.status.description) || '';
+            const cur = war.seen.get(id);
+            if (st === 'traveling' || st === 'abroad') {
+                if (!cur || cur.desc !== desc) war.seen.set(id, { desc, at: nowMs });
+            } else war.seen.delete(id);
+        }
+        war.prev = war.members;
+        war.members = members;
+        war.error = null;
+        wantPlayers(members.map((m) => Number(m.id)));
+    } catch (error) {
+        war.error = String((error && error.message) || error);
+    }
+    war.at = Date.now();
+    war.loading = false;
+    if (page.app) page.app.render(true);
 }
 
 function eyeRows() {
@@ -200,10 +240,11 @@ function getCtx() {
         dayTotals: get(K.dayTotals, {}) || {},
         gymProgress: get(K.gymProgress, null),
         calibration: get('calibration', null),
+        planLine: get(K.planLine, null),
         flags: { hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)), hasFfs: Boolean(getKey(K.ffsKey)), ffsDead: Boolean(ffsState && ffsState.registered === false), hasTs: Boolean(getKey(K.tsKey)) },
         keyProblem: keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: statics.keyInfo || null }),
         planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
-        sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null))].join('|'),
+        sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), (get(K.planLine, null) || {}).key || ''].join('|'),
         setSettings: (p) => {
             setSettings(p);
             refresh();
@@ -236,12 +277,33 @@ function getCtx() {
             linkedId: linkedDiscordId,
             setupUrl: WORKER_SETUP_URL,
         },
+        dev: {
+            data: () => ({ samples: ((get('calibration', null) || {}).samples) || [], fights: joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []), learned: get(K.learned, null) || maybeLearn(Date.now(), true), version: PI_BUILD_VERSION }),
+            unlocked: () => Boolean(get(K.devUnlocked, false)),
+            setUnlocked: (v) => (v ? set(K.devUnlocked, true) : del(K.devUnlocked)),
+            log: () => get(K.learnLog, []) || [],
+            sizes: () => Object.fromEntries(['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions, K.prices, K.priceHistory, K.statsHistory].map((k) => [k, JSON.stringify(get(k, null) || '').length])),
+        },
         eye: {
             rows: eyeRows,
             load: (params) => loadTargets(params).catch(() => {}),
             loading: () => page.eye.loading,
             error: () => page.eye.error,
             sources: () => ({ fights: ((get('myAttacks', null) || {}).list || []).length, ffsFree: page.ffs ? page.ffs.stats().remaining : 60, gear: page.eye.gear }),
+            view: (id, extra, o) => eyeView(id, extra, o),
+            attacks: () => (get('myAttacks', null) || {}).list || [],
+            updatedAt: () => (get('eyeTargets', null) || {}).at || null,
+            war: {
+                state: () => ({ fid: war.fid, name: war.name, members: war.members, early: war.early, seen: new Map([...war.seen].map(([k, v]) => [k, v.at])), loading: war.loading, error: war.error }),
+                watch: (fid) => {
+                    war.fid = fid;
+                    war.members = [];
+                    war.seen.clear();
+                    war.at = 0;
+                    setSettings({ warFaction: fid });
+                    pollWarTab();
+                },
+            },
         },
     };
 }
@@ -259,6 +321,9 @@ export function bootAppPage({ renderers = {} } = {}) {
     onModel(() => page.app.render());
     for (const k of [K.prices, K.settings, K.plan, K.userStatic, K.stateError, K.apiKeyDead]) gmOnChange(k, () => page.app.render());
     onPauseChange(() => page.app.render(true));
+    // War mode: the faction you last watched, read every 10 s while that view is open.
+    war.fid = getSettings().warFaction || null;
+    setInterval(() => pollWarTab().catch(() => {}), 2000);
     page.app.render(true);
     return page.app;
 }

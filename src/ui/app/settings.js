@@ -1,7 +1,9 @@
 /*
- * Settings (mockups/P-settings.html): keys, each with Torn's ToS table
- * where it is entered; FFScouter, TornStats, Discord, overlay, display,
- * diagnostics; "Your data" in the pane.
+ * Settings (mockups/round3/X-settings.html): keys and data, ordered by use,
+ * each key with Torn's ToS table where it is entered. Discord folds to one
+ * line once it works; Torn Eye's colour bands live here; Developer (export
+ * learning data for everyone, the developer key unlocks the rest);
+ * Diagnostics against Torn Trading's limits (the two take turns).
  */
 
 import { h, t } from '../dom.js';
@@ -12,6 +14,8 @@ import { TS_TOS_URL } from '../../api/tornstats.js';
 import { W3B_SITE_URL, W3B_TERMS_URL } from '../../api/w3b.js';
 import { apiKeyPageUrl } from '../../sources/route.js';
 import { sectionHead, headsList } from './common.js';
+import { BAND_WORDS, BAND_COLORS, DEFAULT_BAND_LIMITS } from '../../core/eye/bands.js';
+import { developerSection, renderDeveloper } from './developer.js';
 
 /** Torn's API ToS disclosure for the userscript's Torn key. */
 export const TOS_TORN = [
@@ -41,11 +45,12 @@ export const TOS_TS = [
 
 /** The Worker's own key (a custom key made for it), stored on the user's Cloudflare Worker. */
 export const TOS_WORKER = [
-    ['Data storage', 'On your own Cloudflare Worker (D1 database) until you press Forget'],
-    ['Data sharing', 'Nobody. Only your Worker reads it; pings go to your Discord webhook'],
-    ['Purpose of use', 'Personal: Discord pings for your gym plan'],
-    ['Key storage & sharing', 'Stored / Used only for automation'],
-    ['Key access level', 'Custom (user: bars, cooldowns, refills, travel)'],
+    ['Data storage', 'On your own Cloudflare Worker (D1), the key encrypted, until you press Forget'],
+    ['Data sharing', 'Nobody: pings and replies only you can see (DMs, replies only you see, or your own webhook channel)'],
+    ['Purpose of use', 'Personal gain (gym pings and timers); Competitive advantage (/war, /chain, war pings)'],
+    ['Key storage & sharing', 'Stored / Used only for automation and the commands you type'],
+    ['Key access level', 'Custom (user: basic, bars, cooldowns, refills, travel · faction: members, chain, wars · market: itemmarket)'],
+    ['Other services', '/buy and price watches read TornW3B (weav3r.dev) bazaar prices; no key is sent there. The key is stored encrypted (AES-GCM).'],
 ];
 
 export function tosTable(rows) {
@@ -97,9 +102,52 @@ function segOf(value, options, onpick, aria) {
     return h('div', { class: 'seg', role: 'group', 'aria-label': aria }, options.map(([v, label]) => h('button', { type: 'button', 'aria-pressed': String(v === value), onclick: () => onpick(v), text: label })));
 }
 
+/** Link Discord (the bot): a one-time code to type as /link CODE in your server, on a click only. */
+function linkRow(ctx) {
+    const d = ctx.discord;
+    const box = h('div', { class: 'row', style: 'flex-wrap:wrap' });
+    const code = ctx.ui.linkCode;
+    if (code && code.expiresAt * 1000 > Date.now()) {
+        box.appendChild(h('span', {}, ['Type ', h('b', { class: 'white', text: '/link ' + code.code }), ' in your Discord server · works once, ']));
+        box.appendChild(h('span', { class: 'muted', 'data-cd': String(code.expiresAt * 1000), 'data-cd-prefix': 'expires in ', text: 'expires in 10:00' }));
+    } else {
+        const msg = h('span', { class: 'msg' });
+        box.appendChild(h('button', { class: 'btn sm primary', type: 'button', onclick: async () => { msg.textContent = 'Asking your service…'; try { ctx.ui.linkCode = await d.linkCode(); ctx.rerender(); } catch (e) { msg.className = 'msg bad'; msg.textContent = String((e && e.message) || e); } }, text: 'Get a link code' }));
+        box.appendChild(h('span', { class: 'muted', text: 'DMs from the bot, with Done / Snooze / Skip buttons (the webhook stays the fallback)' }));
+        box.appendChild(msg);
+    }
+    return box;
+}
+
 function discordSection(ctx) {
     const d = ctx.discord;
     const st = d.state();
+    // Working: one line (owner). Edit opens the full form again.
+    if (st && st.ready && !st.lastError && !ctx.ui.discordEdit) {
+        const msg1 = h('span', { class: 'msg' });
+        const test = async () => {
+            msg1.className = 'msg';
+            msg1.textContent = 'Sending…';
+            try {
+                await d.test();
+                msg1.className = 'msg ok';
+                msg1.textContent = 'Sent. Check Discord.';
+            } catch (e) {
+                msg1.className = 'msg bad';
+                msg1.textContent = String((e && e.message) || e);
+            }
+        };
+        return settingsSection('Discord pings', stateTag('ok', 'Working'), [
+            h('div', { class: 'row', style: 'flex-wrap:wrap' }, [
+                h('span', { class: 'muted num', text: 'Your service · last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') + (st.linked ? ' · linked to the bot' : '') }),
+                h('span', { class: 'grow' }),
+                h('button', { class: 'btn sm', type: 'button', onclick: test, text: 'Send a test ping' }),
+                h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.discordEdit = true; ctx.rerender(); }, text: 'Edit' }),
+            ]),
+            st.bot && !st.linked ? linkRow(ctx) : null,
+            msg1,
+        ]);
+    }
     const tag = !st ? stateTag('off', 'Not set up yet') : st.lastError ? stateTag('bad', 'Last sync failed') : st.ready ? stateTag('ok', 'Connected') : stateTag('bad', 'Needs the webhook and key');
     const f = {};
     const field = (key, label, attrs) => h('label', { class: 'field', style: 'flex:1;min-width:220px' }, [t('lab', label), (f[key] = h('input', { class: 'inp', ...attrs }))]);
@@ -135,17 +183,21 @@ function discordSection(ctx) {
     const rows = [
         h('p', { text: 'A small free service on your Cloudflare account checks your timers every minute and tags you, even with your PC off: "Drug cooldown ends in 5 min · Xanax #2, then DEX × 27". Pings never come from a Torn tab.' }),
         h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('base', 'Service address', { placeholder: 'https://pumping-iron.you.workers.dev', value: st ? st.base : '' }), field('invite', 'Invite code (first time)', { placeholder: 'from SETUP.md', ...keyAttrs, class: secretCls })]),
-        h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('hook', 'Discord webhook', { placeholder: st ? 'Saved on your Worker · paste to change' : 'https://discord.com/api/webhooks/…', ...keyAttrs, class: secretCls }), field('key', 'Torn key for the Worker', { placeholder: st ? 'Saved on your Worker · paste to change' : 'Custom: bars, cooldowns, refills, travel', ...keyAttrs, class: secretCls })]),
+        h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('hook', 'Discord webhook', { placeholder: st ? 'Saved on your Worker · paste to change' : 'https://discord.com/api/webhooks/…', ...keyAttrs, class: secretCls }), field('key', 'Torn key for the Worker', { placeholder: st ? 'Saved on your Worker · paste to change' : 'Custom key made for the Worker (see below)', ...keyAttrs, class: secretCls })]),
         h('div', { class: 'row', style: 'max-width:760px' }, [field('discordId', 'Your Discord user id', { placeholder: 'Blank: the one linked in Torn', value: st && st.discordId ? st.discordId : '', inputmode: 'numeric' })]),
         h('div', { class: 'row' }, [h('button', { class: 'btn primary', type: 'button', onclick: connect, text: st ? 'Save' : 'Connect' }), h('button', { class: 'btn', type: 'button', disabled: !st, onclick: () => run(() => d.test(), 'Test ping sent. Check your channel.'), text: 'Send a test ping' }), st ? h('button', { class: 'btn ghost', type: 'button', onclick: () => run(async () => { await d.forget(); ctx.rerender(); }, 'Forgotten here and on your Worker.'), text: 'Forget' }) : null, h('a', { href: d.setupUrl, target: '_blank', rel: 'noopener', text: 'Set it up (10 minutes)' })]),
         msg,
-        st ? h('p', { class: 'num', text: 'Last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') + (st.lastError ? ' · ' + st.lastError : '') + ' · Later: DMs, /plan, Done and Snooze buttons.' }) : null,
+        st ? h('p', { class: 'num', text: 'Last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') + (st.lastError ? ' · ' + st.lastError : '') + (st.bot ? ' · the bot is set up: DMs with Done / Snooze / Skip, /plan, /timers' : '') }) : null,
+        st && st.bot && !st.linked ? linkRow(ctx) : null,
+        st && st.ready ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.discordEdit = false; ctx.rerender(); }, text: 'Done' }) : null,
         h('details', { class: 'dis' }, [h('summary', { text: 'How the Worker’s key is used' }), tosTable(TOS_WORKER), h('p', { style: 'margin-top:6px', text: 'Make a new custom key for the Worker in Torn (API settings). Your main key never goes to the Worker.' })]),
     ];
     return settingsSection('Discord pings', tag, rows);
 }
 
 export function renderSettings(m, ctx) {
+    // The Developer page (unlocked only) replaces Settings while it is open.
+    if (ctx.ui.devPage && ctx.dev && ctx.dev.unlocked()) return renderDeveloper(m, ctx);
     const s = ctx.settings;
     const ki = (ctx.statics && ctx.statics.keyInfo) || null;
     const dead = ctx.flags.keyDead;
@@ -178,11 +230,28 @@ export function renderSettings(m, ctx) {
 
     const discordSec = discordSection(ctx);
 
-    const overlaySec = settingsSection('Overlay on Torn', null, [
+    // Torn Eye's colour bands (moved here from the Torn Eye pane).
+    const limits = { ...DEFAULT_BAND_LIMITS, ...(s.bands || {}) };
+    const bandCell = (band) => h('span', { class: 'band2' }, [h('i', { style: 'background:' + BAND_COLORS[band] }), BAND_WORDS[band]]);
+    const bandInput = (band, key) => h('input', { class: 'inp num', style: 'width:52px', inputmode: 'numeric', value: String(limits[band][key]), 'aria-label': BAND_WORDS[band] + ' ' + key, onchange: (ev) => { const v = Math.max(0, Math.min(100, Number(ev.target.value) || 0)); ctx.setSettings({ bands: { ...limits, [band]: { ...limits[band], [key]: v } } }); } });
+    const bandsSec = settingsSection('Torn Eye colours', h('span', { class: 'state off', text: 'your limits' }), [
+        h('table', { class: 'tbl num', style: 'max-width:520px' }, [
+            h('thead', {}, [h('tr', {}, [h('th', { text: 'Band' }), h('th', { text: 'Win at least' }), h('th', { text: 'Keep HP at least' })])]),
+            h('tbody', {}, [
+                h('tr', {}, [h('td', {}, [bandCell('stomp')]), h('td', {}, [bandInput('stomp', 'win'), ' %']), h('td', {}, [bandInput('stomp', 'keep'), ' %'])]),
+                h('tr', {}, [h('td', {}, [bandCell('good')]), h('td', {}, [bandInput('good', 'win'), ' %']), h('td', {}, [bandInput('good', 'keep'), ' %'])]),
+                h('tr', {}, [h('td', {}, [bandCell('tough')]), h('td', {}, [bandInput('tough', 'win'), ' %']), h('td', { class: 'muted', text: '—' })]),
+                h('tr', {}, [h('td', {}, [bandCell('cant')]), h('td', { class: 'muted', colspan: '2', text: 'below that' })]),
+            ]),
+        ]),
+    ]);
+
+    const overlaySec = settingsSection('On Torn’s pages', null, [
         h('div', { class: 'opts' }, [settingsCheck('Panel on every page', s.pill, (v) => ctx.setSettings({ pill: v })), settingsCheck('Marks on the gym page', s.gymMarks, (v) => ctx.setSettings({ gymMarks: v })), settingsCheck('Marks on items and markets', s.marketMarks, (v) => ctx.setSettings({ marketMarks: v })), settingsCheck('Torn Eye chips', s.eyeChips, (v) => ctx.setSettings({ eyeChips: v }))]),
         h('p', { class: 'num' }, ['Expand or collapse the panel: ', h('b', { class: 'white', text: 'Alt+`' }), ' · drag it by its bar; it stays in the empty margin beside Torn’s page, left of it first, so NPC Arbitrage keeps the right.']),
         h('div', { class: 'opts' }, [settingsCheck('Bazaar prices from TornW3B', s.w3b !== false, (v) => ctx.setSettings({ w3b: v }))]),
         h('p', {}, ['Bazaar prices come from ', h('a', { href: W3B_SITE_URL, target: '_blank', rel: 'noopener', text: 'TornW3B' }), ' (item ids only, never a key; ', h('a', { href: W3B_TERMS_URL, target: '_blank', rel: 'noopener', text: 'their terms' }), '). Off: Item Market and points market only.']),
+        h('p', {}, [h('b', { class: 'white', text: 'Pumping Iron pauses while Torn Trading (NPC Arbitrage / Torn Bids) runs' }), ': the two never share Torn’s API limit or mark the same pages. While paused it asks Torn nothing, draws nothing on Torn’s pages and shows a warning sign; it starts again by itself within a minute of Torn Trading being turned off.']),
     ]);
 
     const displaySec = settingsSection('Display', null, [
@@ -190,7 +259,8 @@ export function renderSettings(m, ctx) {
     ]);
 
     const d = ctx.diagnostics();
-    const diagSec = settingsSection('Diagnostics', null, [h('dl', { class: 'kv num', style: 'max-width:460px' }, [h('dt', { text: 'Torn API, last minute' }), h('dd', { text: d.torn + ' of ' + (d.tornMax || 70) }), h('dt', { text: 'FFScouter, last minute' }), h('dd', { text: d.ffs + ' of 60' }), h('dt', { text: 'TornW3B, last minute' }), h('dd', { text: d.w3b + ' of 80' }), h('dt', { text: 'Last error' }), h('dd', { text: d.lastError || 'none' }), h('dt', { text: 'Perk lines not understood' }), h('dd', { text: String(d.unknownPerks) }), h('dt', { text: 'Version' }), h('dd', { text: d.version })])]);
+    const diagSec = h('div', {}, [sectionHead('Diagnostics', null, null, 'h3'), h('dl', { class: 'facts num' }, [h('dt', { text: 'Torn API, last minute' }), h('dd', { text: d.torn + ' of ' + (d.tornMax || 70) }), h('dt', { text: 'FFScouter, last minute' }), h('dd', { text: d.ffs + ' of 60' }), h('dt', { text: 'TornW3B, last minute' }), h('dd', { text: d.w3b + ' of 80' }), h('dt', { text: 'Last error' }), h('dd', { text: d.lastError || 'none' }), h('dt', { text: 'Perk lines not understood' }), h('dd', { text: String(d.unknownPerks) }), h('dt', { text: 'Version' }), h('dd', { text: d.version })])]);
+    const devSec = developerSection(m, ctx);
 
     const dataRows = [
         ['keys', 'Keys', 'Torn, FFScouter, TornStats, Discord service', 'Forget keys'],
@@ -198,11 +268,14 @@ export function renderSettings(m, ctx) {
         ['progress', 'Progress history', d.historyDays + ' day' + (d.historyDays === 1 ? '' : 's') + ' of stats', 'Clear'],
         ['prices', 'Price history', d.priceItems + ' item' + (d.priceItems === 1 ? '' : 's'), 'Clear'],
         ['eye', 'Torn Eye', d.eyeLine, 'Clear'],
+        ['learning', 'Learning data', d.learnLine, 'Clear'],
     ];
     const pane = [
+        diagSec,
         h('div', {}, [sectionHead('Your data', h('span', { class: 'meta', text: 'all on this computer' })), h('div', { class: 'data num' }, dataRows.map(([g, name, sub, act]) => h('div', { class: 'dr' }, [h('div', {}, [h('b', { text: name }), h('br'), h('small', { text: sub })]), h('button', { class: 'btn sm', type: 'button', onclick: () => ctx.clearGroup(g), text: act })])))]),
         h('div', {}, [sectionHead('What it never does', null, null, 'h3'), headsList([{ tone: 'plain', text: 'Train, buy, use or attack', sub: 'Fill only types a number' }, { tone: 'plain', text: 'Load a Torn page by itself' }, { tone: 'plain', text: 'Ping from a Torn tab', sub: 'only your Discord service does' }])]),
     ];
-    return { main: [h('div', {}, [sectionHead('Settings'), tornSec, ffsSec, tsSec, discordSec, overlaySec, displaySec, diagSec])], pane };
+    // One card per section, ordered by use.
+    return { main: [tornSec, discordSec, ffsSec, tsSec, bandsSec, overlaySec, displaySec, devSec].filter(Boolean), pane };
 }
 

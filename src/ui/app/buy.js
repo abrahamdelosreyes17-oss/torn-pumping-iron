@@ -1,21 +1,45 @@
 /*
- * Buy (mockups/M-buy.html): what the plan needs for today / 3 days / a week,
- * minus what you hold, filled from the cheapest listings across the Item
- * Market, bazaars (TornW3B) and the points market, each with a link to
- * that exact listing. You buy by hand.
+ * Buy (mockups/round3/U-buy.html): one question, "what do I buy, where,
+ * now?". Every Item Market listing (Torn API) and bazaar listing (TornW3B)
+ * sorted together and filled from the cheapest; each item says which side
+ * is cheaper; deals show even for items you hold; type ticks filter both
+ * lists. Every row links to that exact listing. You buy by hand.
  */
 
 import { h, t, sparkline } from '../dom.js';
 import { fmtInt, fmtMoney } from '../../core/format.js';
-import { itemName, POINTS, XANAX, ECSTASY, EDVD, FHC, CANDY_KISSES } from '../../core/items.js';
+import { itemName, ITEMS, REFILL_POINTS, POINTS, XANAX, ECSTASY, EDVD, FHC, CANDY_KISSES, MUNSTER } from '../../core/items.js';
 import { itemsNeeded } from '../../core/plan.js';
 import { tornDayStart, DAY } from '../../core/bars.js';
-import { needList, fillCheapest, priceVerdict, whereText, WINDOWS } from '../../core/market.js';
+import { needList, fillCheapest, whereText, linkFor, WINDOWS, SOURCE_BAZAAR, SOURCE_ITEM_MARKET } from '../../core/market.js';
 import { W3B_SITE_URL } from '../../api/w3b.js';
+import { itemMarketUrl, pointsMarketUrl } from '../../sources/route.js';
 import { sectionHead, meta } from './common.js';
 
 const WINDOW_LABEL = { today: 'Today', three: '3 days', week: 'Week' };
-const TRACKED = [XANAX, POINTS, ECSTASY, EDVD];
+
+/** Items Buy keeps an eye on for deals, plan or not. */
+export const TRACKED = [XANAX, POINTS, ECSTASY, EDVD, FHC, CANDY_KISSES, MUNSTER];
+
+/** The type ticks, and which items each covers. */
+export const BUY_TYPES = [
+    ['drug', 'Drugs'],
+    ['booster', 'Boosters'],
+    ['candy', 'Candy'],
+    ['energy', 'Energy drinks'],
+    ['points', 'Points'],
+];
+export const DEFAULT_BUY_TYPES = ['drug', 'booster', 'points'];
+
+export function typeOf(id) {
+    if (id === POINTS) return 'points';
+    const it = ITEMS[id];
+    if (!it) return 'booster';
+    if (it.kind === 'drug') return 'drug';
+    if (it.category === 'Candy') return 'candy';
+    if (it.category === 'Energy Drink') return 'energy';
+    return 'booster';
+}
 
 /** The plan's needs for a window: today's steps, plus later days at the plan's daily average. */
 export function needsForWindow(m, compare, plan, windowKey, horizonDays) {
@@ -26,6 +50,7 @@ export function needsForWindow(m, compare, plan, windowKey, horizonDays) {
     const out = { ...today };
     if (r) {
         for (const [id, n] of Object.entries(r.used || {})) {
+            if (id === 'special') continue;
             const extra = ((n || 0) / (horizonDays || 30)) * (days - 1);
             if (extra > 0) out[id] = Math.ceil((out[id] || 0) + extra - 1e-9);
         }
@@ -33,71 +58,180 @@ export function needsForWindow(m, compare, plan, windowKey, horizonDays) {
     return out;
 }
 
-function agoText(at, now) {
-    if (!at) return 'not yet';
+export function agoShort(at, now) {
+    if (!at) return '—';
     const s = Math.max(0, Math.round((now - at) / 1000));
-    return s < 90 ? s + 's ago' : Math.round(s / 60) + ' min ago';
+    return s < 90 ? s + ' s' : s < 5400 ? Math.round(s / 60) + ' min' : Math.round(s / 3600) + ' h';
+}
+
+/** The lowest price of the days before today (the "7-day low"), or null. */
+function low7(p) {
+    const lows = (p && p.lows7) || [];
+    const before = lows.slice(0, -1).filter((v) => v > 0);
+    return before.length ? Math.min(...before) : null;
+}
+
+/** "Bazaars $3,000 cheaper than the Item Market" (or the other way), per unit. */
+function sideLine(listings) {
+    const bz = listings.filter((l) => l.source === SOURCE_BAZAAR).map((l) => l.price);
+    const im = listings.filter((l) => l.source === SOURCE_ITEM_MARKET).map((l) => l.price);
+    if (!bz.length || !im.length) return null;
+    const b = Math.min(...bz);
+    const i = Math.min(...im);
+    if (b === i) return { good: true, text: 'Bazaars and the Item Market at the same price' };
+    return b < i ? { good: true, text: 'Bazaars ' + fmtMoney(i - b) + ' cheaper than the Item Market' } : { good: true, text: 'The Item Market is ' + fmtMoney(b - i) + ' cheaper than bazaars' };
+}
+
+function checkedText(row, p, now) {
+    if (row.source === SOURCE_BAZAAR) return 'TornW3B · ' + agoShort(row.dataAt || p.w3bAt, now);
+    return 'Torn API · ' + agoShort(p.imAt, now);
+}
+
+function openBtn(link, primary, ghost) {
+    return h('a', { class: 'btn sm' + (primary ? ' primary' : ghost ? ' ghost' : ''), href: link, target: '_blank', rel: 'noopener', text: 'Open' });
 }
 
 export function renderBuy(m, ctx) {
     const s = ctx.settings;
+    const now = m.now;
     const win = s.buyWindow || 'three';
-    const needs = needList(needsForWindow(m, ctx.compare, ctx.plan, win, s.horizonDays), ctx.statics.inventory || {});
-    const toBuy = needs.filter((n) => n.buy > 0);
-    ctx.wantPrices(toBuy.map((n) => n.id).concat(TRACKED));
+    const show = new Set(Array.isArray(s.buyTypes) ? s.buyTypes : DEFAULT_BUY_TYPES);
+    const inv = ctx.statics.inventory || {};
+    const needs = needList(needsForWindow(m, ctx.compare, ctx.plan, win, s.horizonDays), inv);
+    const toBuy = needs.filter((n) => n.buy > 0 && show.has(typeOf(n.id)));
+    ctx.wantPrices([...new Set(toBuy.map((n) => n.id).concat(TRACKED.filter((id) => show.has(typeOf(id)))))]);
     const prices = ctx.prices || {};
     let total = 0;
-    const blocks = toBuy.map((n) => {
-        const p = prices[n.id];
-        const fill = p && p.listings ? fillCheapest(p.listings, n.buy, n.id) : null;
-        if (fill) total += fill.total;
-        const v = fill && fill.rows[0] ? priceVerdict(fill.rows[0].price, p.avg7 || null, { slack: n.have > 0 }) : null;
-        const vColor = !v ? 'var(--dim)' : v.kind === 'buy' || v.kind === 'bulk' ? 'var(--good)' : v.kind === 'wait' ? 'var(--warn)' : 'var(--dim)';
-        const perDay = WINDOWS[win] > 1 ? Math.round((n.need / WINDOWS[win]) * 10) / 10 + ' a day' : n.need + ' today';
-        const rows = fill
-            ? fill.rows.map((r) =>
-                  h('tr', {}, [
-                      h('td', {}, [h('b', { class: 'w', text: whereText(r) }), h('small', { text: ' · ' + (r.listed > r.qty ? r.listed + ' listed, take ' + r.qty : r.listed + ' listed') })]),
-                      h('td', { class: 'r' }, [h('b', { class: 'w', text: fmtInt(r.qty) })]),
-                      h('td', { class: 'r', text: fmtMoney(r.price) }),
-                      h('td', { class: 'r', text: '$' + fmtInt(r.subtotal) }),
-                      h('td', { class: 'r' }, [h('a', { class: 'btn sm', href: r.link, target: '_blank', rel: 'noopener', text: r.source === 'bazaar' ? 'Open bazaar' : r.source === 'points' ? 'Open points' : 'Open market' })]),
-                  ]),
-              )
-            : [h('tr', {}, [h('td', { colspan: '5', class: 'muted', text: p && p.error ? 'Prices could not load: ' + p.error : 'Checking prices…' })])];
-        return h('div', { class: 'item num' }, [
-            h('div', { class: 'ih' }, [h('b', { text: n.name + ' × ' + fmtInt(n.buy) }), h('span', { class: 'need', text: perDay + (n.have ? ', ' + n.have + ' in inventory' : '') + (n.id === POINTS ? ' · for the refill' : '') }), h('span', { class: 'sum', text: fill ? fmtMoney(fill.total) : '' })]),
-            v ? h('div', { class: 'verdict' }, [h('i', { style: 'background:' + vColor }), v.pct !== null ? h('span', {}, [h('b', { style: 'color:' + vColor, text: v.text.split(' · ')[0] }), h('span', { class: 'muted', text: ' · ' + v.text.split(' · ')[1] + ' (' + fmtMoney(Math.round(p.avg7)) + ')' })]) : h('span', { class: 'muted', text: 'Price history starts today: a verdict after two days' })]) : null,
-            fill && fill.short > 0 ? h('div', { class: 'msg bad', text: 'Only ' + fill.filled + ' listed at these prices' }) : null,
-            h('table', { class: 'tbl' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'Where' }), h('th', { class: 'r', style: 'width:80px', text: 'Take' }), h('th', { class: 'r', style: 'width:120px', text: 'Each' }), h('th', { class: 'r', style: 'width:130px', text: 'Subtotal' }), h('th', { style: 'width:130px' })])]), h('tbody', {}, rows)]),
-        ]);
-    });
+    const firstOpen = { done: false };
 
-    const held = needs.filter((n) => n.have > 0).map((n) => n.have + ' ' + n.name);
-    const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Window', style: 'margin-top:6px' }, Object.keys(WINDOWS).map((k) => h('button', { type: 'button', 'aria-pressed': String(k === win), onclick: () => ctx.setSettings({ buyWindow: k }), text: WINDOW_LABEL[k] })));
-    const summary = toBuy.map((n) => fmtInt(n.buy) + ' ' + (n.id === POINTS ? 'points' : n.name)).join(' and ');
-    const top = h('div', { class: 'prime num', style: 'grid-template-columns:auto 1fr auto' }, [
-        h('div', {}, [t('lab', 'Buy for'), seg]),
-        h('div', { class: 'd', style: 'padding-left:12px', text: (summary || 'Nothing to buy') + (held.length ? ' · you have ' + held.join(', ') : '') + ' · cheapest first across the Item Market, bazaars and the points market' }),
-        h('div', { style: 'text-align:right' }, [t('lab', 'Total'), h('div', { class: 'big', text: total ? fmtMoney(total) : '$0' })]),
+    const rows = [];
+    for (const n of toBuy) {
+        const p = prices[n.id] || {};
+        const listings = Array.isArray(p.listings) ? p.listings : [];
+        const fill = listings.length ? fillCheapest(listings, n.buy, n.id) : null;
+        if (fill) total += fill.total;
+        const days = WINDOWS[win] || 1;
+        const perDay = days > 1 ? Math.round((n.need / days) * 10) / 10 + ' a day' : n.need + ' today';
+        const side = listings.length ? sideLine(listings) : null;
+        rows.push(
+            h('tr', { class: 'ih' }, [
+                h('td', { colspan: '6' }, [
+                    h('b', { text: n.name + ' × ' + fmtInt(n.buy) }),
+                    h('span', { class: 'muted', text: ' · ' + (n.id === POINTS ? refillWords(n, days) : perDay) + ' · you have ' + fmtInt(n.have) + (fill ? ' · ' + fmtMoney(fill.total) : '') }),
+                    side ? h('span', { class: 'verdict c-good', style: 'margin-left:10px', text: side.text }) : null,
+                ]),
+            ]),
+        );
+        if (!fill) {
+            rows.push(h('tr', { class: 'sub' }, [h('td', { colspan: '5', class: 'muted', text: p.error ? 'Prices could not load: ' + p.error : ctx.paused ? 'Prices wait while Torn Trading runs' : 'Checking prices…' }), h('td', { class: 'r' }, [openBtn(n.id === POINTS ? pointsMarketUrl() : itemMarketUrl(n.id), false, true)])]));
+            continue;
+        }
+        for (const r of fill.rows) {
+            const primary = !firstOpen.done;
+            firstOpen.done = true;
+            rows.push(
+                h('tr', { class: 'sub' }, [
+                    h('td', { text: whereText(r) }),
+                    h('td', { text: fmtInt(r.qty) + ' of ' + fmtInt(r.listed) }),
+                    h('td', { class: 'r', text: '$' + fmtInt(r.price) }),
+                    h('td', { class: 'r', text: '$' + fmtInt(r.subtotal) }),
+                    h('td', { class: 'muted', text: checkedText(r, p, now) }),
+                    h('td', { class: 'r' }, [openBtn(r.link, primary)]),
+                ]),
+            );
+        }
+        if (fill.short > 0) rows.push(h('tr', { class: 'sub' }, [h('td', { colspan: '6', class: 'c-bad', text: 'Only ' + fmtInt(fill.filled) + ' listed at these prices' })]));
+        // The Item Market's cheapest, when the fill didn't need it: a check that bazaars really are cheaper.
+        if (n.id !== POINTS && !fill.rows.some((r) => r.source === SOURCE_ITEM_MARKET)) {
+            const im = listings.filter((l) => l.source === SOURCE_ITEM_MARKET).sort((a, b) => a.price - b.price)[0];
+            if (im) rows.push(h('tr', { class: 'sub' }, [h('td', { class: 'muted', text: 'Item Market, cheapest' }), h('td', { class: 'muted', text: 'not needed' }), h('td', { class: 'r muted', text: '$' + fmtInt(im.price) }), h('td'), h('td', { class: 'muted', text: 'Torn API · ' + agoShort(p.imAt, now) }), h('td', { class: 'r' }, [openBtn(itemMarketUrl(n.id), false, true)])]));
+        }
+    }
+    if (!rows.length) rows.push(h('tr', {}, [h('td', { colspan: '6' }, [h('b', { class: 'w', text: 'Nothing to buy' }), h('span', { class: 'muted', text: ' · what you hold covers the plan’s next ' + WINDOW_LABEL[win].toLowerCase() })])]));
+
+    const listCard = h('div', { class: 'lead' }, [
+        sectionHead('Your list', meta(['the plan’s next ' + (win === 'today' ? 'day' : WINDOW_LABEL[win].toLowerCase()) + ', minus what you hold · cheapest first'])),
+        h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'Where' }), h('th', { style: 'width:120px', text: 'Take' }), h('th', { class: 'r', style: 'width:110px', text: 'Each' }), h('th', { class: 'r', style: 'width:120px', text: 'Total' }), h('th', { style: 'width:130px', text: 'Checked' }), h('th', { style: 'width:70px' })])]), h('tbody', {}, rows)]),
+        h('div', { class: 'note2', text: 'A listing can sell before you get there. Bazaar rows TornW3B hasn’t re-checked in 2 minutes are left out, and so are $1 locked listings.' }),
     ]);
 
-    const now = m.now;
-    const spark = TRACKED.map((id) => {
-        const p = prices[id] || {};
-        const lows = p.lows7 || [];
-        const cheapest = p.listings && p.listings.length ? Math.min(...p.listings.map((l) => l.price)) : null;
-        const v = cheapest && p.avg7 ? priceVerdict(cheapest, p.avg7) : null;
-        const inPlan = toBuy.some((n) => n.id === id);
-        return h('div', { class: 'pr' }, [h('b', { text: itemName(id) }), sparkline(lows, { color: inPlan ? '#efebe2' : '#6c737a' }), h('span', { class: 'r ' + (v && v.pct > 3 ? 'c-warn' : !inPlan ? 'muted' : '') }, [cheapest ? fmtMoney(cheapest) : '—', v && v.pct !== null ? h('span', { class: v.pct < 0 ? 'c-good' : 'muted', text: ' ' + (v.pct >= 0 ? '+' : '−') + Math.abs(v.pct).toFixed(1) + '%' }) : null])]);
+    // Deals: under the lowest price of the last days, whether the plan needs it or you already hold some.
+    const deals = [];
+    let hiddenDeals = 0;
+    const planIds = new Set(needs.map((n) => String(n.id)));
+    for (const id of TRACKED) {
+        const p = prices[id];
+        if (!p || !Array.isArray(p.listings) || !p.listings.length) continue;
+        const best = p.listings.slice().sort((a, b) => a.price - b.price)[0];
+        const low = low7(p);
+        if (!low || !(best.price < low)) continue;
+        if (!show.has(typeOf(id))) {
+            hiddenDeals++;
+            continue;
+        }
+        const pct = (100 * (best.price - low)) / low;
+        const link = linkFor(best, id);
+        deals.push(
+            h('tr', {}, [
+                h('td', {}, [h('b', { class: 'w', text: itemName(id) }), planIds.has(String(id)) ? null : h('span', { class: 'tag', style: 'margin-left:6px', text: 'not in plan' })]),
+                h('td', {}, [whereText(best), h('span', { class: 'muted', text: ' · ' + (best.source === SOURCE_BAZAAR ? 'TornW3B ' + agoShort(best.dataAt || p.w3bAt, now) : 'Torn API ' + agoShort(p.imAt, now)) })]),
+                h('td', { class: 'r', text: '$' + fmtInt(best.price) }),
+                h('td', { class: 'r c-good', text: '−' + Math.abs(pct).toFixed(1) + '%' }),
+                h('td', { text: fmtInt(best.qty) }),
+                h('td', { class: 'r' }, [openBtn(link, false)]),
+            ]),
+        );
+    }
+    const notInPlan = TRACKED.filter((id) => !planIds.has(String(id)) && show.has(typeOf(id)));
+    const cheapestRows = notInPlan.map((id) => {
+        const p = prices[id];
+        const best = p && Array.isArray(p.listings) && p.listings.length ? p.listings.slice().sort((a, b) => a.price - b.price)[0] : null;
+        return h('tr', {}, [h('td', {}, [h('b', { class: 'w', text: itemName(id) })]), h('td', { class: 'muted', text: best ? whereText(best) : 'checking…' }), h('td', { class: 'r', text: best ? '$' + fmtInt(best.price) : '' }), h('td', { class: 'r', style: 'width:70px' }, [best ? openBtn(linkFor(best, id), false, true) : null])]);
     });
-    const notInPlan = [ECSTASY, EDVD, CANDY_KISSES, FHC].filter((id) => !toBuy.some((n) => n.id === id)).map(itemName);
+    const dealsCard = h('div', {}, [
+        sectionHead('Deals', meta(['under the lowest price of the last days · worth buying ahead, even if you hold some'])),
+        deals.length
+            ? h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:170px', text: 'Item' }), h('th', { text: 'Where' }), h('th', { class: 'r', style: 'width:110px', text: 'Price' }), h('th', { class: 'r', style: 'width:110px', text: 'vs the low' }), h('th', { style: 'width:70px', text: 'Listed' }), h('th', { style: 'width:70px' })])]), h('tbody', {}, deals)])
+            : h('p', { class: 'muted', style: 'margin:0', text: 'Nothing under its recent low right now. Deals need two days of prices: they show here as soon as one appears.' }),
+        hiddenDeals ? h('div', { class: 'note2', text: hiddenDeals + ' deal' + (hiddenDeals === 1 ? '' : 's') + ' hidden by your ticks.' }) : null,
+        cheapestRows.length ? h('details', { class: 'dis', style: 'margin-top:12px' }, [h('summary', { text: 'Not in your plan · the cheapest of each' }), h('table', { class: 'tbl num', style: 'margin-top:6px' }, [h('tbody', {}, cheapestRows)])]) : null,
+    ]);
+
+    // Pane: 7-day prices, what you hold, where prices come from.
+    const spark = TRACKED.filter((id) => show.has(typeOf(id))).map((id) => {
+        const p = prices[id] || {};
+        const cheapest = p.listings && p.listings.length ? Math.min(...p.listings.map((l) => l.price)) : null;
+        const pct = cheapest && p.avg7 ? (100 * (cheapest - p.avg7)) / p.avg7 : null;
+        return h('tr', {}, [h('td', {}, [h('b', { class: 'w', text: itemName(id) })]), h('td', { style: 'width:96px' }, [sparkline(p.lows7 || [], { w: 90, h: 22, color: planIds.has(String(id)) ? '#efebe2' : '#6c737a' })]), h('td', { class: 'r', text: cheapest ? '$' + fmtInt(cheapest) : '—' }), h('td', { class: 'r ' + (pct !== null && pct < -1 ? 'c-good' : 'muted'), text: pct === null ? '' : (pct >= 0 ? '+' : '−') + Math.abs(pct).toFixed(1) + '%' })]);
+    });
+    const heldIds = [...new Set([XANAX, POINTS, ECSTASY, EDVD, CANDY_KISSES, FHC, MUNSTER].map(String))];
+    const held = heldIds.map((id) => [id === POINTS ? 'Points' : itemName(Number(id)), Number(inv[id === POINTS ? POINTS : Number(id)]) || 0]);
     const im = Object.values(prices).map((p) => p.imAt || 0);
     const bz = Object.values(prices).map((p) => p.w3bAt || 0);
     const pane = [
-        h('div', {}, [sectionHead('7-day prices', meta(['lowest listing we saw each day'])), h('div', { class: 'num' }, spark)]),
-        notInPlan.length ? h('div', {}, [sectionHead('Not in your plan', null, null, 'h3'), h('details', { class: 'dis' }, [h('summary', { text: notInPlan.join(', ') }), h('p', { class: 'muted', style: 'margin:6px 0 0;font-size:12px', text: 'Your plan doesn’t use them. Pick a jump in Plan and they show here with sellers.' })])]) : null,
-        h('div', {}, [sectionHead('Where prices come from', null, null, 'h3'), h('dl', { class: 'kv' }, [h('dt', { text: 'Item Market' }), h('dd', { text: 'Torn API · ' + agoText(Math.max(0, ...im), now) }), h('dt', { text: 'Points market' }), h('dd', { text: 'Torn API · ' + agoText(prices[POINTS] && prices[POINTS].imAt, now) }), h('dt', { text: 'Bazaars' }), h('dd', {}, [h('a', { href: W3B_SITE_URL, target: '_blank', rel: 'noopener', text: 'TornW3B' }), ' · ' + agoText(Math.max(0, ...bz), now)])])]),
+        h('div', {}, [sectionHead('7-day prices', meta(['lowest each day']), null, 'h3'), h('table', { class: 'tbl num' }, [h('tbody', {}, spark)])]),
+        h('div', {}, [sectionHead('You hold', null, null, 'h3'), h('dl', { class: 'facts num' }, held.flatMap(([name, n]) => [h('dt', { text: name }), h('dd', { text: fmtInt(n) })]))]),
+        h('div', {}, [
+            sectionHead('Prices from', null, null, 'h3'),
+            h('dl', { class: 'facts num' }, [h('dt', { text: 'Item Market' }), h('dd', { text: 'Torn API · ' + agoShort(Math.max(0, ...im), now) }), h('dt', { text: 'Points market' }), h('dd', { text: 'Torn API · ' + agoShort(prices[POINTS] && prices[POINTS].imAt, now) }), h('dt', { text: 'Bazaars' }), h('dd', {}, [s.w3b === false ? 'off in Settings' : h('a', { href: W3B_SITE_URL, target: '_blank', rel: 'noopener', text: 'TornW3B' }), s.w3b === false ? '' : ' · ' + agoShort(Math.max(0, ...bz), now)])]),
+            h('div', { class: 'note2', text: 'Read at most every 5 min while this tab is open. Bazaar rows older than 2 min are hidden.' }),
+        ]),
     ];
-    return { main: [top, h('div', { class: 'items' }, blocks), h('p', { class: 'muted', style: 'margin:0;font-size:12px', text: 'A listing can sell before you get there. The list checks again when you come back to this tab.' })], pane };
+
+    const summary = toBuy.map((n) => fmtInt(n.buy) + ' ' + (n.id === POINTS ? 'points' : n.name)).join(' + ');
+    const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Buy for' }, Object.keys(WINDOWS).map((k) => h('button', { type: 'button', 'aria-pressed': String(k === win), onclick: () => ctx.setSettings({ buyWindow: k }), text: WINDOW_LABEL[k] })));
+    const ticks = h(
+        'div',
+        { class: 'ticks', role: 'group', 'aria-label': 'Show' },
+        BUY_TYPES.map(([k, label]) =>
+            h('button', { type: 'button', class: 'tk', 'aria-pressed': String(show.has(k)), onclick: () => { const next = new Set(show); if (next.has(k)) next.delete(k); else next.add(k); ctx.setSettings({ buyTypes: [...next] }); } }, [h('i'), label]),
+        ),
+    );
+    const ctl = [t('lab', 'Buy for'), seg, h('span', { class: 'muted' }, [summary ? summary + ' · ' : 'Nothing to buy · ', h('b', { class: 'white', text: fmtMoney(total) })]), h('span', { class: 'sep' }), t('lab', 'Show'), ticks];
+    const newest = Math.max(0, ...Object.values(prices).map((p) => p.at || 0));
+    return { ctl: [ctl], upd: newest ? 'prices ' + agoShort(newest, now) + ' ago' : 'prices load now', main: [listCard, dealsCard], pane };
+}
+
+function refillWords() {
+    return REFILL_POINTS + ' a day for the refill';
 }

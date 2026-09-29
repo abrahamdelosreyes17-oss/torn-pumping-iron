@@ -273,3 +273,14 @@ test('R2 keeps the old six plans’ numbers (sim30 at sample prices)', () => {
     void MIN;
     void tornClock;
 });
+
+test('war: where travellers go and an estimated landing from when we first saw them', async () => {
+    const { travelOf, landingAt } = await import('../src/core/eye/war.js');
+    assert.deepEqual(travelOf({ status: { description: 'Traveling to Mexico' } }), { kind: 'to', place: 'Mexico', minutes: 26 });
+    assert.deepEqual(travelOf({ status: { description: 'Returning to Torn from Japan' } }), { kind: 'back', place: 'Japan', minutes: 225 });
+    assert.equal(travelOf({ status: { description: 'In United Kingdom' } }).kind, 'abroad');
+    assert.equal(travelOf({ status: { description: 'Okay' } }), null);
+    const seen = Date.UTC(2026, 8, 29, 12, 0);
+    assert.equal(landingAt(travelOf({ status: { description: 'Traveling to Mexico' } }), seen, seen + 60000), seen + 26 * 60000);
+    assert.equal(landingAt(travelOf({ status: { description: 'In Mexico' } }), null, seen), seen + 26 * 60000, 'abroad: if they fly now');
+});

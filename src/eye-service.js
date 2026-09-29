@@ -7,6 +7,8 @@
  */
 
 import { K, get, set, getKey, getSettings } from './platform/store.js';
+import { learnedModel } from './core/learndata.js';
+import { applyFightModel } from './core/learn.js';
 import { idbGet, idbSet } from './platform/idb.js';
 import { pi, tornClient, isVisible } from './runtime.js';
 import { isPaused } from './turns.js';
@@ -259,7 +261,10 @@ export function eyeView(id, extra = {}, { war = false } = {}) {
         f = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe });
         if (gThem) fGear = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe, gearThem: gThem });
     }
-    const main = fGear || f;
+    let main = fGear || f;
+    // What the fight learner kept from your own fights (only when it predicted your newest fights better).
+    const fm = learnedModel(get(K.learned, null)).fight;
+    if (main && fm) main = { ...main, ...applyFightModel(fm, { pWin: main.pWin, keep: main.keep }), learned: true };
     const band = bandOf(main, getSettings().bands);
     const ff = est ? fairFight(est.bss, bssOf(meStats)) : null;
     const respect = est && level ? respectFor(level, ff, { war }) : null;

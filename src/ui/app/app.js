@@ -100,7 +100,7 @@ export class PiApp {
         this.sig = sig;
         const s = ctx.settings;
         const app = h('div', { class: 'app' });
-        app.appendChild(this.topBar());
+        app.appendChild(this.topBar(ctx, m));
         // Taking turns with Torn Trading: say so on top; the plan below keeps moving on the clock from the last read.
         if (ctx.paused) app.appendChild(pausedBanner(m, s));
         let tab = this.tab;
@@ -122,7 +122,6 @@ export class PiApp {
                 return;
             }
         }
-        if ((tab === 'home' || tab === 'plan') && m && m.ready) app.appendChild(statusStrip(m, s));
         const fn = this.renderers[tab] || this.renderers.home;
         let out;
         try {
@@ -130,13 +129,20 @@ export class PiApp {
         } catch (error) {
             out = { main: [h('div', { class: 'warnb' }, [h('b', { text: 'This tab hit a problem' }), h('p', { text: String((error && error.message) || error) })])], pane: [] };
         }
+        // A page's control bars (the inputs that drive every number on it), then the status strip where the page wants it.
+        for (const bar of out.ctl || []) if (bar && bar.length) app.appendChild(h('div', { class: 'ctl num' }, bar));
+        if (out.strip && m && m.ready) app.appendChild(statusStrip(m, s));
+        this.updText = out.upd || null;
         app.appendChild(h('div', { class: 'body' }, [h('div', { class: 'main' }, out.main || []), h('div', { class: 'pane' }, out.pane || [])]));
         fill(this.root, [app]);
         this.tick();
     }
 
-    topBar() {
-        const tabs = APP_TABS.filter(([id]) => this.renderers[id]).map(([id, label]) => h('a', { class: 'tab' + (id === this.tab ? ' on' : ''), href: '#' + id, onclick: (e) => { e.preventDefault(); this.go(id); }, text: label }));
+    topBar(ctx = null, m = null) {
+        // Buy shows how many things to buy today; Settings a dot when the key needs you.
+        const buyN = m && m.ready ? (m.buyToday || []).filter((n) => n.buy > 0).length : 0;
+        const badge = (id) => (id === 'buy' && buyN ? h('span', { class: 'n', text: String(buyN) }) : id === 'settings' && ctx && ctx.keyProblem ? h('span', { class: 'dotw', 'aria-label': 'needs you' }) : null);
+        const tabs = APP_TABS.filter(([id]) => this.renderers[id]).map(([id, label]) => h('a', { class: 'tab' + (id === this.tab ? ' on' : ''), href: '#' + id, onclick: (e) => { e.preventDefault(); this.go(id); } }, [label, badge(id)]));
         this.clockEl = h('span', { class: 'upd num' }, [h('i'), (this.clockText = t('', ''))]);
         return h('div', { class: 'top' }, [
             h('div', { class: 'mark' }, [h('i')]),
@@ -162,6 +168,10 @@ export class PiApp {
             const ago = st ? Math.max(0, Math.round((now - st) / 1000)) : null;
             if (ctx && ctx.paused) {
                 this.clockText.textContent = 'Paused' + (st ? ' · last read ' + clock(st, settings) : '');
+                return;
+            }
+            if (this.updText) {
+                this.clockText.textContent = clock(now, settings) + (settings && settings.timeFormat === 'local' ? ' local' : ' Torn time') + ' · ' + this.updText;
                 return;
             }
             this.clockText.textContent = clock(now, settings) + (settings && settings.timeFormat === 'local' ? ' local' : ' Torn time') + (ago !== null ? ' · updated ' + (ago < 90 ? ago + 's' : Math.round(ago / 60) + ' min') + ' ago' : '');

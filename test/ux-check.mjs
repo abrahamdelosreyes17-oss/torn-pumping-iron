@@ -118,12 +118,12 @@ async function checkTab(page, tab, errors, want) {
 }
 
 const TABS = {
-    home: ['Today', 'Take Xanax #1, then train', 'Refill · 30 points', 'Buy today', 'Heads-up', 'Pick your build type', "against Baldr's, STR high build"],
-    plan: ['Recommended', 'Steady training', 'Other plans', 'Choco jump', 'Build', 'High stat', "Hank's", "You vs Baldr's, STR high", 'Pick one'],
-    buy: ['Buy for', 'Xanax', 'Iron_Monk', 'Points market', '7-day prices', 'TornW3B'],
-    progress: ['Stats', 'Gyms', 'Force Training', 'This week'],
-    eye: ['Targets', 'Colours', 'Sources', 'FFScouter', 'Gear seen'],
-    settings: ['Torn API key', 'How this key is used', 'FFScouter', 'data policy', 'TornStats', 'Your data', 'Diagnostics'],
+    home: ['Today', 'Take Xanax #1, then train', 'Refill · 30 points', 'Buy today', 'Heads-up', 'Pick your build type', "You vs Baldr's, STR high", 'Next 7 days', 'This week'],
+    plan: ['Most stats in my budget', 'Recommended', 'Steady training', 'Per $1M', 'Other plans', 'Why it isn’t the pick', 'Where your energy comes from', 'Natural energy', 'Build', 'High stat', "Hank's", 'pick yours', 'Ignorance Is Bliss', 'what-if'],
+    buy: ['Buy for', 'Your list', 'Xanax', 'Iron_Monk', 'Points market', 'Deals', '7-day prices', 'You hold', 'TornW3B'],
+    progress: ['Total stats against the plan', 'Each stat', 'Gained against plan', 'Last trains', 'This week', 'Budget', 'Force Training'],
+    eye: ['Targets', 'Chain', 'War', 'How sure', 'FFScouter', 'Gear seen', 'Your side'],
+    settings: ['Torn API key', 'How this key is used', 'Discord pings', 'FFScouter', 'data policy', 'TornStats', 'Torn Eye colours', 'On Torn’s pages', 'Developer', 'Export as .zip', 'Your data', 'Diagnostics', 'of 70'],
 };
 
 const { page, errors, tornHits } = await openApp('');
@@ -152,14 +152,43 @@ if (!only.length || only.includes('plan')) {
     await page.waitForTimeout(300);
     let plan = await page.evaluate(() => JSON.parse(_store['pumpingIron.v1.plan']));
     ok(plan.build === 'baldr:def' && plan.buildPicked === true, 'build: DEF as the high stat is saved (' + plan.build + ')');
-    await page.locator('#pi-app .brow', { hasText: "Hank's" }).first().click();
+    await page.locator('#pi-app .bl .r', { hasText: "Hank's" }).first().click();
     await page.waitForTimeout(300);
     plan = await page.evaluate(() => JSON.parse(_store['pumpingIron.v1.plan']));
     ok(plan.build === 'hank:def', "build: Hank's with DEF high picked (" + plan.build + ')');
-    const shown = await measure(page);
-    ok(shown.text.includes("You vs Hank's, DEF high"), 'build: the plan names it');
     m = await measure(page);
-    ok(m.text.toLowerCase().includes('yours') && m.text.includes('the plan trains toward your build'), 'build: marked as yours');
+    ok(m.text.includes("Hank's ✓") && m.text.includes('what the plan trains toward'), 'build: marked as yours');
+    // The Plan dropdown: Max gains, no budget (saved, and the recommendation follows).
+    await page.locator('#pi-app details.plansel summary').click();
+    await page.waitForTimeout(200);
+    await page.locator('#pi-app .plansel .opt', { hasText: 'Max gains, no budget' }).click();
+    await page.waitForTimeout(400);
+    plan = await page.evaluate(() => JSON.parse(_store['pumpingIron.v1.plan']));
+    m = await measure(page);
+    ok(plan.pickBy === 'max' && m.text.includes('Max gains, no budget') && m.text.includes('Steady + FHC, max'), 'plan: Max gains picks Steady + FHC (' + plan.pickBy + ')');
+    ok(m.covered.length === 0, 'plan: nothing covered with the dropdown closed ' + JSON.stringify(m.covered.slice(0, 3)));
+    await page.locator('#pi-app details.plansel summary').click();
+    await page.waitForTimeout(200);
+    await page.locator('#pi-app .plansel .opt', { hasText: 'Most stats in my budget' }).click();
+    await page.waitForTimeout(300);
+    // Buy's type ticks filter the list.
+    await page.evaluate(() => (location.hash = 'buy'));
+    await page.waitForTimeout(600);
+    await page.locator('#pi-app .tk', { hasText: 'Points' }).click();
+    await page.waitForTimeout(400);
+    m = await measure(page);
+    const settings1 = await page.evaluate(() => JSON.parse(_store['pumpingIron.v1.settings'] || '{}'));
+    ok(Array.isArray(settings1.buyTypes) && !settings1.buyTypes.includes('points') && !/Points × \d/.test(m.text), 'buy: the Points tick hides points');
+    await page.locator('#pi-app .tk', { hasText: 'Points' }).click();
+    await page.waitForTimeout(300);
+    // Developer: a wrong key is refused; the export is there for everyone.
+    await page.evaluate(() => (location.hash = 'settings'));
+    await page.waitForTimeout(500);
+    await page.locator('#pi-app input[aria-label="Developer key"]').fill('not-the-key');
+    await page.locator('#pi-app button', { hasText: 'Unlock' }).click();
+    await page.waitForTimeout(400);
+    m = await measure(page);
+    ok(m.text.includes('That isn’t the developer key') && !m.text.includes('What it learned'), 'developer: a wrong key is refused');
     // One layout (the owner: "i dont need 2 layouts, just one, compact is fine"): no density switch anywhere.
     const switches = await page.evaluate(() => /Comfortable/.test(document.getElementById('pi-app').shadowRoot.textContent));
     ok(!switches, 'one layout: no Compact/Comfortable switch');
@@ -172,12 +201,27 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     const o = await openApp('&ffs=1&who=owner');
     await o.page.evaluate(() => (location.hash = 'eye'));
     await o.page.waitForTimeout(500);
-    await o.page.locator('#pi-app button', { hasText: 'Refresh' }).click();
     await o.page.waitForTimeout(2500);
-    const m = await checkTab(o.page, 'eye', o.errors, ['Targets', 'Stomp', 'Attack', 'ranked by our fight estimate']);
+    const m = await checkTab(o.page, 'eye', o.errors, ['Targets', 'Stomp', 'Attack', 'win and HP kept from your stats']);
     const rows = await o.page.evaluate(() => document.getElementById('pi-app').shadowRoot.querySelectorAll('.tbl tbody tr').length);
-    ok(rows >= 5, 'eye: targets listed (' + rows + ')');
-    ok(/Hidden: \d+ Can.t win/.test(m.text), "eye: can't-win targets hidden by default");
+    ok(rows >= 5, 'eye: targets load by themselves the first time (' + rows + ')');
+    ok(/\d+ can.t-win players? hidden/.test(m.text), "eye: can't-win targets hidden by default");
+    // Chain: only Stomp and Good, most respect first.
+    await o.page.locator('#pi-app .modes button', { hasText: 'Chain' }).click();
+    await o.page.waitForTimeout(400);
+    const chain = await o.page.evaluate(() => [...document.getElementById('pi-app').shadowRoot.querySelectorAll('.tbl tbody tr')].map((tr) => ({ band: tr.cells[0].textContent.trim(), resp: Number(tr.cells[3].textContent) })));
+    ok(chain.length > 0 && chain.every((r) => r.band === 'Stomp' || r.band === 'Good'), 'eye chain: only Stomp and Good (' + chain.map((r) => r.band).join(',') + ')');
+    ok(chain.every((r, i) => i === 0 || r.resp <= chain[i - 1].resp), 'eye chain: most respect first');
+    // War: watch a faction; everyone listed, attackable first.
+    await o.page.locator('#pi-app .modes button', { hasText: 'War' }).click();
+    await o.page.waitForTimeout(300);
+    await o.page.locator('#pi-app input[placeholder="faction id"]').fill('7777');
+    await o.page.locator('#pi-app button', { hasText: 'Watch' }).click();
+    await o.page.waitForTimeout(3000);
+    const war = await measure(o.page);
+    ok(/attack now/.test(war.text) && /Next out of hospital/.test(war.text), 'eye war: members listed with who to hit now');
+    ok(/Traveling|In |Returning/.test(war.text), 'eye war: travellers shown');
+    await o.page.screenshot({ path: resolve(shots, 'app-eye-war.png'), fullPage: true });
     await o.page.close();
 }
 

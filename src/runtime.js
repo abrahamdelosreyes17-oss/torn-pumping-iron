@@ -16,6 +16,8 @@ import { targetShares } from './core/plan.js';
 import { livePrices } from './core/market.js';
 import { TORN_PER_MINUTE_ALONE } from './core/turns.js';
 import { isPaused } from './turns.js';
+import { useDampingMode } from './core/gain.js';
+import { joinFights, runLearning, learnedModel } from './core/learndata.js';
 
 export const pi = {
     tabId: makeTabId(),
@@ -64,14 +66,14 @@ export function tornClient() {
 
 /** Re-run the strategy comparison at most once per Torn hour or when inputs change. */
 function comparisonFor(state, statics, plan, settings) {
-    const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null) });
+    const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult });
     const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
     const prices = get(K.prices, {}) || {};
     // Every input that moves the answer: all four stats (in ~2% steps), prices (2 significant digits), perks, gyms.
     const statsSig = Object.values(pc.stats).map((v) => Math.round(Math.log1p(v) * 50)).join(',');
     const priceSig = Object.entries(livePrices(prices)).map(([id, p]) => id + ':' + Number(p.toPrecision(2))).join(',');
     const special = specialLeft(plan, state);
-    const perkSig = JSON.stringify([pc.perks.mult, pc.perks.happyLossMult, pc.perks.canMult, pc.perks.candyMult, pc.perks.consoleMult, pc.perks.edvdMult, pc.perks.boosterCapExtraH]);
+    const perkSig = JSON.stringify([learnedNow().mode, pc.perks.mult, pc.perks.happyLossMult, pc.perks.canMult, pc.perks.candyMult, pc.perks.consoleMult, pc.perks.edvdMult, pc.perks.boosterCapExtraH]);
     const key = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, priceSig, pc.unlocked.join(','), special].join('|');
     if (key !== pi.compareKey) {
         pi.compare = compareStrategies({ state, pc, shares, settings, prices, special });
@@ -91,7 +93,7 @@ export function currentModel(now = Date.now()) {
     const plan = getPlan();
     const settings = getSettings();
     const compare = comparisonFor(state, statics, plan, settings);
-    return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: get(K.prices, {}) || {}, compare, whatIf: pi.whatIf || null, gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+    return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: get(K.prices, {}) || {}, compare, whatIf: pi.whatIf || null, learnedMult: learnedNow().mult, gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
 }
 
 /**
@@ -119,10 +121,66 @@ function recordDayTotals(m) {
     set(K.dayTotals, all);
 }
 
+/**
+ * The plan's line for Progress: the 30-day projection as it stood when this
+ * plan (strategy, build, start) was set. Written once per plan by the leader.
+ */
+function recordPlanLine(m) {
+    if (!m || !m.ready || !m.compare) return;
+    const plan = getPlan();
+    const r = m.compare[plan.strategy];
+    if (!r) return;
+    const key = [plan.createdAt || 0, plan.strategy, plan.build].join('|');
+    const cur = get(K.planLine, null);
+    if (cur && cur.key === key) return;
+    const lead = get(K.leader, null);
+    if (!lead || lead.id !== pi.tabId) return;
+    set(K.planLine, { key, start: tornDayStart(m.now), total: m.total, perStat: { ...m.pc.stats }, daily: r.daily, perStatGain: r.perStat, cost: r.cost, days: r.daily.length });
+}
+
+/**
+ * What the learner kept (Settings › Developer), applied to the engine: the
+ * per-stat multipliers and, when it found one, the damping formula above 50M.
+ */
+export function learnedNow() {
+    const l = learnedModel(get(K.learned, null));
+    useDampingMode(l.mode);
+    return l;
+}
+
+/** How often the learner runs (and only when new trains or fights came in). */
+export const LEARN_EVERY_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * The app improves itself from your own trains and fights: at most every
+ * 6 hours, in the leader tab, a change kept only if it predicts your newest
+ * sessions better (docs/research-learning.md). Cheap: a few ms.
+ */
+export function maybeLearn(now = Date.now(), force = false) {
+    const lead = get(K.leader, null);
+    if (!force && (!lead || lead.id !== pi.tabId)) return null;
+    const cal = get('calibration', null) || {};
+    const samples = cal.samples || [];
+    const fights = joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []);
+    const prev = get(K.learned, null);
+    const sig = samples.length + ':' + fights.length;
+    if (!force && prev && (now - prev.at < LEARN_EVERY_MS || prev.sig === sig)) return prev;
+    set(K.fightLog, fights);
+    const current = prev && prev.gym && prev.gym.accepted ? prev.gym.model : null;
+    const res = { ...runLearning({ samples, fights, now, current }), sig };
+    set(K.learned, res);
+    const log = get(K.learnLog, []) || [];
+    log.push({ at: now, gym: { accepted: res.gym.accepted, heldOut: res.gym.heldOut, mode: res.gym.model.mode, mult: res.gym.model.mult, sessions: res.gym.sessions, candidates: res.gym.candidates }, fights: { accepted: res.fights.accepted, model: res.fights.model, fights: res.fights.fights, heldOut: res.fights.heldOut } });
+    set(K.learnLog, log.slice(-60));
+    return res;
+}
+
 export function refresh() {
     try {
+        maybeLearn();
         pi.model = currentModel();
         recordDayTotals(pi.model);
+        recordPlanLine(pi.model);
     } catch (error) {
         set(K.lastError, { at: Date.now(), where: 'model', message: String((error && error.message) || error) });
         return;

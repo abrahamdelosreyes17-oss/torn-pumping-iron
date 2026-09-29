@@ -243,6 +243,12 @@
         apiPause: 'apiPause',
         lastError: 'lastError',
         stateError: 'stateError',
+        planLine: 'planLine',
+        learned: 'learned',
+        learnLog: 'learnLog',
+        fightLog: 'fightLog',
+        eyePredictions: 'eyePredictions',
+        devUnlocked: 'devUnlocked',
     };
 
     /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */
@@ -331,7 +337,8 @@
     const DATA_GROUPS = {
         keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker],
         plan: [K.plan, K.recheck],
-        progress: [K.statsHistory, K.dayLog, K.dayTotals],
+        progress: [K.statsHistory, K.dayLog, K.dayTotals, K.planLine],
+        learning: ['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions],
         prices: [K.priceHistory, K.prices],
         eye: ['eyeTargets', 'myAttacks'],
     };
@@ -981,6 +988,22 @@
     const POST_50M_MODE = 'log10';
 
     /**
+     * The damping mode the engine uses now: POST_50M_MODE until the learner
+     * finds (and keeps) a better one from the player's own trains.
+     */
+    let dampingMode = POST_50M_MODE;
+
+    /** Use a learned damping mode ('log10' | 'ln' | 'power'); anything else resets it. */
+    function useDampingMode(mode) {
+        dampingMode = mode === 'ln' || mode === 'power' || mode === 'log10' ? mode : POST_50M_MODE;
+        return dampingMode;
+    }
+
+    function currentDampingMode() {
+        return dampingMode;
+    }
+
+    /**
      * [calibrate] Happy lost per train, per energy. Torn's real loss is random in
      * 0.4–0.6 × energy per train (research-gym.md); the mean is used.
      */
@@ -991,7 +1014,7 @@
     }
 
     /** The stat the formula sees: itself up to 50M, damped above. */
-    function effectiveStat(S, mode = POST_50M_MODE) {
+    function effectiveStat(S, mode = dampingMode) {
         if (!(S > 5e7)) return Math.max(0, S || 0);
         if (mode === 'power') return 5e7 + 0.057406 * Math.pow(S - 5e7, 0.928996);
         const log = mode === 'ln' ? Math.log(S) : Math.log10(S);
@@ -1007,7 +1030,7 @@
      * @param {number} E - energy per train of the gym (5, 10, 25, 50)
      * @param {number} [perks] - product of every gym-gain multiplier (1.02 …)
      */
-    function gainPerTrain(stat, S, H, dots, E, perks = 1, mode = POST_50M_MODE) {
+    function gainPerTrain(stat, S, H, dots, E, perks = 1, mode = dampingMode) {
         const ab = STAT_AB[stat];
         if (!ab || !(dots > 0) || !(E > 0)) return 0;
         const h = Math.min(HAPPY_CAP, Math.max(0, H || 0));
@@ -1024,7 +1047,7 @@
      * Train one stat, one train at a time, until the energy (or maxTrains) runs out.
      * @returns {{gain:number, trains:number, energyUsed:number, statAfter:number, happyAfter:number}}
      */
-    function trainSession({ stat, S, H, dots, energyPerTrain, energy, perks = 1, maxTrains = Infinity, mode = POST_50M_MODE }) {
+    function trainSession({ stat, S, H, dots, energyPerTrain, energy, perks = 1, maxTrains = Infinity, mode = dampingMode }) {
         let s = S;
         let h = H;
         let trains = 0;
@@ -1040,7 +1063,7 @@
      * Trains (and energy) to take a stat from S to at least `target`.
      * Returns null when it would take more than `limit` trains.
      */
-    function trainsToReach({ stat, S, target, H, dots, energyPerTrain, perks = 1, limit = 1e6, mode = POST_50M_MODE }) {
+    function trainsToReach({ stat, S, target, H, dots, energyPerTrain, perks = 1, limit = 1e6, mode = dampingMode }) {
         if (S >= target) return { trains: 0, energy: 0 };
         let s = S;
         let n = 0;
@@ -2685,14 +2708,15 @@
 
 
 
-    const CALIBRATION_KEEP = 50;
+    /** Samples kept (the learner wants many; each is ~150 bytes). */
+    const CALIBRATION_KEEP = 200;
 
     /**
      * @param {object} prev - normalizeState() before
      * @param {object} next - after
      * @param {object} diff - diffStates(prev, next)
      * @param {object} o - {table, perks (per-stat multipliers), happyLossMult}
-     * @returns {{stat, trains, predicted, actual}|null}
+     * @returns {{at, stat, trains, predicted, actual, S, H, dots, E, gym, perks}|null} (S/H/dots/E let the learner try other formulas)
      */
     function calibrationSample(prev, next, diff, { table, perks = null } = {}) {
         const stats = Object.keys((diff && diff.trained) || {});
@@ -2704,10 +2728,10 @@
         const trains = Math.round(spent / gym.energy);
         if (!(trains >= 1) || Math.abs(trains * gym.energy - spent) > 1) return null;
         const pred = trainSession({ stat, S: prev.stats[stat], H: prev.happy.current, dots: gym.dots[stat], energyPerTrain: gym.energy, energy: trains * gym.energy, perks: perks ? perks[stat] : 1 });
-        return { stat, trains, predicted: pred.gain, actual: diff.trained[stat] };
+        return { at: next.at, stat, trains, predicted: pred.gain, actual: diff.trained[stat], S: prev.stats[stat], H: prev.happy.current, dots: gym.dots[stat], E: gym.energy, gym: gym.name, perks: perks ? perks[stat] : 1 };
     }
 
-    /** Keep the last 50 samples and the error of the total (actual vs predicted, %). */
+    /** Keep the last samples and the error of the total (actual vs predicted, %). */
     function addCalibration(store, sample) {
         const samples = [...((store && store.samples) || []), sample].slice(-CALIBRATION_KEEP);
         const p = samples.reduce((a, s) => a + s.predicted, 0);
@@ -3772,7 +3796,7 @@
         for (const l of sorted) {
             if (left <= 0) break;
             const take = Math.min(left, l.qty);
-            const row = { source: l.source, sellerId: l.sellerId || null, sellerName: l.sellerName || null, listed: l.qty, qty: take, price: l.price, subtotal: take * l.price };
+            const row = { source: l.source, sellerId: l.sellerId || null, sellerName: l.sellerName || null, listingId: l.listingId || null, listed: l.qty, qty: take, price: l.price, subtotal: take * l.price, dataAt: l.dataAt || null };
             row.link = linkFor(row, itemId);
             rows.push(row);
             total += row.subtotal;
@@ -4237,11 +4261,13 @@
      * The context the engine needs about this player right now.
      * @param {object} state - normalizeState()
      * @param {object} statics - stored slow data {perks, property, gyms, inventory, keyInfo}
-     * @param {object} extra - {unlockedKnown, drugsTaken}
+     * @param {object} extra - {unlockedKnown, drugsTaken, learnedMult: per-stat multipliers the learner kept (unknown perks)}
      */
     function playerContext(state, statics = {}, extra = {}) {
         const table = statics.gyms && statics.gyms.length ? mergeLiveGyms(statics.gyms) : GYMS;
         const perks = parsePerks(statics.perks || {});
+        // What the learner found in your own trains (an unknown perk): on top of the perks Torn lists.
+        if (extra.learnedMult) for (const k of STATS) perks.mult[k] *= Number(extra.learnedMult[k]) > 0 ? Number(extra.learnedMult[k]) : 1;
         const unlocked = unlockedGyms(state && state.gymId, extra.unlockedKnown || null);
         const stats = (state && state.stats) || { str: 0, spd: 0, def: 0, dex: 0 };
         const best = {};
@@ -4354,9 +4380,9 @@
      * @param {object} [o.gymProgress] - {gymId, energy} read from the gym page
      * @param {number} o.now
      */
-    function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, now }) {
+    function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, now }) {
         if (!state) return { ready: false };
-        const pc = playerContext(state, statics, { unlockedKnown });
+        const pc = playerContext(state, statics, { unlockedKnown, learnedMult });
         const build = buildOf(plan.build);
         const shares = targetShares(plan, pc.stats, build.shares);
         const keep = (build.gyms || []).filter((id) => pc.unlocked.includes(id) && gymAccess(gymById(id, pc.table), pc.stats).ok);
@@ -4601,12 +4627,494 @@
         gmOnChange(TRADING_SEEN_KEY, () => check());
     }
 
+    /* ===== src/core/learn.js ===== */
+    /*
+     * Learning from the player's own results (docs/research-learning.md).
+     * Gym: a per-stat multiplier (unknown perks) and the damping above 50M.
+     * Torn Eye: how often predicted wins come true, and how much HP is kept.
+     * Both learn on the older 70% of the data and test on the newest 30%;
+     * a change is kept only when it beats today's model there by a margin.
+     * Pure and deterministic: no DOM, no storage, no randomness.
+     */
+
+
+
+    const LEARN_MODES = ['log10', 'ln', 'power'];
+    /** Share of the data (oldest first) used to learn; the rest tests. */
+    const LEARN_SPLIT = 0.7;
+    /** Sessions (or fights) needed in the learning part before a change is kept. */
+    const LEARN_MIN = 10;
+    /** A stat needs this many learning sessions for its own multiplier. */
+    const LEARN_MIN_PER_STAT = 5;
+    /** Held-out gym error (percentage points) the learned model must win by. */
+    const LEARN_MARGIN_PCT = 0.2;
+    /** Held-out Brier score the fight model must win by. */
+    const LEARN_MARGIN_BRIER = 0.0005;
+    /** Held-out HP-kept error (share of HP, 0.002 = 0.2 points) it must win by. */
+    const LEARN_MARGIN_HP = 0.002;
+    /**
+     * One fight is a coin toss, so a small margin alone would let noise through.
+     * The newest fights must also show today's forecast off in the learned
+     * direction by at least this many standard errors (more wins than
+     * predicted, or HP kept above the forecast more often than below).
+     */
+    const LEARN_Z = 2;
+    /** The HP scale stays in this range whatever the data says. */
+    const LEARN_HP_CLAMP = [0.5, 1.5];
+
+    function learnMedian(a) {
+        if (!a.length) return null;
+        const b = [...a].sort((x, y) => x - y);
+        const m = Math.floor(b.length / 2);
+        return b.length % 2 ? b[m] : (b[m - 1] + b[m]) / 2;
+    }
+
+    function learnPct(x, digits = 0) {
+        return `${(x * 100).toFixed(digits)}%`;
+    }
+
+    /** Oldest first, by `at` when present (stable otherwise); nothing after `now`. */
+    function learnByTime(rows, now) {
+        const list = (rows || []).filter((r) => r && !(Number.isFinite(now) && Number.isFinite(r.at) && r.at > now));
+        return list.map((r, i) => [r, i]).sort((x, y) => (x[0].at ?? 0) - (y[0].at ?? 0) || x[1] - y[1]).map((x) => x[0]);
+    }
+
+    function learnCut(n, cut) {
+        return Number.isInteger(cut) && cut >= 0 && cut <= n ? cut : Math.floor(n * LEARN_SPLIT);
+    }
+
+    // ---------------------------------------------------------------- gym
+
+    /** Every stat present with a number (1 when missing). */
+    function learnFullMult(mult) {
+        return Object.fromEntries(STATS.map((k) => [k, Number(mult && mult[k]) > 0 ? Number(mult[k]) : 1]));
+    }
+
+    function learnNormModel(m) {
+        return { mult: learnFullMult(m && m.mult), mode: LEARN_MODES.includes(m && m.mode) ? m.mode : POST_50M_MODE };
+    }
+
+    /** A sample can be re-predicted when it carries the train inputs. */
+    function learnHasInputs(r) {
+        return Number.isFinite(r.S) && Number.isFinite(r.H) && r.dots > 0 && (r.E || r.energyPerTrain) > 0 && r.trains >= 1;
+    }
+
+    /**
+     * The gain the formula predicts for one sample, with multiplier `mult`
+     * on top of the perks the sample already knew. Samples without inputs use
+     * their stored `predicted` (made with the known perks and `baseMode`).
+     */
+    function learnPredict(r, mode, mult, baseMode) {
+        if (!learnHasInputs(r)) return mode === baseMode && r.predicted > 0 ? r.predicted * mult : null;
+        const E = r.E || r.energyPerTrain;
+        const perks = (Number(r.perks) > 0 ? Number(r.perks) : 1) * mult;
+        let s = r.S;
+        let h = r.H;
+        for (let i = 0; i < r.trains; i++) {
+            s += gainPerTrain(r.stat, s, h, r.dots, E, perks, mode);
+            h = Math.max(0, h - HAPPY_LOSS_PER_ENERGY * E);
+        }
+        return s - r.S;
+    }
+
+    /** Mean absolute error in % of the actual gain. */
+    function learnMape(rows, model, baseMode) {
+        if (!rows.length) return null;
+        let sum = 0;
+        for (const r of rows) {
+            const p = learnPredict(r, model.mode, model.mult[r.stat] || 1, baseMode);
+            sum += Math.abs(p - r.actual) / r.actual;
+        }
+        return (sum / rows.length) * 100;
+    }
+
+    /**
+     * Learn the gym model from recorded sessions.
+     * A sample: {at?, stat, trains, actual, S?, H?, dots?, E? (or energyPerTrain), perks?, predicted?}.
+     * With S/H/dots/E the damping mode can be learned too; without them only
+     * the multiplier (from `predicted`, made with the current mode).
+     * @param {object[]} samples
+     * @param {object} o - {now?, current?: {mult, mode}, cut?: sessions to learn on (default 70%)}
+     * @returns {{accepted, model:{mult, mode}, current, heldOut:{current, learned}, sessions, learnSessions, testSessions, reasons:string[], candidates:{mode, error}[], at}}
+     */
+    function learnGym(samples, { now, current, cut } = {}) {
+        const base = learnNormModel(current);
+        const rows = learnByTime(samples, now).filter((r) => STATS.includes(r.stat) && r.actual > 0 && (learnHasInputs(r) || r.predicted > 0));
+        const k = learnCut(rows.length, cut);
+        const train = rows.slice(0, k);
+        const test = rows.slice(k);
+        const reasons = [];
+        const allInputs = rows.length > 0 && rows.every(learnHasInputs);
+        // Today's mode first, so a tie (all stats under 50M) keeps it.
+        const modes = allInputs ? [base.mode, ...LEARN_MODES.filter((m) => m !== base.mode)] : [base.mode];
+        const candidates = [];
+        let best = null;
+        for (const mode of modes) {
+            const mult = { ...base.mult };
+            for (const stat of STATS) {
+                const mine = train.filter((r) => r.stat === stat);
+                if (mine.length < LEARN_MIN_PER_STAT) continue; // too few: keep today's value
+                mult[stat] = learnMedian(mine.map((r) => r.actual / learnPredict(r, mode, 1, base.mode))); // median: bad sessions don't count
+            }
+            const error = train.length ? learnMape(train, { mode, mult }, base.mode) : null;
+            candidates.push({ mode, error });
+            if (!best || (error !== null && error < best.error)) best = { mode, mult, error };
+        }
+        const model = { mult: best.mult, mode: best.mode };
+        const heldOut = { current: learnMape(test, base, base.mode), learned: learnMape(test, model, base.mode) };
+
+        if (!allInputs && rows.length) reasons.push('Some sessions lack the stat, happy and gym, so only the multipliers were learned.');
+        let accepted = false;
+        if (train.length < LEARN_MIN) {
+            reasons.push(`Only ${train.length} sessions to learn from; ${LEARN_MIN} are needed.`);
+        } else if (!test.length) {
+            reasons.push('No newer sessions left to test on.');
+        } else {
+            const gain = heldOut.current - heldOut.learned;
+            const words = `On the newest ${test.length} sessions the formula was off by ${heldOut.current.toFixed(2)}%, the learned model by ${heldOut.learned.toFixed(2)}%.`;
+            if (gain >= LEARN_MARGIN_PCT) {
+                accepted = true;
+                reasons.push(`${words} Kept: better by ${gain.toFixed(2)} points.`);
+            } else {
+                reasons.push(`${words} Not kept: the gain (${gain.toFixed(2)} points) is under the ${LEARN_MARGIN_PCT} needed.`);
+            }
+        }
+        return { accepted, model, current: base, heldOut, sessions: rows.length, learnSessions: train.length, testSessions: test.length, reasons, candidates, at: Number.isFinite(now) ? now : null };
+    }
+
+    /**
+     * What the engine should use: the learned {mult, mode} when accepted,
+     * otherwise the model it was compared against (the plain formula by default).
+     */
+    function applyGymModel(result) {
+        if (!result) return learnNormModel(null);
+        if (!('accepted' in result)) return learnNormModel(result); // a bare model
+        return learnNormModel(result.accepted ? result.model : result.current);
+    }
+
+    /** Plain lines for the Developer page. */
+    function describeGym(result) {
+        if (!result) return ['Nothing learned yet.'];
+        if (!result.accepted) {
+            if (result.learnSessions < LEARN_MIN) return [`Still learning: ${result.learnSessions} of ${LEARN_MIN} sessions so far.`];
+            if (result.heldOut.current !== null && result.heldOut.current < 1) return [`The formula already matches your trains (off by ${result.heldOut.current.toFixed(2)}% on your newest sessions). Nothing changed.`];
+            return [`No clear pattern in your trains yet (the formula is off by ${(result.heldOut.current ?? 0).toFixed(2)}%, mostly noise). Nothing changed.`];
+        }
+        const out = [];
+        const before = result.current || learnNormModel(null);
+        for (const stat of STATS) {
+            const m = result.model.mult[stat];
+            if (!(m > 0) || Math.abs(m - before.mult[stat]) < 0.01) continue;
+            const d = m - 1;
+            if (Math.abs(d) < 0.01) out.push(`Your ${STAT_LABEL[stat]} gains now match the formula again. The plan is back to it.`);
+            else if (d > 0) out.push(`Your ${STAT_LABEL[stat]} gains run ${learnPct(d)} above the formula: an unknown perk? The plan now counts it.`);
+            else out.push(`Your ${STAT_LABEL[stat]} gains run ${learnPct(-d)} below the formula: a perk that ended? The plan now counts it.`);
+        }
+        if (result.model.mode !== before.mode) out.push(`Above 50M your gains slow down on a different curve than assumed ("${result.model.mode}" fits better). The plan now uses it.`);
+        out.push(`Newest sessions: off by ${result.heldOut.learned.toFixed(2)}% now, was ${result.heldOut.current.toFixed(2)}%.`);
+        return out;
+    }
+
+    // ---------------------------------------------------------------- Torn Eye
+
+    const LEARN_P_EPS = 0.005;
+
+    /** A win chance after scaling its odds by k (k > 1: more wins than predicted). */
+    function learnScaleOdds(p, k) {
+        const q = Math.min(1 - LEARN_P_EPS, Math.max(LEARN_P_EPS, p));
+        const o = (k * q) / (1 - q);
+        return o / (1 + o);
+    }
+
+    function learnMean(a) {
+        return a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
+    }
+
+    /** Brier score of each fight: (chance − result)², 0 is perfect. */
+    function learnBrierEach(rows, k) {
+        return rows.map((r) => (learnScaleOdds(r.predictedWin, k) - (r.won ? 1 : 0)) ** 2);
+    }
+
+    function learnBrier(rows, k) {
+        return learnMean(learnBrierEach(rows, k));
+    }
+
+    /** Wins above the forecast, in standard errors (+: more wins than predicted). */
+    function learnWinZ(rows) {
+        let d = 0;
+        let v = 0;
+        for (const r of rows) {
+            const p = Math.min(1 - LEARN_P_EPS, Math.max(LEARN_P_EPS, r.predictedWin));
+            d += (r.won ? 1 : 0) - p;
+            v += p * (1 - p);
+        }
+        return v > 0 ? d / Math.sqrt(v) : 0;
+    }
+
+    /** HP kept above vs below the forecast, in standard errors (a sign test). */
+    function learnHpZ(rows) {
+        const up = rows.filter((r) => r.hpKept > r.predictedHpKept).length;
+        const down = rows.filter((r) => r.hpKept < r.predictedHpKept).length;
+        return up + down ? (up - down) / Math.sqrt(up + down) : 0;
+    }
+
+    /** Fights with a usable HP pair: won, both numbers known. */
+    function learnHpRows(rows) {
+        return rows.filter((r) => r.won && Number.isFinite(r.predictedHpKept) && r.predictedHpKept > 0 && Number.isFinite(r.hpKept));
+    }
+
+    function learnHpErrorEach(rows, scale) {
+        return rows.map((r) => Math.abs(Math.min(1, r.predictedHpKept * scale) - r.hpKept));
+    }
+
+    function learnHpError(rows, scale) {
+        return learnMean(learnHpErrorEach(rows, scale));
+    }
+
+    /** Reliability bins: of fights predicted 80–90%, how many were won. */
+    function learnBins(rows) {
+        const bins = [];
+        for (let i = 0; i < 10; i++) {
+            const mine = rows.filter((r) => Math.min(9, Math.floor(r.predictedWin * 10)) === i);
+            bins.push({
+                from: i / 10,
+                to: (i + 1) / 10,
+                fights: mine.length,
+                predicted: mine.length ? mine.reduce((a, r) => a + r.predictedWin, 0) / mine.length : null,
+                won: mine.length ? mine.filter((r) => r.won).length / mine.length : null,
+            });
+        }
+        return bins;
+    }
+
+    /**
+     * Learn how far Torn Eye's forecasts are off.
+     * A fight: {at, predictedWin (0..1), won (bool), predictedHpKept (0..1)|null, hpKept (0..1)|null}.
+     * @param {object[]} fights
+     * @param {object} o - {now?, cut?: fights to learn on (default 70%)}
+     * @returns {{accepted, model:{winScale, hpScale}, learned:{winScale, hpScale}, heldOut:{brier:{current, learned, z}, hpError:{current, learned, z}}, fights, learnFights, testFights, reasons:string[], bins, winAccepted, hpAccepted}}
+     */
+    function learnFights(fights, { now, cut } = {}) {
+        const rows = learnByTime(fights, now).filter((r) => Number.isFinite(r.predictedWin) && r.predictedWin >= 0 && r.predictedWin <= 1 && typeof r.won === 'boolean');
+        const k = learnCut(rows.length, cut);
+        const train = rows.slice(0, k);
+        const test = rows.slice(k);
+        const reasons = [];
+
+        // Win chance: one odds factor, the best of a grid (0.25× to 4×) on the learning fights.
+        let winScale = 1;
+        if (train.length) {
+            let bestB = learnBrier(train, 1);
+            for (let j = -40; j <= 40; j++) {
+                const s = 2 ** (j / 20);
+                const b = learnBrier(train, s);
+                if (b < bestB - 1e-12) {
+                    bestB = b;
+                    winScale = s;
+                }
+            }
+        }
+        // HP kept: median of actual ÷ predicted, clamped.
+        const hpTrain = learnHpRows(train);
+        const hpTest = learnHpRows(test);
+        const ratio = learnMedian(hpTrain.map((r) => r.hpKept / r.predictedHpKept));
+        const hpScale = ratio === null ? 1 : Math.min(LEARN_HP_CLAMP[1], Math.max(LEARN_HP_CLAMP[0], ratio));
+
+        const heldOut = {
+            brier: { current: learnBrier(test, 1), learned: learnBrier(test, winScale) },
+            hpError: { current: learnHpError(hpTest, 1), learned: learnHpError(hpTest, hpScale) },
+        };
+        let winAccepted = false;
+        let hpAccepted = false;
+        if (train.length < LEARN_MIN) {
+            reasons.push(`Only ${train.length} fights to learn from; ${LEARN_MIN} are needed.`);
+        } else if (!test.length) {
+            reasons.push('No newer fights left to test on.');
+        } else {
+            const gain = heldOut.brier.current - heldOut.brier.learned;
+            const z = learnWinZ(test) * Math.sign(Math.log(winScale)); // + when the newest fights lean the learned way
+            heldOut.brier.z = z;
+            winAccepted = gain >= LEARN_MARGIN_BRIER && z >= LEARN_Z;
+            reasons.push(`Win chance on the newest ${test.length} fights: score ${heldOut.brier.current.toFixed(4)} before, ${heldOut.brier.learned.toFixed(4)} learned (lower is better). ${winAccepted ? 'Kept.' : `Not kept: needs ${LEARN_MARGIN_BRIER} better and a clear lean (${z.toFixed(1)} of ${LEARN_Z}).`}`);
+            if (hpTrain.length < LEARN_MIN || !hpTest.length) {
+                reasons.push(`HP kept: only ${hpTrain.length} won fights with HP to learn from; ${LEARN_MIN} are needed.`);
+            } else {
+                const gain = heldOut.hpError.current - heldOut.hpError.learned;
+                const z = learnHpZ(hpTest) * Math.sign(Math.log(hpScale));
+                heldOut.hpError.z = z;
+                hpAccepted = gain >= LEARN_MARGIN_HP && z >= LEARN_Z;
+                reasons.push(`HP kept on the newest ${hpTest.length} wins: off by ${learnPct(heldOut.hpError.current, 1)} before, ${learnPct(heldOut.hpError.learned, 1)} learned. ${hpAccepted ? 'Kept.' : `Not kept: needs ${learnPct(LEARN_MARGIN_HP, 1)} better and a clear lean (${z.toFixed(1)} of ${LEARN_Z}).`}`);
+            }
+        }
+        return {
+            accepted: winAccepted || hpAccepted,
+            winAccepted,
+            hpAccepted,
+            model: { winScale: winAccepted ? winScale : 1, hpScale: hpAccepted ? hpScale : 1 },
+            learned: { winScale, hpScale },
+            heldOut,
+            fights: rows.length,
+            learnFights: train.length,
+            testFights: test.length,
+            reasons,
+            bins: learnBins(rows),
+            at: Number.isFinite(now) ? now : null,
+        };
+    }
+
+    /** A forecast corrected by the fight model: {pWin, keep} in, the same out. */
+    function applyFightModel(model, { pWin, keep }) {
+        const m = model && model.model ? model.model : model;
+        const ws = m && m.winScale > 0 ? m.winScale : 1;
+        const hs = m && m.hpScale > 0 ? m.hpScale : 1;
+        return { pWin: ws === 1 || !Number.isFinite(pWin) ? pWin : learnScaleOdds(pWin, ws), keep: Number.isFinite(keep) ? Math.min(1, keep * hs) : keep };
+    }
+
+    /** Plain lines for the Developer page. */
+    function describeFights(result) {
+        if (!result) return ['Nothing learned yet.'];
+        if (result.learnFights < LEARN_MIN) return [`Still learning: ${result.learnFights} of ${LEARN_MIN} fights so far.`];
+        const out = [];
+        if (result.winAccepted) {
+            const up = result.model.winScale > 1;
+            // The clearest example: the band (10+ fights) furthest off in the learned direction.
+            const gap = (b) => (up ? 1 : -1) * (b.won - b.predicted);
+            const bin = result.bins.filter((b) => b.fights >= 10).sort((a, b) => gap(b) - gap(a))[0];
+            const example = bin ? ` (fights called ${Math.round(bin.from * 100)}–${Math.round(bin.to * 100)}% were won ${learnPct(bin.won)} of the time)` : '';
+            out.push(`Your fights: you win ${up ? 'more' : 'less'} often than Torn Eye said${example}; fixed.`);
+        }
+        if (result.hpAccepted) {
+            const d = result.model.hpScale - 1;
+            out.push(`Your fights: HP kept was ${learnPct(Math.abs(d))} too ${d > 0 ? 'pessimistic' : 'optimistic'}; fixed.`);
+        }
+        if (!out.length) out.push('Torn Eye already matches your fights. Nothing changed.');
+        return out;
+    }
+
+    /* ===== src/core/learndata.js ===== */
+    /*
+     * The learning data (docs/research-learning.md): what the app saw, joined
+     * into what the learner reads, and the .zip export anyone can make (names
+     * and player ids left out by default). Pure.
+     */
+
+
+
+    /** Fight results that count as a win for you. */
+    const WIN_RESULTS = new Set(['attacked', 'mugged', 'hospitalized', 'arrested', 'bounty', 'special']);
+
+    /** A prediction counts for a fight that ends within this long after it. */
+    const PREDICTION_WINDOW_MS = 2 * 60 * 60 * 1000;
+
+    const FIGHT_LOG_KEEP = 500;
+    const PREDICTIONS_KEEP = 300;
+
+    /** A short, stable stand-in for a player id (not reversible by eye; the export is for the learner, not for tracking). */
+    function hashId(id) {
+        let h = 2166136261;
+        for (const ch of String(id)) {
+            h ^= ch.charCodeAt(0);
+            h = Math.imul(h, 16777619);
+        }
+        return 'p' + (h >>> 0).toString(36);
+    }
+
+    /** Remember what Torn Eye said before a fight (one per player per 30 min). */
+    function addPrediction(list, { def, at, pWin, keep }) {
+        const all = Array.isArray(list) ? list : [];
+        if (!(def > 0) || !Number.isFinite(pWin)) return all;
+        const last = all.filter((p) => p.def === def).sort((a, b) => b.at - a.at)[0];
+        if (last && at - last.at < 30 * 60 * 1000) return all;
+        return [...all, { def, at, pWin: Math.round(pWin * 1000) / 1000, keep: Number.isFinite(keep) ? Math.round(keep * 1000) / 1000 : null }].slice(-PREDICTIONS_KEEP);
+    }
+
+    /**
+     * Join your attacks with what was predicted before each, into the fight
+     * log the learner reads (kept across the hourly attack reads).
+     * @param {object[]} log - fights already joined
+     * @param {object[]} attacks - myAttacks rows {def, ended (s), result, respect}
+     * @param {object[]} predictions - {def, at (ms), pWin, keep}
+     */
+    function joinFights(log, attacks, predictions) {
+        const out = [...(Array.isArray(log) ? log : [])];
+        const seen = new Set(out.map((f) => f.key));
+        for (const a of attacks || []) {
+            const at = Number(a.ended) * 1000;
+            const key = a.def + ':' + a.ended;
+            if (!at || seen.has(key)) continue;
+            const p = (predictions || []).filter((x) => x.def === Number(a.def) && x.at <= at && at - x.at <= PREDICTION_WINDOW_MS).sort((x, y) => y.at - x.at)[0];
+            if (!p) continue;
+            out.push({ key, at, who: hashId(a.def), predictedWin: p.pWin, won: WIN_RESULTS.has(String(a.result || '').toLowerCase()), predictedHpKept: p.keep, hpKept: null, respect: Number(a.respect) || 0 });
+            seen.add(key);
+        }
+        return out.sort((x, y) => x.at - y.at).slice(-FIGHT_LOG_KEEP);
+    }
+
+    /** Stats rounded to 4 significant digits (enough for the learner, less of a fingerprint). */
+    function round4sig(v) {
+        if (!(v > 0)) return v;
+        const p = Math.pow(10, Math.floor(Math.log10(v)) - 3);
+        return Math.round(v / p) * p;
+    }
+
+    /**
+     * Run both learners. `current` is the gym model in use (so a new one must
+     * beat it on the newest sessions to replace it).
+     */
+    function runLearning({ samples = [], fights = [], now, current = null }) {
+        const gym = learnGym(samples, { now, current: current || undefined });
+        const fight = learnFights(fights, { now });
+        return { at: now, gym, fights: fight };
+    }
+
+    /** What the engine uses from a learning run: per-stat multipliers, the damping mode, the fight model. */
+    function learnedModel(learned) {
+        if (!learned) return { mult: { str: 1, spd: 1, def: 1, dex: 1 }, mode: null, fight: null };
+        const g = applyGymModel(learned.gym || null);
+        return { mult: g.mult, mode: learned.gym && learned.gym.accepted ? g.mode : null, fight: learned.fights && learned.fights.accepted ? learned.fights.model : null };
+    }
+
+    /**
+     * The export's files: gym-samples.json, fights.json, model.json, meta.json.
+     * Player ids are left out (fights carry a hashed stand-in) unless asked.
+     */
+    function exportFiles({ samples = [], fights = [], learned = null, version = '', now = Date.now(), includeIds = false }) {
+        const gym = samples.map((s) => ({ at: s.at || null, stat: s.stat, trains: s.trains, predicted: Math.round(s.predicted), actual: Math.round(s.actual), S: round4sig(s.S), H: s.H, dots: s.dots, E: s.E, perks: s.perks, gym: s.gym || null }));
+        const fl = fights.map((f) => ({ at: f.at, who: includeIds ? f.key.split(':')[0] : f.who, predictedWin: f.predictedWin, won: f.won, predictedHpKept: f.predictedHpKept, hpKept: f.hpKept }));
+        const model = learned ? { at: learned.at, gym: learned.gym ? { accepted: learned.gym.accepted, model: learned.gym.model, heldOut: learned.gym.heldOut, sessions: learned.gym.sessions } : null, fights: learned.fights ? { accepted: learned.fights.accepted, model: learned.fights.model, fights: learned.fights.fights } : null } : null;
+        const meta = { app: 'Torn Pumping Iron', version, exportedAt: new Date(now).toISOString(), sessions: gym.length, fights: fl.length, ids: includeIds ? 'included' : 'left out' };
+        return [
+            { name: 'gym-samples.json', data: JSON.stringify(gym) },
+            { name: 'fights.json', data: JSON.stringify(fl) },
+            { name: 'model.json', data: JSON.stringify(model) },
+            { name: 'meta.json', data: JSON.stringify(meta, null, 1) },
+        ];
+    }
+
+    /** A friend's export, read back (never merged into your own data). */
+    function importFiles(files) {
+        const read = (n) => {
+            try {
+                return files[n] ? JSON.parse(files[n]) : null;
+            } catch {
+                return null;
+            }
+        };
+        const samples = read('gym-samples.json');
+        const fights = read('fights.json');
+        const meta = read('meta.json');
+        if (!Array.isArray(samples) && !Array.isArray(fights)) throw new Error('This zip has no learning data (gym-samples.json / fights.json).');
+        return { samples: Array.isArray(samples) ? samples : [], fights: Array.isArray(fights) ? fights : [], meta: meta || {} };
+    }
+
     /* ===== src/runtime.js ===== */
     /*
      * What every tab shares at run time: the one Torn client (70/min across
      * tabs, visible only, silent while Torn Trading runs), the state feed, and the model every surface renders
      * from. Userscript-only; core/ and api/ stay plain modules.
      */
+
+
 
 
 
@@ -4668,14 +5176,14 @@
 
     /** Re-run the strategy comparison at most once per Torn hour or when inputs change. */
     function comparisonFor(state, statics, plan, settings) {
-        const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null) });
+        const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult });
         const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
         const prices = get(K.prices, {}) || {};
         // Every input that moves the answer: all four stats (in ~2% steps), prices (2 significant digits), perks, gyms.
         const statsSig = Object.values(pc.stats).map((v) => Math.round(Math.log1p(v) * 50)).join(',');
         const priceSig = Object.entries(livePrices(prices)).map(([id, p]) => id + ':' + Number(p.toPrecision(2))).join(',');
         const special = specialLeft(plan, state);
-        const perkSig = JSON.stringify([pc.perks.mult, pc.perks.happyLossMult, pc.perks.canMult, pc.perks.candyMult, pc.perks.consoleMult, pc.perks.edvdMult, pc.perks.boosterCapExtraH]);
+        const perkSig = JSON.stringify([learnedNow().mode, pc.perks.mult, pc.perks.happyLossMult, pc.perks.canMult, pc.perks.candyMult, pc.perks.consoleMult, pc.perks.edvdMult, pc.perks.boosterCapExtraH]);
         const key = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, priceSig, pc.unlocked.join(','), special].join('|');
         if (key !== pi.compareKey) {
             pi.compare = compareStrategies({ state, pc, shares, settings, prices, special });
@@ -4695,7 +5203,7 @@
         const plan = getPlan();
         const settings = getSettings();
         const compare = comparisonFor(state, statics, plan, settings);
-        return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: get(K.prices, {}) || {}, compare, whatIf: pi.whatIf || null, gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+        return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: get(K.prices, {}) || {}, compare, whatIf: pi.whatIf || null, learnedMult: learnedNow().mult, gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
     }
 
     /**
@@ -4723,10 +5231,66 @@
         set(K.dayTotals, all);
     }
 
+    /**
+     * The plan's line for Progress: the 30-day projection as it stood when this
+     * plan (strategy, build, start) was set. Written once per plan by the leader.
+     */
+    function recordPlanLine(m) {
+        if (!m || !m.ready || !m.compare) return;
+        const plan = getPlan();
+        const r = m.compare[plan.strategy];
+        if (!r) return;
+        const key = [plan.createdAt || 0, plan.strategy, plan.build].join('|');
+        const cur = get(K.planLine, null);
+        if (cur && cur.key === key) return;
+        const lead = get(K.leader, null);
+        if (!lead || lead.id !== pi.tabId) return;
+        set(K.planLine, { key, start: tornDayStart(m.now), total: m.total, perStat: { ...m.pc.stats }, daily: r.daily, perStatGain: r.perStat, cost: r.cost, days: r.daily.length });
+    }
+
+    /**
+     * What the learner kept (Settings › Developer), applied to the engine: the
+     * per-stat multipliers and, when it found one, the damping formula above 50M.
+     */
+    function learnedNow() {
+        const l = learnedModel(get(K.learned, null));
+        useDampingMode(l.mode);
+        return l;
+    }
+
+    /** How often the learner runs (and only when new trains or fights came in). */
+    const LEARN_EVERY_MS = 6 * 60 * 60 * 1000;
+
+    /**
+     * The app improves itself from your own trains and fights: at most every
+     * 6 hours, in the leader tab, a change kept only if it predicts your newest
+     * sessions better (docs/research-learning.md). Cheap: a few ms.
+     */
+    function maybeLearn(now = Date.now(), force = false) {
+        const lead = get(K.leader, null);
+        if (!force && (!lead || lead.id !== pi.tabId)) return null;
+        const cal = get('calibration', null) || {};
+        const samples = cal.samples || [];
+        const fights = joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []);
+        const prev = get(K.learned, null);
+        const sig = samples.length + ':' + fights.length;
+        if (!force && prev && (now - prev.at < LEARN_EVERY_MS || prev.sig === sig)) return prev;
+        set(K.fightLog, fights);
+        const current = prev && prev.gym && prev.gym.accepted ? prev.gym.model : null;
+        const res = { ...runLearning({ samples, fights, now, current }), sig };
+        set(K.learned, res);
+        const log = get(K.learnLog, []) || [];
+        log.push({ at: now, gym: { accepted: res.gym.accepted, heldOut: res.gym.heldOut, mode: res.gym.model.mode, mult: res.gym.model.mult, sessions: res.gym.sessions, candidates: res.gym.candidates }, fights: { accepted: res.fights.accepted, model: res.fights.model, fights: res.fights.fights, heldOut: res.fights.heldOut } });
+        set(K.learnLog, log.slice(-60));
+        return res;
+    }
+
     function refresh() {
         try {
+            maybeLearn();
             pi.model = currentModel();
             recordDayTotals(pi.model);
+            recordPlanLine(pi.model);
         } catch (error) {
             set(K.lastError, { at: Date.now(), where: 'model', message: String((error && error.message) || error) });
             return;
@@ -5159,7 +5723,7 @@
 
     /* stats vs build */
     .sg { display: flex; flex-direction: column; }
-    .sgr { display: grid; grid-template-columns: 40px 80px minmax(0, 1fr) 96px 120px 76px; gap: 12px; align-items: center; height: var(--row); border-top: 1px solid var(--line); }
+    .sgr { display: grid; grid-template-columns: 40px 108px minmax(0, 1fr) 110px 110px 84px; gap: 12px; align-items: center; height: var(--row); border-top: 1px solid var(--line); }
     .sgr:first-of-type { border-top: 0; }
     .sgr b.n { font: 700 14px var(--display); letter-spacing: .5px; }
     .sgr .v { text-align: right; font-weight: bold; color: var(--white); }
@@ -5208,7 +5772,6 @@
     .pill-tag.chalk { background: var(--chalk); color: var(--on-chalk); }
 
     /* warning block */
-    .why { font-size: 12px; color: var(--warn); margin-top: 2px; }
     .warnb { border-left: 3px solid var(--warn); background: #231d12; padding: 10px 14px; border-radius: 0 8px 8px 0; display: flex; flex-direction: column; gap: 6px; }
     .warnb b { color: #ffd79a; font-size: 14px; }
     .warnb p { margin: 0; color: var(--text); max-width: 90ch; }
@@ -5303,20 +5866,11 @@
     .btn:disabled { opacity: .45; cursor: default; }
     .brow:focus-visible, .tbl tr.click:focus-visible { outline: 2px solid var(--chalk); outline-offset: -2px; }
     .pane .chart { max-width: 100%; }
-    .ih { display: flex; align-items: baseline; gap: 12px; }
-    .ih b { font: 700 20px/1 var(--display); color: var(--white); }
-    .ih .need { color: var(--muted); font-size: 12px; }
-    .ih .sum { margin-left: auto; font: 600 20px/1 var(--display); color: var(--white); }
-    .item { display: flex; flex-direction: column; gap: 6px; }
-    .items { display: flex; flex-direction: column; gap: var(--sec); }
-    .verdict { display: flex; align-items: center; gap: 8px; font-size: 13px; }
-    .verdict i { width: 8px; height: 8px; border-radius: 50%; }
     .big { font: 700 34px/1 var(--display); color: var(--white); }
     .pr { display: grid; grid-template-columns: 90px 76px 1fr; gap: 10px; align-items: center; height: var(--row); border-top: 1px solid var(--line); font-size: 12px; }
     .pr:first-child { border-top: 0; }
     .pr b { color: var(--white); font-size: 13px; }
     .pr .r { text-align: right; }
-    .mult { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 20px; }
     .smc { display: flex; flex-direction: column; gap: 4px; }
     .smc .h { display: flex; justify-content: space-between; align-items: baseline; }
     .smc .h b { font: 700 14px var(--display); letter-spacing: .5px; }
@@ -5350,6 +5904,104 @@
     .bandr:first-child { border-top: 0; }
     .bandr .inp { width: 52px; height: 26px; padding: 0 6px; text-align: right; }
     .stok { color: var(--good); } .sthos { color: var(--bad); } .sttr { color: var(--link); }
+
+    /* ---- Round 3 (mockups/round3/r3.css): control bars, tick chips, cards with more room, charts, the Plan chooser. ---- */
+    .tab .n { margin-left: 5px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--card2); color: var(--text); font-size: 11px; line-height: 16px; text-align: center; }
+    .tab .dotw { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); margin-left: 5px; }
+    .strip.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .ctl { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 12px 24px; border-bottom: 1px solid var(--line); background: #171a1c; font-size: 13px; }
+    .ctl + .ctl { padding-top: 4px; }
+    .ctl .lab { margin-right: -6px; }
+    .ctl .inp { height: 28px; width: auto; }
+    .ctl .sep { width: 1px; height: 20px; background: var(--line2); }
+    .ctl select, .ctl .sel { height: 28px; padding: 0 28px 0 10px; border-radius: 5px; border: 1px solid var(--line2); background: var(--card2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23939aa1'/%3E%3C/svg%3E") no-repeat right 10px center; color: var(--text); font: bold 12px Arial; display: inline-flex; align-items: center; appearance: none; }
+    .info { display: inline-grid; place-items: center; width: 15px; height: 15px; border-radius: 50%; border: 1px solid var(--line2); color: var(--muted); font: bold 11px Arial; cursor: help; }
+    .ticks { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+    .tk { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px 0 7px; border-radius: 13px; border: 1px solid var(--line2); color: var(--muted); font: bold 12px Arial; cursor: pointer; user-select: none; background: transparent; }
+    .tk i { width: 12px; height: 12px; border-radius: 3px; border: 1px solid var(--dim); display: grid; place-items: center; }
+    .tk[aria-pressed="true"] { color: var(--text); border-color: var(--muted); }
+    .tk[aria-pressed="true"] i { background: var(--chalk); border-color: var(--chalk); }
+    .tk[aria-pressed="true"] i::after { content: ""; width: 6px; height: 3px; border: solid var(--on-chalk); border-width: 0 0 2px 2px; transform: rotate(-45deg) translate(1px, -1px); }
+    .tk:focus-visible { outline: 2px solid var(--chalk); outline-offset: 2px; }
+    .why { color: var(--warn); font-size: 12px; }
+    .why.ok { color: var(--muted); }
+    .tbl tr.whatif td { color: var(--dim); }
+    .tbl tr.whatif b.w { color: var(--muted); }
+    .tag { white-space: nowrap; display: inline-block; height: 18px; line-height: 18px; padding: 0 7px; border-radius: 9px; font-size: 11px; font-weight: bold; letter-spacing: .4px; text-transform: uppercase; background: var(--card2); color: var(--muted); vertical-align: 1px; }
+    .tag.chalk { background: var(--chalk); color: var(--on-chalk); }
+    .tag.warn { background: #3a2a10; color: var(--warn); }
+    .tag.good { background: #1f3320; color: var(--good); }
+    .bl { display: flex; flex-direction: column; }
+    .bl .r { display: grid; grid-template-columns: 78px 90px 1fr; gap: 10px; align-items: center; height: 36px; padding: 0 8px; border-top: 1px solid var(--line); cursor: pointer; font-size: 12px; }
+    .bl .r:first-child { border-top: 0; }
+    .bl .r b { color: var(--white); font-size: 13px; }
+    .bl .r span { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bl .r.sel { border: 1px solid var(--chalk); border-radius: 6px; }
+    .bl .r:focus-visible { outline: 2px solid var(--chalk); outline-offset: -2px; }
+    .bl .ratio { height: 8px; }
+    .nowb { display: grid; grid-template-columns: auto 1fr auto; gap: 18px; align-items: center; padding: 16px 20px; border-radius: 10px; background: var(--card2); }
+    .nowb .k { font: 700 13px var(--display); letter-spacing: .6px; color: var(--on-chalk); background: var(--chalk); border-radius: 4px; padding: 3px 8px; }
+    .nowb .cd { font: 600 30px/0.9 var(--display); color: var(--chalk); min-width: 64px; }
+    .nowb b { font-size: 17px; color: var(--white); }
+    .nowb span.s { color: var(--muted); }
+    .nowb .acts { display: flex; gap: 8px; }
+    .tbl tr.ih td { height: 38px; background: #191c1f; }
+    .tbl tr.ih b { font-size: 14px; color: var(--white); }
+    .tbl tr.sub td:first-child { padding-left: 22px; }
+    .verdict { font-size: 12px; }
+    svg.ch { width: 100%; display: block; overflow: visible; }
+    svg.ch text { font: 11px Arial; fill: var(--dim); }
+    svg.ch .ax { stroke: var(--line2); stroke-width: 1; }
+    svg.ch .grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
+    .legend2 { display: flex; gap: 14px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+    .legend2 i { display: inline-block; width: 14px; height: 2px; vertical-align: 3px; margin-right: 5px; }
+    .legend2 i.dash { background: repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px); height: 2px; }
+    .mult { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 28px; }
+    .mult .t { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; color: var(--muted); margin-bottom: 2px; gap: 10px; }
+    .mult .t b { font: 600 15px var(--display); }
+    .band2 { display: inline-flex; align-items: center; gap: 6px; font-weight: bold; }
+    .band2 i { width: 9px; height: 9px; border-radius: 50%; }
+    .modes button { min-width: 72px; }
+    .hidden { display: none !important; }
+    .cdn { color: var(--warn); }
+    .facts { display: grid; grid-template-columns: auto 1fr; gap: 9px 14px; font-size: 13px; margin: 0; }
+    .facts dt { color: var(--muted); }
+    .facts dd { margin: 0; text-align: right; color: var(--text); }
+    .facts .mini { height: 6px; border-radius: 3px; background: var(--card2); overflow: hidden; margin-top: 3px; }
+    .facts .mini i { display: block; height: 100%; background: var(--good); }
+    .one { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+    .bliss { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; font-size: 13px; color: var(--muted); }
+    .bliss b { color: var(--text); }
+    .note2 { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    /* Breathing room and cards (owner, round 3): one level of cards; the page's primary block has a chalk edge. */
+    .app { --row: 40px; --pad: 14px; --gap: 22px; --sec: 18px; }
+    .top { padding: 0 24px; }
+    .strip { padding: 14px 24px; }
+    .body { padding: 22px 24px 28px; gap: 22px; align-items: stretch; }
+    .main > div, .pane > div { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; min-width: 0; }
+    .main > div.lead { border-color: var(--chalk); }
+    .lead .prime { border: 0; padding: 0; background: none; }
+    .main > div:last-child, .pane > div:last-child { flex-grow: 1; }
+    .sh { margin-bottom: 12px; }
+    .tbl td { border-top-color: #262a2e; }
+    .tbl th { padding-bottom: 8px; }
+    .heads li { padding: 4px 0; }
+    /* The "Plan" chooser: the one control that says "this is where I plan it". */
+    .plansel { position: relative; }
+    .plansel > summary { list-style: none; display: inline-flex; align-items: center; gap: 10px; height: 34px; padding: 0 12px 0 14px; border: 1.5px solid var(--chalk); border-radius: 8px; background: #22252a; cursor: pointer; }
+    .plansel > summary::-webkit-details-marker { display: none; }
+    .plansel > summary .lab { color: var(--chalk); }
+    .plansel > summary b { font-size: 14px; color: var(--white); }
+    .plansel > summary::after { content: ""; width: 0; height: 0; border: 5px solid transparent; border-top-color: var(--chalk); margin-top: 5px; }
+    .plansel .menu { position: absolute; z-index: 5; top: 40px; left: 0; width: 360px; background: var(--card); border: 1px solid var(--line2); border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.5); padding: 6px; }
+    .plansel .opt { display: block; width: 100%; text-align: left; padding: 9px 10px; border-radius: 6px; cursor: pointer; background: transparent; border: 0; font: inherit; color: inherit; }
+    .plansel .opt:hover, .plansel .opt:focus-visible { background: var(--card2); outline: none; }
+    .plansel .opt b { display: block; color: var(--white); }
+    .plansel .opt span { color: var(--muted); font-size: 12px; }
+    .plansel .opt.on { outline: 1px solid var(--chalk); }
+    .main > .sec, .main > .sec:first-child { padding: 18px 20px; }
+    .warnb.paused { border-radius: 0; margin: 0; padding: 12px 24px; }
+    .dev-scatter { max-width: 520px; }
     `;
 
     /* ===== src/ui/app/common.js ===== */
@@ -5363,6 +6015,9 @@
 
 
 
+
+    const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
     const STAT_COLOR = { str: '#e5534b', spd: '#f0c02f', def: '#4a8ff0', dex: '#43b86c' };
 
@@ -5406,14 +6061,15 @@
         ]);
     }
 
-    /** Energy · Happy · Drug · Booster · Refill (Home and Plan only). */
+    /** Energy · Happy · Drug · (Booster, only when the plan uses one) · Refill (Home). */
     function statusStrip(m, settings) {
         const s = m.strip;
         const now = m.now;
         const drugTxt = s.drug.left > 0 ? countdown(s.drug.left) : 'Ready';
         const drugPct = s.drug.left > 0 && s.drug.total > 0 ? (100 * s.drug.left) / s.drug.total : 0;
         const boosterTxt = s.booster.left > 0 ? countdown(s.booster.left) : 'Ready';
-        return h('div', { class: 'strip num' }, [
+        const withBooster = s.booster.used || s.booster.left > 0;
+        return h('div', { class: 'strip num' + (withBooster ? '' : ' four') }, [
             stCell('Energy', s.energy.current + ' / ' + s.energy.max, null, (100 * s.energy.current) / Math.max(1, s.energy.max), 'var(--chalk)', s.energy.fullAt ? 'Full at ' + clock(s.energy.fullAt, settings) : 'Full'),
             stCell('Happy', fmtInt(s.happy.current), null, (100 * Math.min(s.happy.current, s.happy.max)) / Math.max(1, s.happy.max), 'var(--good)', 'Max ' + fmtInt(s.happy.max) + (s.happy.property ? ' · ' + s.happy.property : '')),
             (() => {
@@ -5421,7 +6077,7 @@
                 if (s.drug.left > 0) c.querySelector('b').setAttribute('data-cd', String(now + s.drug.left));
                 return c;
             })(),
-            stCell('Booster', boosterTxt, s.booster.left > 0 ? null : 'good', 0, 'var(--chalk)', s.booster.used ? 'Used by this plan' : 'Not used by this plan'),
+            withBooster ? stCell('Booster', boosterTxt, s.booster.left > 0 ? null : 'good', 0, 'var(--chalk)', s.booster.used ? 'Used by this plan' : 'Not used by this plan') : null,
             stCell('Refill', s.refill.free ? 'Unused' : 'Used', null, s.refill.free ? 0 : 100, 'var(--chalk)', s.refill.free ? (s.refill.plannedAt ? 'Planned ' + clock(s.refill.plannedAt, settings) : 'Use before 00:00') : 'Next at 00:00 Torn time'),
         ]);
     }
@@ -5459,10 +6115,193 @@
         );
     }
 
+    /* ===== src/ui/charts.js ===== */
+    /*
+     * Small SVG charts for the webpage (the round-3 mockups' shapes, r3.js),
+     * built with dom.js: text goes in through textContent, never markup.
+     */
+
+
+
+    /** 1234567 → "1.2M", 45000 → "45k". */
+    function chartNum(v) {
+        const a = Math.abs(v);
+        if (a >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+        if (a >= 1e6) return (v / 1e6).toFixed(a >= 1e8 ? 0 : 1) + 'M';
+        if (a >= 1e3) return Math.round(v / 1e3) + 'k';
+        return String(Math.round(v));
+    }
+
+    function svgBox(w, hgt, label) {
+        return h('svg', { class: 'ch num', viewBox: '0 0 ' + w + ' ' + hgt, role: 'img', 'aria-label': label || '' });
+    }
+
+    function txt(svg, x, y, s, attrs = {}) {
+        svg.appendChild(h('text', { x: Number(x).toFixed(1), y: Number(y).toFixed(1), ...attrs, text: s }));
+    }
+
+    /**
+     * Lines over the same x steps, labelled at their ends.
+     * @param {object[]} series - [{name, color, width, dash, values (nulls skipped), label, labelColor}]
+     * @param {object} o - {w, h, left, right, yMin, yMax, n, xLabels:[[i, text]], grid:[values], today (index), label}
+     */
+    function lineChart(series, o = {}) {
+        const W = o.w || 600;
+        const H = o.h || 180;
+        const L = o.left ?? 44;
+        const R = o.right ?? 90;
+        const T = 8;
+        const B = 20;
+        const svg = svgBox(W, H, o.label);
+        const n = Math.max(1, ...series.map((s) => s.values.length));
+        const all = series.flatMap((s) => s.values.filter((v) => v !== null && Number.isFinite(v)));
+        if (!all.length) return svg;
+        const yMin = o.yMin ?? Math.min(0, ...all);
+        const yMax = o.yMax ?? Math.max(...all) * 1.05;
+        const x = (i) => L + (i / Math.max(1, (o.n || n) - 1)) * (W - L - R);
+        const y = (v) => T + (1 - (v - yMin) / (yMax - yMin || 1)) * (H - T - B);
+        for (const g of o.grid || []) {
+            svg.appendChild(h('line', { class: 'grid', x1: L, x2: W - R, y1: y(g).toFixed(1), y2: y(g).toFixed(1) }));
+            txt(svg, L - 6, y(g) + 4, chartNum(g), { 'text-anchor': 'end' });
+        }
+        svg.appendChild(h('line', { class: 'ax', x1: L, x2: W - R, y1: H - B, y2: H - B }));
+        for (const [i, s] of o.xLabels || []) txt(svg, x(i), H - 4, s, { 'text-anchor': i === 0 ? 'start' : i >= (o.n || n) - 1 ? 'end' : 'middle' });
+        if (o.today !== undefined && o.today !== null) {
+            svg.appendChild(h('line', { x1: x(o.today).toFixed(1), x2: x(o.today).toFixed(1), y1: T, y2: H - B, stroke: 'var(--line2)', 'stroke-dasharray': '3 3' }));
+            txt(svg, x(o.today) + 4, T + 10, 'today');
+        }
+        const ends = [];
+        for (const s of series) {
+            const pts = s.values.map((v, i) => (v === null || !Number.isFinite(v) ? null : x(i).toFixed(1) + ',' + y(v).toFixed(1))).filter(Boolean);
+            if (!pts.length) continue;
+            svg.appendChild(h('polyline', { points: pts.join(' '), fill: 'none', stroke: s.color, 'stroke-width': s.width || 1.5, 'stroke-dasharray': s.dash || null, 'stroke-linejoin': 'round' }));
+            let last = -1;
+            s.values.forEach((v, i) => {
+                if (v !== null && Number.isFinite(v)) last = i;
+            });
+            if (s.label !== false && last >= 0) ends.push({ y: y(s.values[last]), x: x(last), s });
+        }
+        // Direct labels at the line ends, nudged apart.
+        ends.sort((a, b) => a.y - b.y);
+        for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 13) ends[i].y = ends[i - 1].y + 13;
+        for (const e of ends) txt(svg, e.x + 6, e.y + 4, e.s.label || e.s.name, { style: 'fill:' + (e.s.labelColor || e.s.color) + ';font-weight:' + ((e.s.width || 1.5) > 2 ? 'bold' : 'normal') });
+        return svg;
+    }
+
+    /**
+     * Stacked bars, one per day.
+     * @param {{c:string, v:number}[][]} days
+     * @param {string[]} labels
+     * @param {object} o - {w, h, max, top:[text per bar], label}
+     */
+    function stackBars(days, labels, o = {}) {
+        const W = o.w || 600;
+        const H = o.h || 90;
+        const B = 16;
+        const TOP = o.top ? 16 : 4;
+        const svg = svgBox(W, H, o.label);
+        const max = o.max || Math.max(1, ...days.map((d) => d.reduce((a, b) => a + b.v, 0)));
+        const bw = W / Math.max(1, days.length);
+        days.forEach((d, i) => {
+            let yy = H - B;
+            for (const p of d) {
+                const hh = (Math.max(0, p.v) / max) * (H - B - TOP);
+                yy -= hh;
+                svg.appendChild(h('rect', { x: (i * bw + bw * 0.3).toFixed(1), y: yy.toFixed(1), width: (bw * 0.4).toFixed(1), height: hh.toFixed(1), fill: p.c, rx: 1 }));
+            }
+            txt(svg, i * bw + bw / 2, H - 3, labels[i] || '', { 'text-anchor': 'middle' });
+            if (o.top && o.top[i]) txt(svg, i * bw + bw / 2, yy - 4, o.top[i], { 'text-anchor': 'middle', style: 'fill:var(--muted)' });
+        });
+        return svg;
+    }
+
+    /**
+     * Gained against plan, each day, as % of plan (100 = on plan).
+     * @param {(number|null)[]} pct
+     * @param {string[]} labels
+     * @param {object} o - {w, h, partial (index of today)}
+     */
+    function planBars(pct, labels, o = {}) {
+        const W = o.w || 600;
+        const H = o.h || 110;
+        const B = 16;
+        const T = 10;
+        const svg = svgBox(W, H, o.label);
+        const max = 140;
+        const y = (v) => T + (1 - Math.min(Math.max(v, 0), max) / max) * (H - T - B);
+        svg.appendChild(h('line', { class: 'grid', x1: 0, x2: W, y1: y(100).toFixed(1), y2: y(100).toFixed(1) }));
+        txt(svg, W, y(100) - 3, 'plan', { 'text-anchor': 'end' });
+        const bw = W / Math.max(1, pct.length);
+        pct.forEach((v, i) => {
+            if (v === null || !Number.isFinite(v)) return;
+            const c = i === o.partial ? 'var(--line2)' : v >= 95 ? 'var(--good)' : v >= 75 ? 'var(--spd)' : 'var(--bad)';
+            svg.appendChild(h('rect', { x: (i * bw + bw * 0.2).toFixed(1), y: y(v).toFixed(1), width: (bw * 0.6).toFixed(1), height: Math.max(0, H - B - y(v)).toFixed(1), fill: c, rx: 1 }));
+        });
+        labels.forEach((l, i) => {
+            if (l) txt(svg, i * bw + bw / 2, H - 3, l, { 'text-anchor': 'middle' });
+        });
+        return svg;
+    }
+
+    /**
+     * Predicted (x) against actual (y) with the 1:1 line.
+     * @param {{x:number, y:number, c:string}[]} pts
+     * @param {object} o - {w, h, max, min, grid, xl, yl}
+     */
+    function scatter(pts, o = {}) {
+        const W = o.w || 480;
+        const H = o.h || 240;
+        const L = 46;
+        const B = 22;
+        const T = 8;
+        const R = 10;
+        const svg = svgBox(W, H, o.label);
+        if (!pts.length) return svg;
+        const mx = o.max || Math.max(...pts.flatMap((p) => [p.x, p.y])) * 1.05;
+        const mn = o.min ?? 0;
+        const x = (v) => L + ((v - mn) / (mx - mn || 1)) * (W - L - R);
+        const y = (v) => T + (1 - (v - mn) / (mx - mn || 1)) * (H - T - B);
+        svg.appendChild(h('line', { class: 'ax', x1: L, x2: W - R, y1: H - B, y2: H - B }));
+        svg.appendChild(h('line', { x1: x(mn).toFixed(1), y1: y(mn).toFixed(1), x2: x(mx).toFixed(1), y2: y(mx).toFixed(1), stroke: 'var(--line2)', 'stroke-dasharray': '4 4' }));
+        txt(svg, x(mx) - 4, y(mx) + 14, 'perfect', { 'text-anchor': 'end' });
+        for (const g of o.grid || []) {
+            txt(svg, L - 6, y(g) + 4, o.fmt ? o.fmt(g) : chartNum(g), { 'text-anchor': 'end' });
+            txt(svg, x(g), H - 6, o.fmt ? o.fmt(g) : chartNum(g), { 'text-anchor': 'middle' });
+        }
+        for (const p of pts) svg.appendChild(h('circle', { cx: x(p.x).toFixed(1), cy: y(p.y).toFixed(1), r: 3.2, fill: p.c, 'fill-opacity': 0.85 }));
+        if (o.xl) txt(svg, W - R, H - 6, o.xl, { 'text-anchor': 'end', style: 'fill:var(--muted)' });
+        if (o.yl) txt(svg, L + 4, T + 10, o.yl, { style: 'fill:var(--muted)' });
+        return svg;
+    }
+
+    /**
+     * Plain bars with labels on a 0..max scale; `ref` draws a chalk tick (what it said).
+     * @param {{v:number, c:string, label:string, top?:string, ref?:number}[]} list
+     */
+    function bars(list, o = {}) {
+        const W = o.w || 480;
+        const H = o.h || 160;
+        const B = 18;
+        const T = 14;
+        const svg = svgBox(W, H, o.label);
+        const max = o.max || 100;
+        const bw = W / Math.max(1, list.length);
+        const y = (v) => T + (1 - Math.min(v, max) / max) * (H - T - B);
+        list.forEach((b, i) => {
+            svg.appendChild(h('rect', { x: (i * bw + bw * 0.25).toFixed(1), y: y(b.v).toFixed(1), width: (bw * 0.5).toFixed(1), height: Math.max(0, H - B - y(b.v)).toFixed(1), fill: b.c, rx: 1 }));
+            if (b.ref !== undefined) svg.appendChild(h('line', { x1: (i * bw + bw * 0.15).toFixed(1), x2: (i * bw + bw * 0.85).toFixed(1), y1: y(b.ref).toFixed(1), y2: y(b.ref).toFixed(1), stroke: 'var(--chalk)', 'stroke-width': 2 }));
+            txt(svg, i * bw + bw / 2, H - 4, b.label, { 'text-anchor': 'middle' });
+            if (b.top) txt(svg, i * bw + bw / 2, y(Math.max(b.v, b.ref ?? 0)) - 6, b.top, { 'text-anchor': 'middle', style: 'fill:var(--muted)' });
+        });
+        return svg;
+    }
+
     /* ===== src/ui/app/home.js ===== */
     /*
-     * Home (mockups/K-home.html): the next step, today's steps, stats against
-     * the build; Buy today, Heads-up and the current plan in the pane.
+     * Home (mockups/round3/S-home.html): one question, "what do I do today?".
+     * The Now band and today's steps (the page's primary card), you against the
+     * build, the next 7 days; Buy today, Heads-up, the plan in one line and this
+     * week in the pane.
      */
 
 
@@ -5474,8 +6313,10 @@
 
 
 
-    const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+
+    const DAYS = DAY_NAMES;
+    const MONTHS = MONTH_NAMES;
 
     function dateLine(now) {
         const d = new Date(now);
@@ -5491,6 +6332,10 @@
                 return 'Take ' + s.label + then;
             case 'refill':
                 return 'Use your refill' + then;
+            case 'special':
+                return 'Use ' + s.label.toLowerCase() + then;
+            case 'booster':
+                return 'Use ' + s.label.replace(', train after each', '') + then;
             case 'natural':
                 return tr ? 'Train ' + tr : 'Natural energy';
             case 'stack':
@@ -5504,27 +6349,30 @@
         }
     }
 
+    /** "George's · +72,335 · 400 energy". */
     function stepSub(s) {
         const parts = [];
         const gyms = [...new Set(Object.values(s.gyms || {}).filter(Boolean))];
-        if (gyms.length) parts.push('At ' + gyms.join(' / '));
-        if (s.gain) parts.push('about ' + fmtSigned(s.gain) + (Object.keys(s.trains).length === 1 ? ' ' + STAT_LABEL[Object.keys(s.trains)[0]] : ''));
-        if (s.energy) parts.push('uses ' + fmtInt(s.energy) + ' energy');
+        if (gyms.length) parts.push(gyms.join(' / '));
+        if (s.gain) parts.push(fmtSigned(s.gain));
+        if (s.energy) parts.push(fmtInt(s.energy) + ' energy');
         if (s.note) parts.push(s.note);
         return parts.join(' · ');
     }
 
+    /** One click to the exact Torn page for this step: the gym (Fill is ready there), the items page, the points page. */
     function stepLinks(s) {
-        const items = (s.items || []).filter((it) => it.id !== POINTS);
+        const items = (s.items || []).filter((it) => it.id !== POINTS && ITEMS[it.id]);
         const out = [];
-        if (s.kind === 'refill') out.push(h('a', { class: 'btn primary', href: pointsUrl(), target: '_blank', rel: 'noopener', text: 'Points' }));
-        if (items.length) out.push(h('a', { class: 'btn primary', href: itemsUrl(), target: '_blank', rel: 'noopener', text: 'Items' }));
-        if (Object.keys(s.trains || {}).length) out.push(h('a', { class: 'btn' + (out.length ? '' : ' primary'), href: gymUrl(), target: '_blank', rel: 'noopener', text: 'Gym' }));
+        const trains = Object.keys(s.trains || {}).length > 0;
+        if (s.kind === 'refill') out.push(h('a', { class: 'btn' + (trains ? '' : ' primary'), href: pointsUrl(), target: '_blank', rel: 'noopener', text: 'Points' }));
+        if (items.length) out.push(h('a', { class: 'btn' + (trains ? '' : ' primary'), href: itemsUrl(), target: '_blank', rel: 'noopener', text: 'Items' }));
+        if (trains) out.push(h('a', { class: 'btn primary', href: gymUrl(), target: '_blank', rel: 'noopener', text: 'Open the gym' }));
         return out;
     }
 
     /** Cheapest fill for one need, from stored listings. */
-    function buyRow(need, prices, history) {
+    function buyRow(need, prices) {
         const p = prices && prices[need.id];
         if (!p || !Array.isArray(p.listings) || !p.listings.length) return { need, fill: null, verdict: null };
         const fill = fillCheapest(p.listings, need.buy, need.id);
@@ -5532,42 +6380,132 @@
         return { need, fill, verdict: priceVerdict(cheapest, p.avg7 || null) };
     }
 
-    function buyPane(m, ctx) {
+    function buyCard(m, ctx) {
         const needs = m.buyToday.filter((n) => n.buy > 0);
-        // Home refreshes today's prices too, at most every 5 minutes (ENGINE-SPEC §13).
+        // Home refreshes today's prices too, at most every 5 minutes.
         if (needs.length && ctx.wantPrices) ctx.wantPrices(needs.map((n) => n.id));
-        const held = m.buyToday.filter((n) => n.have > 0);
         const rows = needs.map((n) => buyRow(n, ctx.prices));
         const total = rows.reduce((a, r) => a + (r.fill ? r.fill.total : 0), 0);
-        const list = h('div', { class: 'buy num' }, [
-            ...rows.map(({ need, fill, verdict }) => {
-                const first = fill && fill.rows[0];
-                const link = first ? first.link : need.id === POINTS ? pointsMarketUrl() : itemMarketUrl(need.id);
-                const where = first ? whereText(first) + (fill.rows.length > 1 ? ' + ' + (fill.rows.length - 1) + ' more' : '') + (verdict && verdict.pct !== null ? ' · ' + verdict.text.split(' · ')[1] : '') : 'Prices load on the Buy tab';
-                return h('div', { class: 'bi' }, [
-                    h('div', {}, [h('b', { text: need.name + ' × ' + need.buy })]),
-                    h('span', { class: 'p', text: fill ? fmtMoney(fill.total) : '' }),
-                    h('a', { class: 'btn sm', href: link, target: '_blank', rel: 'noopener', text: 'Open' }),
-                    h('small', { text: need.id === POINTS ? where + ' · for the refill' : where }),
-                ]);
-            }),
-            needs.length ? null : h('div', { class: 'bi' }, [h('div', {}, [h('b', { text: 'Nothing to buy today' })]), h('span'), h('span'), h('small', { text: 'Your inventory covers the plan' })]),
-            h('div', { class: 'buyfoot' }, [h('span', { text: held.length ? held.map((n) => n.have + ' ' + n.name + ' in inventory').join(' · ') : 'Nothing held yet' }), h('b', { text: total ? fmtMoney(total) : '' })]),
-            ctx.settings.w3b !== false ? h('small', { class: 'muted', style: 'font-size:11px;margin-top:4px' }, ['Bazaar prices: ', h('a', { href: 'https://weav3r.dev', target: '_blank', rel: 'noopener', text: 'TornW3B' })]) : null,
+        const trs = rows.map(({ need, fill }) => {
+            const first = fill && fill.rows[0];
+            const link = first ? first.link : need.id === POINTS ? pointsMarketUrl() : itemMarketUrl(need.id);
+            const where = first ? whereText(first) + (fill.rows.length > 1 ? ' + ' + (fill.rows.length - 1) + ' more' : '') : ctx.paused ? 'prices wait while paused' : 'checking prices…';
+            const why = need.id === POINTS ? 'for the refill' : 'have ' + need.have + ', need ' + need.need;
+            return h('tr', {}, [
+                h('td', {}, [h('b', { class: 'w', text: need.name + ' × ' + fmtInt(need.buy) }), h('br'), h('small', { class: 'muted', text: where + ' · ' + why })]),
+                h('td', { class: 'r', text: fill ? fmtMoney(fill.total) : '' }),
+                h('td', { class: 'r', style: 'width:64px' }, [h('a', { class: 'btn sm', href: link, target: '_blank', rel: 'noopener', text: 'Open' })]),
+            ]);
+        });
+        if (!trs.length) trs.push(h('tr', {}, [h('td', { colspan: '3' }, [h('b', { class: 'w', text: 'Nothing to buy today' }), h('br'), h('small', { class: 'muted', text: 'What you hold covers today’s steps' })])]));
+        return h('div', {}, [
+            sectionHead('Buy today', h('span', { class: 'meta right num', text: total ? fmtMoney(total) : '' }), null, 'h3'),
+            h('table', { class: 'tbl num' }, [h('tbody', {}, trs)]),
+            h('div', { class: 'note2' }, [h('a', { href: '#buy', onclick: (e) => { e.preventDefault(); ctx.go('buy'); }, text: 'Deals and the rest of the week → Buy' })]),
         ]);
-        return h('div', {}, [sectionHead('Buy today', h('span', { class: 'meta' }, [h('a', { href: '#buy', onclick: (e) => { e.preventDefault(); ctx.go('buy'); }, text: 'Next 3 days' })])), list]);
+    }
+
+    /** Share bar against the target, "24.9% → 27.8%", what's left, and today's trains. */
+    function youVsBuild(m) {
+        const tot = {};
+        for (const st of m.steps) for (const [k, n] of Object.entries(st.trains || {})) tot[k] = (tot[k] || 0) + n;
+        const only = Object.keys(tot).length === 1 ? Object.keys(tot)[0] : null;
+        const rows = m.statRows.map((r) => {
+            const k = r.stat;
+            const trains = tot[k] || 0;
+            const toGo = r.over ? 'over' : r.gap > 0 ? '+' + fmtShort(r.gap) + ' to go' : 'on target';
+            const tod = trains ? h('span', { class: 'tod s-' + k, text: trains + ' train' + (trains === 1 ? '' : 's') }) : h('span', { class: 'tod', style: 'color:var(--dim)', text: r.over ? 'skip' : 'later' });
+            return h('div', { class: 'sgr' }, [
+                h('b', { class: 'n s-' + k, text: STAT_LABEL[k] }),
+                h('span', { class: 'v', text: fmtInt(r.value) }),
+                h('div', { class: 'share' }, [h('i', { style: 'width:' + Math.min(100, r.share * 100).toFixed(1) + '%;background:' + STAT_COLOR[k] }), h('em', { style: 'left:' + Math.min(100, r.target * 100).toFixed(1) + '%' })]),
+                h('span', { class: 'gap', text: (r.share * 100).toFixed(1) + '% → ' + (r.target * 100).toFixed(1) + '%' }),
+                h('span', { class: 'gap', text: toGo }),
+                tod,
+            ]);
+        });
+        const metaParts = [fmtInt(m.total) + ' total'];
+        return h('div', {}, [
+            sectionHead('You vs ' + m.build.name, meta([...metaParts, only ? ' · today every train goes to ' : '', only ? h('b', { style: 'color:var(--' + only + ')', text: STAT_LABEL[only] }) : ''])),
+            h('div', { class: 'sg num' }, rows),
+            buildFoot(m),
+        ]);
+    }
+
+    function buildFoot(m) {
+        const foot = [];
+        if (m.reachedDay !== null && m.reachedDay !== undefined) foot.push(h('span', {}, [m.build.name + ' in ', h('b', { text: m.reachedDay === 0 ? 'now' : 'about ' + m.reachedDay + ' day' + (m.reachedDay === 1 ? '' : 's') })]));
+        if (m.nextGym && m.nextGym.gym) foot.push(h('span', {}, [m.nextGym.gym.name + ' ', h('b', { text: m.nextGym.known ? 'in ' + fmtInt(m.nextGym.energyLeft) + ' E' : 'next' }), m.nextGym.known ? ' (about ' + Math.max(1, Math.round(m.nextGym.days)) + ' days)' : ' · open Torn’s gym page once to track it']));
+        return foot.length ? h('div', { class: 'sgfoot num' }, foot) : null;
+    }
+
+    /** Next 7 days: stats gained a day, split by the stats trained. */
+    function weekChart(m) {
+        const days = m.projection || [];
+        if (!days.length) return null;
+        const start = new Date(m.now).getUTCDay();
+        const perDay = days.map((d) => {
+            const trains = STATS.reduce((a, k) => a + (d[k] || 0), 0) || 1;
+            return STATS.filter((k) => d[k]).map((k) => ({ c: STAT_COLOR[k], v: ((d.gain || 0) * d[k]) / trains }));
+        });
+        const totals = days.map((d) => d.gain || 0);
+        const used = STATS.filter((k) => days.some((d) => d[k]));
+        const legend = h('span', { class: 'legend2' }, used.map((k) => h('span', {}, [h('i', { style: 'background:' + STAT_COLOR[k] }), STAT_LABEL[k]])));
+        return h('div', {}, [
+            h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('lab', 'Next 7 days · stats gained a day'), legend]),
+            stackBars(perDay, days.map((_, i) => DAYS[(start + i) % 7]), { w: 1000, h: 84, top: totals.map((v) => '+' + fmtShort(v)), label: 'Stats gained each of the next 7 days' }),
+        ]);
+    }
+
+    /** This week from the recorded day totals (Tue–Mon style: the last 7 Torn days, today included). */
+    function weekCard(m, ctx) {
+        const totals = ctx.dayTotals || {};
+        const today = tornDayStart(m.now);
+        const days = Object.keys(totals).map(Number).filter((d) => d > today - 7 * DAY && d <= today).sort((a, b) => a - b);
+        const sum = (k) => days.reduce((a, d) => a + ((totals[d] && totals[d][k]) || 0), 0);
+        const gained = sum('gained');
+        const planned = sum('planned');
+        const xan = sum('xanax');
+        const xanP = sum('xanaxPlanned');
+        const refills = sum('refills');
+        const xp = unitPrice((ctx.prices || {})[XANAX]) || 0;
+        const pp = unitPrice((ctx.prices || {})[POINTS], 300) || 0;
+        const spent = xan * xp + refills * REFILL_POINTS * pp;
+        const pct = planned > 0 ? Math.min(100, (100 * gained) / planned) : 0;
+        return h('div', {}, [
+            sectionHead('This week', meta([days.length ? days.length + ' day' + (days.length === 1 ? '' : 's') + ' recorded' : 'from today']), null, 'h3'),
+            h('dl', { class: 'facts num' }, [
+                h('dt', { text: 'Gained' }),
+                h('dd', {}, [fmtSigned(gained) + (planned ? ' of ' + fmtShort(planned) : ''), h('div', { class: 'mini' }, [h('i', { style: 'width:' + pct.toFixed(0) + '%' })])]),
+                h('dt', { text: 'Xanax' }),
+                h('dd', { text: xan + (xanP ? ' of ' + xanP : '') }),
+                h('dt', { text: 'Refills' }),
+                h('dd', { text: refills + ' of ' + Math.max(1, days.length) }),
+                h('dt', { text: 'Spent' }),
+                h('dd', { text: xp || pp ? 'about ' + fmtMoney(spent) : '—' }),
+            ]),
+        ]);
+    }
+
+    function planLine(m, ctx) {
+        const plan = ctx.plan;
+        const strat = STRATEGIES[plan.strategy] || STRATEGIES.steady;
+        const r = ctx.compare && ctx.compare[plan.strategy];
+        const days = ctx.settings.horizonDays || 30;
+        const perDay = r ? Math.round(((r.used && r.used[XANAX]) || 0) / days) : null;
+        const sub = r ? (perDay ? perDay + ' Xanax' : 'no Xanax') + ((r.used && r.used[POINTS]) ? ' + refill' : '') + ' a day · +' + fmtShort(r.gained) + ' in ' + days + ' days' : strat.what;
+        return h('div', {}, [
+            h('div', { class: 'one' }, [
+                h('div', {}, [t('lab', 'Plan'), h('div', {}, [h('b', { class: 'white', text: strat.short + ' · ' + m.build.name })]), h('span', { class: 'muted', style: 'font-size:12px', text: sub })]),
+                h('a', { class: 'btn sm', href: '#plan', onclick: (e) => { e.preventDefault(); ctx.go('plan'); }, text: 'Change' }),
+            ]),
+        ]);
     }
 
     function renderHome(m, ctx) {
         const s = ctx.settings;
         const now = m.now;
         const next = m.next;
-        const mainStat = (() => {
-            const tot = {};
-            for (const st of m.steps) for (const [k, n] of Object.entries(st.trains || {})) tot[k] = (tot[k] || 0) + n;
-            const ks = Object.keys(tot);
-            return ks.length === 1 ? ks[0] : null;
-        })();
         const late = next && next.kind === 'xanax' && m.strip.drug.left === 0;
         const buyTotal = m.buyToday.reduce((a, n) => {
             const r = buyRow(n, ctx.prices);
@@ -5577,61 +6515,63 @@
         const head = sectionHead(
             'Today',
             meta([
-                dateLine(now) + ' · planned ',
-                h('b', { style: mainStat ? 'color:var(--' + mainStat + ')' : null, text: fmtSigned(m.plannedGain) + (mainStat ? ' ' + STAT_LABEL[mainStat] : '') }),
-                buyTotal ? ' · ' + fmtMoney(buyTotal) : '',
+                dateLine(now) + ' · ',
+                h('b', { text: fmtSigned(m.plannedGain) }),
+                ' planned',
+                buyTotal ? ' · ' + fmtMoney(buyTotal) + ' to spend' : '',
                 ' · ',
                 h('b', { style: late ? 'color:var(--warn)' : null, text: late ? 'Xanax ready' : 'on plan' }),
             ]),
         );
 
-        const nextBand = next
-            ? h('div', { class: 'next num' }, [
-                  next.at > now ? cd(next.at, now, { cls: 'cd' }) : h('span', { class: 'cd', text: 'Now' }),
-                  h('div', { class: 'what' }, [h('b', { text: stepWords(next) }), h('span', { text: stepSub(next) })]),
+        const nowBand = next
+            ? h('div', { class: 'nowb num' }, [
+                  next.at > now ? cd(next.at, now, { cls: 'cd' }) : h('span', { class: 'k', text: 'NOW' }),
+                  h('div', {}, [h('b', { text: stepWords(next) }), h('br'), h('span', { class: 's', text: stepSub(next) })]),
                   h('div', { class: 'acts' }, stepLinks(next)),
               ])
-            : h('div', { class: 'next num' }, [h('span', { class: 'cd', text: '—' }), h('div', { class: 'what' }, [h('b', { text: 'Nothing left today' }), h('span', { text: 'Tomorrow’s plan starts at 00:00 Torn time' })]), h('div')]);
+            : h('div', { class: 'nowb num' }, [h('span', { class: 'k', text: 'DONE' }), h('div', {}, [h('b', { text: 'Nothing left today' }), h('br'), h('span', { class: 's', text: 'Tomorrow’s plan starts at 00:00 Torn time' })]), h('div')]);
 
         const rows = [];
         for (const d of m.done) rows.push(h('tr', { class: 'done' }, [h('td', { class: 't', text: clock(d.at, s) }), h('td', { text: d.label }), h('td', { text: Object.keys(d.trained || {}).map((k) => STAT_LABEL[k]).join(' · ') || '—' }), h('td', { class: 'r', text: d.gain ? fmtSigned(d.gain) : '' }), h('td', { class: 'r ok', text: 'Done' })]));
-        m.steps.forEach((st, i) => {
+        m.steps.slice(next ? 1 : 0).forEach((st) => {
+            const k = Object.keys(st.trains || {});
             rows.push(
-                h('tr', { class: i === 0 ? 'now' : null }, [
+                h('tr', {}, [
                     h('td', { class: 't', text: clock(st.at, s) }),
-                    h('td', { text: st.label }),
-                    h('td', { text: trainsText(st.trains) || '—' }),
+                    h('td', {}, [h('b', { class: 'w', text: st.label })]),
+                    h('td', {}, [h('span', { class: k.length === 1 ? 's-' + k[0] : null, text: trainsText(st.trains) || '—' })]),
                     h('td', { class: 'r', text: st.gain ? fmtSigned(st.gain) : '' }),
-                    h('td', { class: 'r' }, [st.at > now ? cd(st.at, now, { prefix: 'in ', cls: 'when' }) : h('span', { class: 'when', text: 'now' })]),
+                    h('td', { class: 'r muted' }, [st.at > now ? cd(st.at, now, { cls: 'when' }) : h('span', { class: 'when', text: 'now' })]),
                 ]),
             );
         });
-        const steps = h('table', { class: 'tbl num' }, [
-            h('thead', {}, [h('tr', {}, [h('th', { text: 'Time' }), h('th', { text: 'Step' }), h('th', { text: 'Train' }), h('th', { class: 'r', text: 'Gain' }), h('th', { class: 'r' })])]),
-            h('tbody', {}, rows),
-            h('tfoot', {}, [h('tr', {}, [h('td'), h('td', { colspan: '2' }, ['So far ', h('b', { text: fmtSigned(m.gainedToday) }), ' of ' + fmtSigned(m.plannedGain)]), h('td', { class: 'r', colspan: '2', text: 'Late on a step? The rest move with it.' })])]),
-        ]);
+        const steps = rows.length
+            ? h('table', { class: 'tbl num', style: 'margin-top:8px' }, [
+                  h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Step' }), h('th', { style: 'width:150px', text: 'Train' }), h('th', { class: 'r', style: 'width:110px', text: 'Gain' }), h('th', { class: 'r', style: 'width:110px', text: 'In' })])]),
+                  h('tbody', {}, rows),
+              ])
+            : null;
+        const foot = h('div', { class: 'row muted num', style: 'justify-content:space-between;margin-top:6px;font-size:12px' }, [h('span', {}, ['So far ', h('b', { class: 'white', text: fmtSigned(m.gainedToday) }), ' of ' + fmtInt(m.plannedGain) + ' today']), h('span', { text: 'Late for a step? The rest move by themselves.' })]);
 
-        const foot = [];
-        if (m.reachedDay !== null && m.reachedDay !== undefined) foot.push(h('span', {}, [m.build.name + ' in ', h('b', { text: m.reachedDay === 0 ? 'now' : 'about ' + m.reachedDay + ' day' + (m.reachedDay === 1 ? '' : 's') })]));
-        if (m.nextGym && m.nextGym.gym) foot.push(h('span', {}, [m.nextGym.gym.name + ' ', h('b', { text: m.nextGym.known ? 'in ' + fmtInt(m.nextGym.energyLeft) + ' E' : 'next' }), m.nextGym.known ? ' (about ' + Math.max(1, Math.round(m.nextGym.days)) + ' days)' : ' · open Torn’s gym page once to track it']));
-
-        const stats = h('div', {}, [sectionHead('Stats', meta(['against ' + m.build.name + ' build · ' + fmtInt(m.total) + ' total'])), statRowsBlock(m), h('div', { class: 'sgfoot num' }, foot)]);
-
-        const plan = ctx.plan;
-        const strat = STRATEGIES[plan.strategy] || STRATEGIES.steady;
-        const planCard = h('div', { class: 'plan' }, [h('div', {}, [h('b', { text: strat.short + ' · ' + m.build.name + ' build' }), h('br'), h('span', { text: strat.what })]), h('div', { class: 'grow' }), h('a', { class: 'btn', href: '#plan', onclick: (e) => { e.preventDefault(); ctx.go('plan'); }, text: 'Change' })]);
-
+        const lead = h('div', { class: 'lead' }, [head, nowBand, steps, foot]);
+        const week = weekChart(m);
         return {
-            main: [h('div', {}, [head, nextBand]), steps, stats],
-            pane: [buyPane(m, ctx), h('div', {}, [sectionHead('Heads-up'), headsList(m.heads.length ? m.heads : [{ tone: 'good', text: 'Nothing needs you' }])]), planCard],
+            strip: true,
+            main: [lead, youVsBuild(m), week].filter(Boolean),
+            pane: [buyCard(m, ctx), h('div', {}, [sectionHead('Heads-up', null, null, 'h3'), headsList(m.heads.length ? m.heads : [{ tone: 'good', text: 'Nothing needs you' }])]), planLine(m, ctx), weekCard(m, ctx)],
         };
     }
 
     /* ===== src/ui/app/plan.js ===== */
     /*
-     * Plan (mockups/L-plan.html): the recommended strategy, the others against
-     * it with a warning before a worse pick, the build, and the 30-day chart.
+     * Plan (mockups/round3/T-plan.html): one question, "which plan, and why?".
+     * On top, the Plan dropdown (most stats in my budget · best value · max
+     * gains) and the inputs that change every number: days, budget, what you
+     * train toward, special refills (only when the account has some), Ignorance
+     * Is Bliss. Then the Recommended card, every other plan with why it isn't
+     * the pick (plans that don't fit you hidden behind a tick), and where your
+     * energy comes from. Pane: the 30-day chart, the build, the Bliss card.
      */
 
 
@@ -5647,131 +6587,165 @@
 
     const KIND_TAG = { steady: 'Steady', boost: 'Boost', jump: 'Jump' };
 
+    /** "2 Xanax + refill", "3 Xanax + 4 FHC + refill", "¾ EDVD". */
     function planPerDay(r, days) {
-        const x = (r.used[XANAX] || 0) / days;
+        const per = (id) => ((r.used && r.used[id]) || 0) / days;
+        const n = (v) => (v >= 1 ? String(Math.round(v)) : v >= 0.7 ? '¾' : v >= 0.4 ? '½' : '¼');
         const parts = [];
-        if (x) parts.push((Math.round(x * 2) / 2).toString().replace('.5', '½') + ' Xanax');
-        if (r.used[EDVD]) parts.push(Math.round((r.used[EDVD] / days) * 10) / 10 + ' EDVD');
-        if ((r.used[POINTS] || 0) >= REFILL_POINTS * days * 0.9) parts.push('refill');
+        if (per(XANAX)) parts.push(n(per(XANAX)) + ' Xanax');
+        if (per(EDVD)) parts.push(n(per(EDVD)) + ' EDVD');
+        if (per(FHC)) parts.push(n(per(FHC)) + ' FHC');
+        for (const id of [530, 532, 533]) if (per(id)) parts.push(n(per(id)) + ' ' + ITEMS[id].name.replace(/^Can of /, ''));
+        if (per(CANDY_KISSES) && !per(EDVD)) parts.push('candy');
+        if (((r.used && r.used[POINTS]) || 0) >= REFILL_POINTS * days * 0.9) parts.push('refill');
         return parts.join(' + ') || '—';
     }
 
-    function planChart(compare, recommended, days) {
-        const W = 290;
-        const H = 150;
-        const ids = Object.keys(compare);
-        const max = Math.max(1, ...ids.map((id) => compare[id].gained));
-        const top = Math.pow(10, Math.floor(Math.log10(max)));
-        const gridV = Math.floor(max / top) * top;
-        const svg = h('svg', { class: 'chart num', viewBox: '0 0 352 180', role: 'img', 'aria-label': 'Stats gained over ' + days + ' days per plan' });
-        const y = (v) => H - (v / max) * (H - 10);
-        svg.appendChild(h('line', { class: 'ax', x1: 0, y1: H, x2: W, y2: H }));
-        svg.appendChild(h('line', { class: 'ax', x1: 0, y1: y(gridV).toFixed(1), x2: W, y2: y(gridV).toFixed(1), 'stroke-dasharray': '2 4' }));
-        svg.appendChild(h('text', { x: 0, y: (y(gridV) - 5).toFixed(1), text: fmtShort(gridV) }));
-        const labels = [];
-        const order = ids.filter((id) => id !== recommended).concat(recommended);
-        for (const id of order) {
-            const r = compare[id];
-            const pts = ['0,' + H].concat(r.daily.map((v, i) => (((i + 1) / r.daily.length) * W).toFixed(1) + ',' + y(v).toFixed(1)));
-            const rec = id === recommended;
-            const color = rec ? '#efebe2' : r.gained < compare[recommended].gained * 0.8 ? '#e8a33d' : '#6c737a';
-            svg.appendChild(h('polyline', { fill: 'none', stroke: color, 'stroke-width': rec ? '2.5' : '1.5', points: pts.join(' ') }));
-            labels.push({ id, y: y(r.gained), color, rec });
-        }
-        labels.sort((a, b) => a.y - b.y);
-        let last = -Infinity;
-        for (const l of labels) {
-            const yy = Math.max(l.y + 4, last + 13);
-            last = yy;
-            svg.appendChild(h('text', { x: W + 4, y: yy.toFixed(1), style: 'fill:' + l.color + (l.rec ? ';font-weight:bold' : ''), text: (STRATEGIES[l.id] || {}).short || l.id }));
-        }
-        svg.appendChild(h('text', { x: 0, y: H + 18, text: 'today' }));
-        svg.appendChild(h('text', { x: W, y: H + 18, 'text-anchor': 'end', text: days + ' d' }));
-        return svg;
+    /** The table's why-not: what it loses, then the first reason (the whole line is the cell's tooltip). */
+    function shortWhy(why) {
+        const s = String(why || '');
+        const i = s.indexOf(': ');
+        if (i < 0) return s;
+        const first = s.slice(i + 2).split('; ')[0].replace(/\.$/, '');
+        return s.slice(0, i) + ': ' + first + (s.slice(i + 2).includes('; ') ? '…' : '.');
     }
 
-    function weekBars(days) {
-        const W = 700;
-        const colW = 70;
-        const gap = (W - 7 * colW) / 7;
-        const max = Math.max(1, ...days.map((d) => STATS.reduce((a, k) => a + d[k], 0)));
-        const svg = h('svg', { class: 'chart', viewBox: '0 0 ' + W + ' 92', role: 'img', 'aria-label': 'Trains per stat over the next 7 days' });
-        const names = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-        const today = new Date(Date.now()).getUTCDay();
-        days.forEach((d, i) => {
-            const x = gap / 2 + i * (colW + gap);
-            let yy = 4;
-            for (const k of ['dex', 'def', 'spd', 'str']) {
-                const hgt = (d[k] / max) * 64;
-                if (hgt > 0) svg.appendChild(h('rect', { x: x.toFixed(1), y: yy.toFixed(1), width: colW, height: hgt.toFixed(1), fill: STAT_COLOR[k] }));
-                yy += hgt;
-            }
-            svg.appendChild(h('text', { x: (x + colW / 2).toFixed(1), y: 86, 'text-anchor': 'middle', text: names[(today + i) % 7] }));
+    function kindOf(id) {
+        const s = STRATEGIES[id];
+        if (id === 'blissSteady') return 'Book';
+        return s ? KIND_TAG[s.kind] || 'Steady' : '';
+    }
+
+    /** The Plan dropdown: stands out, chalk-edged. */
+    function planChooser(ctx) {
+        const cur = PICK_BY[ctx.plan.pickBy] ? ctx.plan.pickBy : 'most';
+        const det = h('details', { class: 'plansel' }, [h('summary', {}, [t('lab', 'Plan'), h('b', { text: PICK_BY[cur].name })])]);
+        // The options exist only while it's open (nothing hidden to click by accident).
+        const menu = () =>
+            h(
+                'div',
+                { class: 'menu', role: 'listbox', 'aria-label': 'What to plan for' },
+                Object.values(PICK_BY).map((o) =>
+                    h('button', { type: 'button', class: 'opt' + (o.id === cur ? ' on' : ''), role: 'option', 'aria-selected': String(o.id === cur), onclick: () => { det.open = false; ctx.setPlan({ pickBy: o.id }); } }, [h('b', { text: o.name }), h('span', { text: o.what })]),
+                ),
+            );
+        det.addEventListener('toggle', () => {
+            const old = det.querySelector('.menu');
+            if (old) old.remove();
+            if (det.open) det.appendChild(menu());
         });
-        return svg;
+        return det;
     }
 
-    function renderPlan(m, ctx) {
-        const compare = ctx.compare || {};
-        const rec = m.recommendation;
-        const days = ctx.settings.horizonDays || 30;
+    function numberInput(value, width, onSet, { money = false, min = 0, max = Infinity } = {}) {
+        const inp = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:' + width + 'px', value: money ? '$' + fmtInt(value) : String(value) });
+        inp.addEventListener('change', () => {
+            const v = Number(String(inp.value).replace(/[^\d]/g, ''));
+            if (Number.isFinite(v)) onSet(Math.max(min, Math.min(max, v)));
+        });
+        return inp;
+    }
+
+    function controls(m, ctx) {
         const plan = ctx.plan;
-        if (!rec || !rec.recommended || !compare[rec.recommended]) return { main: [h('p', { class: 'muted', text: 'Working out the plans…' })], pane: [] };
+        const s = ctx.settings;
+        const days = s.horizonDays || 30;
+        const goal = plan.goal;
+        const goalChip =
+            goal && goal.kind === 'statTargets'
+                ? h('span', { class: 'sel' }, ['Stat numbers · ' + Object.entries(goal.targets || {}).map(([k, v]) => STAT_LABEL[k] + ' ' + fmtShort(v)).join(' · ')])
+                : goal && goal.kind === 'unlockGym'
+                  ? h('span', { class: 'sel', text: 'Unlock ' + ((gymById(goal.gymId, m.pc && m.pc.table) || {}).name || 'a gym') })
+                  : h('span', { class: 'sel', text: 'Build · ' + m.build.name });
+        const bar1 = [
+            planChooser(ctx),
+            t('lab', 'for'),
+            numberInput(days, 52, (v) => ctx.setSettings({ horizonDays: Math.max(3, Math.min(90, v || 30)) })),
+            h('span', { class: 'muted', text: 'days' }),
+            ctx.plan.pickBy === 'max' ? h('span', { class: 'muted', text: '· no budget' }) : t('lab', 'with'),
+            ctx.plan.pickBy === 'max' ? null : numberInput(s.budget || 0, 130, (v) => ctx.setSettings({ budget: v }), { money: true }),
+            ctx.plan.pickBy === 'max' ? null : h('span', { class: 'muted', text: 'budget' }),
+            h('span', { class: 'sep' }),
+            t('lab', 'Train toward'),
+            goalChip,
+            goal
+                ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.setPlan({ goal: null }), text: 'Back to the build' })
+                : h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.goalForm = !ctx.ui.goalForm; ctx.rerender(); }, text: '+ Stat numbers' }),
+            !goal && m.nextGym && m.nextGym.gym ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.setPlan({ goal: { kind: 'unlockGym', gymId: m.nextGym.gym.id } }), text: '+ Unlock ' + m.nextGym.gym.name }) : null,
+        ];
+        const bar2 = [];
+        const sp = m.special || {};
+        if (sp.have > 0) {
+            const perE = m.ladder ? m.ladder.perEnergy : 0;
+            const each = m.state.energy.maximum;
+            bar2.push(
+                t('lab', 'Special refills'),
+                h('span', { class: 'muted' }, ['you have ', h('b', { class: 'white', text: fmtInt(sp.have) }), ' · use']),
+                numberInput(sp.use || 0, 58, (v) => ctx.setPlan({ specialUse: Math.min(v, sp.have), specialStart: sp.have, specialSetAt: Date.now() })),
+                h('span', { class: 'muted', text: 'in this plan · each adds ' + each + ' energy' + (perE ? ' (about +' + fmtShort(perE * each) + ' stats for you)' : '') + (sp.use ? ' · ' + sp.left + ' left' : ' · set how many to use') }),
+                h('span', { class: 'info', title: 'Shown because Torn says your account has special refills. They aren’t limited to one a day: the plan puts them where they add the most (in a happy jump or boost, where the happy they cost resets anyway) and keeps the rest.', text: 'i' }),
+                h('span', { class: 'sep' }),
+            );
+        }
+        const bliss = m.pc && m.pc.perks.bliss;
+        bar2.push(t('lab', 'Ignorance Is Bliss'), h('span', { class: 'tag' + (bliss ? ' good' : ''), text: bliss ? 'Active' + (m.pc.perks.blissDays ? ' · ' + m.pc.perks.blissDays + ' days' : '') : 'Not active' }), h('span', { class: 'info', title: 'Read from your perks: the book’s line shows while it is active (31 days). The plan counts it the day it shows.', text: 'i' }));
+        return [bar1, bar2];
+    }
+
+    function goalForm(m, ctx) {
+        const plan = ctx.plan;
+        const vals = (plan.goal && plan.goal.kind === 'statTargets' && plan.goal.targets) || {};
+        const inputs = {};
+        return h('div', { class: 'row num', style: 'margin-top:12px;flex-wrap:wrap;gap:12px' }, [
+            ...STATS.map((k) => h('label', { class: 'field', style: 'width:150px' }, [t('lab', STAT_LABEL[k] + ' to reach'), (inputs[k] = h('input', { class: 'inp num', inputmode: 'numeric', placeholder: fmtInt(m.pc.stats[k]), value: vals[k] ? String(vals[k]) : '' }))])),
+            h('button', {
+                class: 'btn primary',
+                type: 'button',
+                style: 'align-self:flex-end',
+                onclick: () => {
+                    const targets = {};
+                    for (const k of STATS) {
+                        const v = Number(String(inputs[k].value).replace(/[^\d]/g, ''));
+                        if (v > m.pc.stats[k]) targets[k] = v;
+                    }
+                    ctx.ui.goalForm = false;
+                    ctx.setPlan(Object.keys(targets).length ? { goal: { kind: 'statTargets', targets } } : { goal: null });
+                },
+                text: 'Train toward these',
+            }),
+        ]);
+    }
+
+    function recommendedCard(m, ctx, rec, compare, days) {
         const best = compare[rec.recommended];
         const S = STRATEGIES[rec.recommended];
-        const pick = ctx.ui.planPick || null;
-        const using = plan.strategy;
-
-        const recCard = h('div', {}, [
-            sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + fmtMoney(ctx.settings.budget) + ' budget · ' + days + ' days'])),
+        const using = ctx.plan.strategy;
+        const pickBy = rec.pickBy || 'most';
+        const figs = [
+            h('div', { class: 'fig' }, [t('lab', days + ' days'), h('b', { class: 'good', text: '+' + fmtShort(best.gained) })]),
+            h('div', { class: 'fig' }, [t('lab', 'Cost'), h('b', { text: fmtMoney(best.cost) })]),
+            h('div', { class: 'fig' }, [t('lab', 'Per $1M'), h('b', { text: best.cost > 0 ? chartNum(perMillion(best)) : '—' })]),
+            h('div', { class: 'fig' }, [t('lab', pickBy === 'max' ? 'A day' : 'Per day'), h('b', { text: pickBy === 'max' ? fmtMoney(best.cost / days) : planPerDay(best, days) })]),
+        ];
+        const reasons = rec.reasons.length ? rec.reasons.join(' ') : 'It gains the most stats inside your budget.';
+        const spend = m.spend && m.spend.lastsDays !== null && m.spend.cash !== null ? ' Your ' + fmtMoney(m.spend.cash) + ' on hand lasts about ' + Math.round(m.spend.lastsDays) + ' days at ' + fmtMoney(m.spend.perDay) + ' a day.' : '';
+        const kids = [
+            sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + (pickBy === 'max' ? 'no budget' : fmtMoney(ctx.settings.budget)) + ' · ' + days + ' days'])),
             h('div', { class: 'prime num' }, [
-                h('div', {}, [h('span', { class: 'pill-tag chalk', text: KIND_TAG[S.kind] }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: S.what })]),
-                h('div', { class: 'figs' }, [
-                    h('div', { class: 'fig' }, [t('lab', days + ' days'), h('b', { class: 'good', text: '+' + fmtShort(best.gained) })]),
-                    h('div', { class: 'fig' }, [t('lab', 'Cost'), h('b', { text: fmtMoney(best.cost) })]),
-                    h('div', { class: 'fig' }, [t('lab', 'Per day'), h('b', { text: planPerDay(best, days) })]),
-                ]),
+                h('div', {}, [h('span', { class: 'pill-tag chalk', text: kindOf(rec.recommended) }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: S.what })]),
+                h('div', { class: 'figs' }, figs),
                 h('div', { class: 'why' }, [
-                    'Why: ' + (rec.reasons[0] || 'It gains the most stats inside your budget.') + ' ',
-                    using === rec.recommended ? h('span', { class: 'c-good', text: 'You’re on it.' }) : h('a', { href: '#', onclick: (e) => { e.preventDefault(); ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); ctx.ui.planPick = null; }, text: 'Use it' }),
+                    'Wins because: ' + reasons + spend + ' ',
+                    using === rec.recommended ? h('span', { class: 'c-good', text: 'You’re on it.' }) : h('a', { href: '#', onclick: (e) => { e.preventDefault(); ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Use it' }),
                 ]),
             ]),
-        ]);
-
-        const altRows = [];
-        if (m.nextGym && m.nextGym.gym) {
-            altRows.push(h('tr', { class: 'click' + (plan.goal && plan.goal.kind === 'unlockGym' ? ' sel' : ''), tabindex: '0', onclick: () => ctx.setPlan({ goal: plan.goal && plan.goal.kind === 'unlockGym' ? null : { kind: 'unlockGym', gymId: m.nextGym.gym.id }, type: 'goal' }) }, [h('td', {}, [h('small', { text: 'Goal' })]), h('td', {}, [h('b', { class: 'w', text: 'Unlock a gym' })]), h('td', { class: 'muted', text: m.nextGym.gym.name + (m.nextGym.days !== null ? ' in about ' + Math.max(1, Math.round(m.nextGym.days)) + ' days' : ' is next') + ' on ' + (STRATEGIES[using] || S).short.toLowerCase() }), h('td', { class: 'r muted', text: 'same' }), h('td', { class: 'r muted', text: 'same' })]));
-        }
-        altRows.push(h('tr', { class: 'click' + (plan.goal && plan.goal.kind === 'statTargets' ? ' sel' : ''), tabindex: '0', onclick: () => { ctx.ui.goalForm = !ctx.ui.goalForm; ctx.rerender(); } }, [h('td', {}, [h('small', { text: 'Goal' })]), h('td', {}, [h('b', { class: 'w', text: 'Reach stat numbers' })]), h('td', { class: 'muted', text: plan.goal && plan.goal.kind === 'statTargets' ? Object.entries(plan.goal.targets).map(([k, v]) => STAT_LABEL[k] + ' ' + fmtInt(v)).join(' · ') : 'e.g. DEX 150,000: aims each train at what’s missing' }), h('td', { class: 'r muted', text: 'same' }), h('td', { class: 'r muted', text: 'same' })]));
-        for (const a of rec.alternatives) {
-            const st = STRATEGIES[a.id];
-            const sel = (pick || using) === a.id;
-            altRows.push(
-                h('tr', { class: 'click' + (sel ? ' sel' : ''), tabindex: '0', onclick: () => { const w = pickWarning(best, compare[a.id], { bliss: m.pc.perks.bliss, days }); if (w.warn) { ctx.ui.planPick = a.id; ctx.rerender(); } else { ctx.ui.planPick = null; ctx.setPlan({ strategy: a.id, strategyPicked: true }); } } }, [
-                    h('td', {}, [h('small', { text: KIND_TAG[st.kind] })]),
-                    h('td', {}, [h('b', { class: 'w', text: st.name })]),
-                    h('td', { class: 'muted' }, [st.what, a.why ? h('div', { class: 'why', text: 'Why not: ' + a.why }) : null]),
-                    h('td', { class: 'r ' + (a.deltaStatsPct >= 0 ? 'c-good' : 'c-bad'), text: fmtPct(a.deltaStatsPct) }),
-                    h('td', { class: 'r ' + (a.deltaCost > 0 ? 'c-bad' : 'c-good'), text: (a.deltaCost >= 0 ? '+' : '−') + fmtMoney(Math.abs(a.deltaCost)) }),
-                ]),
-            );
-        }
-        const altTable = h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:70px', text: 'Kind' }), h('th', { style: 'width:170px', text: 'Plan' }), h('th', { text: 'What you do · why it isn’t the pick' }), h('th', { class: 'r', style: 'width:90px', text: 'Stats' }), h('th', { class: 'r', style: 'width:90px', text: 'Cost' })])]), h('tbody', {}, altRows)]);
-
-        const blocks = [sectionHead('Other plans', meta(['compared with ' + S.short.toLowerCase() + ' · click a row to pick it'])), altTable];
-        if (ctx.ui.goalForm) {
-            const vals = (plan.goal && plan.goal.kind === 'statTargets' && plan.goal.targets) || {};
-            const inputs = {};
-            blocks.push(
-                h('div', { class: 'row num', style: 'margin-top:10px;flex-wrap:wrap' }, [
-                    ...STATS.map((k) => h('label', { class: 'field', style: 'width:140px' }, [t('lab', STAT_LABEL[k]), (inputs[k] = h('input', { class: 'inp num', inputmode: 'numeric', placeholder: fmtInt(m.pc.stats[k]), value: vals[k] ? String(vals[k]) : '' }))])),
-                    h('button', { class: 'btn primary', type: 'button', style: 'align-self:flex-end', onclick: () => { const targets = {}; for (const k of STATS) { const v = Number(String(inputs[k].value).replace(/[^\d]/g, '')); if (v > m.pc.stats[k]) targets[k] = v; } ctx.ui.goalForm = false; ctx.setPlan(Object.keys(targets).length ? { goal: { kind: 'statTargets', targets }, type: 'goal' } : { goal: null }); }, text: 'Save goal' }),
-                ]),
-            );
-        }
+            h('div', { class: 'note2', text: 'If you’re late: steady and goal plans re-time by themselves. Jump plans warn 5 min before the tick, then re-time.' }),
+        ];
+        if (ctx.ui.goalForm) kids.push(goalForm(m, ctx));
+        const pick = ctx.ui.planPick;
         if (pick && compare[pick]) {
             const w = pickWarning(best, compare[pick], { bliss: m.pc.perks.bliss, days });
-            blocks.push(
+            kids.push(
                 h('div', { class: 'warnb num', style: 'margin-top:12px' }, [
                     h('b', { text: w.title }),
                     h('p', { text: w.text + ' ' + w.reasons.join(' ') }),
@@ -5782,64 +6756,174 @@
                 ]),
             );
         }
+        return h('div', { class: 'lead' }, kids);
+    }
 
-        // The build is yours to pick (specialist builds first); the high stat decides where the specialist gym and merits go.
+    function otherPlans(m, ctx, rec, compare, days) {
+        const best = compare[rec.recommended];
+        const showAll = Boolean(ctx.ui.planShowAll);
+        const hiddenAlts = rec.alternatives.filter((a) => !a.fits);
+        const using = ctx.plan.strategy;
+        const rows = [];
+        for (const a of rec.alternatives) {
+            if (!a.fits && !showAll) continue;
+            const st = STRATEGIES[a.id];
+            const sel = (ctx.ui.planPick || using) === a.id;
+            rows.push(
+                h('tr', {
+                    class: 'click' + (sel ? ' sel' : ''),
+                    tabindex: '0',
+                    onclick: () => {
+                        const w = pickWarning(best, compare[a.id], { bliss: m.pc.perks.bliss, days });
+                        if (w.warn) {
+                            ctx.ui.planPick = a.id;
+                            ctx.rerender();
+                        } else {
+                            ctx.ui.planPick = null;
+                            ctx.setPlan({ strategy: a.id, strategyPicked: true });
+                        }
+                    },
+                }, [
+                    h('td', {}, [h('small', { text: kindOf(a.id) })]),
+                    h('td', {}, [h('b', { class: 'w', text: st.name }), st.unverified ? h('span', { class: 'tag warn', style: 'margin-left:6px', text: 'unverified' }) : null, sel && a.id === using ? h('span', { class: 'tag chalk', style: 'margin-left:6px', text: 'yours' }) : null]),
+                    h('td', { class: 'muted', text: st.what }),
+                    h('td', { class: 'r ' + (a.deltaStatsPct >= 0 ? 'c-good' : 'c-bad'), text: fmtPct(a.deltaStatsPct) }),
+                    h('td', { class: 'r ' + (a.deltaCost > 0 ? 'c-bad' : 'c-good'), text: (a.deltaCost >= 0 ? '+' : '−') + fmtMoney(Math.abs(a.deltaCost)) }),
+                    h('td', { class: 'r', text: a.cost > 0 ? chartNum(a.perM) : '—' }),
+                    h('td', { class: 'why', title: a.why, text: shortWhy(a.why) }),
+                ]),
+            );
+        }
+        // Ignorance Is Bliss, what if (only while the book isn't active).
+        for (const w of Object.values(m.whatIf || {})) {
+            const st = STRATEGIES[w.id];
+            const d = best.gained > 0 ? (100 * (w.gained - best.gained)) / best.gained : 0;
+            rows.push(
+                h('tr', { class: 'whatif' }, [
+                    h('td', {}, [h('small', { text: 'Book' })]),
+                    h('td', {}, [h('b', { class: 'w', text: st.name === 'Steady with Bliss' ? st.name : st.name + ' with Bliss' }), ' ', h('span', { class: 'tag', text: 'what-if' })]),
+                    h('td', { text: st.what }),
+                    h('td', { class: 'r', text: fmtPct(d) }),
+                    h('td', { class: 'r', text: (w.cost - best.cost >= 0 ? '+' : '−') + fmtMoney(Math.abs(w.cost - best.cost)) }),
+                    h('td', { class: 'r', text: chartNum(perMillion(w)) }),
+                    h('td', { class: 'why ok', text: 'Needs Ignorance Is Bliss active; see the Bliss card' }),
+                ]),
+            );
+        }
+        const tick = hiddenAlts.length
+            ? h('button', { type: 'button', class: 'tk', 'aria-pressed': String(showAll), onclick: () => { ctx.ui.planShowAll = !showAll; ctx.rerender(); } }, [h('i'), 'Show plans that don’t fit you (' + hiddenAlts.length + ')'])
+            : null;
+        const note = hiddenAlts.length && !showAll ? h('div', { class: 'note2', text: 'Hidden: ' + hiddenAlts.map((a) => STRATEGIES[a.id].name).join(', ') + ' — they lose more than half your stats at ' + fmtShort(m.total) + ' total. They come back on their own if that changes.' }) : null;
+        return h('div', {}, [
+            sectionHead('Other plans', meta(['against ' + STRATEGIES[rec.recommended].short.toLowerCase() + ' · click a row to pick it']), tick),
+            h('table', { class: 'tbl num' }, [
+                h('thead', {}, [h('tr', {}, [h('th', { style: 'width:52px', text: 'Kind' }), h('th', { style: 'width:190px', text: 'Plan' }), h('th', { style: 'width:230px', text: 'What you do' }), h('th', { class: 'r', style: 'width:66px', text: 'Stats' }), h('th', { class: 'r', style: 'width:84px', text: 'Cost' }), h('th', { class: 'r', style: 'width:70px', title: 'Stats gained for each $1M spent over the ' + days + ' days', text: 'Per $1M' }), h('th', { text: 'Why it isn’t the pick' })])]),
+                h('tbody', {}, rows.length ? rows : [h('tr', {}, [h('td', { colspan: '7', class: 'muted', text: 'No other plan fits you.' })])]),
+            ]),
+            note,
+        ]);
+    }
+
+    function ladderCard(m, ctx) {
+        const l = m.ladder;
+        if (!l) return null;
+        const rows = l.rows.map((r) =>
+            h('tr', {}, [
+                h('td', {}, [h('b', { class: 'w', text: r.name })]),
+                h('td', { class: 'muted', text: r.cooldown }),
+                h('td', { class: 'r', text: r.energy }),
+                h('td', { class: 'r ' + (r.costPerStat === 0 ? 'c-good' : ''), text: r.costPerStat === 0 ? 'free' : r.costPerStat === null ? '—' : '~$' + fmtInt(r.costPerStat) }),
+                h('td', { class: 'r', text: r.perDay }),
+                h('td', { class: r.inPlan ? 'c-good' : 'muted', text: r.inPlan ? 'yes' + (r.note ? ' · ' + r.note : '') : r.note || 'no' }),
+            ]),
+        );
+        const stat = l.stat ? STAT_LABEL[l.stat] : 'your next stat';
+        return h('div', {}, [
+            sectionHead('Where your energy comes from', meta(['cheapest per stat first · the plan climbs this until your budget runs out (“Max gains”: no limit)']), null, 'h3'),
+            h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'Source' }), h('th', { text: 'Cooldown it uses' }), h('th', { class: 'r', text: 'Energy' }), h('th', { class: 'r', text: 'Cost per stat' }), h('th', { class: 'r', text: 'A day' }), h('th', { text: 'In your plan' })])]), h('tbody', {}, rows)]),
+            h('div', { class: 'note2', text: 'Today’s prices; your ' + stat + (l.gym ? ' at ' + l.gym : '') + '. FHC and cans use the booster cooldown, so they add to your Xanax, never replace it. Faction energy-drink perks raise what cans give and are read from your perks.' }),
+        ]);
+    }
+
+    function chartCard(m, ctx, rec, compare, days) {
+        const showAll = Boolean(ctx.ui.planShowAll);
+        const fit = new Set([rec.recommended, ...rec.alternatives.filter((a) => a.fits || showAll).map((a) => a.id)]);
+        const series = [];
+        for (const id of Object.keys(compare)) {
+            if (!fit.has(id)) continue;
+            const r = compare[id];
+            const isRec = id === rec.recommended;
+            series.push({ name: (STRATEGIES[id] || {}).short || id, color: isRec ? 'var(--chalk)' : r.gained < compare[rec.recommended].gained * 0.8 ? 'var(--warn)' : 'var(--dim)', width: isRec ? 2.5 : 1.5, values: [0, ...r.daily], rec: isRec });
+        }
+        for (const w of Object.values(m.whatIf || {})) series.push({ name: (STRATEGIES[w.id].short || w.id) + ' + Bliss', color: 'var(--dim)', dash: '4 3', width: 1.2, values: [0, ...w.daily] });
+        series.sort((a, b) => (a.rec ? 1 : 0) - (b.rec ? 1 : 0));
+        const max = Math.max(1, ...series.map((s) => Math.max(...s.values)));
+        const top = Math.pow(10, Math.floor(Math.log10(max)));
+        return h('div', {}, [
+            sectionHead(days + ' days', meta(['stats gained, each plan']), null, 'h3'),
+            lineChart(series, { w: 360, h: 190, left: 36, right: 96, xLabels: [[0, 'today'], [days, days + ' d']], grid: [Math.floor(max / top) * top], n: days + 1, label: 'Stats gained over ' + days + ' days, each plan' }),
+            h('div', { class: 'legend2', style: 'margin-top:6px' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), 'recommended']), m.whatIf ? h('span', {}, [h('i', { class: 'dash', style: 'color:var(--dim)' }), 'with Bliss (what-if)']) : null]),
+        ]);
+    }
+
+    function buildCard(m, ctx) {
+        const plan = ctx.plan;
         const current = BUILD_ALIASES[plan.build] || String(plan.build || 'baldr');
         const curBase = current.split(':')[0];
         const high = highStatOf(current) || 'str';
         const buildFor = (id) => (highStatOf(id) ? resolveBuild(id + ':' + high) : BUILDS[id]);
         const buildIdFor = (id) => (highStatOf(id) ? id + ':' + high : id);
-        const buildRows = BUILD_ORDER.map((id) => {
+        const rows = BUILD_ORDER.map((id) => {
             const b = buildFor(id);
             const sel = curBase === id;
-            return h('div', { class: 'brow' + (sel ? ' sel' : ''), tabindex: '0', role: 'button', onclick: () => ctx.setPlan({ build: buildIdFor(id), buildPicked: true }) }, [
-                h('b', {}, [BUILDS[id].name, sel ? h('span', { class: 'pill-tag chalk', style: 'margin-left:6px', text: plan.buildPicked ? 'Yours' : 'Pick one' }) : null]),
+            return h('div', { class: 'r' + (sel ? ' sel' : ''), tabindex: '0', role: 'button', 'aria-pressed': String(sel), onclick: () => ctx.setPlan({ build: buildIdFor(id), buildPicked: true }), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); ctx.setPlan({ build: buildIdFor(id), buildPicked: true }); } } }, [
+                h('b', { text: BUILDS[id].name + (sel && plan.buildPicked ? ' ✓' : '') }),
                 h('div', { class: 'ratio' }, STATS.map((k) => h('i', { style: 'width:' + (b.shares[k] * 100).toFixed(1) + '%;background:' + STAT_COLOR[k] }))),
-                t('', b.line),
-                t('', b.gyms.map((g) => (gymById(g) || { name: '' }).name.replace(' Gym', '').replace('Mr. ', '')).join(' + ')),
+                h('span', { text: b.line }),
             ]);
         });
-
-        const todayTrains = m.projection[0] || {};
-        const todayTxt = STATS.filter((k) => todayTrains[k]).map((k) => STAT_LABEL[k] + ' ' + todayTrains[k]).join(', ');
-        const youVs = h('div', {}, [
-            sectionHead('You vs ' + m.build.name, meta(['Today: ' + STATS.reduce((a, k) => a + (todayTrains[k] || 0), 0) + ' trains → ', h('b', { text: todayTxt || 'none' })])),
-            statRowsBlock(m, { todayCol: 'trains' }),
-            h('div', { style: 'margin-top:16px' }, [
-                h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('lab', 'Next 7 days · trains per stat'), h('span', { class: 'legend' }, STATS.map((k) => h('span', {}, [h('i', { style: 'background:' + STAT_COLOR[k] }), STAT_LABEL[k]])))]),
-                weekBars(m.projection),
-                h('div', { class: 'sgfoot num' }, [h('span', {}, [m.build.name + ' in ', h('b', { text: m.reachedDay === null ? 'more than 30 days' : m.reachedDay === 0 ? 'now' : 'about ' + m.reachedDay + ' days' })])]),
-            ]),
-        ]);
-
-        let daysIn;
-        let budgetIn;
-        const pane = [
-            h('div', {}, [
-                sectionHead(days + ' days', meta(['stats gained, each plan'])),
-                planChart(compare, rec.recommended, days),
-                h('dl', { class: 'kv num', style: 'margin-top:8px' }, Object.values(compare).sort((a, b) => b.gained - a.gained).flatMap((r) => [h('dt', { text: STRATEGIES[r.id].name }), h('dd', { class: r.id === rec.recommended ? 'white' : r.gained < best.gained * 0.8 ? 'c-warn' : null, text: '+' + fmtShort(r.gained) + ' · ' + fmtMoney(r.cost) })])),
-            ]),
-            h('div', {}, [
-                sectionHead('Plan for', null, null, 'h3'),
-                h('div', { class: 'row' }, [
-                    h('label', { class: 'field', style: 'flex:1' }, [t('lab', 'Days'), (daysIn = h('input', { class: 'inp num', inputmode: 'numeric', value: String(days), onchange: () => { const v = Math.max(3, Math.min(90, Number(daysIn.value) || 30)); ctx.setSettings({ horizonDays: v }); } }))]),
-                    h('label', { class: 'field', style: 'flex:2' }, [t('lab', 'Budget'), (budgetIn = h('input', { class: 'inp num', inputmode: 'numeric', value: '$' + fmtInt(ctx.settings.budget), onchange: () => { const v = Number(String(budgetIn.value).replace(/[^\d]/g, '')) || 0; ctx.setSettings({ budget: v }); } }))]),
-                ]),
-                rec.alternatives.some((a) => a.overBudget) ? h('p', { class: 'muted', style: 'margin:8px 0 0;font-size:12px', text: rec.alternatives.filter((a) => a.overBudget).map((a) => STRATEGIES[a.id].short).join(', ') + ' over this budget.' }) : null,
-            ]),
-            h('div', {}, [sectionHead('When you’re late', null, null, 'h3'), headsList([{ tone: 'plain', text: 'Steady and goal plans', sub: 're-time by themselves; later steps move' }, { tone: 'warn', text: 'Jump plans', sub: 'warn 5 min before the tick or cooldown, then re-time' }])]),
-        ];
-
-        const highSeg = h('div', { class: 'row', style: 'margin:0 0 8px' }, [
-            t('lab', 'High stat'),
-            h('div', { class: 'seg', role: 'group', 'aria-label': 'High stat' }, STATS.map((k) => h('button', { type: 'button', 'aria-pressed': String(k === high), onclick: () => ctx.setPlan({ build: (highStatOf(curBase) ? curBase : 'baldr') + ':' + k, buildPicked: true }), text: STAT_LABEL[k] }))),
-            h('span', { class: 'muted', style: 'font-size:12px', text: highStatOf(curBase) ? 'where the single-stat gym and your merits go (DEF or DEX high = the defensive version)' : 'for Baldr\u2019s and Hank\u2019s' }),
-        ]);
+        const cur = buildFor(curBase);
+        const gyms = (cur.gyms || []).map((g) => (gymById(g) || { name: '' }).name).filter(Boolean);
         const georges = m.pc.unlocked.includes(GEORGES);
-        const buildNote = georges ? null : h('p', { class: 'muted', style: 'margin:8px 0 0;font-size:12px', text: 'Specialist gyms open after George\u2019s. Until then every train still moves you toward this build, so you qualify the day they open.' });
-        return { main: [recCard, h('div', {}, blocks), h('div', {}, [sectionHead('Build', meta([plan.buildPicked ? 'the plan trains toward your build' : 'pick your build type: the plan trains toward it'])), highSeg, h('div', { class: 'builds num' }, buildRows), buildNote]), youVs], pane };
+        return h('div', {}, [
+            sectionHead('Build', meta([plan.buildPicked ? 'what the plan trains toward' : 'pick yours: the plan trains toward it']), null, 'h3'),
+            h('div', { class: 'row', style: 'margin-bottom:8px;gap:8px' }, [t('lab', 'High stat'), h('div', { class: 'seg', role: 'group', 'aria-label': 'High stat' }, STATS.map((k) => h('button', { type: 'button', 'aria-pressed': String(k === high), onclick: () => ctx.setPlan({ build: (highStatOf(curBase) ? curBase : 'baldr') + ':' + k, buildPicked: true }), text: STAT_LABEL[k] })))]),
+            h('div', { class: 'bl' }, rows),
+            h('div', { class: 'note2', text: (gyms.length ? 'Specialist gyms: ' + gyms.join(' + ') + '. ' : '') + (georges ? '' : 'They open after George’s; until then every train still moves you toward this build.') }),
+        ]);
     }
+
+    function blissCard(m, ctx, rec, compare, days) {
+        const bliss = m.pc.perks.bliss;
+        const best = compare[rec.recommended];
+        const happyMax = fmtInt(m.state.happy.maximum);
+        const w = m.whatIf || {};
+        const lines = [];
+        if (bliss) lines.push(h('b', { text: 'Now' }), h('span', { text: 'Active' + (m.pc.perks.blissDays ? ' for ' + m.pc.perks.blissDays + ' days' : '') + ': happy keeps climbing above ' + happyMax + ', so the plans above already count it.' }));
+        lines.push(h('b', { text: 'Changes' }), h('span', { text: 'Happy stops resetting to ' + happyMax + ' at :00/:15/:30/:45 and keeps climbing (to 99,999), so boosters and candy keep paying for 31 days.' }));
+        if (!bliss && w.blissSteady) {
+            const pct = (x) => Math.round((100 * (x.gained - best.gained)) / Math.max(1, best.gained));
+            lines.push(h('b', { text: 'For you' }), h('span', { text: 'Steady with Bliss +' + fmtShort(w.blissSteady.gained) + ' in ' + days + ' days (' + fmtPct(pct(w.blissSteady)) + ') for ' + fmtMoney(w.blissSteady.cost) + (w.dailyChoco ? '; Daily choco with Bliss +' + fmtShort(w.dailyChoco.gained) + ' (' + fmtPct(pct(w.dailyChoco)) + ') for ' + fmtMoney(w.dailyChoco.cost) : '') + '.' }));
+            const budget = ctx.settings.budget || Infinity;
+            const cheapest = [w.blissSteady, w.dailyChoco].filter((x) => x && x.gained > best.gained).sort((a, b) => a.cost - b.cost)[0];
+            lines.push(h('b', { text: 'Worth it?' }), h('span', {}, [cheapest ? (cheapest.cost <= budget ? 'Yes inside your budget: ' + STRATEGIES[cheapest.id].short.toLowerCase() + ' with the book beats today’s pick. ' : 'Only with a budget of ~' + fmtMoney(cheapest.cost) + '. ') : 'Not at your stats. ', h('a', { href: '#buy', onclick: (e) => { e.preventDefault(); ctx.go('buy'); }, text: 'Price on Buy' })]));
+        }
+        return h('div', {}, [sectionHead('Ignorance Is Bliss', meta([bliss ? 'active' : 'not active']), null, 'h3'), h('div', { class: 'bliss num' }, lines)]);
+    }
+
+    function renderPlan(m, ctx) {
+        const compare = ctx.compare || {};
+        const rec = m.recommendation;
+        const days = ctx.settings.horizonDays || 30;
+        if (!rec || !rec.recommended || !compare[rec.recommended]) return { ctl: controls(m, ctx), main: [h('div', { class: 'lead' }, [h('p', { class: 'muted', style: 'margin:0', text: 'Working out the plans…' })])], pane: [] };
+        return {
+            ctl: controls(m, ctx),
+            main: [recommendedCard(m, ctx, rec, compare, days), otherPlans(m, ctx, rec, compare, days), ladderCard(m, ctx)].filter(Boolean),
+            pane: [chartCard(m, ctx, rec, compare, days), buildCard(m, ctx), blissCard(m, ctx, rec, compare, days)],
+        };
+    }
+
+    void SPECIAL;
 
     /* ===== src/api/w3b.js ===== */
     /*
@@ -6156,11 +7240,13 @@
 
     /* ===== src/ui/app/buy.js ===== */
     /*
-     * Buy (mockups/M-buy.html): what the plan needs for today / 3 days / a week,
-     * minus what you hold, filled from the cheapest listings across the Item
-     * Market, bazaars (TornW3B) and the points market, each with a link to
-     * that exact listing. You buy by hand.
+     * Buy (mockups/round3/U-buy.html): one question, "what do I buy, where,
+     * now?". Every Item Market listing (Torn API) and bazaar listing (TornW3B)
+     * sorted together and filled from the cheapest; each item says which side
+     * is cheaper; deals show even for items you hold; type ticks filter both
+     * lists. Every row links to that exact listing. You buy by hand.
      */
+
 
 
 
@@ -6172,7 +7258,29 @@
 
 
     const WINDOW_LABEL = { today: 'Today', three: '3 days', week: 'Week' };
-    const TRACKED = [XANAX, POINTS, ECSTASY, EDVD];
+
+    /** Items Buy keeps an eye on for deals, plan or not. */
+    const TRACKED = [XANAX, POINTS, ECSTASY, EDVD, FHC, CANDY_KISSES, MUNSTER];
+
+    /** The type ticks, and which items each covers. */
+    const BUY_TYPES = [
+        ['drug', 'Drugs'],
+        ['booster', 'Boosters'],
+        ['candy', 'Candy'],
+        ['energy', 'Energy drinks'],
+        ['points', 'Points'],
+    ];
+    const DEFAULT_BUY_TYPES = ['drug', 'booster', 'points'];
+
+    function typeOf(id) {
+        if (id === POINTS) return 'points';
+        const it = ITEMS[id];
+        if (!it) return 'booster';
+        if (it.kind === 'drug') return 'drug';
+        if (it.category === 'Candy') return 'candy';
+        if (it.category === 'Energy Drink') return 'energy';
+        return 'booster';
+    }
 
     /** The plan's needs for a window: today's steps, plus later days at the plan's daily average. */
     function needsForWindow(m, compare, plan, windowKey, horizonDays) {
@@ -6183,6 +7291,7 @@
         const out = { ...today };
         if (r) {
             for (const [id, n] of Object.entries(r.used || {})) {
+                if (id === 'special') continue;
                 const extra = ((n || 0) / (horizonDays || 30)) * (days - 1);
                 if (extra > 0) out[id] = Math.ceil((out[id] || 0) + extra - 1e-9);
             }
@@ -6190,79 +7299,191 @@
         return out;
     }
 
-    function agoText(at, now) {
-        if (!at) return 'not yet';
+    function agoShort(at, now) {
+        if (!at) return '—';
         const s = Math.max(0, Math.round((now - at) / 1000));
-        return s < 90 ? s + 's ago' : Math.round(s / 60) + ' min ago';
+        return s < 90 ? s + ' s' : s < 5400 ? Math.round(s / 60) + ' min' : Math.round(s / 3600) + ' h';
+    }
+
+    /** The lowest price of the days before today (the "7-day low"), or null. */
+    function low7(p) {
+        const lows = (p && p.lows7) || [];
+        const before = lows.slice(0, -1).filter((v) => v > 0);
+        return before.length ? Math.min(...before) : null;
+    }
+
+    /** "Bazaars $3,000 cheaper than the Item Market" (or the other way), per unit. */
+    function sideLine(listings) {
+        const bz = listings.filter((l) => l.source === SOURCE_BAZAAR).map((l) => l.price);
+        const im = listings.filter((l) => l.source === SOURCE_ITEM_MARKET).map((l) => l.price);
+        if (!bz.length || !im.length) return null;
+        const b = Math.min(...bz);
+        const i = Math.min(...im);
+        if (b === i) return { good: true, text: 'Bazaars and the Item Market at the same price' };
+        return b < i ? { good: true, text: 'Bazaars ' + fmtMoney(i - b) + ' cheaper than the Item Market' } : { good: true, text: 'The Item Market is ' + fmtMoney(b - i) + ' cheaper than bazaars' };
+    }
+
+    function checkedText(row, p, now) {
+        if (row.source === SOURCE_BAZAAR) return 'TornW3B · ' + agoShort(row.dataAt || p.w3bAt, now);
+        return 'Torn API · ' + agoShort(p.imAt, now);
+    }
+
+    function openBtn(link, primary, ghost) {
+        return h('a', { class: 'btn sm' + (primary ? ' primary' : ghost ? ' ghost' : ''), href: link, target: '_blank', rel: 'noopener', text: 'Open' });
     }
 
     function renderBuy(m, ctx) {
         const s = ctx.settings;
+        const now = m.now;
         const win = s.buyWindow || 'three';
-        const needs = needList(needsForWindow(m, ctx.compare, ctx.plan, win, s.horizonDays), ctx.statics.inventory || {});
-        const toBuy = needs.filter((n) => n.buy > 0);
-        ctx.wantPrices(toBuy.map((n) => n.id).concat(TRACKED));
+        const show = new Set(Array.isArray(s.buyTypes) ? s.buyTypes : DEFAULT_BUY_TYPES);
+        const inv = ctx.statics.inventory || {};
+        const needs = needList(needsForWindow(m, ctx.compare, ctx.plan, win, s.horizonDays), inv);
+        const toBuy = needs.filter((n) => n.buy > 0 && show.has(typeOf(n.id)));
+        ctx.wantPrices([...new Set(toBuy.map((n) => n.id).concat(TRACKED.filter((id) => show.has(typeOf(id)))))]);
         const prices = ctx.prices || {};
         let total = 0;
-        const blocks = toBuy.map((n) => {
-            const p = prices[n.id];
-            const fill = p && p.listings ? fillCheapest(p.listings, n.buy, n.id) : null;
-            if (fill) total += fill.total;
-            const v = fill && fill.rows[0] ? priceVerdict(fill.rows[0].price, p.avg7 || null, { slack: n.have > 0 }) : null;
-            const vColor = !v ? 'var(--dim)' : v.kind === 'buy' || v.kind === 'bulk' ? 'var(--good)' : v.kind === 'wait' ? 'var(--warn)' : 'var(--dim)';
-            const perDay = WINDOWS[win] > 1 ? Math.round((n.need / WINDOWS[win]) * 10) / 10 + ' a day' : n.need + ' today';
-            const rows = fill
-                ? fill.rows.map((r) =>
-                      h('tr', {}, [
-                          h('td', {}, [h('b', { class: 'w', text: whereText(r) }), h('small', { text: ' · ' + (r.listed > r.qty ? r.listed + ' listed, take ' + r.qty : r.listed + ' listed') })]),
-                          h('td', { class: 'r' }, [h('b', { class: 'w', text: fmtInt(r.qty) })]),
-                          h('td', { class: 'r', text: fmtMoney(r.price) }),
-                          h('td', { class: 'r', text: '$' + fmtInt(r.subtotal) }),
-                          h('td', { class: 'r' }, [h('a', { class: 'btn sm', href: r.link, target: '_blank', rel: 'noopener', text: r.source === 'bazaar' ? 'Open bazaar' : r.source === 'points' ? 'Open points' : 'Open market' })]),
-                      ]),
-                  )
-                : [h('tr', {}, [h('td', { colspan: '5', class: 'muted', text: p && p.error ? 'Prices could not load: ' + p.error : 'Checking prices…' })])];
-            return h('div', { class: 'item num' }, [
-                h('div', { class: 'ih' }, [h('b', { text: n.name + ' × ' + fmtInt(n.buy) }), h('span', { class: 'need', text: perDay + (n.have ? ', ' + n.have + ' in inventory' : '') + (n.id === POINTS ? ' · for the refill' : '') }), h('span', { class: 'sum', text: fill ? fmtMoney(fill.total) : '' })]),
-                v ? h('div', { class: 'verdict' }, [h('i', { style: 'background:' + vColor }), v.pct !== null ? h('span', {}, [h('b', { style: 'color:' + vColor, text: v.text.split(' · ')[0] }), h('span', { class: 'muted', text: ' · ' + v.text.split(' · ')[1] + ' (' + fmtMoney(Math.round(p.avg7)) + ')' })]) : h('span', { class: 'muted', text: 'Price history starts today: a verdict after two days' })]) : null,
-                fill && fill.short > 0 ? h('div', { class: 'msg bad', text: 'Only ' + fill.filled + ' listed at these prices' }) : null,
-                h('table', { class: 'tbl' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'Where' }), h('th', { class: 'r', style: 'width:80px', text: 'Take' }), h('th', { class: 'r', style: 'width:120px', text: 'Each' }), h('th', { class: 'r', style: 'width:130px', text: 'Subtotal' }), h('th', { style: 'width:130px' })])]), h('tbody', {}, rows)]),
-            ]);
-        });
+        const firstOpen = { done: false };
 
-        const held = needs.filter((n) => n.have > 0).map((n) => n.have + ' ' + n.name);
-        const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Window', style: 'margin-top:6px' }, Object.keys(WINDOWS).map((k) => h('button', { type: 'button', 'aria-pressed': String(k === win), onclick: () => ctx.setSettings({ buyWindow: k }), text: WINDOW_LABEL[k] })));
-        const summary = toBuy.map((n) => fmtInt(n.buy) + ' ' + (n.id === POINTS ? 'points' : n.name)).join(' and ');
-        const top = h('div', { class: 'prime num', style: 'grid-template-columns:auto 1fr auto' }, [
-            h('div', {}, [t('lab', 'Buy for'), seg]),
-            h('div', { class: 'd', style: 'padding-left:12px', text: (summary || 'Nothing to buy') + (held.length ? ' · you have ' + held.join(', ') : '') + ' · cheapest first across the Item Market, bazaars and the points market' }),
-            h('div', { style: 'text-align:right' }, [t('lab', 'Total'), h('div', { class: 'big', text: total ? fmtMoney(total) : '$0' })]),
+        const rows = [];
+        for (const n of toBuy) {
+            const p = prices[n.id] || {};
+            const listings = Array.isArray(p.listings) ? p.listings : [];
+            const fill = listings.length ? fillCheapest(listings, n.buy, n.id) : null;
+            if (fill) total += fill.total;
+            const days = WINDOWS[win] || 1;
+            const perDay = days > 1 ? Math.round((n.need / days) * 10) / 10 + ' a day' : n.need + ' today';
+            const side = listings.length ? sideLine(listings) : null;
+            rows.push(
+                h('tr', { class: 'ih' }, [
+                    h('td', { colspan: '6' }, [
+                        h('b', { text: n.name + ' × ' + fmtInt(n.buy) }),
+                        h('span', { class: 'muted', text: ' · ' + (n.id === POINTS ? refillWords(n, days) : perDay) + ' · you have ' + fmtInt(n.have) + (fill ? ' · ' + fmtMoney(fill.total) : '') }),
+                        side ? h('span', { class: 'verdict c-good', style: 'margin-left:10px', text: side.text }) : null,
+                    ]),
+                ]),
+            );
+            if (!fill) {
+                rows.push(h('tr', { class: 'sub' }, [h('td', { colspan: '5', class: 'muted', text: p.error ? 'Prices could not load: ' + p.error : ctx.paused ? 'Prices wait while Torn Trading runs' : 'Checking prices…' }), h('td', { class: 'r' }, [openBtn(n.id === POINTS ? pointsMarketUrl() : itemMarketUrl(n.id), false, true)])]));
+                continue;
+            }
+            for (const r of fill.rows) {
+                const primary = !firstOpen.done;
+                firstOpen.done = true;
+                rows.push(
+                    h('tr', { class: 'sub' }, [
+                        h('td', { text: whereText(r) }),
+                        h('td', { text: fmtInt(r.qty) + ' of ' + fmtInt(r.listed) }),
+                        h('td', { class: 'r', text: '$' + fmtInt(r.price) }),
+                        h('td', { class: 'r', text: '$' + fmtInt(r.subtotal) }),
+                        h('td', { class: 'muted', text: checkedText(r, p, now) }),
+                        h('td', { class: 'r' }, [openBtn(r.link, primary)]),
+                    ]),
+                );
+            }
+            if (fill.short > 0) rows.push(h('tr', { class: 'sub' }, [h('td', { colspan: '6', class: 'c-bad', text: 'Only ' + fmtInt(fill.filled) + ' listed at these prices' })]));
+            // The Item Market's cheapest, when the fill didn't need it: a check that bazaars really are cheaper.
+            if (n.id !== POINTS && !fill.rows.some((r) => r.source === SOURCE_ITEM_MARKET)) {
+                const im = listings.filter((l) => l.source === SOURCE_ITEM_MARKET).sort((a, b) => a.price - b.price)[0];
+                if (im) rows.push(h('tr', { class: 'sub' }, [h('td', { class: 'muted', text: 'Item Market, cheapest' }), h('td', { class: 'muted', text: 'not needed' }), h('td', { class: 'r muted', text: '$' + fmtInt(im.price) }), h('td'), h('td', { class: 'muted', text: 'Torn API · ' + agoShort(p.imAt, now) }), h('td', { class: 'r' }, [openBtn(itemMarketUrl(n.id), false, true)])]));
+            }
+        }
+        if (!rows.length) rows.push(h('tr', {}, [h('td', { colspan: '6' }, [h('b', { class: 'w', text: 'Nothing to buy' }), h('span', { class: 'muted', text: ' · what you hold covers the plan’s next ' + WINDOW_LABEL[win].toLowerCase() })])]));
+
+        const listCard = h('div', { class: 'lead' }, [
+            sectionHead('Your list', meta(['the plan’s next ' + (win === 'today' ? 'day' : WINDOW_LABEL[win].toLowerCase()) + ', minus what you hold · cheapest first'])),
+            h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'Where' }), h('th', { style: 'width:120px', text: 'Take' }), h('th', { class: 'r', style: 'width:110px', text: 'Each' }), h('th', { class: 'r', style: 'width:120px', text: 'Total' }), h('th', { style: 'width:130px', text: 'Checked' }), h('th', { style: 'width:70px' })])]), h('tbody', {}, rows)]),
+            h('div', { class: 'note2', text: 'A listing can sell before you get there. Bazaar rows TornW3B hasn’t re-checked in 2 minutes are left out, and so are $1 locked listings.' }),
         ]);
 
-        const now = m.now;
-        const spark = TRACKED.map((id) => {
-            const p = prices[id] || {};
-            const lows = p.lows7 || [];
-            const cheapest = p.listings && p.listings.length ? Math.min(...p.listings.map((l) => l.price)) : null;
-            const v = cheapest && p.avg7 ? priceVerdict(cheapest, p.avg7) : null;
-            const inPlan = toBuy.some((n) => n.id === id);
-            return h('div', { class: 'pr' }, [h('b', { text: itemName(id) }), sparkline(lows, { color: inPlan ? '#efebe2' : '#6c737a' }), h('span', { class: 'r ' + (v && v.pct > 3 ? 'c-warn' : !inPlan ? 'muted' : '') }, [cheapest ? fmtMoney(cheapest) : '—', v && v.pct !== null ? h('span', { class: v.pct < 0 ? 'c-good' : 'muted', text: ' ' + (v.pct >= 0 ? '+' : '−') + Math.abs(v.pct).toFixed(1) + '%' }) : null])]);
+        // Deals: under the lowest price of the last days, whether the plan needs it or you already hold some.
+        const deals = [];
+        let hiddenDeals = 0;
+        const planIds = new Set(needs.map((n) => String(n.id)));
+        for (const id of TRACKED) {
+            const p = prices[id];
+            if (!p || !Array.isArray(p.listings) || !p.listings.length) continue;
+            const best = p.listings.slice().sort((a, b) => a.price - b.price)[0];
+            const low = low7(p);
+            if (!low || !(best.price < low)) continue;
+            if (!show.has(typeOf(id))) {
+                hiddenDeals++;
+                continue;
+            }
+            const pct = (100 * (best.price - low)) / low;
+            const link = linkFor(best, id);
+            deals.push(
+                h('tr', {}, [
+                    h('td', {}, [h('b', { class: 'w', text: itemName(id) }), planIds.has(String(id)) ? null : h('span', { class: 'tag', style: 'margin-left:6px', text: 'not in plan' })]),
+                    h('td', {}, [whereText(best), h('span', { class: 'muted', text: ' · ' + (best.source === SOURCE_BAZAAR ? 'TornW3B ' + agoShort(best.dataAt || p.w3bAt, now) : 'Torn API ' + agoShort(p.imAt, now)) })]),
+                    h('td', { class: 'r', text: '$' + fmtInt(best.price) }),
+                    h('td', { class: 'r c-good', text: '−' + Math.abs(pct).toFixed(1) + '%' }),
+                    h('td', { text: fmtInt(best.qty) }),
+                    h('td', { class: 'r' }, [openBtn(link, false)]),
+                ]),
+            );
+        }
+        const notInPlan = TRACKED.filter((id) => !planIds.has(String(id)) && show.has(typeOf(id)));
+        const cheapestRows = notInPlan.map((id) => {
+            const p = prices[id];
+            const best = p && Array.isArray(p.listings) && p.listings.length ? p.listings.slice().sort((a, b) => a.price - b.price)[0] : null;
+            return h('tr', {}, [h('td', {}, [h('b', { class: 'w', text: itemName(id) })]), h('td', { class: 'muted', text: best ? whereText(best) : 'checking…' }), h('td', { class: 'r', text: best ? '$' + fmtInt(best.price) : '' }), h('td', { class: 'r', style: 'width:70px' }, [best ? openBtn(linkFor(best, id), false, true) : null])]);
         });
-        const notInPlan = [ECSTASY, EDVD, CANDY_KISSES, FHC].filter((id) => !toBuy.some((n) => n.id === id)).map(itemName);
+        const dealsCard = h('div', {}, [
+            sectionHead('Deals', meta(['under the lowest price of the last days · worth buying ahead, even if you hold some'])),
+            deals.length
+                ? h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:170px', text: 'Item' }), h('th', { text: 'Where' }), h('th', { class: 'r', style: 'width:110px', text: 'Price' }), h('th', { class: 'r', style: 'width:110px', text: 'vs the low' }), h('th', { style: 'width:70px', text: 'Listed' }), h('th', { style: 'width:70px' })])]), h('tbody', {}, deals)])
+                : h('p', { class: 'muted', style: 'margin:0', text: 'Nothing under its recent low right now. Deals need two days of prices: they show here as soon as one appears.' }),
+            hiddenDeals ? h('div', { class: 'note2', text: hiddenDeals + ' deal' + (hiddenDeals === 1 ? '' : 's') + ' hidden by your ticks.' }) : null,
+            cheapestRows.length ? h('details', { class: 'dis', style: 'margin-top:12px' }, [h('summary', { text: 'Not in your plan · the cheapest of each' }), h('table', { class: 'tbl num', style: 'margin-top:6px' }, [h('tbody', {}, cheapestRows)])]) : null,
+        ]);
+
+        // Pane: 7-day prices, what you hold, where prices come from.
+        const spark = TRACKED.filter((id) => show.has(typeOf(id))).map((id) => {
+            const p = prices[id] || {};
+            const cheapest = p.listings && p.listings.length ? Math.min(...p.listings.map((l) => l.price)) : null;
+            const pct = cheapest && p.avg7 ? (100 * (cheapest - p.avg7)) / p.avg7 : null;
+            return h('tr', {}, [h('td', {}, [h('b', { class: 'w', text: itemName(id) })]), h('td', { style: 'width:96px' }, [sparkline(p.lows7 || [], { w: 90, h: 22, color: planIds.has(String(id)) ? '#efebe2' : '#6c737a' })]), h('td', { class: 'r', text: cheapest ? '$' + fmtInt(cheapest) : '—' }), h('td', { class: 'r ' + (pct !== null && pct < -1 ? 'c-good' : 'muted'), text: pct === null ? '' : (pct >= 0 ? '+' : '−') + Math.abs(pct).toFixed(1) + '%' })]);
+        });
+        const heldIds = [...new Set([XANAX, POINTS, ECSTASY, EDVD, CANDY_KISSES, FHC, MUNSTER].map(String))];
+        const held = heldIds.map((id) => [id === POINTS ? 'Points' : itemName(Number(id)), Number(inv[id === POINTS ? POINTS : Number(id)]) || 0]);
         const im = Object.values(prices).map((p) => p.imAt || 0);
         const bz = Object.values(prices).map((p) => p.w3bAt || 0);
         const pane = [
-            h('div', {}, [sectionHead('7-day prices', meta(['lowest listing we saw each day'])), h('div', { class: 'num' }, spark)]),
-            notInPlan.length ? h('div', {}, [sectionHead('Not in your plan', null, null, 'h3'), h('details', { class: 'dis' }, [h('summary', { text: notInPlan.join(', ') }), h('p', { class: 'muted', style: 'margin:6px 0 0;font-size:12px', text: 'Your plan doesn’t use them. Pick a jump in Plan and they show here with sellers.' })])]) : null,
-            h('div', {}, [sectionHead('Where prices come from', null, null, 'h3'), h('dl', { class: 'kv' }, [h('dt', { text: 'Item Market' }), h('dd', { text: 'Torn API · ' + agoText(Math.max(0, ...im), now) }), h('dt', { text: 'Points market' }), h('dd', { text: 'Torn API · ' + agoText(prices[POINTS] && prices[POINTS].imAt, now) }), h('dt', { text: 'Bazaars' }), h('dd', {}, [h('a', { href: W3B_SITE_URL, target: '_blank', rel: 'noopener', text: 'TornW3B' }), ' · ' + agoText(Math.max(0, ...bz), now)])])]),
+            h('div', {}, [sectionHead('7-day prices', meta(['lowest each day']), null, 'h3'), h('table', { class: 'tbl num' }, [h('tbody', {}, spark)])]),
+            h('div', {}, [sectionHead('You hold', null, null, 'h3'), h('dl', { class: 'facts num' }, held.flatMap(([name, n]) => [h('dt', { text: name }), h('dd', { text: fmtInt(n) })]))]),
+            h('div', {}, [
+                sectionHead('Prices from', null, null, 'h3'),
+                h('dl', { class: 'facts num' }, [h('dt', { text: 'Item Market' }), h('dd', { text: 'Torn API · ' + agoShort(Math.max(0, ...im), now) }), h('dt', { text: 'Points market' }), h('dd', { text: 'Torn API · ' + agoShort(prices[POINTS] && prices[POINTS].imAt, now) }), h('dt', { text: 'Bazaars' }), h('dd', {}, [s.w3b === false ? 'off in Settings' : h('a', { href: W3B_SITE_URL, target: '_blank', rel: 'noopener', text: 'TornW3B' }), s.w3b === false ? '' : ' · ' + agoShort(Math.max(0, ...bz), now)])]),
+                h('div', { class: 'note2', text: 'Read at most every 5 min while this tab is open. Bazaar rows older than 2 min are hidden.' }),
+            ]),
         ];
-        return { main: [top, h('div', { class: 'items' }, blocks), h('p', { class: 'muted', style: 'margin:0;font-size:12px', text: 'A listing can sell before you get there. The list checks again when you come back to this tab.' })], pane };
+
+        const summary = toBuy.map((n) => fmtInt(n.buy) + ' ' + (n.id === POINTS ? 'points' : n.name)).join(' + ');
+        const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Buy for' }, Object.keys(WINDOWS).map((k) => h('button', { type: 'button', 'aria-pressed': String(k === win), onclick: () => ctx.setSettings({ buyWindow: k }), text: WINDOW_LABEL[k] })));
+        const ticks = h(
+            'div',
+            { class: 'ticks', role: 'group', 'aria-label': 'Show' },
+            BUY_TYPES.map(([k, label]) =>
+                h('button', { type: 'button', class: 'tk', 'aria-pressed': String(show.has(k)), onclick: () => { const next = new Set(show); if (next.has(k)) next.delete(k); else next.add(k); ctx.setSettings({ buyTypes: [...next] }); } }, [h('i'), label]),
+            ),
+        );
+        const ctl = [t('lab', 'Buy for'), seg, h('span', { class: 'muted' }, [summary ? summary + ' · ' : 'Nothing to buy · ', h('b', { class: 'white', text: fmtMoney(total) })]), h('span', { class: 'sep' }), t('lab', 'Show'), ticks];
+        const newest = Math.max(0, ...Object.values(prices).map((p) => p.at || 0));
+        return { ctl: [ctl], upd: newest ? 'prices ' + agoShort(newest, now) + ' ago' : 'prices load now', main: [listCard, dealsCard], pane };
+    }
+
+    function refillWords() {
+        return REFILL_POINTS + ' a day for the refill';
     }
 
     /* ===== src/ui/app/progress.js ===== */
     /*
-     * Progress (mockups/N-progress.html): stats over time, gained against the
-     * plan each day (TrainingPeaks colours), the gyms ahead; this week in the pane.
+     * Progress (mockups/round3/V-progress.html): one question, "am I on the
+     * line?". Total stats against the plan's line, one chart per stat on its own
+     * scale, gained against plan each day, and the last trains (what the plan
+     * said, what Torn showed). Before any history: the planned line and today,
+     * never a "come back tomorrow" paragraph (owner).
      */
 
 
@@ -6272,8 +7493,11 @@
 
 
 
-    const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const dayLabel = (d) => new Date(d).getUTCDate() + ' ' + MONTH_SHORT[new Date(d).getUTCMonth()];
+
+
+
+
+    const dayLabel = (d) => new Date(d).getUTCDate() + ' ' + MONTH_NAMES[new Date(d).getUTCMonth()];
 
     /** Plan-vs-actual colour: green within ±20%, yellow 50–79% or 121–150%, red further off. */
     function planColor(ratio) {
@@ -6282,117 +7506,267 @@
         return 'bad';
     }
 
-    const PC_HEX = { good: '#9bdc8a', warn: '#e8a33d', bad: '#ff6b5e' };
+    /** Days from the plan's start to show (14, 30 or all), with the plan's cumulative line under them. */
+    function seriesFor(m, ctx, range) {
+        const hist = ctx.history || {};
+        const today = tornDayStart(m.now);
+        const line = ctx.planLine && ctx.planLine.start <= today ? ctx.planLine : null;
+        let days = Object.keys(hist).map(Number).filter((d) => d <= today).sort((a, b) => a - b);
+        if (line) days = days.filter((d) => d >= line.start);
+        if (range !== 'all') days = days.slice(-range);
+        if (!days.length || days[days.length - 1] !== today) days.push(today);
+        const actual = days.map((d) => (d === today ? m.total : hist[d] ? hist[d].total : null));
+        const first = days[0];
+        // The plan line: from the day it was set; before any history, the line from today forward (planned + today).
+        const start = line ? line.start : today;
+        const base = line ? line.total : m.total;
+        const planAt = (d) => {
+            const i = Math.round((d - start) / DAY);
+            if (i < 0) return null;
+            const daily = line ? line.daily : m.compare && m.compare[ctx.plan.strategy] ? m.compare[ctx.plan.strategy].daily : [];
+            return i === 0 ? base : daily[Math.min(i - 1, daily.length - 1)] !== undefined ? base + daily[Math.min(i - 1, daily.length - 1)] : null;
+        };
+        return { days, actual, planAt, first, start, line };
+    }
 
-    function smallMultiple(k, series) {
-        const vals = series.map((s) => s[k]);
+    function totalChart(m, ctx, s) {
+        const onlyToday = s.days.length === 1;
+        // With only today, show the plan's line ahead (planned + today).
+        const ahead = onlyToday ? 14 : 0;
+        const xs = s.days.concat(Array.from({ length: ahead }, (_, i) => s.days[s.days.length - 1] + (i + 1) * DAY));
+        const plan = xs.map((d) => s.planAt(d));
+        const you = s.actual.concat(Array(ahead).fill(null));
+        const lbl = (i) => (onlyToday && i === 0 ? 'today' : dayLabel(xs[i]));
+        const labels = [[0, lbl(0)], [xs.length - 1, lbl(xs.length - 1)]];
+        const vals = plan.concat(you).filter((v) => v !== null);
         const lo = Math.min(...vals);
         const hi = Math.max(...vals);
-        const W = 180;
-        const H = 64;
-        const pts = vals.map((v, i) => ((vals.length === 1 ? 0 : i / (vals.length - 1)) * W).toFixed(1) + ',' + (hi === lo ? H / 2 : H - 2 - ((v - lo) / (hi - lo)) * (H - 4)).toFixed(1));
-        const gained = vals[vals.length - 1] - vals[0];
-        const firstUp = vals.findIndex((v, i) => i > 0 && v > vals[i - 1]);
-        return h('div', { class: 'smc' }, [
-            h('div', { class: 'h' }, [h('b', { class: 's-' + k, text: STAT_LABEL[k] }), h('span', { text: fmtInt(vals[vals.length - 1]) })]),
-            h('svg', { class: 'chart', viewBox: '0 0 ' + W + ' ' + H, 'aria-hidden': 'true' }, [h('polyline', { fill: 'none', stroke: STAT_COLOR[k], 'stroke-width': '2', points: pts.join(' ') })]),
-            h('small', { text: fmtSigned(gained) + (firstUp > 1 ? ' · from ' + dayLabel(series[firstUp].day) : firstUp === 1 ? ' · every day' : '') }),
+        return h('div', {}, [
+            h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('lab', 'Total stats against the plan'), h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), 'you']), h('span', {}, [h('i', { class: 'dash', style: 'color:var(--muted)' }), 'plan'])])]),
+            lineChart(
+                [
+                    { name: 'plan', color: 'var(--muted)', dash: '5 4', width: 1.5, values: plan, label: 'plan' },
+                    { name: 'you', color: 'var(--chalk)', width: 2.5, values: you, label: 'you ' + fmtShort(m.total) },
+                ],
+                { w: 1000, h: 200, left: 50, right: 110, yMin: lo - (hi - lo) * 0.08, yMax: hi + (hi - lo) * 0.08 || hi * 1.01, grid: [lo, hi], xLabels: labels, n: xs.length, today: onlyToday ? 0 : undefined, label: 'Total stats against the plan' },
+            ),
+            onlyToday ? h('div', { class: 'note2', text: 'Your line starts today; the dashed line is where the plan takes you. Each day adds a point.' }) : null,
         ]);
     }
 
-    function renderProgress(m, ctx) {
-        const range = ctx.ui.progressRange || 14;
+    function statCharts(m, ctx, s) {
         const hist = ctx.history || {};
-        const days = Object.keys(hist).map(Number).sort((a, b) => a - b).slice(-range);
-        const series = days.map((d) => ({ day: d, ...hist[d] }));
-        const main = [];
-        const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Range' }, [14, 30, 120].map((n) => h('button', { type: 'button', 'aria-pressed': String(n === range), onclick: () => { ctx.ui.progressRange = n; ctx.rerender(); }, text: n === 120 ? 'All' : n + ' days' })));
-        if (series.length >= 2) {
-            main.push(h('div', {}, [sectionHead('Stats', meta(['last ' + series.length + ' days · ' + fmtInt(series[0].total) + ' → ', h('b', { text: fmtInt(series[series.length - 1].total) }), ' total']), seg), h('div', { class: 'mult num' }, STATS.map((k) => smallMultiple(k, series)))]));
-        } else {
-            main.push(h('div', {}, [sectionHead('Stats', meta(['a line per stat once two days are recorded']), seg), h('p', { class: 'muted', style: 'margin:0', text: 'Pumping Iron records your stats once a day while a Torn or Pumping Iron tab is open. Come back tomorrow for the first line.' })]));
-        }
-
-        // Gained vs plan per day
-        const totals = ctx.dayTotals || {};
-        // Only finished Torn days are judged against the plan; today is still going.
-        const todayStart = Math.floor(m.now / DAY) * DAY;
-        const tdays = Object.keys(totals).map(Number).filter((d) => d < todayStart).sort((a, b) => a - b).slice(-14);
-        if (!tdays.length) main.push(h('div', {}, [sectionHead('Gained vs plan', meta(['per day'])), h('p', { class: 'muted', style: 'margin:0', text: 'Your first full day shows here tomorrow: what you gained against what the plan said.' })]));
-        if (tdays.length) {
-            const W = 780;
-            const H = 110;
-            const colW = Math.min(36, W / tdays.length - 20);
-            const step = W / tdays.length;
-            const max = Math.max(1, ...tdays.map((d) => Math.max(totals[d].gained || 0, totals[d].planned || 0))) * 1.1;
-            const svg = h('svg', { class: 'chart num', viewBox: '0 0 ' + W + ' 132', role: 'img', 'aria-label': 'Stats gained each day against the plan' });
-            svg.appendChild(h('line', { class: 'ax', x1: 0, y1: H, x2: W, y2: H }));
-            let onPlan = 0;
-            const notes = [];
-            tdays.forEach((d, i) => {
-                const x = i * step + (step - colW) / 2;
-                const g = totals[d].gained || 0;
-                const p = totals[d].planned || 0;
-                const ratio = p > 0 ? g / p : 1;
-                const c = planColor(ratio);
-                if (c === 'good') onPlan++;
-                else notes.push(dayLabel(d) + ': ' + Math.round(ratio * 100) + '% of plan');
-                const hg = (g / max) * H;
-                svg.appendChild(h('rect', { x: x.toFixed(1), y: (H - hg).toFixed(1), width: colW.toFixed(1), height: hg.toFixed(1), rx: 2, fill: PC_HEX[c] }));
-                if (p > 0) svg.appendChild(h('line', { x1: (x - 3).toFixed(1), x2: (x + colW + 3).toFixed(1), y1: (H - (p / max) * H).toFixed(1), y2: (H - (p / max) * H).toFixed(1), stroke: '#efebe2', 'stroke-width': 2 }));
-                if (i === 0 || i === tdays.length - 1 || i % 5 === 0) svg.appendChild(h('text', { x: (x + colW / 2).toFixed(1), y: 126, 'text-anchor': 'middle', text: i === tdays.length - 1 ? 'today' : dayLabel(d) }));
-            });
-            const legendEl = h('span', { class: 'right legend' }, [h('span', {}, [h('i', { style: 'background:var(--good)' }), 'within 20%']), h('span', {}, [h('i', { style: 'background:var(--warn)' }), '50–79% or 121–150%']), h('span', {}, [h('i', { style: 'background:var(--bad)' }), 'further off']), h('span', {}, [h('i', { style: 'background:var(--chalk);height:2px;vertical-align:3px' }), 'plan'])]);
-            main.push(h('div', {}, [sectionHead('Gained vs plan', meta(['per day · ', h('b', { text: onPlan + ' of ' + tdays.length + ' on plan' })]), legendEl), svg, notes.length ? h('div', { class: 'sgfoot num' }, notes.slice(-3).map((n) => h('span', { text: n }))) : null]));
-        }
-
-        // Gyms ahead
-        const active = m.state.gymId || 1;
-        const rows = [];
-        let cumE = 0;
-        const perDay = m.energyPerDay || 1620;
-        if (active < GEORGES) {
-            const cur = gymById(active, m.pc.table);
-            rows.push(h('div', { class: 'tlr now' }, [h('i', { class: 'dotc' }), h('b', { text: cur ? cur.name : 'Gym ' + active }), h('span', { class: 'muted', text: bestDots(cur) }), h('span', { class: 'muted', text: m.nextGym && m.nextGym.energyLeft !== null && ctx.gymProgress ? fmtInt(m.nextGym.energyLeft) + ' E to the next' : 'open the gym page once to track progress' }), h('span', { class: 'r', text: 'now' })]));
-            for (let id = active + 1; id <= GEORGES && rows.length < 7; id++) {
-                const g = gymById(id, m.pc.table);
-                const need = id === active + 1 && m.nextGym ? m.nextGym.energyLeft : unlockEnergyAfter(id - 1, m.pc.perks.gymExpMult);
-                cumE += need || 0;
-                rows.push(h('div', { class: 'tlr' + (id === active + 1 ? ' next' : '') }, [h('i', { class: 'dotc' }), h('b', { text: g.name }), h('span', { class: 'muted', text: bestDots(g) }), h('span', { class: 'muted', text: (id === active + 1 ? fmtInt(need) + ' E to go' : '+' + fmtInt(need) + ' E') + ' · ' + fmtMoney(g.cost) }), h('span', { class: 'r', text: 'about ' + Math.max(1, Math.round(cumE / perDay)) + ' days' })]));
-            }
-        } else {
-            rows.push(h('div', { class: 'tlr now' }, [h('i', { class: 'dotc' }), h('b', { text: (gymById(active, m.pc.table) || {}).name || "George's" }), h('span', { class: 'muted', text: 'every ladder gym unlocked' }), h('span'), h('span', { class: 'r', text: 'now' })]));
-        }
-        main.push(h('div', {}, [sectionHead('Gyms', meta(['at ' + fmtInt(perDay) + ' energy a day'])), h('div', { class: 'tl num' }, rows)]));
-
-        // Pane: this week
-        const weekStart = Math.floor(m.now / DAY) * DAY - 6 * DAY;
-        const wk = tdays.filter((d) => d >= weekStart).map((d) => totals[d]);
-        const sum = (k) => wk.reduce((a, x) => a + (x[k] || 0), 0);
-        const g = sum('gained');
-        const p = sum('planned');
-        const pct = p > 0 && wk.length ? Math.round((100 * g) / p) : null;
-        const meter = (label, valText, sub, fillPct, color) => h('div', { class: 'meter' }, [h('span', { text: label }), h('b', {}, [valText, sub ? h('span', { class: 'muted', style: 'font-weight:normal', text: ' ' + sub }) : null]), h('div', { class: 'bar' }, [h('i', { style: 'width:' + Math.max(0, Math.min(100, fillPct)) + '%;background:' + color })])]);
-        const pane = [
-            h('div', {}, [
-                sectionHead('This week', meta([wk.length ? wk.length + ' full day' + (wk.length === 1 ? '' : 's') : 'first full day tomorrow'])),
-                h('div', { class: 'num' }, [
-                    meter('Stats gained', fmtSigned(g), pct !== null ? pct + '% of plan' : '', pct || 0, pct !== null && planColor(pct / 100) === 'good' ? 'var(--good)' : 'var(--warn)'),
-                    meter('Xanax taken', String(sum('xanax')), 'of ' + sum('xanaxPlanned'), sum('xanaxPlanned') ? (100 * sum('xanax')) / sum('xanaxPlanned') : 0, 'var(--chalk)'),
-                    meter('Refills used', String(sum('refills')), 'of ' + wk.length, wk.length ? (100 * sum('refills')) / wk.length : 0, 'var(--chalk)'),
-                ]),
-            ]),
-            h('div', {}, [sectionHead('Gain model', null, null, 'h3'), headsList([ctx.calibration && ctx.calibration.n >= 10 ? { tone: Math.abs(ctx.calibration.errPct) <= 3 ? 'good' : 'warn', text: 'Within ' + Math.max(1, Math.round(Math.abs(ctx.calibration.errPct))) + '% of your last ' + ctx.calibration.n + ' sessions', sub: 'predicted against what your stats did' } : { tone: 'plain', text: 'Checks itself after 10 sessions', sub: 'from stat changes after each train' }])]),
-            h('div', {}, [sectionHead('Totals', null, null, 'h3'), h('dl', { class: 'kv num' }, [h('dt', { text: 'Days recorded' }), h('dd', { text: String(Object.keys(hist).length) }), h('dt', { text: 'Best day' }), h('dd', { text: tdays.length ? fmtSigned(Math.max(...tdays.map((d) => totals[d].gained || 0))) : '—' })])]),
-        ];
-        return { main, pane };
+        const today = tornDayStart(m.now);
+        const trains = {};
+        for (const st of m.steps) for (const [k, n] of Object.entries(st.trains || {})) trains[k] = (trains[k] || 0) + n;
+        const cells = STATS.map((k) => {
+            const vals = s.days.map((d) => (d === today ? m.pc.stats[k] : hist[d] ? hist[d][k] : null));
+            const known = vals.filter((v) => v !== null);
+            const gained = known.length > 1 ? known[known.length - 1] - known[0] : 0;
+            const row = m.statRows.find((r) => r.stat === k);
+            const what = trains[k] ? trains[k] + ' trains today' : row && row.over ? 'over target, skipped' : 'no trains today';
+            // The plan's line for this stat: its share of the plan's gains, over the same days (and 14 ahead on day one).
+            const ahead = s.days.length === 1 ? 14 : 0;
+            const r = s.line ? { perStat: s.line.perStatGain, gained: s.line.daily[s.line.daily.length - 1], daily: s.line.daily, base: s.line.perStat[k] } : m.compare && m.compare[ctx.plan.strategy] ? { ...m.compare[ctx.plan.strategy], base: m.pc.stats[k] } : null;
+            const share = r && r.gained > 0 ? (r.perStat[k] || 0) / r.gained : 0;
+            const planVals = r ? s.days.concat(Array.from({ length: ahead }, (_, i) => s.days[s.days.length - 1] + (i + 1) * DAY)).map((d) => {
+                const i = Math.round((d - s.start) / DAY);
+                return i < 0 ? null : r.base + (i === 0 ? 0 : (r.daily[Math.min(i - 1, r.daily.length - 1)] || 0) * share);
+            }) : [];
+            const youVals = vals.concat(Array(ahead).fill(null));
+            const all = known.concat(planVals.filter((v) => v !== null));
+            const lo = Math.min(...all);
+            const hi = Math.max(...all);
+            const series = [];
+            if (share > 0) series.push({ name: 'plan', color: 'var(--muted)', dash: '5 4', width: 1.2, values: planVals, label: false });
+            series.push({ name: k, color: STAT_COLOR[k], width: 2, values: youVals.length > 1 ? youVals : [youVals[0], youVals[0]], label: false });
+            return h('div', {}, [
+                h('div', { class: 't' }, [h('b', { class: 's-' + k, text: STAT_LABEL[k] }), h('span', { text: fmtInt(m.pc.stats[k]) + (gained ? ' · ' + fmtSigned(gained) : '') + ' · ' + what })]),
+                lineChart(series, { w: 460, h: 90, left: 4, right: 4, yMin: lo - (hi - lo || hi * 0.01) * 0.1, yMax: hi + (hi - lo || hi * 0.01) * 0.1, n: youVals.length > 1 ? youVals.length : 2, label: STAT_LABEL[k] + ' over the days shown' }),
+            ]);
+        });
+        return h('div', {}, [h('div', { class: 'lab', style: 'margin-bottom:8px', text: 'Each stat · own scale' }), h('div', { class: 'mult num' }, cells)]);
     }
 
-    function bestDots(g) {
-        if (!g) return '';
-        const best = Math.max(...STATS.map((k) => g.dots[k]));
-        const which = STATS.filter((k) => g.dots[k] === best).map((k) => STAT_LABEL[k]);
-        return best + ' ' + (which.length === 4 ? 'all' : which.join('/'));
+    function dayBars(m, ctx) {
+        const totals = ctx.dayTotals || {};
+        const today = tornDayStart(m.now);
+        const days = Object.keys(totals).map(Number).filter((d) => d <= today).sort((a, b) => a - b).slice(-14);
+        if (!days.includes(today)) days.push(today);
+        const pct = days.map((d) => {
+            const r = d === today ? { gained: m.gainedToday, planned: m.plannedGain } : totals[d];
+            return r && r.planned > 0 ? (100 * (r.gained || 0)) / r.planned : null;
+        });
+        const labels = days.map((d, i) => (d === today ? 'today' : i === 0 || i % 3 === 0 ? dayLabel(d) : ''));
+        const done = days.filter((d) => d < today);
+        const onPlan = done.filter((d) => totals[d] && totals[d].planned > 0 && totals[d].gained / totals[d].planned >= 0.95).length;
+        return h('div', {}, [
+            h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [
+                h('span', {}, [t('lab', 'Gained against plan, each day'), done.length ? h('span', { class: 'muted', style: 'margin-left:10px;font-size:12px', text: onPlan + ' of ' + done.length + ' days on plan' }) : null]),
+                h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--good)' }), 'on plan']), h('span', {}, [h('i', { style: 'background:var(--spd)' }), '75–95%']), h('span', {}, [h('i', { style: 'background:var(--bad)' }), 'under 75%']), h('span', {}, [h('i', { style: 'background:var(--line2)' }), 'today so far'])]),
+            ]),
+            planBars(pct, labels, { w: 1000, h: 110, partial: days.length - 1, label: 'Stats gained each day as a share of the plan' }),
+        ]);
+    }
+
+    function lastTrains(m, ctx) {
+        const samples = ((ctx.calibration && ctx.calibration.samples) || []).slice(-6).reverse();
+        const rows = samples.map((x) => {
+            const off = x.predicted > 0 ? (100 * (x.actual - x.predicted)) / x.predicted : 0;
+            return h('tr', {}, [
+                h('td', { class: 't', text: x.at ? clock(x.at, ctx.settings) : '' }),
+                h('td', { class: 's-' + x.stat, text: STAT_LABEL[x.stat] + ' × ' + x.trains }),
+                h('td', { text: x.gym || '' }),
+                h('td', { class: 'r', text: fmtSigned(x.predicted) }),
+                h('td', { class: 'r', text: fmtSigned(x.actual) }),
+                h('td', { class: 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn'), text: fmtPct(off, 1) }),
+            ]);
+        });
+        return h('div', {}, [
+            sectionHead('Last trains', meta(['what the plan said, what Torn showed']), null, 'h3'),
+            rows.length
+                ? h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Train' }), h('th', { text: 'Gym' }), h('th', { class: 'r', text: 'Plan said' }), h('th', { class: 'r', text: 'You got' }), h('th', { class: 'r', style: 'width:80px', text: 'Off by' })])]), h('tbody', {}, rows)])
+                : h('p', { class: 'muted', style: 'margin:0', text: 'Your next train shows here: one stat trained between two reads, with no drug, booster or refill in between, is compared with what the plan said.' }),
+        ]);
+    }
+
+    function weekFacts(m, ctx) {
+        const totals = ctx.dayTotals || {};
+        const today = tornDayStart(m.now);
+        const days = Object.keys(totals).map(Number).filter((d) => d > today - 7 * DAY && d <= today);
+        const sum = (k) => days.reduce((a, d) => a + ((totals[d] && totals[d][k]) || 0), 0);
+        const g = sum('gained');
+        const p = sum('planned');
+        const xp = unitPrice((ctx.prices || {})[XANAX]) || 0;
+        const pp = unitPrice((ctx.prices || {})[POINTS], 300) || 0;
+        const spent = sum('xanax') * xp + sum('refills') * REFILL_POINTS * pp;
+        const first = new Date(today - 6 * DAY);
+        return h('div', {}, [
+            sectionHead('This week', meta([DAY_NAMES[first.getUTCDay()] + '–' + DAY_NAMES[new Date(today).getUTCDay()] + ' · ' + days.length + ' of 7 days']), null, 'h3'),
+            h('dl', { class: 'facts num' }, [
+                h('dt', { text: 'Gained' }),
+                h('dd', {}, [fmtSigned(g) + (p ? ' of ' + fmtShort(p) : ''), h('div', { class: 'mini' }, [h('i', { style: 'width:' + (p ? Math.min(100, (100 * g) / p) : 0).toFixed(0) + '%' })])]),
+                h('dt', { text: 'Xanax' }),
+                h('dd', { text: sum('xanax') + ' of ' + sum('xanaxPlanned') }),
+                h('dt', { text: 'Refills' }),
+                h('dd', { text: sum('refills') + ' of ' + days.length }),
+                h('dt', { text: 'Spent' }),
+                h('dd', { text: xp || pp ? 'about ' + fmtMoney(spent) : '—' }),
+            ]),
+        ]);
+    }
+
+    function budgetFacts(m, ctx, s) {
+        const days = ctx.settings.horizonDays || 30;
+        const budget = ctx.settings.budget || 0;
+        const line = s.line;
+        const dayN = line ? Math.min(days, Math.floor((tornDayStart(m.now) - line.start) / DAY) + 1) : 1;
+        const perDay = line ? line.cost / days : m.spend ? m.spend.perDay : 0;
+        const spent = perDay * dayN;
+        return h('div', {}, [
+            sectionHead('Budget', meta([fmtMoney(budget) + ' for ' + days + ' days']), null, 'h3'),
+            h('dl', { class: 'facts num' }, [
+                h('dt', { text: 'At the plan’s pace' }),
+                h('dd', {}, ['about ' + fmtMoney(spent) + ' · day ' + dayN + ' of ' + days, h('div', { class: 'mini' }, [h('i', { style: 'width:' + (budget ? Math.min(100, (100 * spent) / budget) : 0).toFixed(0) + '%;background:var(--muted)' })])]),
+                h('dt', { text: 'On pace for' }),
+                h('dd', { text: fmtMoney(perDay * days) }),
+                m.spend && m.spend.cash !== null ? h('dt', { text: 'Cash on hand' }) : null,
+                m.spend && m.spend.cash !== null ? h('dd', { text: fmtMoney(m.spend.cash) + (m.spend.lastsDays !== null ? ' · lasts ~' + Math.round(m.spend.lastsDays) + ' days' : '') }) : null,
+            ]),
+        ]);
+    }
+
+    /** The stat furthest behind the build, how far, and when it gets there at the recent pace. */
+    function buildFacts(m, ctx, s) {
+        const behind = m.statRows.filter((r) => !r.over && r.gap > 0).sort((a, b) => b.target - b.share - (a.target - a.share))[0];
+        const hist = ctx.history || {};
+        const firstDay = s.days.find((d) => hist[d]);
+        const pace = firstDay !== undefined && behind ? (m.pc.stats[behind.stat] - hist[firstDay][behind.stat]) / Math.max(1, (tornDayStart(m.now) - firstDay) / DAY) : 0;
+        return h('div', {}, [
+            sectionHead('Build', meta([m.build.name]), null, 'h3'),
+            behind
+                ? h('dl', { class: 'facts num' }, [
+                      h('dt', { text: STAT_LABEL[behind.stat] + ' share' }),
+                      h('dd', {}, [(behind.share * 100).toFixed(1) + '% of ' + (behind.target * 100).toFixed(1) + '%', h('div', { class: 'mini' }, [h('i', { style: 'width:' + Math.min(100, (100 * behind.share) / behind.target).toFixed(0) + '%;background:' + STAT_COLOR[behind.stat] })])]),
+                      h('dt', { text: 'To go' }),
+                      h('dd', { text: '+' + fmtShort(behind.gap) }),
+                      h('dt', { text: 'At this pace' }),
+                      h('dd', { text: pace > 0 ? 'about ' + Math.max(1, Math.round(behind.gap / pace)) + ' days' : m.reachedDay !== null && m.reachedDay !== undefined ? 'about ' + m.reachedDay + ' days (plan)' : 'more than 30 days' }),
+                  ])
+                : h('p', { class: 'muted', style: 'margin:0', text: 'On build: every stat at or over its share.' }),
+        ]);
+    }
+
+    /** Round-number milestones ahead for the stat the plan trains most, and the total. */
+    function milestones(m, ctx) {
+        const r = ctx.compare && ctx.compare[ctx.plan.strategy];
+        if (!r) return null;
+        const days = ctx.settings.horizonDays || 30;
+        const out = [];
+        const main = STATS.filter((k) => r.perStat && r.perStat[k] > 0).sort((a, b) => r.perStat[b] - r.perStat[a])[0];
+        const when = (target, cur, daily) => {
+            const i = daily.findIndex((v) => cur + v >= target);
+            return i < 0 ? null : i + 1;
+        };
+        const inDays = (d) => 'in ~' + d + ' day' + (d === 1 ? '' : 's');
+        const step = (v) => Math.pow(10, Math.floor(Math.log10(Math.max(10, v))));
+        const total = m.total;
+        const tStep = step(total) / 2;
+        const tTarget = Math.ceil((total + 1) / tStep) * tStep;
+        const tDay = when(tTarget, total, r.daily);
+        if (tDay) out.push([fmtShort(tTarget) + ' total', inDays(tDay)]);
+        if (main) {
+            const cur = m.pc.stats[main];
+            const share = r.perStat[main] / Math.max(1, r.gained);
+            const daily = r.daily.map((v) => v * share);
+            const st = step(cur);
+            for (const target of [Math.ceil((cur + 1) / st) * st, Math.ceil((cur + 1) / st) * st + st]) {
+                const d = when(target, cur, daily);
+                if (d) out.push([STAT_LABEL[main] + ' ' + fmtShort(target), inDays(d)]);
+            }
+        }
+        if (m.nextGym && m.nextGym.gym) out.push([m.nextGym.gym.name, m.nextGym.known ? 'in ~' + Math.max(1, Math.round(m.nextGym.days)) + ' days' : 'open the gym page once to track it']);
+        if (!out.length) return null;
+        return h('div', {}, [sectionHead('Next milestones', meta(['at the plan’s pace, ' + days + ' days']), null, 'h3'), h('dl', { class: 'facts num' }, out.flatMap(([a, b]) => [h('dt', { text: a }), h('dd', { text: b })]))]);
+    }
+
+    function gymFacts(m) {
+        const top = Math.max(0, ...m.pc.unlocked.filter((id) => id <= GEORGES));
+        const specs = (m.pc.table || GYMS).filter((g) => g.id > GEORGES);
+        const lines = [h('dt', { text: 'Ladder' }), h('dd', { text: top >= GEORGES ? 'George’s ✓ (all ' + GEORGES + ')' : ((gymById(top, m.pc.table) || {}).name || 'gym ' + top) + ' · ' + (GEORGES - top) + ' to go' })];
+        for (const g of specs) {
+            const have = m.pc.unlocked.includes(g.id);
+            const acc = gymAccess(g, m.pc.stats);
+            if (!have && top < GEORGES) continue;
+            lines.push(h('dt', { text: g.name }), h('dd', { text: have && acc.ok ? '✓ open to you' : acc.reason || 'not unlocked' }));
+        }
+        return h('div', {}, [sectionHead('Gyms', null, null, 'h3'), h('dl', { class: 'facts num' }, lines)]);
+    }
+
+    function renderProgress(m, ctx) {
+        const rangeKey = ctx.ui.progressRange || 14;
+        const s = seriesFor(m, ctx, rangeKey === 'all' ? 'all' : rangeKey);
+        const hist = ctx.history || {};
+        const firstVal = s.days.map((d) => hist[d]).find(Boolean);
+        const gained = firstVal ? m.total - firstVal.total : m.gainedToday;
+        const planned = s.planAt(tornDayStart(m.now));
+        const pct = s.line && planned && planned > s.line.total ? Math.round((100 * (m.total - s.line.total)) / (planned - s.line.total)) : null;
+        const strat = STRATEGIES[ctx.plan.strategy] || STRATEGIES.steady;
+        const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Show' }, [14, 30, 'all'].map((n) => h('button', { type: 'button', 'aria-pressed': String(n === rangeKey), onclick: () => { ctx.ui.progressRange = n; ctx.rerender(); }, text: n === 'all' ? 'All' : n + ' days' })));
+        const ctl = [
+            t('lab', 'Show'),
+            seg,
+            h('span', { class: 'muted', text: (s.line ? 'since ' + dayLabel(s.line.start) : 'from today') + ' · plan: ' + strat.short + ' · ' + m.build.name }),
+            h('span', { class: 'grow' }),
+            h('span', { class: pct === null || pct >= 95 ? 'c-good' : 'c-warn' }, [h('b', { text: fmtSigned(gained) }), ' gained' + (pct !== null ? ' · ' + pct + '% of plan' : '')]),
+        ];
+        const lead = totalChart(m, ctx, s);
+        lead.classList.add('lead');
+        return {
+            ctl: [ctl],
+            main: [lead, statCharts(m, ctx, s), dayBars(m, ctx), lastTrains(m, ctx)],
+            pane: [weekFacts(m, ctx), budgetFacts(m, ctx, s), buildFacts(m, ctx, s), milestones(m, ctx), gymFacts(m)].filter(Boolean),
+        };
     }
 
     /* ===== src/ui/mask.js ===== */
@@ -6837,12 +8211,438 @@
         return out;
     }
 
+    /* ===== src/core/eye/bands.js ===== */
+    /*
+     * Torn Eye's colour bands (user-set in the Torn Eye tab; ENGINE-SPEC §10):
+     * Stomp, Good, Tough, Can't win, or No data. Never "FF".
+     */
+
+    const BAND_ORDER = ['stomp', 'good', 'tough', 'cant', 'none'];
+    const BAND_WORDS = { stomp: 'Stomp', good: 'Good', tough: 'Tough', cant: "Can't win", none: 'No data' };
+    const BAND_COLORS = { stomp: '#3fbf5a', good: '#a6e08a', tough: '#f0a040', cant: '#ff5a4e', none: '#6c737a' };
+    const DEFAULT_BAND_LIMITS = { stomp: { win: 99, keep: 75 }, good: { win: 90, keep: 40 }, tough: { win: 60, keep: 0 } };
+
+    /**
+     * @param {object|null} f - forecast() output (pWin 0..1, keep 0..1)
+     * @param {object} [limits] - {stomp:{win,keep}, good:{win,keep}, tough:{win}} in percent
+     */
+    function bandOf(f, limits = DEFAULT_BAND_LIMITS) {
+        if (!f || !Number.isFinite(f.pWin)) return 'none';
+        const win = f.pWin * 100;
+        const keep = (f.keep || 0) * 100;
+        const L = { ...DEFAULT_BAND_LIMITS, ...(limits || {}) };
+        if (win >= L.stomp.win && keep >= L.stomp.keep) return 'stomp';
+        if (win >= L.good.win && keep >= L.good.keep) return 'good';
+        if (win >= L.tough.win) return 'tough';
+        return 'cant';
+    }
+
+    /** "win 96% · keep ~62% · 2.80 respect" (no "~" when the stats are exact). */
+    function chipFigures(f, est, respect) {
+        if (!f) return 'no estimate yet';
+        const parts = ['win ' + Math.round(f.pWin * 100) + '%'];
+        if (f.pWin >= 0.05 && f.keep !== null && f.keep !== undefined) parts.push('keep ' + (est && est.confidence === 'exact' ? '' : '~') + Math.round(f.keep * 100) + '%');
+        if (f.pWin < 0.05 && est && est.confidence === 'rough') parts.push('rough estimate');
+        else if (respect) parts.push(respect.toFixed(2) + ' respect');
+        return parts.join(' · ');
+    }
+
+    /* ===== src/core/zip.js ===== */
+    /*
+     * A tiny .zip writer and reader for the learning export (Settings ›
+     * Developer). Stored entries only (no compression): the files are small
+     * JSON, and a zip any tool can open needs nothing more. Pure: bytes in,
+     * bytes out; the page does the download.
+     */
+
+    const ZIP_CRC_TABLE = (() => {
+        const t = new Uint32Array(256);
+        for (let n = 0; n < 256; n++) {
+            let c = n;
+            for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+            t[n] = c >>> 0;
+        }
+        return t;
+    })();
+
+    function crc32(bytes) {
+        let c = 0xffffffff;
+        for (let i = 0; i < bytes.length; i++) c = ZIP_CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+        return (c ^ 0xffffffff) >>> 0;
+    }
+
+    function zipDosTime(date) {
+        const d = new Date(date);
+        const time = (d.getUTCHours() << 11) | (d.getUTCMinutes() << 5) | Math.floor(d.getUTCSeconds() / 2);
+        const day = ((d.getUTCFullYear() - 1980) << 9) | ((d.getUTCMonth() + 1) << 5) | d.getUTCDate();
+        return { time, day };
+    }
+
+    /**
+     * @param {{name:string, data:string|Uint8Array}[]} files
+     * @param {number} [at] - the time stamped on every entry (ms)
+     * @returns {Uint8Array}
+     */
+    function makeZip(files, at = Date.now()) {
+        const enc = new TextEncoder();
+        const { time, day } = zipDosTime(at);
+        const locals = [];
+        const centrals = [];
+        let offset = 0;
+        for (const f of files) {
+            const name = enc.encode(f.name);
+            const data = typeof f.data === 'string' ? enc.encode(f.data) : f.data;
+            const crc = crc32(data);
+            const lh = new DataView(new ArrayBuffer(30));
+            lh.setUint32(0, 0x04034b50, true);
+            lh.setUint16(4, 20, true);
+            lh.setUint16(6, 0x0800, true); // UTF-8 names
+            lh.setUint16(8, 0, true); // stored
+            lh.setUint16(10, time, true);
+            lh.setUint16(12, day, true);
+            lh.setUint32(14, crc, true);
+            lh.setUint32(18, data.length, true);
+            lh.setUint32(22, data.length, true);
+            lh.setUint16(26, name.length, true);
+            lh.setUint16(28, 0, true);
+            locals.push(new Uint8Array(lh.buffer), name, data);
+            const ch = new DataView(new ArrayBuffer(46));
+            ch.setUint32(0, 0x02014b50, true);
+            ch.setUint16(4, 20, true);
+            ch.setUint16(6, 20, true);
+            ch.setUint16(8, 0x0800, true);
+            ch.setUint16(10, 0, true);
+            ch.setUint16(12, time, true);
+            ch.setUint16(14, day, true);
+            ch.setUint32(16, crc, true);
+            ch.setUint32(20, data.length, true);
+            ch.setUint32(24, data.length, true);
+            ch.setUint16(28, name.length, true);
+            ch.setUint32(42, offset, true);
+            centrals.push(new Uint8Array(ch.buffer), name);
+            offset += 30 + name.length + data.length;
+        }
+        const cdSize = centrals.reduce((a, b) => a + b.length, 0);
+        const end = new DataView(new ArrayBuffer(22));
+        end.setUint32(0, 0x06054b50, true);
+        end.setUint16(8, files.length, true);
+        end.setUint16(10, files.length, true);
+        end.setUint32(12, cdSize, true);
+        end.setUint32(16, offset, true);
+        const parts = [...locals, ...centrals, new Uint8Array(end.buffer)];
+        const out = new Uint8Array(parts.reduce((a, b) => a + b.length, 0));
+        let p = 0;
+        for (const part of parts) {
+            out.set(part, p);
+            p += part.length;
+        }
+        return out;
+    }
+
+    /**
+     * Read a zip made by makeZip (stored entries). Compressed entries are
+     * skipped and named in `skipped`.
+     * @param {Uint8Array} bytes
+     * @returns {{files:{[name:string]: string}, skipped:string[]}}
+     */
+    function readZip(bytes) {
+        const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const dec = new TextDecoder();
+        let e = bytes.length - 22;
+        while (e >= 0 && dv.getUint32(e, true) !== 0x06054b50) e--;
+        if (e < 0) throw new Error('Not a zip file');
+        const count = dv.getUint16(e + 10, true);
+        let p = dv.getUint32(e + 16, true);
+        const files = {};
+        const skipped = [];
+        for (let i = 0; i < count; i++) {
+            if (dv.getUint32(p, true) !== 0x02014b50) throw new Error('Broken zip directory');
+            const method = dv.getUint16(p + 10, true);
+            const size = dv.getUint32(p + 20, true);
+            const nameLen = dv.getUint16(p + 28, true);
+            const extra = dv.getUint16(p + 30, true);
+            const comment = dv.getUint16(p + 32, true);
+            const local = dv.getUint32(p + 42, true);
+            const name = dec.decode(bytes.subarray(p + 46, p + 46 + nameLen));
+            const lName = dv.getUint16(local + 26, true);
+            const lExtra = dv.getUint16(local + 28, true);
+            const start = local + 30 + lName + lExtra;
+            if (method === 0) files[name] = dec.decode(bytes.subarray(start, start + size));
+            else skipped.push(name);
+            p += 46 + nameLen + extra + comment;
+        }
+        return { files, skipped };
+    }
+
+    /* ===== src/ui/app/developer.js ===== */
+    /*
+     * Settings › Developer (mockups/round3/X-settings.html, Y-developer.html).
+     * Everyone: export the learning data as a .zip (names and ids left out) so
+     * a friend can send theirs. The developer key (owner and Claude) unlocks
+     * the rest: import a friend's export, what the app learned in plain words
+     * and charts, the simulation check, and the raw details. The key is checked
+     * against a SHA-256 in this (public) script, so it only hides views; it
+     * never unlocks data or actions.
+     */
+
+
+
+
+
+
+
+
+
+
+    /** SHA-256 of the developer key (the key itself lives only on the owner's laptop). */
+    const DEV_KEY_SHA256 = '867b596b74aed64f484c60611ac2b3cc03c7ceb45230a140e4be5a8330d660e2';
+
+    async function sha256Hex(text) {
+        const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text)));
+        return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    async function checkDevKey(text) {
+        return (await sha256Hex(String(text || '').trim())) === DEV_KEY_SHA256;
+    }
+
+    function dateShort(t0) {
+        const d = new Date(t0);
+        return d.getUTCDate() + ' ' + MONTH_NAMES[d.getUTCMonth()];
+    }
+
+    /** Download bytes as a file from our own page (never on torn.com). */
+    function download(bytes, name) {
+        const url = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }));
+        const a = h('a', { href: url, download: name, style: 'display:none' });
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+            URL.revokeObjectURL(url);
+            a.remove();
+        }, 1000);
+    }
+
+    function exportZip(ctx) {
+        const d = ctx.dev.data();
+        const files = exportFiles({ samples: d.samples, fights: d.fights, learned: d.learned, version: d.version, now: Date.now() });
+        download(makeZip(files), 'learning-' + new Date().toISOString().slice(0, 10) + '.zip');
+    }
+
+    /** The Settings card (locked: export for everyone, unlock for the owner). */
+    function developerSection(m, ctx) {
+        if (!ctx.dev) return null;
+        const d = ctx.dev.data();
+        const unlocked = ctx.dev.unlocked();
+        const keyIn = h('input', { class: 'inp', type: 'password', autocomplete: 'off', placeholder: 'Developer key', 'aria-label': 'Developer key', style: 'width:220px' });
+        const msg = h('span', { class: 'msg' });
+        const unlock = async () => {
+            msg.textContent = 'Checking…';
+            const ok = await checkDevKey(keyIn.value);
+            keyIn.value = '';
+            if (ok) {
+                ctx.dev.setUnlocked(true);
+                ctx.ui.devPage = true;
+                ctx.rerender();
+            } else {
+                msg.className = 'msg bad';
+                msg.textContent = 'That isn’t the developer key.';
+            }
+        };
+        keyIn.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') unlock();
+        });
+        return h('div', { class: 'sec' }, [
+            h('div', {}, [h('h3', { text: 'Developer' }), h('span', { class: 'state ' + (unlocked ? 'ok' : 'off') }, [h('i'), unlocked ? 'Unlocked' : 'Locked'])]),
+            h('div', { class: 'secbody' }, [
+                h('div', { class: 'row', style: 'flex-wrap:wrap' }, [
+                    h('span', {}, [h('b', { class: 'white', text: 'Learning data' }), h('span', { class: 'muted', text: ' · what Pumping Iron learned from your trains (' + fmtInt(d.samples.length) + ' sessions) and fights (' + fmtInt(d.fights.length) + '). Names and ids are left out.' })]),
+                    h('span', { class: 'grow' }),
+                    h('button', { class: 'btn sm', type: 'button', onclick: () => exportZip(ctx), text: 'Export as .zip' }),
+                ]),
+                unlocked
+                    ? h('div', { class: 'row' }, [h('button', { class: 'btn sm primary', type: 'button', onclick: () => { ctx.ui.devPage = true; ctx.rerender(); }, text: 'Open the Developer page' }), h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.dev.setUnlocked(false); ctx.rerender(); }, text: 'Lock' })])
+                    : h('div', { class: 'row', style: 'flex-wrap:wrap' }, [keyIn, h('button', { class: 'btn sm', type: 'button', onclick: unlock, text: 'Unlock' }), h('span', { class: 'muted', style: 'font-size:12px', text: 'For the owner only: what it learned (graphs, plain words), import a friend’s export, and the raw details.' }), msg]),
+            ]),
+        ]);
+    }
+
+    /* ------------------------------------------------------------- the page */
+
+    /** Simulated sessions from the engine's own formula (the learner's self-check; docs/sims/learn-sim.mjs). */
+    function simSessions({ stat, S, H = 5000, dots = 7.3, E = 10, n = 30, truth = 1, seed = 7 }) {
+        let x = seed;
+        const rnd = () => ((x = (x * 1103515245 + 12345) % 2147483648) / 2147483648);
+        const out = [];
+        let s = S;
+        for (let i = 0; i < n; i++) {
+            const trains = 15 + Math.floor(rnd() * 25);
+            let st = s;
+            let hh = H;
+            let pred = s;
+            for (let k = 0; k < trains; k++) {
+                st += gainPerTrain(stat, st, hh, dots, E, truth);
+                pred += gainPerTrain(stat, pred, hh, dots, E, 1);
+                hh = Math.max(0, hh - E * (0.4 + rnd() * 0.2));
+            }
+            out.push({ at: i, stat, trains, S: s, H, dots, E, perks: 1, predicted: pred - s, actual: st - s });
+            s = st;
+        }
+        return out;
+    }
+
+    /** S1 (the model already right: no change) and S2 (a hidden +4% perk: found), run now in this page. */
+    function selfCheck() {
+        const t0 = performance.now();
+        const s1 = learnGym(simSessions({ stat: 'spd', S: 4.06e6 }), { now: 1e9 });
+        const s2 = learnGym(simSessions({ stat: 'spd', S: 4.06e6, truth: 1.04, seed: 11 }), { now: 1e9 });
+        const ms = performance.now() - t0;
+        return [
+            { name: 'S1 model already right', ok: !s1.accepted, text: s1.accepted ? 'changed (wrong)' : 'no false change' },
+            { name: 'S2 hidden +4% perk', ok: s2.accepted && Math.abs(s2.model.mult.spd - 1.04) < 0.01, text: s2.accepted ? 'found ×' + s2.model.mult.spd.toFixed(3) : 'not found' },
+            { name: 'Time', ok: ms < 500, text: Math.round(ms) + ' ms' },
+        ];
+    }
+
+    function renderDeveloper(m, ctx) {
+        const dev = ctx.dev;
+        const mine = dev.data();
+        const friend = ctx.ui.devImport || null;
+        const src = ctx.ui.devSource === 'friend' && friend ? 'friend' : 'mine';
+        const now = Date.now();
+        // Mine: what the app kept. A friend's export: the learners run on it here (never merged into your model).
+        const set = src === 'friend' ? { samples: friend.samples, fights: friend.fights, learned: { at: now, gym: learnGym(friend.samples, { now }), fights: learnFights(friend.fights, { now }) } } : { samples: mine.samples, fights: mine.fights, learned: mine.learned || { at: now, gym: learnGym(mine.samples, { now }), fights: learnFights(mine.fights, { now }) } };
+        const gym = set.learned.gym;
+        const fights = set.learned.fights;
+
+        const fileIn = h('input', { type: 'file', accept: '.zip,application/zip', style: 'display:none' });
+        const importMsg = h('span', { class: 'msg' });
+        fileIn.addEventListener('change', async () => {
+            const f = fileIn.files && fileIn.files[0];
+            if (!f) return;
+            try {
+                const bytes = new Uint8Array(await f.arrayBuffer());
+                const data = importFiles(readZip(bytes).files);
+                ctx.ui.devImport = { ...data, name: f.name };
+                ctx.ui.devSource = 'friend';
+                ctx.rerender();
+            } catch (e) {
+                importMsg.className = 'msg bad';
+                importMsg.textContent = String((e && e.message) || e);
+            }
+        });
+        const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Data' }, [
+            h('button', { type: 'button', 'aria-pressed': String(src === 'mine'), onclick: () => { ctx.ui.devSource = 'mine'; ctx.rerender(); }, text: 'Mine · ' + mine.samples.length + ' sessions · ' + mine.fights.length + ' fights' }),
+            friend ? h('button', { type: 'button', 'aria-pressed': String(src === 'friend'), onclick: () => { ctx.ui.devSource = 'friend'; ctx.rerender(); }, text: 'Friend’s export · ' + friend.samples.length + ' sessions' }) : null,
+        ]);
+        const ctl = [
+            h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.devPage = false; ctx.rerender(); }, text: '‹ Settings' }),
+            h('b', { class: 'white', text: 'Developer' }),
+            h('span', { class: 'tag good', text: 'Unlocked' }),
+            h('span', { class: 'sep' }),
+            t('lab', 'Data'),
+            seg,
+            h('button', { class: 'btn sm', type: 'button', onclick: () => fileIn.click(), text: 'Import a .zip' }),
+            fileIn,
+            importMsg,
+            h('button', { class: 'btn sm', type: 'button', onclick: () => exportZip(ctx), text: 'Export as .zip' }),
+            h('span', { class: 'grow' }),
+            h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { dev.setUnlocked(false); ctx.ui.devPage = false; ctx.rerender(); }, text: 'Lock' }),
+        ];
+
+        // What it learned, in plain words.
+        const lines = [...describeGym(gym), ...describeFights(fights)];
+        const learned = h('div', { class: 'lead' }, [
+            sectionHead('What it learned', meta(['in plain words · each change was kept only because it predicted newer ' + (src === 'friend' ? 'sessions' : 'trains') + ' better'])),
+            h('ul', { class: 'heads num' }, lines.map((l) => h('li', { class: /now counts|corrected|found|Kept/i.test(l) ? 'g' : null }, [h('i'), h('div', { text: l })]))),
+            gym && gym.reasons && gym.reasons.length ? h('div', { class: 'note2', text: 'Gym: ' + gym.reasons.join(' ') }) : null,
+        ]);
+
+        // Each session: what it said (before) and with the learned model, against what you got.
+        const mult = gym && gym.accepted ? gym.model.mult : null;
+        const pts = [];
+        for (const s of set.samples.slice(-200)) {
+            if (!(s.predicted > 0) || !(s.actual > 0)) continue;
+            pts.push({ x: s.predicted, y: s.actual, c: 'var(--muted)' });
+            if (mult) pts.push({ x: s.predicted * (mult[s.stat] || 1), y: s.actual, c: STAT_COLOR[s.stat] || 'var(--chalk)' });
+        }
+        const scat = h('div', {}, [
+            sectionHead('Each session', meta(['what it said vs what you got' + (mult ? ' · grey before, coloured now' : '')]), null, 'h3'),
+            pts.length ? scatter(pts, { w: 520, h: 240, xl: 'it said', yl: 'you got', label: 'Predicted against actual gain per session' }) : h('p', { class: 'muted', style: 'margin:0', text: 'No sessions yet: one stat trained between two reads, with no drug, booster or refill in between, makes one.' }),
+        ]);
+
+        // Error on newer sessions, over time (from the learning runs).
+        const log = dev.log();
+        const errRows = log.filter((r) => r.gym && r.gym.heldOut && r.gym.heldOut.current !== null);
+        const errChart = h('div', {}, [
+            sectionHead('Error on newer sessions', meta(['over time · before vs the learned model']), null, 'h3'),
+            errRows.length >= 2
+                ? lineChart([{ name: 'before', color: 'var(--muted)', dash: '5 4', values: errRows.map((r) => r.gym.heldOut.current), label: 'before' }, { name: 'now', color: 'var(--chalk)', width: 2.5, values: errRows.map((r) => r.gym.heldOut.learned), label: 'learned' }], { w: 520, h: 160, left: 36, right: 70, xLabels: [[0, dateShort(errRows[0].at)], [errRows.length - 1, dateShort(errRows[errRows.length - 1].at)]], grid: [0, Math.max(...errRows.map((r) => Math.max(r.gym.heldOut.current, r.gym.heldOut.learned || 0)))], label: 'Held-out error over time' })
+                : h('p', { class: 'muted', style: 'margin:0', text: 'Shows after two learning runs with enough newer sessions to test on (' + errRows.length + ' so far).' }),
+        ]);
+
+        // Torn Eye: when it said you'd win, how often you did.
+        const bins = (fights && fights.bins) || [];
+        const eye = h('div', {}, [
+            sectionHead('Torn Eye', meta(['when it said you’d win, how often you did · bar = what happened, line = what it said']), null, 'h3'),
+            bins.some((b) => b.fights)
+                ? bars(bins.filter((b) => b.fights).map((b) => ({ v: 100 * b.won, ref: 100 * b.predicted, c: 'var(--good)', label: Math.round(b.from * 100) + '–' + Math.round(b.to * 100) + '%', top: b.fights + ' fights' })), { w: 520, h: 160, max: 100, label: 'Win rate by predicted win chance' })
+                : h('p', { class: 'muted', style: 'margin:0', text: 'Needs fights with a prediction before them: Torn Eye saves what it said when you open an attack page. ' + set.fights.length + ' so far. Spotting a 10% error takes about 2,000 fights, so this changes slowly by design.' }),
+        ]);
+
+        // Pane: learned values, the self-check, the export, raw.
+        const firstAccepted = (pred) => log.find(pred);
+        const valRows = [];
+        for (const k of STATS) {
+            const v = gym && gym.model ? gym.model.mult[k] : 1;
+            const when = firstAccepted((r) => r.gym && r.gym.accepted && Math.abs((r.gym.mult || {})[k] - 1) > 1e-6);
+            valRows.push(h('tr', {}, [h('td', { text: STAT_LABEL[k] + ' gain ×' }), h('td', { class: 'r', text: (gym && gym.accepted ? v : 1).toFixed(3) }), h('td', { class: 'muted', text: gym && gym.accepted && Math.abs(v - 1) > 1e-6 ? (when ? dateShort(when.at) : 'now') : 'kept' })]));
+        }
+        valRows.push(h('tr', {}, [h('td', { text: 'Above-50M formula' }), h('td', { class: 'r', text: gym && gym.model ? gym.model.mode : 'log10' }), h('td', { class: 'muted', text: gym && gym.accepted && gym.model.mode !== (gym.current && gym.current.mode) ? 'changed' : 'kept' })]));
+        valRows.push(h('tr', {}, [h('td', { text: 'Win odds ×' }), h('td', { class: 'r', text: fights && fights.accepted ? fights.model.winScale.toFixed(2) : '1.00' }), h('td', { class: 'muted', text: fights && fights.winAccepted ? 'changed' : 'kept' })]));
+        valRows.push(h('tr', {}, [h('td', { text: 'HP kept ×' }), h('td', { class: 'r', text: fights && fights.accepted ? fights.model.hpScale.toFixed(2) : '1.00' }), h('td', { class: 'muted', text: fights && fights.hpAccepted ? 'changed' : 'kept' })]));
+
+        const checks = ctx.ui.devChecks || null;
+        const sizes = dev.sizes();
+        const pane = [
+            h('div', {}, [sectionHead('Learned values', meta(['and when they changed']), null, 'h3'), h('table', { class: 'tbl num' }, [h('tbody', {}, valRows)])]),
+            h('div', {}, [
+                sectionHead('Simulation check', meta([checks ? 'run just now' : 'runs here in a moment']), null, 'h3'),
+                checks
+                    ? h('dl', { class: 'facts num' }, checks.flatMap((c) => [h('dt', { text: c.name }), h('dd', { class: c.ok ? 'c-good' : 'c-bad', text: c.text })]))
+                    : h('button', { class: 'btn sm', type: 'button', onclick: () => { ctx.ui.devChecks = selfCheck(); ctx.rerender(); }, text: 'Run S1 + S2' }),
+                h('div', { class: 'note2', text: 'The full suite (S1–S4, fights F1–F3) runs with node --test test/learn.test.js.' }),
+            ]),
+            h('div', {}, [
+                sectionHead('Export', meta(['what the .zip holds']), null, 'h3'),
+                h('dl', { class: 'facts num' }, [h('dt', { text: 'gym-samples.json' }), h('dd', { text: mine.samples.length + ' sessions' }), h('dt', { text: 'fights.json' }), h('dd', { text: mine.fights.length + ' fights' }), h('dt', { text: 'model.json' }), h('dd', { text: 'learned values' }), h('dt', { text: 'meta.json' }), h('dd', { text: 'version, date' })]),
+                h('div', { class: 'note2', text: 'Names and player ids are left out; stats rounded. Nothing is uploaded: the file downloads to this computer.' }),
+            ]),
+            h('div', {}, [
+                h('details', { class: 'dis' }, [
+                    h('summary', { text: 'Raw for Claude · accept log, scores, storage' }),
+                    h('pre', { style: 'white-space:pre-wrap;font-size:11px;color:var(--muted);margin:8px 0 0' }, [
+                        log.slice(-12).map((r) => new Date(r.at).toISOString().slice(0, 16) + ' gym ' + (r.gym.candidates || []).map((c) => c.mode + ' ' + (c.error === null ? '—' : c.error.toFixed(2) + '%')).join(' / ') + ' · held-out ' + (r.gym.heldOut.current === null ? '—' : r.gym.heldOut.current.toFixed(2) + '% → ' + r.gym.heldOut.learned.toFixed(2) + '%') + ' · ' + (r.gym.accepted ? 'ACCEPT' : 'keep') + ' · eye ' + (r.fights.accepted ? 'ACCEPT' : 'keep') + ' (' + r.fights.fights + ')').join('\n') || 'no learning runs yet',
+                        '\n\nstorage: ' + Object.entries(sizes).map(([k, v]) => k + ' ' + fmtInt(v) + ' B').join(' · '),
+                    ]),
+                ]),
+            ]),
+        ];
+        return { ctl: [ctl], main: [learned, scat, errChart, eye], pane };
+    }
+
+    void fmtPct;
+
     /* ===== src/ui/app/settings.js ===== */
     /*
-     * Settings (mockups/P-settings.html): keys, each with Torn's ToS table
-     * where it is entered; FFScouter, TornStats, Discord, overlay, display,
-     * diagnostics; "Your data" in the pane.
+     * Settings (mockups/round3/X-settings.html): keys and data, ordered by use,
+     * each key with Torn's ToS table where it is entered. Discord folds to one
+     * line once it works; Torn Eye's colour bands live here; Developer (export
+     * learning data for everyone, the developer key unlocks the rest);
+     * Diagnostics against Torn Trading's limits (the two take turns).
      */
+
+
 
 
 
@@ -6881,11 +8681,12 @@
 
     /** The Worker's own key (a custom key made for it), stored on the user's Cloudflare Worker. */
     const TOS_WORKER = [
-        ['Data storage', 'On your own Cloudflare Worker (D1 database) until you press Forget'],
-        ['Data sharing', 'Nobody. Only your Worker reads it; pings go to your Discord webhook'],
-        ['Purpose of use', 'Personal: Discord pings for your gym plan'],
-        ['Key storage & sharing', 'Stored / Used only for automation'],
-        ['Key access level', 'Custom (user: bars, cooldowns, refills, travel)'],
+        ['Data storage', 'On your own Cloudflare Worker (D1), the key encrypted, until you press Forget'],
+        ['Data sharing', 'Nobody: pings and replies only you can see (DMs, replies only you see, or your own webhook channel)'],
+        ['Purpose of use', 'Personal gain (gym pings and timers); Competitive advantage (/war, /chain, war pings)'],
+        ['Key storage & sharing', 'Stored / Used only for automation and the commands you type'],
+        ['Key access level', 'Custom (user: basic, bars, cooldowns, refills, travel · faction: members, chain, wars · market: itemmarket)'],
+        ['Other services', '/buy and price watches read TornW3B (weav3r.dev) bazaar prices; no key is sent there. The key is stored encrypted (AES-GCM).'],
     ];
 
     function tosTable(rows) {
@@ -6937,9 +8738,52 @@
         return h('div', { class: 'seg', role: 'group', 'aria-label': aria }, options.map(([v, label]) => h('button', { type: 'button', 'aria-pressed': String(v === value), onclick: () => onpick(v), text: label })));
     }
 
+    /** Link Discord (the bot): a one-time code to type as /link CODE in your server, on a click only. */
+    function linkRow(ctx) {
+        const d = ctx.discord;
+        const box = h('div', { class: 'row', style: 'flex-wrap:wrap' });
+        const code = ctx.ui.linkCode;
+        if (code && code.expiresAt * 1000 > Date.now()) {
+            box.appendChild(h('span', {}, ['Type ', h('b', { class: 'white', text: '/link ' + code.code }), ' in your Discord server · works once, ']));
+            box.appendChild(h('span', { class: 'muted', 'data-cd': String(code.expiresAt * 1000), 'data-cd-prefix': 'expires in ', text: 'expires in 10:00' }));
+        } else {
+            const msg = h('span', { class: 'msg' });
+            box.appendChild(h('button', { class: 'btn sm primary', type: 'button', onclick: async () => { msg.textContent = 'Asking your service…'; try { ctx.ui.linkCode = await d.linkCode(); ctx.rerender(); } catch (e) { msg.className = 'msg bad'; msg.textContent = String((e && e.message) || e); } }, text: 'Get a link code' }));
+            box.appendChild(h('span', { class: 'muted', text: 'DMs from the bot, with Done / Snooze / Skip buttons (the webhook stays the fallback)' }));
+            box.appendChild(msg);
+        }
+        return box;
+    }
+
     function discordSection(ctx) {
         const d = ctx.discord;
         const st = d.state();
+        // Working: one line (owner). Edit opens the full form again.
+        if (st && st.ready && !st.lastError && !ctx.ui.discordEdit) {
+            const msg1 = h('span', { class: 'msg' });
+            const test = async () => {
+                msg1.className = 'msg';
+                msg1.textContent = 'Sending…';
+                try {
+                    await d.test();
+                    msg1.className = 'msg ok';
+                    msg1.textContent = 'Sent. Check Discord.';
+                } catch (e) {
+                    msg1.className = 'msg bad';
+                    msg1.textContent = String((e && e.message) || e);
+                }
+            };
+            return settingsSection('Discord pings', stateTag('ok', 'Working'), [
+                h('div', { class: 'row', style: 'flex-wrap:wrap' }, [
+                    h('span', { class: 'muted num', text: 'Your service · last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') + (st.linked ? ' · linked to the bot' : '') }),
+                    h('span', { class: 'grow' }),
+                    h('button', { class: 'btn sm', type: 'button', onclick: test, text: 'Send a test ping' }),
+                    h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.discordEdit = true; ctx.rerender(); }, text: 'Edit' }),
+                ]),
+                st.bot && !st.linked ? linkRow(ctx) : null,
+                msg1,
+            ]);
+        }
         const tag = !st ? stateTag('off', 'Not set up yet') : st.lastError ? stateTag('bad', 'Last sync failed') : st.ready ? stateTag('ok', 'Connected') : stateTag('bad', 'Needs the webhook and key');
         const f = {};
         const field = (key, label, attrs) => h('label', { class: 'field', style: 'flex:1;min-width:220px' }, [t('lab', label), (f[key] = h('input', { class: 'inp', ...attrs }))]);
@@ -6975,17 +8819,21 @@
         const rows = [
             h('p', { text: 'A small free service on your Cloudflare account checks your timers every minute and tags you, even with your PC off: "Drug cooldown ends in 5 min · Xanax #2, then DEX × 27". Pings never come from a Torn tab.' }),
             h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('base', 'Service address', { placeholder: 'https://pumping-iron.you.workers.dev', value: st ? st.base : '' }), field('invite', 'Invite code (first time)', { placeholder: 'from SETUP.md', ...keyAttrs, class: secretCls })]),
-            h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('hook', 'Discord webhook', { placeholder: st ? 'Saved on your Worker · paste to change' : 'https://discord.com/api/webhooks/…', ...keyAttrs, class: secretCls }), field('key', 'Torn key for the Worker', { placeholder: st ? 'Saved on your Worker · paste to change' : 'Custom: bars, cooldowns, refills, travel', ...keyAttrs, class: secretCls })]),
+            h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('hook', 'Discord webhook', { placeholder: st ? 'Saved on your Worker · paste to change' : 'https://discord.com/api/webhooks/…', ...keyAttrs, class: secretCls }), field('key', 'Torn key for the Worker', { placeholder: st ? 'Saved on your Worker · paste to change' : 'Custom key made for the Worker (see below)', ...keyAttrs, class: secretCls })]),
             h('div', { class: 'row', style: 'max-width:760px' }, [field('discordId', 'Your Discord user id', { placeholder: 'Blank: the one linked in Torn', value: st && st.discordId ? st.discordId : '', inputmode: 'numeric' })]),
             h('div', { class: 'row' }, [h('button', { class: 'btn primary', type: 'button', onclick: connect, text: st ? 'Save' : 'Connect' }), h('button', { class: 'btn', type: 'button', disabled: !st, onclick: () => run(() => d.test(), 'Test ping sent. Check your channel.'), text: 'Send a test ping' }), st ? h('button', { class: 'btn ghost', type: 'button', onclick: () => run(async () => { await d.forget(); ctx.rerender(); }, 'Forgotten here and on your Worker.'), text: 'Forget' }) : null, h('a', { href: d.setupUrl, target: '_blank', rel: 'noopener', text: 'Set it up (10 minutes)' })]),
             msg,
-            st ? h('p', { class: 'num', text: 'Last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') + (st.lastError ? ' · ' + st.lastError : '') + ' · Later: DMs, /plan, Done and Snooze buttons.' }) : null,
+            st ? h('p', { class: 'num', text: 'Last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') + (st.lastError ? ' · ' + st.lastError : '') + (st.bot ? ' · the bot is set up: DMs with Done / Snooze / Skip, /plan, /timers' : '') }) : null,
+            st && st.bot && !st.linked ? linkRow(ctx) : null,
+            st && st.ready ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.discordEdit = false; ctx.rerender(); }, text: 'Done' }) : null,
             h('details', { class: 'dis' }, [h('summary', { text: 'How the Worker’s key is used' }), tosTable(TOS_WORKER), h('p', { style: 'margin-top:6px', text: 'Make a new custom key for the Worker in Torn (API settings). Your main key never goes to the Worker.' })]),
         ];
         return settingsSection('Discord pings', tag, rows);
     }
 
     function renderSettings(m, ctx) {
+        // The Developer page (unlocked only) replaces Settings while it is open.
+        if (ctx.ui.devPage && ctx.dev && ctx.dev.unlocked()) return renderDeveloper(m, ctx);
         const s = ctx.settings;
         const ki = (ctx.statics && ctx.statics.keyInfo) || null;
         const dead = ctx.flags.keyDead;
@@ -7018,11 +8866,28 @@
 
         const discordSec = discordSection(ctx);
 
-        const overlaySec = settingsSection('Overlay on Torn', null, [
+        // Torn Eye's colour bands (moved here from the Torn Eye pane).
+        const limits = { ...DEFAULT_BAND_LIMITS, ...(s.bands || {}) };
+        const bandCell = (band) => h('span', { class: 'band2' }, [h('i', { style: 'background:' + BAND_COLORS[band] }), BAND_WORDS[band]]);
+        const bandInput = (band, key) => h('input', { class: 'inp num', style: 'width:52px', inputmode: 'numeric', value: String(limits[band][key]), 'aria-label': BAND_WORDS[band] + ' ' + key, onchange: (ev) => { const v = Math.max(0, Math.min(100, Number(ev.target.value) || 0)); ctx.setSettings({ bands: { ...limits, [band]: { ...limits[band], [key]: v } } }); } });
+        const bandsSec = settingsSection('Torn Eye colours', h('span', { class: 'state off', text: 'your limits' }), [
+            h('table', { class: 'tbl num', style: 'max-width:520px' }, [
+                h('thead', {}, [h('tr', {}, [h('th', { text: 'Band' }), h('th', { text: 'Win at least' }), h('th', { text: 'Keep HP at least' })])]),
+                h('tbody', {}, [
+                    h('tr', {}, [h('td', {}, [bandCell('stomp')]), h('td', {}, [bandInput('stomp', 'win'), ' %']), h('td', {}, [bandInput('stomp', 'keep'), ' %'])]),
+                    h('tr', {}, [h('td', {}, [bandCell('good')]), h('td', {}, [bandInput('good', 'win'), ' %']), h('td', {}, [bandInput('good', 'keep'), ' %'])]),
+                    h('tr', {}, [h('td', {}, [bandCell('tough')]), h('td', {}, [bandInput('tough', 'win'), ' %']), h('td', { class: 'muted', text: '—' })]),
+                    h('tr', {}, [h('td', {}, [bandCell('cant')]), h('td', { class: 'muted', colspan: '2', text: 'below that' })]),
+                ]),
+            ]),
+        ]);
+
+        const overlaySec = settingsSection('On Torn’s pages', null, [
             h('div', { class: 'opts' }, [settingsCheck('Panel on every page', s.pill, (v) => ctx.setSettings({ pill: v })), settingsCheck('Marks on the gym page', s.gymMarks, (v) => ctx.setSettings({ gymMarks: v })), settingsCheck('Marks on items and markets', s.marketMarks, (v) => ctx.setSettings({ marketMarks: v })), settingsCheck('Torn Eye chips', s.eyeChips, (v) => ctx.setSettings({ eyeChips: v }))]),
             h('p', { class: 'num' }, ['Expand or collapse the panel: ', h('b', { class: 'white', text: 'Alt+`' }), ' · drag it by its bar; it stays in the empty margin beside Torn’s page, left of it first, so NPC Arbitrage keeps the right.']),
             h('div', { class: 'opts' }, [settingsCheck('Bazaar prices from TornW3B', s.w3b !== false, (v) => ctx.setSettings({ w3b: v }))]),
             h('p', {}, ['Bazaar prices come from ', h('a', { href: W3B_SITE_URL, target: '_blank', rel: 'noopener', text: 'TornW3B' }), ' (item ids only, never a key; ', h('a', { href: W3B_TERMS_URL, target: '_blank', rel: 'noopener', text: 'their terms' }), '). Off: Item Market and points market only.']),
+            h('p', {}, [h('b', { class: 'white', text: 'Pumping Iron pauses while Torn Trading (NPC Arbitrage / Torn Bids) runs' }), ': the two never share Torn’s API limit or mark the same pages. While paused it asks Torn nothing, draws nothing on Torn’s pages and shows a warning sign; it starts again by itself within a minute of Torn Trading being turned off.']),
         ]);
 
         const displaySec = settingsSection('Display', null, [
@@ -7030,7 +8895,8 @@
         ]);
 
         const d = ctx.diagnostics();
-        const diagSec = settingsSection('Diagnostics', null, [h('dl', { class: 'kv num', style: 'max-width:460px' }, [h('dt', { text: 'Torn API, last minute' }), h('dd', { text: d.torn + ' of ' + (d.tornMax || 70) }), h('dt', { text: 'FFScouter, last minute' }), h('dd', { text: d.ffs + ' of 60' }), h('dt', { text: 'TornW3B, last minute' }), h('dd', { text: d.w3b + ' of 80' }), h('dt', { text: 'Last error' }), h('dd', { text: d.lastError || 'none' }), h('dt', { text: 'Perk lines not understood' }), h('dd', { text: String(d.unknownPerks) }), h('dt', { text: 'Version' }), h('dd', { text: d.version })])]);
+        const diagSec = h('div', {}, [sectionHead('Diagnostics', null, null, 'h3'), h('dl', { class: 'facts num' }, [h('dt', { text: 'Torn API, last minute' }), h('dd', { text: d.torn + ' of ' + (d.tornMax || 70) }), h('dt', { text: 'FFScouter, last minute' }), h('dd', { text: d.ffs + ' of 60' }), h('dt', { text: 'TornW3B, last minute' }), h('dd', { text: d.w3b + ' of 80' }), h('dt', { text: 'Last error' }), h('dd', { text: d.lastError || 'none' }), h('dt', { text: 'Perk lines not understood' }), h('dd', { text: String(d.unknownPerks) }), h('dt', { text: 'Version' }), h('dd', { text: d.version })])]);
+        const devSec = developerSection(m, ctx);
 
         const dataRows = [
             ['keys', 'Keys', 'Torn, FFScouter, TornStats, Discord service', 'Forget keys'],
@@ -7038,12 +8904,15 @@
             ['progress', 'Progress history', d.historyDays + ' day' + (d.historyDays === 1 ? '' : 's') + ' of stats', 'Clear'],
             ['prices', 'Price history', d.priceItems + ' item' + (d.priceItems === 1 ? '' : 's'), 'Clear'],
             ['eye', 'Torn Eye', d.eyeLine, 'Clear'],
+            ['learning', 'Learning data', d.learnLine, 'Clear'],
         ];
         const pane = [
+            diagSec,
             h('div', {}, [sectionHead('Your data', h('span', { class: 'meta', text: 'all on this computer' })), h('div', { class: 'data num' }, dataRows.map(([g, name, sub, act]) => h('div', { class: 'dr' }, [h('div', {}, [h('b', { text: name }), h('br'), h('small', { text: sub })]), h('button', { class: 'btn sm', type: 'button', onclick: () => ctx.clearGroup(g), text: act })])))]),
             h('div', {}, [sectionHead('What it never does', null, null, 'h3'), headsList([{ tone: 'plain', text: 'Train, buy, use or attack', sub: 'Fill only types a number' }, { tone: 'plain', text: 'Load a Torn page by itself' }, { tone: 'plain', text: 'Ping from a Torn tab', sub: 'only your Discord service does' }])]),
         ];
-        return { main: [h('div', {}, [sectionHead('Settings'), tornSec, ffsSec, tsSec, discordSec, overlaySec, displaySec, diagSec])], pane };
+        // One card per section, ordered by use.
+        return { main: [tornSec, discordSec, ffsSec, tsSec, bandsSec, overlaySec, displaySec, devSec].filter(Boolean), pane };
     }
 
     /* ===== src/ui/app/app.js ===== */
@@ -7149,7 +9018,7 @@
             this.sig = sig;
             const s = ctx.settings;
             const app = h('div', { class: 'app' });
-            app.appendChild(this.topBar());
+            app.appendChild(this.topBar(ctx, m));
             // Taking turns with Torn Trading: say so on top; the plan below keeps moving on the clock from the last read.
             if (ctx.paused) app.appendChild(pausedBanner(m, s));
             let tab = this.tab;
@@ -7171,7 +9040,6 @@
                     return;
                 }
             }
-            if ((tab === 'home' || tab === 'plan') && m && m.ready) app.appendChild(statusStrip(m, s));
             const fn = this.renderers[tab] || this.renderers.home;
             let out;
             try {
@@ -7179,13 +9047,20 @@
             } catch (error) {
                 out = { main: [h('div', { class: 'warnb' }, [h('b', { text: 'This tab hit a problem' }), h('p', { text: String((error && error.message) || error) })])], pane: [] };
             }
+            // A page's control bars (the inputs that drive every number on it), then the status strip where the page wants it.
+            for (const bar of out.ctl || []) if (bar && bar.length) app.appendChild(h('div', { class: 'ctl num' }, bar));
+            if (out.strip && m && m.ready) app.appendChild(statusStrip(m, s));
+            this.updText = out.upd || null;
             app.appendChild(h('div', { class: 'body' }, [h('div', { class: 'main' }, out.main || []), h('div', { class: 'pane' }, out.pane || [])]));
             fill(this.root, [app]);
             this.tick();
         }
 
-        topBar() {
-            const tabs = APP_TABS.filter(([id]) => this.renderers[id]).map(([id, label]) => h('a', { class: 'tab' + (id === this.tab ? ' on' : ''), href: '#' + id, onclick: (e) => { e.preventDefault(); this.go(id); }, text: label }));
+        topBar(ctx = null, m = null) {
+            // Buy shows how many things to buy today; Settings a dot when the key needs you.
+            const buyN = m && m.ready ? (m.buyToday || []).filter((n) => n.buy > 0).length : 0;
+            const badge = (id) => (id === 'buy' && buyN ? h('span', { class: 'n', text: String(buyN) }) : id === 'settings' && ctx && ctx.keyProblem ? h('span', { class: 'dotw', 'aria-label': 'needs you' }) : null);
+            const tabs = APP_TABS.filter(([id]) => this.renderers[id]).map(([id, label]) => h('a', { class: 'tab' + (id === this.tab ? ' on' : ''), href: '#' + id, onclick: (e) => { e.preventDefault(); this.go(id); } }, [label, badge(id)]));
             this.clockEl = h('span', { class: 'upd num' }, [h('i'), (this.clockText = t('', ''))]);
             return h('div', { class: 'top' }, [
                 h('div', { class: 'mark' }, [h('i')]),
@@ -7213,52 +9088,140 @@
                     this.clockText.textContent = 'Paused' + (st ? ' · last read ' + clock(st, settings) : '');
                     return;
                 }
+                if (this.updText) {
+                    this.clockText.textContent = clock(now, settings) + (settings && settings.timeFormat === 'local' ? ' local' : ' Torn time') + ' · ' + this.updText;
+                    return;
+                }
                 this.clockText.textContent = clock(now, settings) + (settings && settings.timeFormat === 'local' ? ' local' : ' Torn time') + (ago !== null ? ' · updated ' + (ago < 90 ? ago + 's' : Math.round(ago / 60) + ' min') + ' ago' : '');
             }
         }
     }
 
-    /* ===== src/core/eye/bands.js ===== */
+    /* ===== src/core/eye/war.js ===== */
     /*
-     * Torn Eye's colour bands (user-set in the Torn Eye tab; ENGINE-SPEC §10):
-     * Stomp, Good, Tough, Can't win, or No data. Never "FF".
+     * War mode (ENGINE-SPEC §12): an enemy faction's members, sorted by what
+     * you can do now. Out early (left hospital before their time: revived or
+     * medded) first, then Okay by band and respect, then Hospital by time out,
+     * then Traveling, then Abroad; a summary line on top.
      */
 
-    const BAND_ORDER = ['stomp', 'good', 'tough', 'cant', 'none'];
-    const BAND_WORDS = { stomp: 'Stomp', good: 'Good', tough: 'Tough', cant: "Can't win", none: 'No data' };
-    const BAND_COLORS = { stomp: '#3fbf5a', good: '#a6e08a', tough: '#f0a040', cant: '#ff5a4e', none: '#6c737a' };
-    const DEFAULT_BAND_LIMITS = { stomp: { win: 99, keep: 75 }, good: { win: 90, keep: 40 }, tough: { win: 60, keep: 0 } };
 
-    /**
-     * @param {object|null} f - forecast() output (pWin 0..1, keep 0..1)
-     * @param {object} [limits] - {stomp:{win,keep}, good:{win,keep}, tough:{win}} in percent
-     */
-    function bandOf(f, limits = DEFAULT_BAND_LIMITS) {
-        if (!f || !Number.isFinite(f.pWin)) return 'none';
-        const win = f.pWin * 100;
-        const keep = (f.keep || 0) * 100;
-        const L = { ...DEFAULT_BAND_LIMITS, ...(limits || {}) };
-        if (win >= L.stomp.win && keep >= L.stomp.keep) return 'stomp';
-        if (win >= L.good.win && keep >= L.good.keep) return 'good';
-        if (win >= L.tough.win) return 'tough';
-        return 'cant';
+
+    function memberState(m) {
+        const st = (m && m.status) || {};
+        const s = String(st.state || st.description || '').toLowerCase();
+        if (s.includes('hospital')) return 'hospital';
+        if (s.includes('travel')) return 'traveling';
+        if (s.includes('abroad')) return 'abroad';
+        if (s.includes('jail') || s.includes('federal')) return 'jail';
+        if (s.includes('fallen')) return 'fallen';
+        return 'okay';
     }
 
-    /** "win 96% · keep ~62% · 2.80 respect" (no "~" when the stats are exact). */
-    function chipFigures(f, est, respect) {
-        if (!f) return 'no estimate yet';
-        const parts = ['win ' + Math.round(f.pWin * 100) + '%'];
-        if (f.pWin >= 0.05 && f.keep !== null && f.keep !== undefined) parts.push('keep ' + (est && est.confidence === 'exact' ? '' : '~') + Math.round(f.keep * 100) + '%');
-        if (f.pWin < 0.05 && est && est.confidence === 'rough') parts.push('rough estimate');
-        else if (respect) parts.push(respect.toFixed(2) + ' respect');
-        return parts.join(' · ');
+    /**
+     * Members that left hospital early: Hospital with a future `until` before,
+     * Okay now, before that time.
+     * @returns {Set<number>}
+     */
+    function outEarly(prevMembers, members, nowS) {
+        const prev = new Map((prevMembers || []).map((m) => [Number(m.id), m]));
+        const out = new Set();
+        for (const m of members || []) {
+            const p = prev.get(Number(m.id));
+            if (!p || memberState(p) !== 'hospital' || memberState(m) !== 'okay') continue;
+            const until = Number(p.status && p.status.until) || 0;
+            if (until > nowS + 30) out.add(Number(m.id));
+        }
+        return out;
+    }
+
+    const STATE_RANK = { early: 0, okay: 1, hospital: 2, traveling: 3, abroad: 4, jail: 5, fallen: 6 };
+
+    /**
+     * @param {object[]} members - /faction/{id}/members rows
+     * @param {object} o - {bands: {id: band}, respect: {id: number}, early: Set, nowS}
+     * @returns {object[]} rows {m, id, state, band, respect, until}
+     */
+    function sortWar(members, { bands = {}, respect = {}, early = new Set(), nowS = 0 } = {}) {
+        const rows = (members || []).map((m) => {
+            const id = Number(m.id);
+            const state = early.has(id) ? 'early' : memberState(m);
+            return { m, id, state, band: bands[id] || 'none', respect: respect[id] || 0, until: Number(m.status && m.status.until) || 0 };
+        });
+        rows.sort((a, b) => {
+            const s = STATE_RANK[a.state] - STATE_RANK[b.state];
+            if (s) return s;
+            if (a.state === 'okay' || a.state === 'early') {
+                const bd = BAND_ORDER.indexOf(a.band) - BAND_ORDER.indexOf(b.band);
+                if (bd) return bd;
+                return b.respect - a.respect;
+            }
+            if (a.state === 'hospital' || a.state === 'traveling') return (a.until || Infinity) - (b.until || Infinity);
+            return a.id - b.id;
+        });
+        return rows;
+    }
+
+    /** "7 attackable now · 0:48 until the next one is out · 3 traveling" as numbers. */
+    function warSummary(rows, nowS) {
+        const attackable = rows.filter((r) => r.state === 'okay' || r.state === 'early').length;
+        const outs = rows.filter((r) => r.state === 'hospital' && r.until > nowS).map((r) => r.until - nowS);
+        return { attackable, nextOutS: outs.length ? Math.min(...outs) : null, traveling: rows.filter((r) => r.state === 'traveling').length, early: rows.filter((r) => r.state === 'early').length };
+    }
+
+    /**
+     * Standard-class flight times in minutes (Torn's travel agency; an airstrip
+     * or business class is faster, so landings are marked as estimates).
+     */
+    const FLIGHT_MIN = {
+        mexico: 26,
+        'cayman islands': 35,
+        canada: 41,
+        hawaii: 134,
+        'united kingdom': 159,
+        argentina: 167,
+        switzerland: 175,
+        japan: 225,
+        china: 242,
+        uae: 271,
+        'united arab emirates': 271,
+        'south africa': 297,
+    };
+
+    /**
+     * Where a traveller is going, from the status line: "Traveling to Mexico",
+     * "Returning to Torn from Mexico", "In Mexico".
+     * @returns {{kind:'to'|'back'|'abroad', place:string, minutes:number|null}|null}
+     */
+    function travelOf(member) {
+        const d = String((member && member.status && member.status.description) || '');
+        let m;
+        const mins = (p) => FLIGHT_MIN[p.toLowerCase()] ?? null;
+        if ((m = d.match(/returning to torn from (.+)$/i))) return { kind: 'back', place: m[1].trim(), minutes: mins(m[1].trim()) };
+        if ((m = d.match(/travel(?:l)?ing to (.+)$/i))) return { kind: 'to', place: m[1].trim(), minutes: mins(m[1].trim()) };
+        if ((m = d.match(/^in (.+)$/i))) return { kind: 'abroad', place: m[1].trim(), minutes: mins(m[1].trim()) };
+        return null;
+    }
+
+    /**
+     * When a traveller lands (ms): from when we first saw this flight plus the
+     * flight time; abroad: "if they fly now". null when unknown.
+     */
+    function landingAt(travel, seenAt, now) {
+        if (!travel || !travel.minutes) return null;
+        if (travel.kind === 'abroad') return now + travel.minutes * 60000;
+        return Math.max(now, (seenAt || now) + travel.minutes * 60000);
     }
 
     /* ===== src/ui/app/eye-tab.js ===== */
     /*
-     * Torn Eye tab (mockups/O-torn-eye.html): targets from FFScouter ranked by
-     * our own fight estimate (easy ↔ respect slider), the colour bands you set,
-     * and where the numbers come from.
+     * Torn Eye tab (mockups/round3/W-eye.html): one question, "who can I hit?".
+     * Three modes: Targets (FFScouter's list ranked by our own fight estimate),
+     * Chain (only Stomp and Good, most respect first, always) and War (everyone
+     * in the enemy faction, coloured by risk: attackable now first, then who's
+     * out of hospital soonest; travellers with where they're going and an
+     * estimated landing). Sorts and tick filters in every mode; the colour
+     * bands live in Settings.
      */
 
 
@@ -7266,6 +9229,32 @@
 
 
 
+
+
+
+
+    const EYE_SORTS = [
+        ['easy', 'Easiest'],
+        ['respect', 'Most respect'],
+        ['keep', 'HP kept'],
+        ['level', 'Level'],
+        ['active', 'Last active'],
+    ];
+
+    const EYE_TICKS = [
+        ['hideCant', 'Hide can’t win'],
+        ['stompOnly', 'Stomp only'],
+        ['keep50', 'Keep over 50% HP'],
+        ['hideHosp', 'Hide hospital'],
+        ['hideTravel', 'Hide traveling'],
+        ['inactive', 'Inactive 14+ days'],
+        ['factionless', 'No faction'],
+        ['notToday', 'Not attacked by me today'],
+        // War shows everyone by default (owner): its own ticks, all off.
+        ['warHideCant', 'Hide can’t win'],
+        ['warHideHosp', 'Hide hospital'],
+        ['warHideTravel', 'Hide traveling'],
+    ];
 
     /** Rank targets: 0 = easiest first (win × HP kept), 1 = most respect you can still win. */
     function rankTargets(rows, slider) {
@@ -7280,8 +9269,42 @@
         return [...rows].sort((a, b) => score(b) - score(a));
     }
 
+    /** Sort by the chosen key (unknown estimates last). */
+    function sortTargets(rows, key) {
+        const val = {
+            easy: (r) => (r.forecast ? r.forecast.pWin * (r.forecast.keep || 0) : -1),
+            respect: (r) => (r.forecast && r.forecast.pWin >= 0.5 ? r.respect || 0 : -1),
+            keep: (r) => (r.forecast ? r.forecast.keep || 0 : -1),
+            level: (r) => -(r.level || 999),
+            active: (r) => -(r.lastAction || Infinity),
+        }[key] || ((r) => (r.forecast ? r.forecast.pWin : -1));
+        return [...rows].sort((a, b) => val(b) - val(a));
+    }
+
+    function stateOf(r, now) {
+        const st = r.status || {};
+        const s = String(st.state || st.description || '').toLowerCase();
+        if ((r.hospitalUntil && r.hospitalUntil > now) || s.includes('hospital')) return 'hospital';
+        if (s.includes('travel') || s.includes('abroad') || s.startsWith('in ')) return 'travel';
+        return 'okay';
+    }
+
+    /** Apply the ticks. */
+    function filterTargets(rows, f, { now, attackedToday = new Set() } = {}) {
+        return rows.filter((r) => {
+            if (f.hideCant && r.band === 'cant') return false;
+            if (f.stompOnly && r.band !== 'stomp') return false;
+            if (f.keep50 && !(r.forecast && r.forecast.keep > 0.5)) return false;
+            const st = stateOf(r, now);
+            if (f.hideHosp && st === 'hospital') return false;
+            if (f.hideTravel && st === 'travel') return false;
+            if (f.notToday && attackedToday.has(Number(r.id))) return false;
+            return true;
+        });
+    }
+
     function bandCell(band) {
-        return h('span', { class: 'band', style: 'color:' + BAND_COLORS[band] }, [h('i', { class: 'dot' }), BAND_WORDS[band]]);
+        return h('span', { class: 'band2' }, [h('i', { style: 'background:' + BAND_COLORS[band] }), BAND_WORDS[band]]);
     }
 
     function ago(ts, now) {
@@ -7290,81 +9313,227 @@
         return d < 1 ? 'today' : d + ' d';
     }
 
+    function statusCell(r, now) {
+        if (r.hospitalUntil && r.hospitalUntil > now) return h('td', { class: 'cdn', text: 'Hospital ' + countdown(r.hospitalUntil - now) });
+        const st = r.status || {};
+        const d = st.description || st.state;
+        if (d && !/^okay$/i.test(d)) return h('td', { class: /hospital/i.test(d) ? 'cdn' : null, text: d });
+        return h('td', { text: 'Okay' });
+    }
+
+    function pct(x) {
+        return x === null || x === undefined ? '—' : Math.round(x * 100) + '%';
+    }
+
+    function attackBtn(id, primary, ghost) {
+        return h('a', { class: 'btn sm' + (primary ? ' primary' : ghost ? ' ghost' : ''), href: attackUrl(id), target: '_blank', rel: 'noopener', text: 'Attack' });
+    }
+
+    function sourceShort(r, now) {
+        const e = r.est;
+        if (!e) return 'no estimate yet';
+        const s = String(e.sourceText || e.source || '');
+        const when = e.at ? ' · ' + ago(e.at, now) : '';
+        if (/spy/i.test(s)) return 'spy' + when;
+        if (/fight/i.test(s)) return 'your fight' + when;
+        if (/ffscouter/i.test(s)) return 'FFScouter' + when;
+        if (/public|rank/i.test(s)) return 'public stats · rough';
+        return s.slice(0, 30);
+    }
+
+    function targetsTable(rows, { now, chain = false }) {
+        const head = chain
+            ? ['Band', 'Player', 'Lvl', 'Respect', 'Win', 'HP kept', 'Status', 'Active', '']
+            : ['Band', 'Player', 'Lvl', 'Win', 'HP kept', 'Respect', 'Status', 'Active', 'Estimate from', ''];
+        const right = chain ? [2, 3, 4, 5, 7] : [2, 3, 4, 5, 7];
+        const body = rows.map((r, i) => {
+            const win = h('td', { class: 'r', text: r.forecast ? pct(r.forecast.pWin) : '—' });
+            const keep = h('td', { class: 'r', text: r.forecast && r.forecast.keep !== null ? (r.est && r.est.confidence === 'exact' ? '' : '~') + pct(r.forecast.keep) : '—' });
+            const resp = h('td', { class: 'r' }, [chain ? h('b', { class: 'white', text: r.respect ? r.respect.toFixed(2) : '—' }) : r.respect ? r.respect.toFixed(2) : '—']);
+            const cells = [h('td', {}, [bandCell(r.band)]), h('td', {}, [h('a', { href: profileUrl(r.id), target: '_blank', rel: 'noopener' }, [h('b', { class: 'w', text: r.name || String(r.id) })])]), h('td', { class: 'r', text: r.level ? String(r.level) : '—' })];
+            if (chain) cells.push(resp, win, keep);
+            else cells.push(win, keep, resp);
+            cells.push(statusCell(r, now), h('td', { class: 'r muted', text: ago(r.lastAction, now) }));
+            if (!chain) cells.push(h('td', { class: 'muted', text: sourceShort(r, now) }));
+            cells.push(h('td', { class: 'r' }, [attackBtn(r.id, i === 0, r.band === 'cant')]));
+            return h('tr', {}, cells);
+        });
+        return h('table', { class: 'tbl num' }, [
+            h('thead', {}, [h('tr', {}, head.map((x, i) => h('th', { class: right.includes(i) ? 'r' : null, style: i === 0 ? 'width:110px' : null, text: x })))]),
+            h('tbody', {}, body),
+        ]);
+    }
+
+    function warTable(rows, { now, seen }) {
+        const nowS = Math.floor(now / 1000);
+        const body = rows.map((w, i) => {
+            const r = w.view || { band: 'none' };
+            const m = w.m;
+            let status;
+            if (w.state === 'okay' || w.state === 'early') status = h('td', { class: 'c-good', text: w.state === 'early' ? 'Out early · attack now' : 'Okay · attack now' });
+            else if (w.state === 'hospital') status = h('td', { class: 'cdn', text: 'Hospital · out in ' + countdown(Math.max(0, (w.until - nowS) * 1000)) });
+            else if (w.state === 'traveling' || w.state === 'abroad') {
+                const tr = travelOf(m);
+                const land = landingAt(tr, seen.get(w.id), now);
+                status = h('td', {}, [
+                    tr ? (tr.kind === 'abroad' ? 'In ' + tr.place + (land ? ' · back ~' + clock(land) + ' if they fly now' : '') : (tr.kind === 'back' ? 'Returning from ' + tr.place : 'Traveling → ' + tr.place) + (land ? ' · lands ~' + clock(land) : '')) : (m.status && m.status.description) || 'Traveling',
+                    land ? h('span', { class: 'muted', text: ' (estimate)' }) : null,
+                ]);
+            } else status = h('td', { class: 'muted', text: (m.status && m.status.description) || w.state });
+            const attackable = w.state === 'okay' || w.state === 'early';
+            return h('tr', {}, [
+                h('td', {}, [bandCell(r.band || 'none')]),
+                h('td', {}, [h('a', { href: profileUrl(w.id), target: '_blank', rel: 'noopener' }, [h('b', { class: 'w', text: m.name || String(w.id) })])]),
+                h('td', { class: 'r', text: m.level ? String(m.level) : '—' }),
+                h('td', { class: 'r', text: r.forecast ? pct(r.forecast.pWin) : '—' }),
+                h('td', { class: 'r', text: r.forecast && r.forecast.keep !== null ? pct(r.forecast.keep) : '—' }),
+                h('td', { class: 'r', text: r.respect ? r.respect.toFixed(2) : '—' }),
+                status,
+                h('td', { class: 'r' }, [attackable || w.state === 'hospital' ? attackBtn(w.id, i === 0 && attackable, r.band === 'cant') : null]),
+            ]);
+        });
+        return h('table', { class: 'tbl num' }, [
+            h('thead', {}, [h('tr', {}, ['Band', 'Player', 'Lvl', 'Win', 'HP kept', 'Respect', 'Status', ''].map((x, i) => h('th', { class: [2, 3, 4, 5].includes(i) ? 'r' : null, style: i === 0 ? 'width:110px' : i === 6 ? 'width:300px' : null, text: x })))]),
+            h('tbody', {}, body),
+        ]);
+    }
+
     function renderEye(m, ctx) {
         const e = ctx.eye;
-        const s = ctx.settings;
-        const f = ctx.ui.eyeFilters || (ctx.ui.eyeFilters = { minLevel: 1, maxLevel: 100, inactive: true, factionless: false, hideCant: true, slider: 50 });
         const now = Date.now();
-        const rowsAll = e.rows();
-        const shown = rankTargets(rowsAll.filter((r) => !(f.hideCant && r.band === 'cant')), f.slider / 100);
-        const hidden = rowsAll.filter((r) => f.hideCant && r.band === 'cant');
+        const ui = ctx.ui;
+        const mode = ui.eyeMode || 'targets';
+        const f = ui.eyeFilters || (ui.eyeFilters = { minLevel: 1, maxLevel: 100, inactive: true, factionless: false, hideCant: true, stompOnly: false, keep50: false, hideHosp: false, hideTravel: false, notToday: false, sort: 'easy' });
         const inputs = {};
-        const refresh = () => {
-            f.minLevel = Math.max(1, Math.min(100, Number(inputs.min.value) || 1));
-            f.maxLevel = Math.max(f.minLevel, Math.min(100, Number(inputs.max.value) || 100));
+        const reload = () => {
+            f.minLevel = Math.max(1, Math.min(100, Number(inputs.min && inputs.min.value) || f.minLevel || 1));
+            f.maxLevel = Math.max(f.minLevel, Math.min(100, Number(inputs.max && inputs.max.value) || f.maxLevel || 100));
             e.load({ minLevel: f.minLevel, maxLevel: f.maxLevel, inactiveOnly: f.inactive ? 1 : 0, factionless: f.factionless ? 1 : null });
         };
-        const check = (label, key, reload) => h('label', { class: 'check' }, [h('input', { type: 'checkbox', checked: f[key], onchange: (ev) => { f[key] = ev.target.checked; if (reload) refresh(); else ctx.rerender(); } }), label]);
-        const filters = h('div', { class: 'filters num' }, [
-            h('label', { class: 'row' }, [t('lab', 'Level'), (inputs.min = h('input', { class: 'inp', inputmode: 'numeric', value: String(f.minLevel), 'aria-label': 'Lowest level', onchange: refresh })), '–', (inputs.max = h('input', { class: 'inp', inputmode: 'numeric', value: String(f.maxLevel), 'aria-label': 'Highest level', onchange: refresh }))]),
-            check('Inactive 14+ days', 'inactive', true),
-            check('No faction', 'factionless', true),
-            check('Hide Can’t win', 'hideCant', false),
-            h('span', { class: 'grow' }),
-            h('label', { class: 'slider' }, ['Easy ', h('input', { type: 'range', min: '0', max: '100', value: String(f.slider), 'aria-label': 'Easy to respect', onchange: (ev) => { f.slider = Number(ev.target.value); ctx.rerender(); } }), ' Respect']),
-        ]);
-        let table;
-        if (!ctx.flags.hasFfs) {
-            table = h('p', { class: 'muted', style: 'margin:0' }, ['Targets come from FFScouter. ', h('a', { href: '#settings', onclick: (ev) => { ev.preventDefault(); ctx.go('settings'); }, text: 'Connect it in Settings' }), '; chips on Torn’s pages work without it (your fights and public stats).']);
-        } else {
-            const body = shown.map((r) =>
-                h('tr', {}, [
-                    h('td', {}, [h('a', { href: profileUrl(r.id), target: '_blank', rel: 'noopener', text: r.name || String(r.id) })]),
-                    h('td', { class: 'r', text: r.level ? String(r.level) : '—' }),
-                    h('td', {}, [bandCell(r.band)]),
-                    h('td', { class: 'r', text: r.forecast ? Math.round(r.forecast.pWin * 100) + '%' : '—' }),
-                    h('td', { class: 'r', text: r.forecast && r.forecast.keep !== null ? (r.est && r.est.confidence === 'exact' ? '' : '~') + Math.round(r.forecast.keep * 100) + '%' : '—' }),
-                    h('td', { class: 'r' }, [h('b', { class: 'w', text: r.respect ? r.respect.toFixed(2) : '—' })]),
-                    h('td', { class: r.hospitalUntil && r.hospitalUntil > now ? 'sthos' : 'stok', text: r.hospitalUntil && r.hospitalUntil > now ? 'Hospital · ' + Math.ceil((r.hospitalUntil - now) / 60000) + ' min' : 'Okay' }),
-                    h('td', { class: 'r muted', text: ago(r.lastAction, now) }),
-                    h('td', { class: 'r' }, [h('a', { class: 'btn sm', href: attackUrl(r.id), target: '_blank', rel: 'noopener', text: 'Attack' })]),
+        const attacks = e.attacks ? e.attacks() : [];
+        const today = tornDayStart(now);
+        const attackedToday = new Set(attacks.filter((a) => (a.ended || 0) * 1000 >= today).map((a) => Number(a.def)));
+
+        // Controls
+        const modeSeg = h('div', { class: 'seg modes', role: 'group', 'aria-label': 'Mode' }, [['targets', 'Targets'], ['chain', 'Chain'], ['war', 'War']].map(([k, label]) => h('button', { type: 'button', 'aria-pressed': String(k === mode), onclick: () => { ui.eyeMode = k; ctx.rerender(); }, text: label })));
+        const bar1 = [modeSeg];
+        if (mode === 'war') {
+            const w = e.war ? e.war.state() : {};
+            let fidIn;
+            bar1.push(
+                t('lab', 'Enemy faction'),
+                (fidIn = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:90px', placeholder: 'faction id', value: w.fid ? String(w.fid) : '' })),
+                h('button', { class: 'btn sm', type: 'button', onclick: () => { const v = Number(String(fidIn.value).replace(/\D/g, '')); if (v && e.war) e.war.watch(v); }, text: w.fid ? 'Watch' : 'Watch' }),
+                w.fid ? h('span', { class: 'muted', text: (w.name || 'faction ' + w.fid) + ' · read every 10 s while open' }) : null,
+            );
+        }
+        bar1.push(h('span', { class: 'sep' }), t('lab', 'Sort'));
+        if (mode === 'chain') bar1.push(h('span', { class: 'muted', text: 'most respect first, always' }));
+        else if (mode === 'war') bar1.push(h('span', { class: 'muted', text: 'attackable now first, then out of hospital soonest' }));
+        else bar1.push(h('div', { class: 'seg', role: 'group', 'aria-label': 'Sort' }, EYE_SORTS.map(([k, label]) => h('button', { type: 'button', 'aria-pressed': String(k === f.sort), onclick: () => { f.sort = k; ctx.rerender(); }, text: label }))));
+        if (mode !== 'war') {
+            bar1.push(h('span', { class: 'sep' }), t('lab', 'Level'), (inputs.min = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:44px', 'aria-label': 'Lowest level', value: String(f.minLevel), onchange: reload })), '–', (inputs.max = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:50px', 'aria-label': 'Highest level', value: String(f.maxLevel), onchange: reload })));
+            if (ctx.flags.hasFfs) bar1.push(h('button', { class: 'btn sm', type: 'button', onclick: reload, text: e.loading() ? 'Loading…' : 'Refresh' }));
+        }
+        const tickKeys = mode === 'war' ? ['warHideCant', 'warHideHosp', 'warHideTravel'] : mode === 'chain' ? ['stompOnly', 'keep50', 'hideHosp', 'hideTravel', 'inactive', 'factionless', 'notToday'] : EYE_TICKS.map(([k]) => k).filter((k) => !k.startsWith('war'));
+        const refetch = new Set(['inactive', 'factionless']);
+        const bar2 = [
+            t('lab', 'Show'),
+            h('div', { class: 'ticks', role: 'group', 'aria-label': 'Show' }, EYE_TICKS.filter(([k]) => tickKeys.includes(k)).map(([k, label]) => h('button', { type: 'button', class: 'tk', 'aria-pressed': String(Boolean(f[k])), onclick: () => { f[k] = !f[k]; if (refetch.has(k) && ctx.flags.hasFfs) reload(); else ctx.rerender(); } }, [h('i'), label]))),
+        ];
+
+        const main = [];
+        const pane = [];
+        const rowsAll = e.rows();
+        // First visit with FFScouter connected: load the targets without a click.
+        if (mode !== 'war' && ctx.flags.hasFfs && !rowsAll.length && !e.loading() && !e.error() && !ui.eyeAutoLoaded) {
+            ui.eyeAutoLoaded = true;
+            setTimeout(reload, 0);
+        }
+
+        if (mode === 'war') {
+            const w = e.war ? e.war.state() : { members: [] };
+            const views = new Map((w.members || []).map((mm) => [Number(mm.id), e.view(Number(mm.id), { level: mm.level, name: mm.name }, { war: true })]));
+            const bands = {};
+            const respect = {};
+            for (const [id, v] of views) {
+                if (v) {
+                    bands[id] = v.band;
+                    respect[id] = v.respect || 0;
+                }
+            }
+            let rows = sortWar(w.members || [], { bands, respect, early: w.early || new Set(), nowS: Math.floor(now / 1000) }).map((r) => ({ ...r, view: views.get(r.id) }));
+            rows = rows.filter((r) => r.state !== 'fallen' && !(f.warHideCant && r.band === 'cant') && !(f.warHideHosp && r.state === 'hospital') && !(f.warHideTravel && (r.state === 'traveling' || r.state === 'abroad')));
+            const sum = warSummary(rows, Math.floor(now / 1000));
+            main.push(
+                h('div', { class: 'lead', 'data-mode': 'war' }, [
+                    sectionHead('War' + (w.name ? ' · ' + w.name : ''), meta(['everyone, coloured by how the fight goes for you · attackable now first, then who’s out soonest'])),
+                    w.fid ? (rows.length ? warTable(rows, { now, seen: w.seen || new Map() }) : h('p', { class: 'muted', style: 'margin:0', text: w.loading ? 'Reading the faction…' : w.error || 'No members to show.' })) : h('p', { class: 'muted', style: 'margin:0', text: 'Type the enemy faction’s id and press Watch. On Torn’s own war page the chips and the order show by themselves.' }),
+                    h('div', { class: 'note2', text: 'War shows everyone, even barely beatable: the colour tells you the risk. Landing times are estimated from when we saw them leave and the standard flight time.' }),
                 ]),
             );
-            table = h('table', { class: 'tbl num' }, [
-                h('thead', {}, [h('tr', {}, ['Player', 'Level', 'Band', 'Win', 'HP kept', 'Respect', 'Status', 'Last active', ''].map((x, i) => h('th', { class: [1, 3, 4, 5, 7].includes(i) ? 'r' : null, text: x })))]),
-                h('tbody', {}, body.length ? body : [h('tr', {}, [h('td', { colspan: '9', class: 'muted', text: e.loading() ? 'Asking FFScouter for targets…' : e.error() || 'No targets yet: press Refresh.' })])]),
-                h('tfoot', {}, [h('tr', {}, [h('td', { colspan: '9' }, [hidden.length ? 'Hidden: ' + hidden.length + ' Can’t win · ' : '', 'Targets from ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }), ', ranked by our fight estimate · "~" means an estimate, not a spy'])])]),
-            ]);
+            const outs = rows.filter((r) => r.state === 'hospital').slice(0, 5);
+            pane.push(
+                h('div', {}, [
+                    sectionHead('Next out of hospital', null, null, 'h3'),
+                    outs.length ? h('dl', { class: 'facts num' }, outs.flatMap((r) => [h('dt', { text: countdown(Math.max(0, r.until * 1000 - now)) }), h('dd', { text: (r.m.name || r.id) + ' · ' + BAND_WORDS[r.band || 'none'] })])) : h('p', { class: 'muted', style: 'margin:0', text: 'Nobody in hospital.' }),
+                    h('div', { class: 'note2', text: sum.attackable + ' attackable now · ' + rows.filter((r) => r.state === 'hospital' && r.until * 1000 - now < 5 * 60000).length + ' out within 5 min · ' + (sum.traveling + rows.filter((r) => r.state === 'abroad').length) + ' traveling or abroad' }),
+                ]),
+            );
+        } else {
+            let rows = filterTargets(rowsAll, f, { now, attackedToday });
+            const hiddenCant = f.hideCant ? rowsAll.filter((r) => r.band === 'cant').length : 0;
+            const hiddenKeep = f.keep50 ? rowsAll.filter((r) => r.band !== 'cant' && !(r.forecast && r.forecast.keep > 0.5)).length : 0;
+            if (mode === 'chain') {
+                rows = rows.filter((r) => r.band === 'stomp' || r.band === 'good').sort((a, b) => (b.respect || 0) - (a.respect || 0));
+            } else rows = sortTargets(rows, f.sort);
+            let body;
+            if (!ctx.flags.hasFfs) body = h('p', { class: 'muted', style: 'margin:0' }, ['Targets come from FFScouter. ', h('a', { href: '#settings', onclick: (ev) => { ev.preventDefault(); ctx.go('settings'); }, text: 'Connect it in Settings' }), '; chips on Torn’s pages work without it (your fights and public stats).']);
+            else if (!rows.length) body = h('p', { class: 'muted', style: 'margin:0', text: e.loading() ? 'Asking FFScouter for targets…' : e.error() || (rowsAll.length ? 'Nobody passes your ticks.' : 'No targets yet: press Refresh.') });
+            else body = targetsTable(rows, { now, chain: mode === 'chain' });
+            const notes = [];
+            if (hiddenCant && mode === 'targets') notes.push(hiddenCant + ' can’t-win player' + (hiddenCant === 1 ? '' : 's') + ' hidden');
+            if (hiddenKeep) notes.push(hiddenKeep + ' hidden because you’d keep under 50% HP');
+            main.push(
+                h('div', { class: 'lead', 'data-mode': mode }, [
+                    sectionHead(mode === 'chain' ? 'Chain' : 'Targets', meta([mode === 'chain' ? 'only Stomp and Good · most respect first · ' + rows.length + ' players' : rowsAll.length + ' players · win and HP kept from your stats against theirs · ' + (EYE_SORTS.find(([k]) => k === f.sort) || [0, ''])[1].toLowerCase() + ' first'])),
+                    body,
+                    notes.length ? h('div', { class: 'note2', text: notes.join(' · ') + '.' }) : null,
+                    mode === 'chain' ? h('div', { class: 'note2', text: 'Chains only list players you’ll beat (green and light green); Tough and Can’t win never show here.' }) : null,
+                ]),
+            );
         }
-        const main = [h('div', {}, [sectionHead('Targets', meta([rowsAll.length + ' players · win and HP kept from your stats against theirs']), ctx.flags.hasFfs ? h('button', { class: 'btn sm', type: 'button', onclick: refresh, text: 'Refresh' }) : null), filters, table])];
 
-        const limits = { ...DEFAULT_BAND_LIMITS, ...(s.bands || {}) };
-        const bandInput = (band, key) => h('input', { class: 'inp', inputmode: 'numeric', value: String(limits[band][key]), 'aria-label': BAND_WORDS[band] + ' ' + key, onchange: (ev) => { const v = Math.max(0, Math.min(100, Number(ev.target.value) || 0)); ctx.setSettings({ bands: { ...limits, [band]: { ...limits[band], [key]: v } } }); } });
         const src = e.sources();
-        const pane = [
+        pane.push(
             h('div', {}, [
-                sectionHead('Colours', meta(['where each band starts'])),
-                h('div', { class: 'bands num' }, [
-                    h('div', { class: 'bandr' }, [bandCell('stomp'), h('span', { class: 'row' }, ['win ', bandInput('stomp', 'win'), ' % · keep ', bandInput('stomp', 'keep'), ' %'])]),
-                    h('div', { class: 'bandr' }, [bandCell('good'), h('span', { class: 'row' }, ['win ', bandInput('good', 'win'), ' % · keep ', bandInput('good', 'keep'), ' %'])]),
-                    h('div', { class: 'bandr' }, [bandCell('tough'), h('span', { class: 'row' }, ['win ', bandInput('tough', 'win'), ' %'])]),
-                    h('div', { class: 'bandr' }, [bandCell('cant'), h('span', { class: 'muted', text: 'everything below' })]),
-                    h('div', { class: 'bandr' }, [bandCell('none'), h('span', { class: 'muted', text: 'no estimate yet' })]),
+                sectionHead('How sure', meta(['best source first']), null, 'h3'),
+                h('dl', { class: 'facts num' }, [
+                    h('dt', { text: 'Faction spies (TornStats)' }),
+                    h('dd', { text: ctx.flags.hasTs ? 'connected' : 'add a key in Settings' }),
+                    h('dt', { text: 'Your own fights' }),
+                    h('dd', { text: fmtInt(src.fights) + ' attacks read' }),
+                    h('dt', { text: 'FFScouter estimates' }),
+                    h('dd', { text: ctx.flags.hasFfs ? src.ffsFree + ' of 60 left this min' : 'not connected' }),
+                    h('dt', { text: 'Public stats (rough)' }),
+                    h('dd', { text: 'always on' }),
+                    h('dt', { text: 'Gear seen' }),
+                    h('dd', { text: fmtInt(src.gear) + ' players · this computer only' }),
                 ]),
+                h('div', { class: 'note2' }, ['Estimates by ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }), '. Colours: Settings › Torn Eye colours.']),
             ]),
-            h('div', {}, [
-                sectionHead('Sources', meta(['best first']), null, 'h3'),
-                headsList([
-                    { tone: ctx.flags.hasTs ? 'good' : 'plain', text: 'TornStats spies', sub: ctx.flags.hasTs ? 'connected' : 'optional · add a key in Settings' },
-                    { tone: src.fights ? 'good' : 'plain', text: 'Your fights', sub: src.fights + ' attacks read' },
-                    { tone: ctx.flags.hasFfs ? 'good' : 'plain', text: 'FFScouter', sub: ctx.flags.hasFfs ? 'connected · ' + src.ffsFree + ' of 60 a minute free' : 'not connected' },
-                    { tone: 'plain', text: 'Public stats', sub: 'always on, labelled rough' },
-                ]),
-            ]),
-            h('div', {}, [sectionHead('Gear seen', null, null, 'h3'), h('dl', { class: 'kv num' }, [h('dt', { text: 'Players with gear' }), h('dd', { text: String(src.gear) }), h('dt', { text: 'Stored' }), h('dd', { text: 'on this computer only' })])]),
-        ];
-        return { main, pane };
+        );
+        if (m && m.ready) {
+            const mods = m.state.statMods || {};
+            const eff = Object.entries(m.pc.stats).reduce((a, [k, v]) => a + v * (1 + (mods[k] || 0) / 100), 0);
+            pane.push(h('div', {}, [sectionHead('Your side', meta(['what the fight uses']), null, 'h3'), h('dl', { class: 'facts num' }, [h('dt', { text: 'Stats as they fight' }), h('dd', { text: fmtShort(eff) + ' (merits and passives in)' }), h('dt', { text: 'Life' }), h('dd', { text: m.state.life ? fmtInt(m.state.life.maximum) : '—' })])]));
+        }
+        const upd = e.updatedAt && e.updatedAt() ? 'targets ' + Math.max(0, Math.round((now - e.updatedAt()) / 60000)) + ' min ago' : null;
+        return { ctl: [bar1, bar2], main, pane, upd };
     }
+
+    void BAND_ORDER;
+    void memberState;
 
     /* ===== src/platform/idb.js ===== */
     /*
@@ -7832,6 +10001,8 @@
 
 
 
+
+
     const PROFILE_FRESH_MS = 10 * 60 * 1000;
     const PUBLIC_FRESH_MS = 24 * 60 * 60 * 1000;
     const SPY_FRESH_MS = 60 * 60 * 1000;
@@ -8073,7 +10244,10 @@
             f = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe });
             if (gThem) fGear = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe, gearThem: gThem });
         }
-        const main = fGear || f;
+        let main = fGear || f;
+        // What the fight learner kept from your own fights (only when it predicted your newest fights better).
+        const fm = learnedModel(get(K.learned, null)).fight;
+        if (main && fm) main = { ...main, ...applyFightModel(fm, { pWin: main.pWin, keep: main.keep }), learned: true };
         const band = bandOf(main, getSettings().bands);
         const ff = est ? fairFight(est.bss, bssOf(meStats)) : null;
         const respect = est && level ? respectFor(level, ff, { war }) : null;
@@ -8183,6 +10357,9 @@
      * only for items the Buy list needs (plus a few tracked ones), at most once
      * every 5 minutes, and only while this tab is visible.
      */
+
+
+
 
 
 
@@ -8335,6 +10512,7 @@
             historyDays: Object.keys(get(K.statsHistory, {}) || {}).length,
             priceItems: Object.keys((readPriceHistory(get(K.priceHistory, null)) || {}).items || {}).length,
             eyeLine: 'targets, estimates and gear for ' + page.eye.gear + ' player' + (page.eye.gear === 1 ? '' : 's'),
+            learnLine: (((get('calibration', null) || {}).samples) || []).length + ' sessions · ' + (get(K.fightLog, []) || []).length + ' fights · what it learned',
         };
     }
 
@@ -8353,6 +10531,42 @@
         }
         page.eye.loading = false;
         page.app.render(true);
+    }
+
+    /* War mode on the webpage: the enemy faction read every 10 s while the Torn Eye tab shows War. */
+    const war = { fid: null, name: null, members: [], prev: null, early: new Set(), seen: new Map(), at: 0, loading: false, error: null, timer: null };
+
+    const WAR_TAB_POLL_MS = 10000;
+
+    async function pollWarTab() {
+        if (!war.fid || war.loading || !isVisible() || isPaused()) return;
+        if (!page.app || page.app.tab !== 'eye' || (page.app.ui.eyeMode || 'targets') !== 'war') return;
+        if (Date.now() - war.at < WAR_TAB_POLL_MS) return;
+        war.loading = true;
+        try {
+            const members = await fetchFactionMembers(tornClient(), war.fid);
+            const nowMs = Date.now();
+            war.early = outEarly(war.members, members, Math.floor(nowMs / 1000));
+            // When each flight was first seen: the landing estimate counts from it.
+            for (const m of members) {
+                const id = Number(m.id);
+                const st = memberState(m);
+                const desc = (m.status && m.status.description) || '';
+                const cur = war.seen.get(id);
+                if (st === 'traveling' || st === 'abroad') {
+                    if (!cur || cur.desc !== desc) war.seen.set(id, { desc, at: nowMs });
+                } else war.seen.delete(id);
+            }
+            war.prev = war.members;
+            war.members = members;
+            war.error = null;
+            wantPlayers(members.map((m) => Number(m.id)));
+        } catch (error) {
+            war.error = String((error && error.message) || error);
+        }
+        war.at = Date.now();
+        war.loading = false;
+        if (page.app) page.app.render(true);
     }
 
     function eyeRows() {
@@ -8380,10 +10594,11 @@
             dayTotals: get(K.dayTotals, {}) || {},
             gymProgress: get(K.gymProgress, null),
             calibration: get('calibration', null),
+            planLine: get(K.planLine, null),
             flags: { hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)), hasFfs: Boolean(getKey(K.ffsKey)), ffsDead: Boolean(ffsState && ffsState.registered === false), hasTs: Boolean(getKey(K.tsKey)) },
             keyProblem: keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: statics.keyInfo || null }),
             planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
-            sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null))].join('|'),
+            sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), (get(K.planLine, null) || {}).key || ''].join('|'),
             setSettings: (p) => {
                 setSettings(p);
                 refresh();
@@ -8416,12 +10631,33 @@
                 linkedId: linkedDiscordId,
                 setupUrl: WORKER_SETUP_URL,
             },
+            dev: {
+                data: () => ({ samples: ((get('calibration', null) || {}).samples) || [], fights: joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []), learned: get(K.learned, null) || maybeLearn(Date.now(), true), version: PI_BUILD_VERSION }),
+                unlocked: () => Boolean(get(K.devUnlocked, false)),
+                setUnlocked: (v) => (v ? set(K.devUnlocked, true) : del(K.devUnlocked)),
+                log: () => get(K.learnLog, []) || [],
+                sizes: () => Object.fromEntries(['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions, K.prices, K.priceHistory, K.statsHistory].map((k) => [k, JSON.stringify(get(k, null) || '').length])),
+            },
             eye: {
                 rows: eyeRows,
                 load: (params) => loadTargets(params).catch(() => {}),
                 loading: () => page.eye.loading,
                 error: () => page.eye.error,
                 sources: () => ({ fights: ((get('myAttacks', null) || {}).list || []).length, ffsFree: page.ffs ? page.ffs.stats().remaining : 60, gear: page.eye.gear }),
+                view: (id, extra, o) => eyeView(id, extra, o),
+                attacks: () => (get('myAttacks', null) || {}).list || [],
+                updatedAt: () => (get('eyeTargets', null) || {}).at || null,
+                war: {
+                    state: () => ({ fid: war.fid, name: war.name, members: war.members, early: war.early, seen: new Map([...war.seen].map(([k, v]) => [k, v.at])), loading: war.loading, error: war.error }),
+                    watch: (fid) => {
+                        war.fid = fid;
+                        war.members = [];
+                        war.seen.clear();
+                        war.at = 0;
+                        setSettings({ warFaction: fid });
+                        pollWarTab();
+                    },
+                },
             },
         };
     }
@@ -8439,6 +10675,9 @@
         onModel(() => page.app.render());
         for (const k of [K.prices, K.settings, K.plan, K.userStatic, K.stateError, K.apiKeyDead]) gmOnChange(k, () => page.app.render());
         onPauseChange(() => page.app.render(true));
+        // War mode: the faction you last watched, read every 10 s while that view is open.
+        war.fid = getSettings().warFaction || null;
+        setInterval(() => pollWarTab().catch(() => {}), 2000);
         page.app.render(true);
         return page.app;
     }
@@ -9437,78 +11676,6 @@
         }
     }
 
-    /* ===== src/core/eye/war.js ===== */
-    /*
-     * War mode (ENGINE-SPEC §12): an enemy faction's members, sorted by what
-     * you can do now. Out early (left hospital before their time: revived or
-     * medded) first, then Okay by band and respect, then Hospital by time out,
-     * then Traveling, then Abroad; a summary line on top.
-     */
-
-
-
-    function memberState(m) {
-        const st = (m && m.status) || {};
-        const s = String(st.state || st.description || '').toLowerCase();
-        if (s.includes('hospital')) return 'hospital';
-        if (s.includes('travel')) return 'traveling';
-        if (s.includes('abroad')) return 'abroad';
-        if (s.includes('jail') || s.includes('federal')) return 'jail';
-        if (s.includes('fallen')) return 'fallen';
-        return 'okay';
-    }
-
-    /**
-     * Members that left hospital early: Hospital with a future `until` before,
-     * Okay now, before that time.
-     * @returns {Set<number>}
-     */
-    function outEarly(prevMembers, members, nowS) {
-        const prev = new Map((prevMembers || []).map((m) => [Number(m.id), m]));
-        const out = new Set();
-        for (const m of members || []) {
-            const p = prev.get(Number(m.id));
-            if (!p || memberState(p) !== 'hospital' || memberState(m) !== 'okay') continue;
-            const until = Number(p.status && p.status.until) || 0;
-            if (until > nowS + 30) out.add(Number(m.id));
-        }
-        return out;
-    }
-
-    const STATE_RANK = { early: 0, okay: 1, hospital: 2, traveling: 3, abroad: 4, jail: 5, fallen: 6 };
-
-    /**
-     * @param {object[]} members - /faction/{id}/members rows
-     * @param {object} o - {bands: {id: band}, respect: {id: number}, early: Set, nowS}
-     * @returns {object[]} rows {m, id, state, band, respect, until}
-     */
-    function sortWar(members, { bands = {}, respect = {}, early = new Set(), nowS = 0 } = {}) {
-        const rows = (members || []).map((m) => {
-            const id = Number(m.id);
-            const state = early.has(id) ? 'early' : memberState(m);
-            return { m, id, state, band: bands[id] || 'none', respect: respect[id] || 0, until: Number(m.status && m.status.until) || 0 };
-        });
-        rows.sort((a, b) => {
-            const s = STATE_RANK[a.state] - STATE_RANK[b.state];
-            if (s) return s;
-            if (a.state === 'okay' || a.state === 'early') {
-                const bd = BAND_ORDER.indexOf(a.band) - BAND_ORDER.indexOf(b.band);
-                if (bd) return bd;
-                return b.respect - a.respect;
-            }
-            if (a.state === 'hospital' || a.state === 'traveling') return (a.until || Infinity) - (b.until || Infinity);
-            return a.id - b.id;
-        });
-        return rows;
-    }
-
-    /** "7 attackable now · 0:48 until the next one is out · 3 traveling" as numbers. */
-    function warSummary(rows, nowS) {
-        const attackable = rows.filter((r) => r.state === 'okay' || r.state === 'early').length;
-        const outs = rows.filter((r) => r.state === 'hospital' && r.until > nowS).map((r) => r.until - nowS);
-        return { attackable, nextOutS: outs.length ? Math.min(...outs) : null, traveling: rows.filter((r) => r.state === 'traveling').length, early: rows.filter((r) => r.state === 'early').length };
-    }
-
     /* ===== src/sources/dom/eye.js ===== */
     /*
      * Reading player rows on the pages Torn Eye marks (docs/research-dom.md
@@ -9776,6 +11943,7 @@
 
 
 
+
     /** War mode asks for the enemy faction this often, and only from a visible tab. */
     const WAR_POLL_MS = 10000;
 
@@ -9901,7 +12069,14 @@
         const x = r && r.right + 262 < window.innerWidth ? r.right + 12 : window.innerWidth - 262;
         panel.style.left = Math.max(8, x) + 'px';
         panel.style.top = (r ? Math.max(8, r.top) : 110) + 'px';
-        fill(panel, attackPanelContent(view(id), ep.attack));
+        const v = view(id);
+        fill(panel, attackPanelContent(v, ep.attack));
+        // What Torn Eye said before this fight: the fight learner compares it with how the fight went.
+        if (v && v.forecast && Number.isFinite(v.forecast.pWin)) {
+            const list = get(K.eyePredictions, []) || [];
+            const next = addPrediction(list, { def: id, at: Date.now(), pWin: v.forecast.pWin, keep: v.forecast.keep });
+            if (next !== list) set(K.eyePredictions, next);
+        }
     }
 
     function onAttackData(json) {

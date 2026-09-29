@@ -64,7 +64,7 @@ export function fillCheapest(listings, qty, itemId) {
     for (const l of sorted) {
         if (left <= 0) break;
         const take = Math.min(left, l.qty);
-        const row = { source: l.source, sellerId: l.sellerId || null, sellerName: l.sellerName || null, listed: l.qty, qty: take, price: l.price, subtotal: take * l.price };
+        const row = { source: l.source, sellerId: l.sellerId || null, sellerName: l.sellerName || null, listingId: l.listingId || null, listed: l.qty, qty: take, price: l.price, subtotal: take * l.price, dataAt: l.dataAt || null };
         row.link = linkFor(row, itemId);
         rows.push(row);
         total += row.subtotal;

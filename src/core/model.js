@@ -54,11 +54,13 @@ export function buildOf(id) {
  * The context the engine needs about this player right now.
  * @param {object} state - normalizeState()
  * @param {object} statics - stored slow data {perks, property, gyms, inventory, keyInfo}
- * @param {object} extra - {unlockedKnown, drugsTaken}
+ * @param {object} extra - {unlockedKnown, drugsTaken, learnedMult: per-stat multipliers the learner kept (unknown perks)}
  */
 export function playerContext(state, statics = {}, extra = {}) {
     const table = statics.gyms && statics.gyms.length ? mergeLiveGyms(statics.gyms) : GYMS;
     const perks = parsePerks(statics.perks || {});
+    // What the learner found in your own trains (an unknown perk): on top of the perks Torn lists.
+    if (extra.learnedMult) for (const k of STATS) perks.mult[k] *= Number(extra.learnedMult[k]) > 0 ? Number(extra.learnedMult[k]) : 1;
     const unlocked = unlockedGyms(state && state.gymId, extra.unlockedKnown || null);
     const stats = (state && state.stats) || { str: 0, spd: 0, def: 0, dex: 0 };
     const best = {};
@@ -171,9 +173,9 @@ export function blissWhatIf({ state, pc, shares, settings, prices, special = 0 }
  * @param {object} [o.gymProgress] - {gymId, energy} read from the gym page
  * @param {number} o.now
  */
-export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, now }) {
+export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, now }) {
     if (!state) return { ready: false };
-    const pc = playerContext(state, statics, { unlockedKnown });
+    const pc = playerContext(state, statics, { unlockedKnown, learnedMult });
     const build = buildOf(plan.build);
     const shares = targetShares(plan, pc.stats, build.shares);
     const keep = (build.gyms || []).filter((id) => pc.unlocked.includes(id) && gymAccess(gymById(id, pc.table), pc.stats).ok);

@@ -30,6 +30,22 @@ export const HAPPY_CAP = 99999;
 export const POST_50M_MODE = 'log10';
 
 /**
+ * The damping mode the engine uses now: POST_50M_MODE until the learner
+ * finds (and keeps) a better one from the player's own trains.
+ */
+let dampingMode = POST_50M_MODE;
+
+/** Use a learned damping mode ('log10' | 'ln' | 'power'); anything else resets it. */
+export function useDampingMode(mode) {
+    dampingMode = mode === 'ln' || mode === 'power' || mode === 'log10' ? mode : POST_50M_MODE;
+    return dampingMode;
+}
+
+export function currentDampingMode() {
+    return dampingMode;
+}
+
+/**
  * [calibrate] Happy lost per train, per energy. Torn's real loss is random in
  * 0.4–0.6 × energy per train (research-gym.md); the mean is used.
  */
@@ -40,7 +56,7 @@ export function round4(x) {
 }
 
 /** The stat the formula sees: itself up to 50M, damped above. */
-export function effectiveStat(S, mode = POST_50M_MODE) {
+export function effectiveStat(S, mode = dampingMode) {
     if (!(S > 5e7)) return Math.max(0, S || 0);
     if (mode === 'power') return 5e7 + 0.057406 * Math.pow(S - 5e7, 0.928996);
     const log = mode === 'ln' ? Math.log(S) : Math.log10(S);
@@ -56,7 +72,7 @@ export function effectiveStat(S, mode = POST_50M_MODE) {
  * @param {number} E - energy per train of the gym (5, 10, 25, 50)
  * @param {number} [perks] - product of every gym-gain multiplier (1.02 …)
  */
-export function gainPerTrain(stat, S, H, dots, E, perks = 1, mode = POST_50M_MODE) {
+export function gainPerTrain(stat, S, H, dots, E, perks = 1, mode = dampingMode) {
     const ab = STAT_AB[stat];
     if (!ab || !(dots > 0) || !(E > 0)) return 0;
     const h = Math.min(HAPPY_CAP, Math.max(0, H || 0));
@@ -73,7 +89,7 @@ export function gainPerTrain(stat, S, H, dots, E, perks = 1, mode = POST_50M_MOD
  * Train one stat, one train at a time, until the energy (or maxTrains) runs out.
  * @returns {{gain:number, trains:number, energyUsed:number, statAfter:number, happyAfter:number}}
  */
-export function trainSession({ stat, S, H, dots, energyPerTrain, energy, perks = 1, maxTrains = Infinity, mode = POST_50M_MODE }) {
+export function trainSession({ stat, S, H, dots, energyPerTrain, energy, perks = 1, maxTrains = Infinity, mode = dampingMode }) {
     let s = S;
     let h = H;
     let trains = 0;
@@ -89,7 +105,7 @@ export function trainSession({ stat, S, H, dots, energyPerTrain, energy, perks =
  * Trains (and energy) to take a stat from S to at least `target`.
  * Returns null when it would take more than `limit` trains.
  */
-export function trainsToReach({ stat, S, target, H, dots, energyPerTrain, perks = 1, limit = 1e6, mode = POST_50M_MODE }) {
+export function trainsToReach({ stat, S, target, H, dots, energyPerTrain, perks = 1, limit = 1e6, mode = dampingMode }) {
     if (S >= target) return { trains: 0, energy: 0 };
     let s = S;
     let n = 0;

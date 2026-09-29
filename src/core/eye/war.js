@@ -68,3 +68,47 @@ export function warSummary(rows, nowS) {
     const outs = rows.filter((r) => r.state === 'hospital' && r.until > nowS).map((r) => r.until - nowS);
     return { attackable, nextOutS: outs.length ? Math.min(...outs) : null, traveling: rows.filter((r) => r.state === 'traveling').length, early: rows.filter((r) => r.state === 'early').length };
 }
+
+/**
+ * Standard-class flight times in minutes (Torn's travel agency; an airstrip
+ * or business class is faster, so landings are marked as estimates).
+ */
+export const FLIGHT_MIN = {
+    mexico: 26,
+    'cayman islands': 35,
+    canada: 41,
+    hawaii: 134,
+    'united kingdom': 159,
+    argentina: 167,
+    switzerland: 175,
+    japan: 225,
+    china: 242,
+    uae: 271,
+    'united arab emirates': 271,
+    'south africa': 297,
+};
+
+/**
+ * Where a traveller is going, from the status line: "Traveling to Mexico",
+ * "Returning to Torn from Mexico", "In Mexico".
+ * @returns {{kind:'to'|'back'|'abroad', place:string, minutes:number|null}|null}
+ */
+export function travelOf(member) {
+    const d = String((member && member.status && member.status.description) || '');
+    let m;
+    const mins = (p) => FLIGHT_MIN[p.toLowerCase()] ?? null;
+    if ((m = d.match(/returning to torn from (.+)$/i))) return { kind: 'back', place: m[1].trim(), minutes: mins(m[1].trim()) };
+    if ((m = d.match(/travel(?:l)?ing to (.+)$/i))) return { kind: 'to', place: m[1].trim(), minutes: mins(m[1].trim()) };
+    if ((m = d.match(/^in (.+)$/i))) return { kind: 'abroad', place: m[1].trim(), minutes: mins(m[1].trim()) };
+    return null;
+}
+
+/**
+ * When a traveller lands (ms): from when we first saw this flight plus the
+ * flight time; abroad: "if they fly now". null when unknown.
+ */
+export function landingAt(travel, seenAt, now) {
+    if (!travel || !travel.minutes) return null;
+    if (travel.kind === 'abroad') return now + travel.minutes * 60000;
+    return Math.max(now, (seenAt || now) + travel.minutes * 60000);
+}

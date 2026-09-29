@@ -26,9 +26,9 @@ test('mixed polls are skipped: a drug taken, two stats, or no energy change', ()
     assert.equal(calibrationSample(a, a, diffStates(a, a), { table: GYMS }), null);
 });
 
-test('the error is of the totals, over the last 50', () => {
+test('the error is of the totals, over the last CALIBRATION_KEEP', () => {
     let c = null;
-    for (let i = 0; i < 60; i++) c = addCalibration(c, { predicted: 100, actual: 103 });
+    for (let i = 0; i < CALIBRATION_KEEP + 10; i++) c = addCalibration(c, { predicted: 100, actual: 103 });
     assert.equal(c.n, CALIBRATION_KEEP);
     assert.ok(Math.abs(c.errPct - 3) < 1e-9);
 });
