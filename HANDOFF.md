@@ -1,12 +1,12 @@
 # HANDOFF: Torn Pumping Iron
 
-**Released: 1.0.0 (2026-09-29).**
-- Install (pinned): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/33c89f451be534bfe5e98e15bef5d8048c9649c8/torn-pumping-iron.user.js
+**Released: 1.0.1 (2026-09-29; 1.0.0 the same day).** Local `main` is 2+ commits ahead (not released: faster plan changes, first read in 0.5 s, why-not lines).
+- Install (pinned 1.0.1): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/9fda20d860586259412d26701986fc40ce67bfad/torn-pumping-iron.user.js
 - Auto-update URL (`@updateURL`): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/main/torn-pumping-iron.user.js
 - Webpage: https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html (gh-pages branch; without the script it shows the placeholder)
 - Repo: https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron (public; `main` + `gh-pages`)
 
-**Next session, start here:** the owner is installing 1.0.0 and checking it live. Wait for their notes; the list they were asked to check is in §8 ("What the owner should look at first"). Then §9 (open items). Read this file, then `docs/BUILD-PLAN.md` for the history, `docs/ENGINE-SPEC.md` (the maths), `docs/DESIGN.md` (the look), `docs/audit-1.0.md` (the pre-release audit).
+**Next session, start here:** read this file, then **`docs/ROUND3-PLAN.md`**: every request from the owner's live check (and their friend's), what is built / mockup only / designed / not started, the open decisions, and the build order R0–R7. Then `docs/bugs-after-1.0.1.md`, `docs/discord-bot-design.md`, the round-3 mockups (`mockups/round3/index.html`, served by the `harness` launch config at http://127.0.0.1:8785/mockups/round3/index.html). Background: `docs/BUILD-PLAN.md` (history), `docs/ENGINE-SPEC.md` (maths), `docs/DESIGN.md` (look; round 3 adds cards + more room, see `mockups/round3/r3.css`), `docs/audit-1.0.md`.
 
 ---
 
@@ -55,6 +55,7 @@
 - One script, one release; the overlay opens the webpage in a new tab (GM_openInTab), like trading's Torn Bids.
 - **One layout (owner, after 1.0.0):** Compact only; no density switch.
 - **The panel on Torn (owner, after 1.0.0):** docked like NPC Arbitrage, collapsed/expanded with Alt+`, living beside the trading script's panels (left margin first), never over them.
+- **Round 3 (owner, 2026-09-29):** the round-3 mockups are liked (with more breathing room and cards, done); no UI code until the open decisions in ROUND3-PLAN §3 are answered. Plan must say why other plans lost and show price vs gains; show only what fits the player (tick to show the rest); the app improves itself from the player's own trains and fights; energy from cans/FHC/special refills and a spend-per-day from income; company jump variants; upcoming Torn events; one click, no thinking.
 - The attack, targets and war side is called **Torn Eye** (the owner said "call this one Torn Eye (kinda like a spy)"; read as the fight side inside Pumping Iron).
 - **Plan types:** Steady, Goal (unlock gym / reach build / stat numbers), Jump (choco, EDVD, 99k). Jump plans are strict (warn before a timing, then re-time). Steady and goal plans re-time silently. There is no strict/adaptive switch; buying re-prices daily.
 - The app recommends, with a dropdown of alternatives. A worse pick shows a warning ("not worth it; train natural energy and drug cooldown instead, unless you have Ignorance Is Bliss").
@@ -148,6 +149,8 @@ Done on the owner's yes. For later releases, the same steps minus the one-time r
 
 ## 9. Open items after 1.0.0
 
+**Superseded by `docs/ROUND3-PLAN.md` (the live check's requests, bugs and order). The items below are still true; they are folded into that plan.**
+
 - **Live check pending** (§8 list). The things most likely wrong, because no source could confirm them: Fill on the gym box (React may need more than the native setter + input event); `selected___` = the gym you're in; `refills.energy` = "used today"; `bars.*.full_time` semantics; the items page Use row; the attack page's armour field (`arm`?); the first attackData answer is missed at `@run-at document-idle` (later polls are read).
 - **Calibrate with real data** (named exports marked [calibrate]): post-50M damping, happy loss per train, fight base damage / hit zones / accuracy / default gear, life by level, respect base, SSL drug limit, specialist gyms needing George's. Progress › Gain model collects predicted-vs-actual from the owner's trains (`calibration` in GM storage); Torn Eye can be checked against `myAttacks` (the replay test uses FFScouter's published scale, not real logs).
 - **Audit items left as low risk** (`docs/audit-1.0.md`): the panel floats over Torn's content only when neither margin holds 220 px (≈ ≤ 1440 px wide; it collapses to a bar with Alt+`); `.pi-on`/`.pi-outlined` set `position:relative` on Torn's rows; the Worker has no rate limit on invite guesses (constant-time compare only).
@@ -158,6 +161,14 @@ Done on the owner's yes. For later releases, the same steps minus the one-time r
 ---
 
 ## What each session did (newest first)
+
+### 2026-09-29 (evening): round 3 (mockups, bug hunt, Discord design; see docs/ROUND3-PLAN.md)
+- Owner watched with Claude in Chrome (they navigate, we read): the key works after 1.0.1; plan changes froze the page 0.5–1 s (181 ms measured per change on 1.0.1). Built locally: indexed gym lookups (3–5× faster, same answers), first read in 0.5 s, a why-not line per other plan (commits 0bec459, d8b5dc6; not released).
+- Fable critiqued the UI (dead space, repeats, Plan's four competing blocks, empty states as paragraphs); round-3 mockups for all six pages with the owner's and the friend's asks; owner: "i like the mockups" + more room and cards (done).
+- A read-only bug hunt (17 items, docs/bugs-after-1.0.1.md: live prices make items free in the comparison, jumps stuck at Xanax #1, points always on Buy, Buy hides held Xanax…). A Discord bot design with Torn's rules and sources (docs/discord-bot-design.md).
+- Found: the trading script uses up to 70 Torn/min and 80 TornW3B/min, so ours must drop to 25/15 (1.0.1 said 40 and assumed trading used 30).
+- Answered: why Daily choco loses (−20% energy trained: the Ecstasy takes a Xanax slot, candy happy lasts one session without Bliss); price per stat for every energy source at today's prices; FHC and cans add on top of Xanax (booster cooldown) at ~$520/stat vs Xanax ~$19.
+- The friend sent the console jump guide: docs/research-console-jump.md (a daily cheap happy jump for low stats, with 5★ Toy/Game Shop doubling the console's happy; details to verify).
 
 ### 2026-09-29 (later): owner's first live check → 1.0.1
 - Owner's notes: stuck on "Reading your state…" after saving a key, nothing opens; wants ONE layout (Compact); must sit beside the trading script's NPC Arbitrage panel (`#ttv2-host`, bottom-right) and Torn Bids window; overlay should dock/collapse like NPC Arbitrage, toggled with **Alt+`** (Arbitrage uses backtick). "finish all first", then release.
