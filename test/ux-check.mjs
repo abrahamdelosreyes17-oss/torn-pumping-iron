@@ -118,12 +118,12 @@ async function checkTab(page, tab, errors, want) {
 }
 
 const TABS = {
-    home: ['Today', 'Take Xanax #1, then train', 'Refill · 30 points', 'Buy today', 'Heads-up', 'Pick your build type', "You vs Baldr's, STR high", 'Next 7 days', 'This week'],
-    plan: ['Most stats in my budget', 'Recommended', 'Steady training', 'Per $1M', 'Other plans', 'Why it isn’t the pick', 'Where your energy comes from', 'Natural energy', 'Build', 'High stat', "Hank's", 'pick yours', 'Ignorance Is Bliss', 'what-if'],
+    home: ['Auto mode needs a Full key · Add it in Settings', 'Today', 'Take Xanax #1, then train', 'Refill · 30 points', 'Buy today', 'Heads-up', 'Pick your build type', "You vs Baldr's, STR high", 'Next 7 days', 'This week'],
+    plan: ['Auto (from your income)', 'Auto mode needs a Full key', 'Recommended', 'Steady training', 'Per $1M', 'Other plans', 'Why it isn’t the pick', 'Where your energy comes from', 'Natural energy', 'Build', 'High stat', "Hank's", 'pick yours', 'Ignorance Is Bliss', 'what-if'],
     buy: ['Buy for', 'Your list', 'Xanax', 'Iron_Monk', 'Points market', 'Deals', '7-day prices', 'You hold', 'TornW3B'],
     progress: ['Total stats against the plan', 'Each stat', 'Gained against plan', 'Receipts', 'Energy trained', '$ per 1,000 stats', 'What if you’d done another plan', 'the comparison appears after two days', 'Last trains', 'This week', 'Budget', 'Force Training'],
     eye: ['Targets', 'Chain', 'War', 'How sure', 'FFScouter', 'Gear seen', 'Your side'],
-    settings: ['Torn API key', 'How this key is used', 'Discord pings', 'FFScouter', 'data policy', 'TornStats', 'Torn Eye colours', 'On Torn’s pages', 'Developer', 'Export as .zip', 'Your data', 'Diagnostics', 'of 70'],
+    settings: ['Torn API key', 'How this key is used', 'Full key (Auto mode)', 'Keep for war days', 'Discord pings', 'Log in with Discord', 'FFScouter', 'data policy', 'TornStats', 'Torn Eye colours', 'On Torn’s pages', 'Developer', 'Export as .zip', 'Your data', 'Diagnostics', 'of 70'],
 };
 
 const { page, errors, tornHits } = await openApp('');
@@ -213,7 +213,7 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     await o.page.locator('#pi-app .tbl tbody tr.click').first().click();
     await o.page.waitForTimeout(300);
     const det = await measure(o.page);
-    ok(/ours · .*FFScouter’s list/.test(det.text), 'eye: row details show our and FFScouter’s figures');
+    ok(/as strong as you \(our estimate\) · .*by FFScouter’s list/.test(det.text) && !/fair fight/i.test(det.text), 'eye: row details in plain words (how strong, ours and FFScouter’s)');
     await o.page.locator('#pi-app .tbl tbody tr.click').first().click();
     await o.page.waitForTimeout(300);
     // ☆ on the first row: it shows on Watched (checked below).
@@ -270,6 +270,30 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     const back = await measure(o.page);
     ok(!/Paused: Torn Trading/.test(back.text), 'paused: back by itself');
     ok(o.errors.length === 0, 'paused: no page errors ' + JSON.stringify(o.errors));
+    await o.page.close();
+}
+
+// Auto mode: without a Full key the top bar says so on every page; with one, the plan runs on your income.
+{
+    const o = await openApp('&full=1');
+    await o.page.evaluate(() => (location.hash = 'plan'));
+    // The money log is read 5 s after the page opens.
+    await o.page.waitForTimeout(7000);
+    const m = await measure(o.page);
+    ok(!/Auto mode needs a Full key · Add it/.test(m.text), 'auto: no header warning with a Full key');
+    ok(/a day from your income/.test(m.text) && /You can afford this with your income/.test(m.text), 'auto: the plan runs on your income (' + (m.text.match(/[^.]*from your income[^.]*/) || [''])[0].slice(0, 120) + ')');
+    ok(/Bazaar sell/.test(m.text), 'auto: where the income comes from (money log)');
+    ok(o.errors.length === 0, 'auto: no page errors ' + JSON.stringify(o.errors.slice(0, 2)));
+    await o.page.screenshot({ path: resolve(shots, 'app-auto.png'), fullPage: true });
+    // Settings › Discord: one button, the old form under Advanced.
+    await o.page.evaluate(() => (location.hash = 'settings'));
+    await o.page.waitForTimeout(600);
+    const st = await measure(o.page);
+    ok(/Log in with Discord/.test(st.text) && !/Service address/i.test(st.text), 'discord: one button, no setup form');
+    ok(/Connected · Full/.test(st.text), 'full key: shown as connected');
+    await o.page.locator('#pi-app button', { hasText: 'Advanced: your own service' }).click();
+    await o.page.waitForTimeout(300);
+    ok(/Service address/i.test((await measure(o.page)).text), 'discord: Advanced opens the own-service form');
     await o.page.close();
 }
 

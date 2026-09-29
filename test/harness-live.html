@@ -92,6 +92,15 @@ CANNED['/v2/faction/7777/members'] = () => ({ members: [
   { id: 777002, name: 'Mira_Vex', level: 61, status: { state: 'Hospital', until: NOW_S + 252, description: 'In hospital' } },
 ] });
 CANNED['/v2/user/attacks'] = () => ({ attacks: [] });
+// Auto mode: networth a month ago, a week ago and now ($2.4B a month: $80M a day), the money log's categories and lines.
+CANNED['/v2/user/personalstats'] = (u) => {
+  if (!(u.searchParams.get('stat') || '').includes('networth')) return { personalstats: [] };
+  const ts = Number(u.searchParams.get('timestamp')) || NOW_S;
+  const nw = 13e9 - Math.round((NOW_S - ts) / 86400) * 80e6;
+  return { personalstats: [{ name: 'networth', value: nw }, { name: 'networthwallet', value: 881e6 }, { name: 'networthvault', value: 0 }, { name: 'networthbank', value: 0 }, { name: 'networthcayman', value: 0 }] };
+};
+CANNED['/v2/torn/logcategories'] = () => ({ logcategories: [{ id: 17, title: 'Bazaars' }, { id: 18, title: 'Item market' }, { id: 5, title: 'Gym' }] });
+CANNED['/v2/user/log'] = (u) => ({ log: u.searchParams.get('cat') === '17' ? [{ id: 'a', timestamp: NOW_S - 2 * 86400, details: { id: 1225, title: 'Bazaar sell', category: 'Bazaars' }, data: { money: 150e6 }, params: {} }] : [] });
 CANNED['/v2/user/equipment'] = () => ({ equipment: [{ type: 'Weapon', sub_type: 'Primary', name: 'Minigun', stats: { damage: 71.2, accuracy: 51 }, bonuses: [] }], clothing: [] });
 const profileOf = (id) => ({ profile: { id: Number(id), name: 'P' + id, level: 60, rank: 'Supreme Hitman', life: { current: 7300, maximum: 7300 }, status: { state: 'Okay', description: 'Okay' } } });
 
@@ -103,6 +112,7 @@ window.GM_xmlhttpRequest = (o) => {
     if (Q.get('dead') && u.hostname === 'api.torn.com') body = { error: { code: 2, error: 'Incorrect key' } };
     else if (Q.get('access') && u.pathname === '/v2/user' && u.searchParams.get('selections')) body = { error: { code: 16, error: 'Access level of this key is not high enough' } };
     else if (Q.get('access') && u.pathname === '/v2/key/info') body = { info: { access: { level: 0, type: 'Custom' }, user: { id: 2345678 }, selections: { user: ['profile', 'basic', 'cooldowns', 'refills', 'attacks', 'battlestats', 'personalstats'] } } };
+    else if (u.pathname === '/v2/key/info' && u.searchParams.get('key') === 'FullKeyHarness12') body = { info: { access: { level: 4, type: 'Full Access' }, user: { id: 2345678 }, selections: {} } };
     else if (/^\/v2\/user\/\d+\/profile$/.test(u.pathname)) body = profileOf(u.pathname.split('/')[3]);
     else body = (CANNED[u.pathname] || (() => ({})))(u);
     o.onload({ status: 200, responseText: JSON.stringify(body) });
@@ -110,6 +120,7 @@ window.GM_xmlhttpRequest = (o) => {
 };
 if (Q.get('key')) _store['pumpingIron.v1.apiKey'] = JSON.stringify('HarnessKey123456');
 if (Q.get('ffs')) _store['pumpingIron.v1.ffsKey'] = JSON.stringify('FfsKeyHarness123');
+if (Q.get('full')) { _store['pumpingIron.v1.fullKey'] = JSON.stringify('FullKeyHarness12'); _store['pumpingIron.v1.fullKeyState'] = JSON.stringify({ ok: true, at: 1 }); }
 if (Q.get('win')) _store['pumpingIron.v1.settings'] = JSON.stringify({ buyWindow: Q.get('win') });
 if (Q.get('hidden')) Object.defineProperty(document, 'visibilityState', { get: () => 'hidden' });
 if (Q.get('build')) _store['pumpingIron.v1.plan'] = JSON.stringify({ type: 'steady', strategy: 'steady', build: Q.get('build'), goal: null, createdAt: 1 });
