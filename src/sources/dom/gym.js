@@ -67,9 +67,21 @@ export function readGymButtons(root) {
         const cls = String(b.className);
         const state = /selected___/.test(cls) ? 'selected' : /inProgress___/.test(cls) ? 'inProgress' : /lockedPurchased___/.test(cls) ? 'lockedPurchased' : /locked___/.test(cls) ? 'locked' : /active___/.test(cls) ? 'active' : 'unknown';
         const pct = b.querySelector('[class*="percentage___"]');
-        out.push({ id: Number(m[1]), state, percent: pct ? gymNum(pct.textContent) : null, name: b.getAttribute('aria-label') || null });
+        out.push({ id: Number(m[1]), state, percent: pct ? gymNum(pct.textContent) : null, name: b.getAttribute('aria-label') || null, el: b });
     }
     return out;
+}
+
+/**
+ * Torn's sidebar energy bar ("150/150"): it moves the moment a train lands,
+ * before our next API read. Null when the page doesn't show it.
+ * @returns {{current:number, max:number}|null}
+ */
+export function readEnergyBar(doc = document) {
+    const bar = doc.getElementById('barEnergy') || doc.querySelector('[class*="bar___"][class*="energy___"]');
+    const v = bar && bar.querySelector('[class*="bar-value___"]');
+    const m = v && String(v.textContent || '').replace(/,/g, '').match(/(\d+)\s*\/\s*(\d+)/);
+    return m ? { current: Number(m[1]), max: Number(m[2]) } : null;
 }
 
 /** Unlocked gym ids (usable now), the gym you're in, and the one being unlocked. */

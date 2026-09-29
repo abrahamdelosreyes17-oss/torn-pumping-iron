@@ -18,6 +18,7 @@ import { GEORGES, gymById } from '../../core/gyms.js';
 import { XANAX, EDVD, FHC, POINTS, REFILL_POINTS, ITEMS, CANDY_KISSES, CANDY_IDS, itemName } from '../../core/items.js';
 import { lineChart, chartNum } from '../charts.js';
 import { sectionHead, meta, STAT_COLOR } from './common.js';
+import { trainInText, whyOneStat } from '../../core/gympage.js';
 
 const KIND_TAG = { steady: 'Steady', boost: 'Boost', jump: 'Jump' };
 
@@ -430,8 +431,27 @@ function buildCard(m, ctx) {
     const cur = buildFor(curBase);
     const gyms = (cur.gyms || []).map((g) => (gymById(g) || { name: '' }).name).filter(Boolean);
     const georges = m.pc.unlocked.includes(GEORGES);
+    // Where the next session trains, why it's one stat (when it is), and the next gym to unlock.
+    const tin = trainInText(m);
+    // With a goal (stat numbers, a gym) the shares aren't the build's: no "under Hank's" line then.
+    const why = plan.goal ? null : whyOneStat(m);
+    const focusBuild = (e) => {
+        e.preventDefault();
+        const sel = e.currentTarget.getRootNode().querySelector('select[aria-label="Build to train toward"]');
+        if (sel) {
+            sel.scrollIntoView({ block: 'center' });
+            sel.focus();
+        }
+    };
+    const ng = m.nextGym && m.nextGym.gym ? m.nextGym : null;
+    const lines = [
+        tin ? h('div', { class: 'note2' }, ['Train in ', h('b', { class: 'white', text: tin })]) : null,
+        why ? h('div', { class: 'note2' }, [why.text + ' · ', h('a', { href: '#plan', onclick: focusBuild, text: 'Change build' })]) : null,
+        ng ? h('div', { class: 'note2' }, ['Next gym unlock: ', h('b', { class: 'white', text: ng.gym.name }), ng.known && ng.days !== null ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' day' + (Math.max(1, Math.round(ng.days)) === 1 ? '' : 's') : ' · open Torn’s gym page once to track it']) : null,
+    ].filter(Boolean);
     return h('div', {}, [
         sectionHead('Build', meta([plan.buildPicked ? 'what the plan trains toward' : 'pick yours: the plan trains toward it']), null, 'h3'),
+        lines.length ? h('div', { style: 'margin-bottom:8px' }, lines) : null,
         h('div', { class: 'row', style: 'margin-bottom:8px;gap:8px' }, [t('lab', 'High stat'), h('div', { class: 'seg', role: 'group', 'aria-label': 'High stat' }, STATS.map((k) => h('button', { type: 'button', 'aria-pressed': String(k === high), onclick: () => ctx.setPlan({ build: (highStatOf(curBase) ? curBase : 'baldr') + ':' + k, buildPicked: true }), text: STAT_LABEL[k] })))]),
         h('div', { class: 'bl' }, rows),
         h('div', { class: 'note2', text: (gyms.length ? 'Specialist gyms: ' + gyms.join(' + ') + '. ' : '') + (georges ? '' : 'They open after George’s; until then every train still moves you toward this build.') }),

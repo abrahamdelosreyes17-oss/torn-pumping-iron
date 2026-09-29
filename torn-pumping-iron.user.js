@@ -263,6 +263,7 @@
         recheck: 'recheck',
         unlocked: 'unlockedGyms',
         gymProgress: 'gymProgress',
+        gymSession: 'gymSession',
         leader: 'leader',
         overlayPos: 'overlayPos',
         overlayCollapsed: 'overlayCollapsed',
@@ -387,7 +388,7 @@
     /** What "Your data" in Settings can clear, by group. */
     const DATA_GROUPS = {
         keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker, K.fullKey, K.fullKeyState, K.moneyLog],
-        plan: [K.plan, K.recheck],
+        plan: [K.plan, K.recheck, K.gymSession],
         progress: [K.statsHistory, K.dayLog, K.dayTotals, K.planLine, K.receipts],
         learning: ['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions],
         prices: [K.priceHistory, K.prices],
@@ -1707,10 +1708,179 @@
     }
 
     /**
-     * Split one session's energy across the stats, one train at a time, each
-     * to the stat furthest below its share (GTG+ runBalance), at that stat's best
-     * unlocked and accessible gym. A train that would lose a gym in `keep` is
-     * never planned; that stat gets `stopAt`.
+     * Which rule gives each train its stat (ENGINE-SPEC §7):
+     * - 'speed' (1.3.0): the train that moves you furthest toward the build per
+     *   energy: its gain per energy (the stat's value, happy now, the gym's dots,
+     *   perks) times how far the stat is under its build share. A stat at or
+     *   over its share never gets one while another stat is under, so the plan
+     *   never drifts from the build you picked.
+     * - 'deficit' (up to 1.2): always the stat furthest under its share
+     *   (GTG+ runBalance). Kept for the simulator check (test/split-sim.test.js).
+     */
+    const SPLIT_RULE = 'speed';
+
+    /**
+     * [tuned: test/split-sim.test.js] How much the happy you have now counts.
+     * Steady training runs happy down (about 0.5 per energy; regeneration and
+     * Xanax give back less), so the trains a stat doesn't get now come later,
+     * at lower happy. Happy adds about the same amount to every train: a big
+     * part of a low stat's gain, a small part of a high stat's. So the
+     * high-happy trains go to the stats they lift most: each value is also
+     * multiplied by (gain now ÷ gain at SPLIT_HAPPY_REF) ^ SPLIT_HAPPY_WEIGHT.
+     * Without it (0) the friend's low stats wait until happy has run out and
+     * a steady 90 days ends ~1.5% lower than the old rule; 6 keeps it level.
+     */
+    const SPLIT_HAPPY_WEIGHT = 6;
+
+    /** [calibrate] The happy later trains happen at: steady training runs it down to about 0 (the simulator). */
+    const SPLIT_HAPPY_REF = 0;
+
+    /** The happy-only parts of gain.js's formula (gainPerTrain), for one happy. */
+    function happyTerms(H) {
+        const h = Math.min(HAPPY_CAP, Math.max(0, H || 0));
+        return { f: round4(1 + 0.07 * round4(Math.log(1 + h / 250))), p: 8 * Math.pow(h, 1.05), q: 1 - Math.pow(h / HAPPY_CAP, 2) };
+    }
+
+    /** gainPerTrain's bracket (before × dots × energy × perks ÷ 200,000): what a train gains per energy, up to that factor. */
+    function innerGain(stat, eff, t) {
+        const [A, B] = STAT_AB[stat];
+        return Math.max(0, eff * t.f + t.p + t.q * A + B);
+    }
+
+    /**
+     * The stat the next train goes to: the most progress toward the build per
+     * energy, value = gain per energy × (gap to its share − band) × happy weight.
+     * While any stat is more than the on-build band (ON_BUILD_PP) under its
+     * share, only those count, each measured to the band's edge: every stat
+     * lands inside the band together, so the build is reached as early as the
+     * old rule reaches it. Once all are inside, any stat under its share, the
+     * fastest first ("near the build, the fastest mix"). When none of those can
+     * train (no gym here, a specialist limit), the old rule's pick, so energy
+     * is never left unspent where it used to be spent.
+     *
+     * @param {{k:string, dots:number, energy:number}[]} cands - stats that can train now, with the gym's dots and energy per train
+     * @param {object} s - stats now
+     * @param {object} shares - build shares
+     * @param {number} happy - happy now (it falls with every train)
+     * @param {object|null} [perks] - per-stat multipliers
+     * @param {string} [rule]
+     * @param {number} [happyRef] - the happy later trains happen at (SPLIT_HAPPY_REF; the build projection, which starts
+     *   every session at the same happy, passes that happy)
+     * @param {number|null} [happyMax] - the property's max happy: a boost above it is weighed as if at the max (every
+     *   train of a jump is boosted, so the boost itself says nothing about which stat should get it)
+     * @returns {object|null} the chosen candidate
+     */
+    function pickStat(cands, s, shares, happy, perks = null, rule = SPLIT_RULE, happyRef = SPLIT_HAPPY_REF, happyMax = null) {
+        const total = totalOf(s);
+        if (rule !== 'deficit') {
+            const band = ON_BUILD_PP / 100;
+            const hNow = happyMax !== null && happy > happyMax ? happyMax : happy;
+            const weigh = SPLIT_HAPPY_WEIGHT > 0 && hNow !== happyRef;
+            // The happy parts of the formula are the same for every stat: once per pick (this runs for every simulated train).
+            const tNow = happyTerms(happy);
+            const tAt = hNow === happy ? tNow : happyTerms(hNow);
+            const tRef = weigh ? happyTerms(happyRef) : null;
+            for (const cut of [band, 0]) {
+                let pick = null;
+                let best = 0;
+                for (const c of cands) {
+                    const w = shares[c.k] - (total > 0 ? s[c.k] / total : 0) - cut;
+                    if (!(w > 0)) continue;
+                    const eff = effectiveStat(s[c.k]);
+                    // Gain per energy up to the same factor for every stat (dots × perks ÷ 200,000).
+                    const scale = c.dots * (perks ? perks[c.k] : 1);
+                    const now = innerGain(c.k, eff, tNow) * scale;
+                    let v = now * w;
+                    if (weigh) {
+                        const later = innerGain(c.k, eff, tRef);
+                        if (later > 0) v *= Math.pow((tAt === tNow ? now / scale : innerGain(c.k, eff, tAt)) / later, SPLIT_HAPPY_WEIGHT);
+                    }
+                    if (v > best) {
+                        best = v;
+                        pick = c;
+                    }
+                }
+                if (pick) return pick;
+            }
+        }
+        let pick = null;
+        let best = -Infinity;
+        for (const c of cands) {
+            const d = shares[c.k] - (total > 0 ? s[c.k] / total : 0);
+            if (d > best) {
+                best = d;
+                pick = c;
+            }
+        }
+        return pick;
+    }
+
+    /**
+     * The session's trains as parts, "George's: STR × 12 → Frontline: DEX × 8":
+     * one part per gym and stat, the gym you're in first, then each gym in the
+     * order the split first used it, so you switch gyms as few times as
+     * possible. Replayed in that order (happy falls train by train, specialist
+     * access is checked again); when that order would lose a gym the build
+     * relies on, or use a gym before its ratio opens, the split's own order is
+     * kept instead.
+     * @returns {{parts:object[], statsAfter:object, happyAfter:number, gains:number[]}|null}
+     */
+    function groupParts(seq, { stats, happy, perks, keepNow, table, active, happyLossMult }) {
+        const byKey = new Map();
+        const gymOrder = [];
+        for (const x of seq) {
+            const key = x.gym.id + ':' + x.k;
+            if (!byKey.has(key)) byKey.set(key, { gym: x.gym, stat: x.k, trains: 0 });
+            byKey.get(key).trains++;
+            if (!gymOrder.includes(x.gym.id)) gymOrder.push(x.gym.id);
+        }
+        const a = Number(active);
+        if (gymOrder.includes(a)) {
+            gymOrder.splice(gymOrder.indexOf(a), 1);
+            gymOrder.unshift(a);
+        }
+        const grouped = [];
+        for (const id of gymOrder) for (const p of byKey.values()) if (p.gym.id === id) grouped.push(p);
+        const replay = (list) => {
+            const s = { ...stats };
+            let h = happy;
+            const gains = [];
+            for (const p of list) {
+                let g = 0;
+                for (let i = 0; i < p.trains; i++) {
+                    if (p.gym.specialist && !gymAccess(p.gym, s).ok) return null;
+                    const d = gainPerTrain(p.stat, s[p.stat], h, p.gym.dots[p.stat], p.gym.energy, perks ? perks[p.stat] : 1);
+                    s[p.stat] += d;
+                    if (keepNow.some((id) => !gymAccess(gymById(id, table), s).ok)) return null;
+                    h = Math.max(0, h - HAPPY_LOSS_PER_ENERGY * p.gym.energy * happyLossMult);
+                    g += d;
+                }
+                gains.push(g);
+            }
+            return { s, h, gains };
+        };
+        let list = grouped;
+        let r = replay(grouped);
+        if (!r) {
+            // The split's own order, consecutive trains of one stat in one gym joined.
+            list = [];
+            for (const x of seq) {
+                const last = list[list.length - 1];
+                if (last && last.gym.id === x.gym.id && last.stat === x.k) last.trains++;
+                else list.push({ gym: x.gym, stat: x.k, trains: 1 });
+            }
+            r = replay(list);
+            if (!r) return null;
+        }
+        const parts = list.map((p, i) => ({ gymId: p.gym.id, gymName: p.gym.name, stat: p.stat, trains: p.trains, energy: p.trains * p.gym.energy, perTrain: p.gym.energy, gain: Math.round(r.gains[i]) }));
+        return { parts, statsAfter: r.s, happyAfter: r.h, gains: r.gains };
+    }
+
+    /**
+     * Split one session's energy across the stats, one train at a time (the
+     * stat pickStat chooses), each at that stat's best unlocked and accessible
+     * gym. A train that would lose a gym in `keep` is never planned; that stat
+     * gets `stopAt`. The trains come back grouped as `parts`, in train order.
      *
      * @param {object} o
      * @param {object} o.stats - {str,spd,def,dex}
@@ -1722,9 +1892,14 @@
      * @param {number[]} [o.keep] - gym ids the plan relies on
      * @param {object[]} [o.table] - gym table
      * @param {number} [o.happyLossMult] - Goal Oriented perk etc.
-     * @returns {{perStat:object, gain:number, energyUsed:number, energyLeft:number, happyAfter:number, statsAfter:object, order:string[]}}
+     * @param {number} [o.active] - the gym you're in (its part comes first)
+     * @param {string} [o.rule] - SPLIT_RULE, or 'deficit' (the old rule)
+     * @param {number} [o.happyRef] - the happy later trains happen at (pickStat)
+     * @param {number} [o.happyMax] - the property's max happy (pickStat)
+     * @returns {{perStat:object, gain:number, energyUsed:number, energyLeft:number, happyAfter:number, statsAfter:object, order:string[],
+     *   parts:{gymId:number, gymName:string, stat:string, trains:number, energy:number, perTrain:number, gain:number, stopAt?:number, stopReason?:string}[]}}
      */
-    function splitSession({ stats, shares, energy, happy, unlocked, perks = null, keep = [], table = GYMS, drugsTaken = null, happyLossMult = 1, active = null }) {
+    function splitSession({ stats, shares, energy, happy, unlocked, perks = null, keep = [], table = GYMS, drugsTaken = null, happyLossMult = 1, active = null, rule = SPLIT_RULE, happyRef = SPLIT_HAPPY_REF, happyMax = null }) {
         const s = { ...stats };
         let h = happy;
         let left = energy;
@@ -1732,21 +1907,16 @@
         for (const k of STATS) perStat[k] = { trains: 0, energy: 0, gain: 0, gym: null, stopAt: null, stopReason: null };
         const blocked = new Set();
         const keepNow = keep.filter((id) => gymAccess(gymById(id, table), s).ok);
-        const order = [];
+        const seq = [];
         for (let guard = 0; guard < 100000; guard++) {
-            const total = totalOf(s);
-            let pick = null;
-            let best = -Infinity;
+            const cands = [];
             for (const k of STATS) {
                 if (blocked.has(k)) continue;
                 const gym = bestGymFor(k, s, unlocked, { table, drugsTaken, active });
                 if (!gym || gym.energy > left) continue;
-                const deficit = shares[k] - (total > 0 ? s[k] / total : 0);
-                if (deficit > best) {
-                    best = deficit;
-                    pick = { k, gym };
-                }
+                cands.push({ k, gym, dots: gym.dots[k], energy: gym.energy });
             }
+            const pick = pickStat(cands, s, shares, h, perks, rule, happyRef, happyMax);
             if (!pick) break;
             const { k, gym } = pick;
             const d = gainPerTrain(k, s[k], h, gym.dots[k], gym.energy, perks ? perks[k] : 1);
@@ -1766,28 +1936,57 @@
             p.energy += gym.energy;
             p.gain += d;
             p.gym = gym;
-            if (order[order.length - 1] !== k) order.push(k);
+            seq.push({ k, gym });
         }
+        let statsAfter = s;
+        let happyAfter = h;
+        let parts = [];
+        if (seq.length) {
+            const g = groupParts(seq, { stats, happy, perks, keepNow, table, active, happyLossMult });
+            if (g) {
+                parts = g.parts;
+                statsAfter = g.statsAfter;
+                happyAfter = g.happyAfter;
+                // Gains as trained in the parts' order.
+                for (const k of STATS) perStat[k].gain = 0;
+                g.parts.forEach((p, i) => (perStat[p.stat].gain += g.gains[i]));
+            }
+            for (const k of STATS) {
+                if (perStat[k].stopAt === null) continue;
+                const last = [...parts].reverse().find((p) => p.stat === k);
+                if (last) {
+                    last.stopAt = last.trains;
+                    last.stopReason = perStat[k].stopReason;
+                }
+            }
+        }
+        const order = [];
+        for (const p of parts) if (!order.includes(p.stat)) order.push(p.stat);
         const gain = STATS.reduce((a, k) => a + perStat[k].gain, 0);
-        return { perStat, gain, energyUsed: energy - left, energyLeft: left, happyAfter: h, statsAfter: s, order };
+        return { perStat, gain, energyUsed: energy - left, energyLeft: left, happyAfter, statsAfter, order, parts };
     }
 
     /**
      * Trains per stat for each of the next `days` days at `energyPerDay`, and
-     * the day the build is reached (null if not within `days`).
+     * the day the build is reached (null if not within `days`). `catchUp`: per
+     * stat, the day it is back within the on-build band of its share (0 = it
+     * is already; null = not within `days`).
      */
-    function projectBuild({ stats, shares, energyPerDay, happy, unlocked, perks = null, keep = [], days = 7, sessionsPerDay = 6, table = GYMS, active = null }) {
+    function projectBuild({ stats, shares, energyPerDay, happy, unlocked, perks = null, keep = [], days = 7, sessionsPerDay = 6, table = GYMS, active = null, rule = SPLIT_RULE }) {
         let s = { ...stats };
         const out = [];
         let reachedDay = onBuild(s, shares) ? 0 : null;
+        const caughtUp = (st, k) => st[k] / Math.max(1, totalOf(st)) >= shares[k] - ON_BUILD_PP / 100;
+        const catchUp = {};
+        for (const k of STATS) catchUp[k] = caughtUp(s, k) ? 0 : null;
         const perSession = Math.floor(energyPerDay / sessionsPerDay);
         for (let d = 1; d <= days; d++) {
             const day = { str: 0, spd: 0, def: 0, dex: 0, gain: 0 };
             let left = energyPerDay;
             for (let i = 0; i < sessionsPerDay && left > 0; i++) {
                 const e = i === sessionsPerDay - 1 ? left : Math.min(left, perSession);
-                // Happy is back at its usual level at the start of each session (regeneration + Xanax).
-                const r = splitSession({ stats: s, shares, energy: e, happy, unlocked, perks, keep, table, active });
+                // Happy is back at its usual level at the start of each session (regeneration + Xanax), so later trains get it too.
+                const r = splitSession({ stats: s, shares, energy: e, happy, unlocked, perks, keep, table, active, rule, happyRef: happy });
                 for (const k of STATS) day[k] += r.perStat[k].trains;
                 day.gain += r.gain;
                 left -= r.energyUsed;
@@ -1796,8 +1995,9 @@
             }
             out.push(day);
             if (reachedDay === null && onBuild(s, shares)) reachedDay = d;
+            for (const k of STATS) if (catchUp[k] === null && caughtUp(s, k)) catchUp[k] = d;
         }
-        return { days: out, reachedDay, statsAfter: s };
+        return { days: out, reachedDay, statsAfter: s, catchUp };
     }
 
     /* ===== src/core/items.js ===== */
@@ -2078,6 +2278,7 @@
 
 
 
+
     const STRATEGY_IDS = ['steady', 'dailyChoco', 'chocoJump', 'edvdJump', 'happy99k', 'blissSteady', 'steadyBoost', 'steadyMax', 'candyXanax', 'consoleJump', 'consoleJumpToy', 'edvdJumpAN'];
 
     /** Special refills, counted like an item (free: they come with the account). */
@@ -2198,6 +2399,7 @@
      * @param {object} [o.jobHappy] - job-point happy specials where the player works: {specials:[{jp, happy}], jpPerDay, bank}
      *   spent in each boosted session (steady plans: the first Xanax session of a day), before the Ecstasy
      * @param {number} [o.freeEdvdPerDay] - Adult Novelties 3★ "Voyeur" (20 JP → 1 EDVD): EDVD the job pays for, a day
+     * @param {string} [o.splitRule] - builds.js SPLIT_RULE (default) or 'deficit' (the old split, for the simulator check)
      * @returns {{id, gained:number, perStat:object, cost:number, energyTrained:number, daily:number[], used:object}}
      * Refills (points or special) set energy to the maximum, never above it: anything over is wasted (O2, owner).
      */
@@ -2257,20 +2459,12 @@
         const daily = [];
         const start = totalOf(S);
 
+        // Toward a build: the same per-train split as the day plan (builds.js pickStat), in each stat's gym.
+        const cands = single ? null : STATS.filter((k) => o.gyms[k] && o.gyms[k].dots > 0).map((k) => ({ k, dots: o.gyms[k].dots, energy: o.gyms[k].energy }));
         const pick = () => {
             if (single) return single;
-            const tot = totalOf(S);
-            let best = null;
-            let bd = -Infinity;
-            for (const k of STATS) {
-                if (!o.gyms[k] || !(o.gyms[k].dots > 0)) continue;
-                const d = shares[k] - S[k] / tot;
-                if (d > bd) {
-                    bd = d;
-                    best = k;
-                }
-            }
-            return best;
+            const c = pickStat(cands, S, shares, H, o.perks || null, o.splitRule, undefined, maxH);
+            return c ? c.k : null;
         };
         const train = (keep = 0) => {
             for (;;) {
@@ -2841,8 +3035,9 @@
 
     /* --------------------------------------------------------------- timeline */
 
-    function sessionGain(ctx, stats, energy, happy) {
+    function sessionGain(ctx, stats, energy, happy, happyMax = null) {
         return splitSession({
+            happyMax,
             stats,
             shares: ctx.shares,
             energy,
@@ -2868,6 +3063,11 @@
         return out;
     }
 
+    /** The session in gym parts, in train order: [{gymId, gymName, stat, trains, energy, perTrain, gain, stopAt?, stopReason?}]. */
+    function partsOf(split) {
+        return (split.parts || []).map((p) => ({ gymId: p.gymId, gymName: p.gymName, stat: p.stat, trains: p.trains, energy: p.energy, perTrain: p.perTrain, gain: p.gain, ...(p.stopAt !== undefined ? { stopAt: p.stopAt, stopReason: p.stopReason } : {}) }));
+    }
+
     /**
      * The day's remaining steps, worked out from the live state.
      *
@@ -2881,7 +3081,7 @@
      *   holdBooster (an event that needs the booster cooldown is near: no boosters), candyMult, canMult,
      *   toyShop5, adultNovelties10}
      * @param {number} [o.until] - end of the window (default: the next Torn midnight)
-     * @returns {object[]} steps {id, at, kind, label, items:[{id,qty}], trains:{}, gyms:{}, gain, energy, strict, warnAt, note}
+     * @returns {object[]} steps {id, at, kind, label, items:[{id,qty}], trains:{}, gyms:{}, parts:[] (train steps: the session in gym parts), gain, energy, strict, warnAt, note}
      */
     function dayTimeline({ state, now, strategy, ctx, until = null }) {
         const end = until || tornDayStart(now) + DAY;
@@ -2917,9 +3117,9 @@
         const train = (at, kind, label, items, extra = {}) => {
             // A faction war (Settings › Keep for war days): never train below the energy kept for it.
             const keep = Math.max(0, Math.min(E, ctx.keepEnergy || 0));
-            const split = sessionGain(ctx, stats, E - keep, H);
+            const split = sessionGain(ctx, stats, E - keep, H, happyMax);
             stats = split.statsAfter;
-            const step = { id: kind + '-' + ++n, at, kind, label, items, trains: trainsOf(split), gyms: gymsOf(split), gain: Math.round(split.gain), energy: split.energyUsed, strict: false, warnAt: null, ...extra };
+            const step = { id: kind + '-' + ++n, at, kind, label, items, trains: trainsOf(split), gyms: gymsOf(split), parts: partsOf(split), gain: Math.round(split.gain), energy: split.energyUsed, strict: false, warnAt: null, ...extra };
             if (keep > 0) step.note = (step.note ? step.note + ' · ' : '') + 'keeps ' + keep + ' energy for the war';
             E = split.energyLeft + keep;
             H = split.happyAfter;
@@ -5533,6 +5733,7 @@
             plannedGain,
             reachedDay: proj.reachedDay,
             projection: proj.days.slice(0, 7),
+            buildCatchUp: proj.catchUp || null,
             nextGym: ng,
             energyPerDay,
             buyToday,
@@ -8448,6 +8649,332 @@
         return svg;
     }
 
+    /* ===== src/core/gympage.js ===== */
+    /*
+     * What the gym page marks say, worked out purely (DESIGN §5, ROUND4-PLAN
+     * §C5): the walk-through of the current train step, part by part ("George's:
+     * STR × 12 → Frontline Fitness: DEX × 8"). In the gym of the current part,
+     * that stat is outlined and Fill types the trains left; when the part is in
+     * another gym, that gym's button is outlined ("Next: Frontline Fitness · DEX
+     * × 8") and the stat boxes go grey. Progress comes from a snapshot taken
+     * when the step starts, moved on by every train Torn shows. The UI only
+     * draws this; nothing here (or there) clicks, trains or switches gyms.
+     */
+
+
+
+
+
+
+
+    /** A walk-through older than this is over (a session takes minutes; the next drug is hours away). */
+    const SESSION_MAX_MS = 3 * 60 * 60 * 1000;
+
+    /** This much more energy than the session still needs (a Xanax, a refill, a full bar) starts a new one. */
+    const NEW_SESSION_E = 50;
+
+    /** A step counts as now when it is due within this long. */
+    const DUE_SLACK_MS = 60 * 1000;
+
+    /** "George's: STR × 12" */
+    function partText(p) {
+        return p.gymName + ': ' + STAT_LABEL[p.stat] + ' × ' + p.trains;
+    }
+
+    /** "George's: STR × 12 → Frontline Fitness: DEX × 8" */
+    function partsText(parts) {
+        return (parts || []).map(partText).join(' → ');
+    }
+
+    /**
+     * The train step the gym page walks through: the first step with trains
+     * that is due now; else the energy you have now, split the same way.
+     * @returns {{id, kind, label, at, items, parts}|null}
+     */
+    function currentTrainStep(m, now = m.now) {
+        const due = (m.steps || []).find((s) => s.parts && s.parts.length && s.at <= now + DUE_SLACK_MS);
+        if (due) return due;
+        const energy = m.strip.energy.current;
+        const r = splitSession({
+            stats: m.pc.stats,
+            shares: m.shares,
+            energy,
+            happy: m.strip.happy.current,
+            happyMax: m.state.happy.maximum,
+            unlocked: m.pc.unlocked,
+            perks: m.pc.perks.mult,
+            keep: m.keep,
+            table: m.pc.table,
+            active: m.state.gymId,
+            happyLossMult: m.pc.perks.happyLossMult,
+        });
+        if (!r.parts.length) return null;
+        return { id: 'now', kind: 'now', label: 'The energy you have now', at: now, items: [], parts: r.parts };
+    }
+
+    /**
+     * What the page shows now: each stat from Torn's boxes where they show it
+     * (they change the moment a train lands), else from the model; energy from
+     * Torn's sidebar bar, else the model.
+     * @param {object} m - model
+     * @param {{stat, value}[]} [boxes] - readStatBoxes()
+     * @param {{current:number}|null} [bar] - readEnergyBar()
+     */
+    function pageReading(m, boxes = [], bar = null) {
+        const stats = { ...m.pc.stats };
+        for (const b of boxes || []) if (STATS.includes(b.stat) && Number.isFinite(b.value) && b.value > 0) stats[b.stat] = Math.max(stats[b.stat] || 0, b.value);
+        const energy = bar && Number.isFinite(bar.current) ? bar.current : m.strip.energy.current;
+        return { stats, energy, happy: m.strip.happy.current };
+    }
+
+    /** A new walk-through, snapshot of the stats and energy as the step starts. */
+    function startSession(step, reading, m, now) {
+        const spent = { str: 0, spd: 0, def: 0, dex: 0 };
+        return {
+            v: 1,
+            at: now,
+            build: m.build.id,
+            stepId: step.id,
+            label: step.label || '',
+            drug: (step.items || []).some((it) => it.id === XANAX),
+            parts: step.parts.map((p) => ({ gymId: p.gymId, gymName: p.gymName, stat: p.stat, trains: p.trains, perTrain: p.perTrain, gain: p.gain || 0, ...(p.stopAt !== undefined ? { stopAt: p.stopAt, stopReason: p.stopReason } : {}) })),
+            stats0: { ...reading.stats },
+            energy0: reading.energy,
+            happy0: reading.happy,
+            last: { stats: { ...reading.stats }, energy: reading.energy },
+            spent,
+        };
+    }
+
+    /** Energy spent so far this session. */
+    function spentTotal(session) {
+        return STATS.reduce((a, k) => a + (session.spent[k] || 0), 0);
+    }
+
+    /**
+     * Count the trains that happened since the last reading. A stat that rose
+     * gets the energy that went (the sidebar's drop); when the bar hasn't moved
+     * yet, the trains the rise stands for (its gain ÷ the gain of one train in
+     * that part's gym), so the page moves on as soon as Torn shows the train.
+     * @returns {object} the session, moved on
+     */
+    function advanceSession(session, reading, { table = undefined, perks = null } = {}) {
+        const last = session.last;
+        const rose = STATS.filter((k) => reading.stats[k] - (last.stats[k] || 0) >= 1);
+        const spent = { ...session.spent };
+        if (rose.length) {
+            const happy = Math.max(0, (session.happy0 || 0) - HAPPY_LOSS_PER_ENERGY * spentTotal(session));
+            const est = {};
+            for (const k of rose) {
+                const part = session.parts.find((p) => p.stat === k);
+                const gym = part ? gymById(part.gymId, table) : null;
+                if (!gym || !(gym.dots[k] > 0)) {
+                    est[k] = 0;
+                    continue;
+                }
+                const one = gainPerTrain(k, last.stats[k], happy, gym.dots[k], gym.energy, perks ? perks[k] : 1);
+                est[k] = one > 0 ? Math.max(1, Math.round((reading.stats[k] - last.stats[k]) / one)) * gym.energy : 0;
+            }
+            const dE = Number.isFinite(last.energy) && Number.isFinite(reading.energy) ? last.energy - reading.energy : 0;
+            const estSum = rose.reduce((a, k) => a + est[k], 0);
+            for (const k of rose) spent[k] += dE > 0 ? (estSum > 0 ? (dE * est[k]) / estSum : dE / rose.length) : est[k];
+        }
+        const stats = { ...last.stats };
+        for (const k of STATS) stats[k] = Math.max(stats[k] || 0, reading.stats[k] || 0);
+        return { ...session, spent, last: { stats, energy: Number.isFinite(reading.energy) ? reading.energy : last.energy } };
+    }
+
+    /**
+     * The parts with what's done: each stat's energy spent fills its parts in
+     * order. `current` is the first part not finished (null = session done).
+     */
+    function sessionProgress(session) {
+        const used = { str: 0, spd: 0, def: 0, dex: 0 };
+        let current = null;
+        const parts = session.parts.map((p, i) => {
+            const avail = Math.max(0, (session.spent[p.stat] || 0) - used[p.stat]);
+            const done = Math.min(p.trains, Math.round(avail / p.perTrain));
+            used[p.stat] += done >= p.trains ? p.trains * p.perTrain : avail;
+            const q = { ...p, index: i, done, left: p.trains - done, energy: p.trains * p.perTrain };
+            if (q.left > 0 && current === null) current = q;
+            return q;
+        });
+        for (const q of parts) q.state = q.left === 0 ? 'done' : q === current ? 'current' : 'later';
+        return { parts, current, done: current === null };
+    }
+
+    /** Energy the session still needs. */
+    function sessionEnergyLeft(session) {
+        return sessionProgress(session).parts.reduce((a, p) => a + p.left * p.perTrain, 0);
+    }
+
+    /** Start a new walk-through? (none yet, another build, too old, or clearly more energy than it needs). */
+    function needsNewSession(session, reading, m, now) {
+        if (!session || session.v !== 1 || !Array.isArray(session.parts) || !session.parts.length) return true;
+        if (session.build !== m.build.id) return true;
+        if (!(now - session.at < SESSION_MAX_MS) || now < session.at) return true;
+        return Number.isFinite(reading.energy) && reading.energy - sessionEnergyLeft(session) >= NEW_SESSION_E;
+    }
+
+    /**
+     * The gym page's session as it should be now: moved on by this reading,
+     * or a new one when a new step has started.
+     * @returns {object|null}
+     */
+    function nextSession(prev, m, reading, now, ctx = {}) {
+        if (!needsNewSession(prev, reading, m, now)) return advanceSession(prev, reading, ctx);
+        const step = currentTrainStep(m, now);
+        return step ? startSession(step, reading, m, now) : null;
+    }
+
+    /**
+     * @param {object} m - buildModel() output
+     * @param {object} page - {selectedId, boxes: [{stat, locked, energyPerTrain}]}
+     * @param {object|null} [session] - the walk-through (nextSession); null = the current step, nothing done yet
+     * @param {number} [now]
+     * @returns {{strip:string[], parts:object[], current:object|null, done:boolean, nextGym:{id, label}|null, switchHint:string|null,
+     *   perStat:object, pill:string|null, gym:object|null}}
+     */
+    function planGymPage(m, page = {}, session = null, now = m.now) {
+        const table = m.pc.table;
+        const selectedId = Number(page.selectedId || m.state.gymId);
+        const gym = gymById(selectedId, table);
+        const stats = m.pc.stats;
+        const reading = page.reading || { stats, energy: m.strip.energy.current };
+        const energy = reading.energy;
+        const perStat = {};
+        const out = { strip: [], parts: [], current: null, done: false, nextGym: null, switchHint: null, perStat, pill: null, gym };
+        if (!gym) return out;
+        if (!session) {
+            const step = currentTrainStep(m, now);
+            session = step ? startSession(step, reading, m, now) : null;
+        }
+        const prog = session ? sessionProgress(session) : { parts: [], current: null, done: false };
+        out.parts = prog.parts;
+        out.current = prog.current;
+        out.done = Boolean(session) && prog.done;
+        const cur = prog.current;
+        const here = cur && cur.gymId === selectedId;
+
+        const total = totalOf(stats);
+        const tomorrow = (m.projection && m.projection[1]) || {};
+        const boxes = new Map((page.boxes || []).map((b) => [b.stat, b]));
+        const partsOfStat = (k) => prog.parts.filter((p) => p.stat === k);
+        // The grey word on a box that isn't trained now.
+        const greyWord = (stat, all, left, lockedHere) => {
+            if (all.length && !left.length) return 'Done ✓ · ' + STAT_LABEL[stat] + ' × ' + all.reduce((a, p) => a + p.trains, 0);
+            if (left.length) {
+                const p = left[0];
+                return p.gymId === selectedId ? 'Next · ' + STAT_LABEL[stat] + ' × ' + p.left + ' after ' + (cur ? STAT_LABEL[cur.stat] : 'this') : 'Later · ' + STAT_LABEL[stat] + ' × ' + p.left + ' at ' + p.gymName;
+            }
+            if (lockedHere) return 'Not trained here';
+            const share = total > 0 ? stats[stat] / total : 0;
+            if (share > m.shares[stat] + 0.005) return 'Skip · ' + (share * 100).toFixed(0) + '% of total, over target';
+            if (tomorrow[stat] > 0) return 'Next · starts tomorrow';
+            return 'Skip · not in this session';
+        };
+
+        for (const k of STATS) {
+            const box = boxes.get(k);
+            const locked = (box && box.locked) || !(gym.dots[k] > 0);
+            const mine = partsOfStat(k);
+            const open = mine.filter((p) => p.left > 0);
+            if (here && k === cur.stat) {
+                const n = cur.left;
+                const canNow = Number.isFinite(energy) ? Math.max(0, Math.min(n, Math.floor(energy / cur.perTrain))) : n;
+                const allEnergy = n * cur.perTrain > energy - cur.perTrain;
+                const gain = cur.trains > 0 ? (cur.gain * n) / cur.trains : 0;
+                const waitWord = canNow < n ? (canNow === 0 ? ' · energy ' + fmtInt(energy) + (session.drug ? ', take the Xanax first' : ', wait for more') : ' · ' + canNow + ' now, the rest after more energy') : '';
+                perStat[k] = {
+                    kind: 'train',
+                    trains: n,
+                    fill: canNow,
+                    gain: Math.round(gain),
+                    text: fmtInt(n) + ' train' + (n === 1 ? '' : 's') + (cur.done > 0 ? ' left' : ''),
+                    sub: (allEnergy ? 'all your energy' : fmtInt(n * cur.perTrain) + ' energy') + ' · about ' + fmtSigned(gain) + waitWord,
+                    warn: cur.stopAt !== undefined ? 'Stop at ' + n + ' trains. More puts you under the rule for ' + cur.stopReason + ' and you lose it.' : null,
+                };
+            } else if (cur && !here) {
+                // The current part is in another gym: every box here waits.
+                perStat[k] = { kind: 'grey', text: k === cur.stat ? 'Next · ' + STAT_LABEL[k] + ' × ' + cur.left + ' at ' + cur.gymName : greyWord(k, mine, open, locked) };
+            } else {
+                const text = greyWord(k, mine, open, locked);
+                perStat[k] = { kind: open.length ? 'next' : mine.length ? 'done' : text === 'Not trained here' ? 'none' : text.startsWith('Next') ? 'next' : 'skip', text };
+            }
+        }
+
+        if (cur && !here) {
+            const label = 'Next: ' + cur.gymName + ' · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
+            out.nextGym = { id: cur.gymId, label };
+            out.switchHint = label;
+        }
+
+        out.strip.push(m.build.name);
+        if (m.nextGym && m.nextGym.gym) {
+            const ng = m.nextGym.gym;
+            const k = cur ? cur.stat : STATS.reduce((a, x) => (m.shares[x] - stats[x] / total > m.shares[a] - stats[a] / total ? x : a), 'str');
+            out.strip.push(ng.name + (m.nextGym.known ? ' in ' + fmtInt(m.nextGym.energyLeft) + ' E' : ' next') + ', ' + STAT_LABEL[k] + ' ' + ng.dots[k] + ' there');
+        }
+        if (out.done) out.pill = 'Session done';
+        else if (cur && here) out.pill = 'Train ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
+        else if (cur) out.pill = out.switchHint;
+        else out.pill = energy < gym.energy ? 'Energy ' + fmtInt(energy) + ' · wait for the next step' : null;
+        return out;
+    }
+
+    /* ------------------------------------------------ Home and Plan lines */
+
+    /** The first step that trains (its parts say which gym for which stat right now). */
+    function firstTrainStep(m) {
+        return (m.steps || []).find((s) => s.parts && s.parts.length) || null;
+    }
+
+    /**
+     * "Train in": which gym for which stat right now, from the next training
+     * step, e.g. [{gymName:"George's", stats:['STR']}, {gymName:'Balboas Gym', stats:['DEX']}].
+     * Without a planned train today, each stat under its share at its best gym.
+     */
+    function trainIn(m) {
+        const step = firstTrainStep(m);
+        const out = [];
+        const add = (gymName, k) => {
+            let g = out.find((x) => x.gymName === gymName);
+            if (!g) out.push((g = { gymName, stats: [] }));
+            if (!g.stats.includes(STAT_LABEL[k])) g.stats.push(STAT_LABEL[k]);
+        };
+        if (step) for (const p of step.parts) add(p.gymName, p.stat);
+        else {
+            const total = totalOf(m.pc.stats);
+            for (const k of STATS) if (m.pc.best[k] && total > 0 && m.pc.stats[k] / total < m.shares[k]) add(m.pc.best[k].name, k);
+        }
+        return out;
+    }
+
+    /** "George's for STR · Balboas Gym for DEX" */
+    function trainInText(m) {
+        return trainIn(m).map((g) => g.gymName + ' for ' + g.stats.join(', ')).join(' · ');
+    }
+
+    /**
+     * The "why" when the next session trains one stat only: "Training STR only:
+     * 6 pts under Hank's, about 9 days to catch up". Null when it mixes stats.
+     */
+    function whyOneStat(m) {
+        const step = firstTrainStep(m);
+        if (!step) return null;
+        const stats = [...new Set(step.parts.map((p) => p.stat))];
+        if (stats.length !== 1) return null;
+        const k = stats[0];
+        const total = totalOf(m.pc.stats);
+        const pts = total > 0 ? (m.shares[k] - m.pc.stats[k] / total) * 100 : 0;
+        const name = (m.build.base && BUILDS[m.build.base] ? BUILDS[m.build.base].name : m.build.name).replace(/, .*$/, '');
+        const days = m.buildCatchUp ? m.buildCatchUp[k] : undefined;
+        const ptsText = pts >= 1 ? Math.round(pts) + ' pts' : pts > 0 ? pts.toFixed(1) + ' pts' : null;
+        let text = 'Training ' + STAT_LABEL[k] + ' only: ' + (ptsText ? ptsText + ' under ' + name : 'it is the one ' + name + ' needs now');
+        if (ptsText && days !== undefined) text += days === null ? ', more than 30 days to catch up' : days > 0 ? ', about ' + days + ' day' + (days === 1 ? '' : 's') + ' to catch up' : '';
+        return { stat: k, pts, days: days === undefined ? null : days, text };
+    }
+
     /* ===== src/ui/app/home.js ===== */
     /*
      * Home (mockups/round3/S-home.html): one question, "what do I do today?".
@@ -8455,6 +8982,7 @@
      * build, the next 7 days; Buy today, Heads-up, the plan in one line and this
      * week in the pane.
      */
+
 
 
 
@@ -8501,11 +9029,12 @@
         }
     }
 
-    /** "George's · +72,335 · 400 energy". */
+    /** "George's: STR × 12 → Frontline Fitness: DEX × 8 · +72,335 · 400 energy". */
     function stepSub(s) {
         const parts = [];
         const gyms = [...new Set(Object.values(s.gyms || {}).filter(Boolean))];
-        if (gyms.length) parts.push(gyms.join(' / '));
+        if (s.parts && s.parts.length) parts.push(partsText(s.parts));
+        else if (gyms.length) parts.push(gyms.join(' / '));
         if (s.gain) parts.push(fmtSigned(s.gain));
         if (s.energy) parts.push(fmtInt(s.energy) + ' energy');
         if (s.note) parts.push(s.note);
@@ -8586,6 +9115,8 @@
 
     function buildFoot(m) {
         const foot = [];
+        const tin = trainInText(m);
+        if (tin) foot.push(h('span', {}, ['Train in ', h('b', { text: tin })]));
         if (m.reachedDay !== null && m.reachedDay !== undefined) foot.push(h('span', {}, [m.build.name + ' in ', h('b', { text: m.reachedDay === 0 ? 'now' : 'about ' + m.reachedDay + ' day' + (m.reachedDay === 1 ? '' : 's') })]));
         if (m.nextGym && m.nextGym.gym) foot.push(h('span', {}, [m.nextGym.gym.name + ' ', h('b', { text: m.nextGym.known ? 'in ' + fmtInt(m.nextGym.energyLeft) + ' E' : 'next' }), m.nextGym.known ? ' (about ' + Math.max(1, Math.round(m.nextGym.days)) + ' days)' : ' · open Torn’s gym page once to track it']));
         return foot.length ? h('div', { class: 'sgfoot num' }, foot) : null;
@@ -8725,6 +9256,7 @@
      * the pick (plans that don't fit you hidden behind a tick), and where your
      * energy comes from. Pane: the 30-day chart, the build, the Bliss card.
      */
+
 
 
 
@@ -9148,8 +9680,27 @@
         const cur = buildFor(curBase);
         const gyms = (cur.gyms || []).map((g) => (gymById(g) || { name: '' }).name).filter(Boolean);
         const georges = m.pc.unlocked.includes(GEORGES);
+        // Where the next session trains, why it's one stat (when it is), and the next gym to unlock.
+        const tin = trainInText(m);
+        // With a goal (stat numbers, a gym) the shares aren't the build's: no "under Hank's" line then.
+        const why = plan.goal ? null : whyOneStat(m);
+        const focusBuild = (e) => {
+            e.preventDefault();
+            const sel = e.currentTarget.getRootNode().querySelector('select[aria-label="Build to train toward"]');
+            if (sel) {
+                sel.scrollIntoView({ block: 'center' });
+                sel.focus();
+            }
+        };
+        const ng = m.nextGym && m.nextGym.gym ? m.nextGym : null;
+        const lines = [
+            tin ? h('div', { class: 'note2' }, ['Train in ', h('b', { class: 'white', text: tin })]) : null,
+            why ? h('div', { class: 'note2' }, [why.text + ' · ', h('a', { href: '#plan', onclick: focusBuild, text: 'Change build' })]) : null,
+            ng ? h('div', { class: 'note2' }, ['Next gym unlock: ', h('b', { class: 'white', text: ng.gym.name }), ng.known && ng.days !== null ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' day' + (Math.max(1, Math.round(ng.days)) === 1 ? '' : 's') : ' · open Torn’s gym page once to track it']) : null,
+        ].filter(Boolean);
         return h('div', {}, [
             sectionHead('Build', meta([plan.buildPicked ? 'what the plan trains toward' : 'pick yours: the plan trains toward it']), null, 'h3'),
+            lines.length ? h('div', { style: 'margin-bottom:8px' }, lines) : null,
             h('div', { class: 'row', style: 'margin-bottom:8px;gap:8px' }, [t('lab', 'High stat'), h('div', { class: 'seg', role: 'group', 'aria-label': 'High stat' }, STATS.map((k) => h('button', { type: 'button', 'aria-pressed': String(k === high), onclick: () => ctx.setPlan({ build: (highStatOf(curBase) ? curBase : 'baldr') + ':' + k, buildPicked: true }), text: STAT_LABEL[k] })))]),
             h('div', { class: 'bl' }, rows),
             h('div', { class: 'note2', text: (gyms.length ? 'Specialist gyms: ' + gyms.join(' + ') + '. ' : '') + (georges ? '' : 'They open after George’s; until then every train still moves you toward this build.') }),
@@ -15033,9 +15584,21 @@
             const cls = String(b.className);
             const state = /selected___/.test(cls) ? 'selected' : /inProgress___/.test(cls) ? 'inProgress' : /lockedPurchased___/.test(cls) ? 'lockedPurchased' : /locked___/.test(cls) ? 'locked' : /active___/.test(cls) ? 'active' : 'unknown';
             const pct = b.querySelector('[class*="percentage___"]');
-            out.push({ id: Number(m[1]), state, percent: pct ? gymNum(pct.textContent) : null, name: b.getAttribute('aria-label') || null });
+            out.push({ id: Number(m[1]), state, percent: pct ? gymNum(pct.textContent) : null, name: b.getAttribute('aria-label') || null, el: b });
         }
         return out;
+    }
+
+    /**
+     * Torn's sidebar energy bar ("150/150"): it moves the moment a train lands,
+     * before our next API read. Null when the page doesn't show it.
+     * @returns {{current:number, max:number}|null}
+     */
+    function readEnergyBar(doc = document) {
+        const bar = doc.getElementById('barEnergy') || doc.querySelector('[class*="bar___"][class*="energy___"]');
+        const v = bar && bar.querySelector('[class*="bar-value___"]');
+        const m = v && String(v.textContent || '').replace(/,/g, '').match(/(\d+)\s*\/\s*(\d+)/);
+        return m ? { current: Number(m[1]), max: Number(m[2]) } : null;
     }
 
     /** Unlocked gym ids (usable now), the gym you're in, and the one being unlocked. */
@@ -15091,6 +15654,11 @@
     .pi-warn { display: flex; align-items: center; gap: 10px; padding: 7px 10px; margin: 6px 0; background: #2a1f10; border-left: 3px solid #e8a33d; border-radius: 0 5px 5px 0; font-size: 12px; color: #ffd79a; }
     .pi-warn b { color: #ffe3b3; }
     .pi-outlined { box-shadow: inset 0 0 0 2px #efebe2 !important; position: relative; }
+    .pi-dim { opacity: .45; }
+    .pi-strip .pi-part { color: #939aa1; white-space: nowrap; }
+    .pi-strip .pi-part.pi-cur { color: #fff; font-weight: bold; }
+    .pi-strip .pi-part.pi-done { color: #9bdc8a; }
+    .pi-strip .pi-done-all { color: #9bdc8a; font-weight: bold; }
     .pi-label { position: absolute; top: -9px; left: 10px; right: auto; height: 18px; line-height: 18px; padding: 0 8px; border-radius: 9px; background: #efebe2; color: #15171a; font: bold 11px Arial, sans-serif; pointer-events: none; z-index: 2; white-space: nowrap; }
     `;
 
@@ -15106,7 +15674,7 @@
     /** Remove every mark we drew inside `scope`. */
     function clearMarks(scope = document) {
         for (const el of scope.querySelectorAll('.pi-mark')) el.remove();
-        for (const el of scope.querySelectorAll('.pi-on, .pi-outlined')) el.classList.remove('pi-on', 'pi-outlined');
+        for (const el of scope.querySelectorAll('.pi-on, .pi-outlined, .pi-dim')) el.classList.remove('pi-on', 'pi-outlined', 'pi-dim');
     }
 
     function plate() {
@@ -15119,42 +15687,66 @@
      * @param {object} plan - planGymPage(model, page)
      * @param {object[]} boxes - readStatBoxes(root)
      * @param {function} rereadBox - (stat) => the box as it is now (React may have replaced the input)
+     * @param {{id, el}[]} [buttons] - readGymButtons(root): the next part's gym gets an outline
      */
-    function drawGymMarks(root, plan, boxes, rereadBox) {
+    function drawGymMarks(root, plan, boxes, rereadBox, buttons = []) {
         clearMarks(root);
         const list = root.querySelector('ul[class*="properties___"]');
         if (!list) return;
+        const sep = (text) => h('span', { class: 'pi-sep', text });
         const strip = h('div', { class: 'pi-mark pi-strip' }, [plate()]);
-        plan.strip.forEach((p, i) => {
-            if (i) strip.appendChild(h('span', { class: 'pi-sep', text: '·' }));
-            strip.appendChild(i === 0 ? h('b', { text: p }) : h('span', { text: p }));
-        });
+        strip.appendChild(h('b', { text: plan.strip[0] || '' }));
+        // The session, part by part: ticks on the ones done, the current one bright.
+        if (plan.parts && plan.parts.length) {
+            strip.appendChild(sep('·'));
+            plan.parts.forEach((p, i) => {
+                if (i) strip.appendChild(sep('→'));
+                const words = p.gymName + ': ' + p.stat.toUpperCase() + ' × ' + p.trains + (p.state === 'current' && p.done > 0 ? ' (' + p.left + ' left)' : '');
+                strip.appendChild(h('span', { class: 'pi-part' + (p.state === 'done' ? ' pi-done' : p.state === 'current' ? ' pi-cur' : ''), text: (p.state === 'done' ? '✓ ' : '') + words }));
+            });
+        }
+        if (plan.done) {
+            strip.appendChild(sep('·'));
+            strip.appendChild(h('span', { class: 'pi-done-all', text: 'Session done' }));
+        }
+        for (const p of plan.strip.slice(1)) {
+            strip.appendChild(sep('·'));
+            strip.appendChild(h('span', { text: p }));
+        }
         if (plan.switchHint) {
-            strip.appendChild(h('span', { class: 'pi-sep', text: '·' }));
+            strip.appendChild(sep('·'));
             strip.appendChild(h('span', { class: 'pi-hint', text: plan.switchHint }));
         }
         list.parentNode.insertBefore(strip, list);
+        // The next part is in another gym: outline that gym's button (the user switches; we never do).
+        if (plan.nextGym) {
+            const b = buttons.find((x) => x.id === plan.nextGym.id);
+            if (b && b.el) outline(b.el, plan.nextGym.label);
+        }
         for (const box of boxes) {
             const p = plan.perStat[box.stat];
             if (!p) continue;
             if (p.kind === 'train') {
+                const n = p.fill !== undefined ? p.fill : p.trains;
                 box.li.classList.add('pi-on');
                 box.li.appendChild(h('span', { class: 'pi-mark pi-label', text: 'Train this' }));
                 const fill = h('button', {
                     class: 'pi-fill',
                     type: 'button',
-                    text: 'Fill ' + p.trains,
-                    disabled: p.trains <= 0,
+                    text: 'Fill ' + n,
+                    disabled: n <= 0,
                     onclick: (e) => {
                         e.preventDefault();
                         e.stopPropagation();
                         const now = rereadBox(box.stat) || box;
-                        fillTrains(now.input, p.trains);
+                        fillTrains(now.input, n);
                     },
                 });
                 const panel = p.warn ? h('div', { class: 'pi-mark pi-warn' }, [h('span', {}, [h('b', { text: p.warn.split('. ')[0] + '.' }), ' ' + p.warn.split('. ').slice(1).join('. ')]), fill]) : h('div', { class: 'pi-mark pi-panel' }, [h('b', { text: p.text }), h('span', { text: p.sub }), fill]);
                 box.content.insertBefore(panel, box.content.firstChild);
             } else {
+                // Waiting on another gym's part: the whole box greys out.
+                if (p.kind === 'grey') box.li.classList.add('pi-dim');
                 box.content.insertBefore(h('div', { class: 'pi-mark pi-grey', text: p.text }), box.content.firstChild);
             }
         }
@@ -15234,89 +15826,6 @@
             };
             out.push({ listingId: id, price: pageMoney(cell('.cost-each')), qty: pageMoney(cell('.points')), el: li });
         }
-        return out;
-    }
-
-    /* ===== src/core/gympage.js ===== */
-    /*
-     * What the gym page marks say, worked out purely (DESIGN §5): which stat to
-     * train in the gym you're in and how many trains, a stop before a train
-     * would lose a specialist gym, a grey word for the other stats, and whether
-     * a better unlocked gym exists. The UI only draws this.
-     */
-
-
-
-
-
-
-    /**
-     * @param {object} m - buildModel() output
-     * @param {object} page - {selectedId, boxes: [{stat, locked, energyPerTrain}]}
-     * @returns {{strip: string[], switchHint: string|null, perStat: object, pill: string|null}}
-     */
-    function planGymPage(m, page = {}) {
-        const table = m.pc.table;
-        const selectedId = Number(page.selectedId || m.state.gymId);
-        const gym = gymById(selectedId, table);
-        const stats = m.pc.stats;
-        const energy = m.strip.energy.current;
-        const happy = m.strip.happy.current;
-        const perStat = {};
-        const out = { strip: [], switchHint: null, perStat, pill: null, gym };
-        if (!gym) return out;
-
-        const here = splitSession({ stats, shares: m.shares, energy, happy, unlocked: [selectedId], perks: m.pc.perks.mult, keep: m.keep, table, active: selectedId, happyLossMult: m.pc.perks.happyLossMult });
-        const best = splitSession({ stats, shares: m.shares, energy: Math.max(energy, 100), happy, unlocked: m.pc.unlocked, perks: m.pc.perks.mult, keep: m.keep, table, active: selectedId, happyLossMult: m.pc.perks.happyLossMult });
-        const total = totalOf(stats);
-        const behind = STATS.reduce((a, k) => (m.shares[k] - stats[k] / total > m.shares[a] - stats[a] / total ? k : a), 'str');
-        const tomorrow = (m.projection && m.projection[1]) || {};
-        const boxes = new Map((page.boxes || []).map((b) => [b.stat, b]));
-
-        for (const k of STATS) {
-            const p = here.perStat[k];
-            const box = boxes.get(k);
-            const locked = (box && box.locked) || !(gym.dots[k] > 0);
-            const share = stats[k] / total;
-            if (p.trains > 0 || p.stopAt !== null) {
-                const n = p.trains;
-                const allEnergy = n * gym.energy > energy - gym.energy;
-                perStat[k] = {
-                    kind: 'train',
-                    trains: n,
-                    gain: Math.round(p.gain),
-                    text: fmtInt(n) + ' train' + (n === 1 ? '' : 's'),
-                    sub: (allEnergy ? 'all your energy' : fmtInt(n * gym.energy) + ' energy') + ' · about ' + fmtSigned(p.gain),
-                    warn: p.stopAt !== null ? 'Stop at ' + p.stopAt + ' trains. More puts you under the rule for ' + p.stopReason + ' and you lose it.' : null,
-                };
-            } else if (locked) {
-                perStat[k] = { kind: 'none', text: 'Not trained here' };
-            } else if (share > m.shares[k] + 0.005) {
-                perStat[k] = { kind: 'skip', text: 'Skip · ' + (share * 100).toFixed(0) + '% of total, over target' };
-            } else if (tomorrow[k] > 0) {
-                perStat[k] = { kind: 'next', text: 'Next · starts tomorrow' };
-            } else {
-                perStat[k] = { kind: 'skip', text: 'Skip · others are further behind' };
-            }
-        }
-
-        // A better unlocked gym for the stat the plan trains first?
-        const first = best.order[0];
-        if (first) {
-            const b = bestGymFor(first, stats, m.pc.unlocked, { table, active: selectedId });
-            if (b && b.id !== selectedId && (!(gym.dots[first] > 0) || b.dots[first] > gym.dots[first])) {
-                out.switchHint = 'Switch to ' + b.name + ' for ' + STAT_LABEL[first] + ' (' + b.dots[first] + (gym.dots[first] > 0 ? ' vs ' + gym.dots[first] : '') + ')';
-            }
-        }
-
-        out.strip.push(m.build.name);
-        out.strip.push(STAT_LABEL[behind] + ' is furthest behind');
-        if (m.nextGym && m.nextGym.gym) {
-            const ng = m.nextGym.gym;
-            out.strip.push(ng.name + (m.nextGym.known ? ' in ' + fmtInt(m.nextGym.energyLeft) + ' E' : ' next') + ', ' + STAT_LABEL[behind] + ' ' + ng.dots[behind] + ' there');
-        }
-        const trainable = STATS.filter((k) => perStat[k].kind === 'train' && perStat[k].trains > 0);
-        out.pill = trainable.length ? 'Train ' + trainable.map((k) => STAT_LABEL[k] + ' × ' + perStat[k].trains).join(' · ') : out.switchHint ? out.switchHint : energy < gym.energy ? 'Energy ' + energy + ' · wait for the next step' : null;
         return out;
     }
 
@@ -15456,11 +15965,17 @@
             return;
         }
         const boxes = readStatBoxes(root);
-        const plan = planGymPage(m, { selectedId: sum.selectedId || m.state.gymId, boxes });
+        // The walk-through: Torn's own boxes and energy bar move the moment a train lands (the model can be 30 s old).
+        const now = Date.now();
+        const reading = pageReading(m, boxes, readEnergyBar());
+        const prev = get(K.gymSession, null);
+        const session = nextSession(prev, m, reading, now, { table: m.pc.table, perks: m.pc.perks.mult });
+        if (JSON.stringify(session) !== JSON.stringify(prev)) set(K.gymSession, session);
+        const plan = planGymPage(m, { selectedId: sum.selectedId || m.state.gymId, boxes, reading }, session, now);
         tp.lastGymPlan = plan;
         tp.drawing = true;
         try {
-            drawGymMarks(root, plan, boxes, (stat) => readStatBoxes(gymRoot()).find((b) => b.stat === stat));
+            drawGymMarks(root, plan, boxes, (stat) => readStatBoxes(gymRoot()).find((b) => b.stat === stat), buttons);
         } finally {
             tp.drawing = false;
         }

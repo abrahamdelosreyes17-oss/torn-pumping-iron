@@ -3,7 +3,7 @@
  * energy split toward one. Pure; ENGINE-SPEC §7, research-builds-gympage.md.
  */
 
-import { STATS, gainPerTrain, HAPPY_LOSS_PER_ENERGY, totalOf } from './gain.js';
+import { STATS, gainPerTrain, HAPPY_LOSS_PER_ENERGY, HAPPY_CAP, STAT_AB, effectiveStat, round4, totalOf } from './gain.js';
 import { gymAccess, gymById, bestGymFor, GYMS, BALBOAS, FRONTLINE, GYM_3000, ISOYAMAS, ELITES, TOTAL_REBOUND, GEORGES } from './gyms.js';
 
 /** Share of the total, per stat. The first listed gyms are the ones the build relies on. */
@@ -149,10 +149,179 @@ export function allowedTrains({ stat, stats, gym, happy, perks = 1, keep = [], m
 }
 
 /**
- * Split one session's energy across the stats, one train at a time, each
- * to the stat furthest below its share (GTG+ runBalance), at that stat's best
- * unlocked and accessible gym. A train that would lose a gym in `keep` is
- * never planned; that stat gets `stopAt`.
+ * Which rule gives each train its stat (ENGINE-SPEC §7):
+ * - 'speed' (1.3.0): the train that moves you furthest toward the build per
+ *   energy: its gain per energy (the stat's value, happy now, the gym's dots,
+ *   perks) times how far the stat is under its build share. A stat at or
+ *   over its share never gets one while another stat is under, so the plan
+ *   never drifts from the build you picked.
+ * - 'deficit' (up to 1.2): always the stat furthest under its share
+ *   (GTG+ runBalance). Kept for the simulator check (test/split-sim.test.js).
+ */
+export const SPLIT_RULE = 'speed';
+
+/**
+ * [tuned: test/split-sim.test.js] How much the happy you have now counts.
+ * Steady training runs happy down (about 0.5 per energy; regeneration and
+ * Xanax give back less), so the trains a stat doesn't get now come later,
+ * at lower happy. Happy adds about the same amount to every train: a big
+ * part of a low stat's gain, a small part of a high stat's. So the
+ * high-happy trains go to the stats they lift most: each value is also
+ * multiplied by (gain now ÷ gain at SPLIT_HAPPY_REF) ^ SPLIT_HAPPY_WEIGHT.
+ * Without it (0) the friend's low stats wait until happy has run out and
+ * a steady 90 days ends ~1.5% lower than the old rule; 6 keeps it level.
+ */
+export const SPLIT_HAPPY_WEIGHT = 6;
+
+/** [calibrate] The happy later trains happen at: steady training runs it down to about 0 (the simulator). */
+export const SPLIT_HAPPY_REF = 0;
+
+/** The happy-only parts of gain.js's formula (gainPerTrain), for one happy. */
+function happyTerms(H) {
+    const h = Math.min(HAPPY_CAP, Math.max(0, H || 0));
+    return { f: round4(1 + 0.07 * round4(Math.log(1 + h / 250))), p: 8 * Math.pow(h, 1.05), q: 1 - Math.pow(h / HAPPY_CAP, 2) };
+}
+
+/** gainPerTrain's bracket (before × dots × energy × perks ÷ 200,000): what a train gains per energy, up to that factor. */
+function innerGain(stat, eff, t) {
+    const [A, B] = STAT_AB[stat];
+    return Math.max(0, eff * t.f + t.p + t.q * A + B);
+}
+
+/**
+ * The stat the next train goes to: the most progress toward the build per
+ * energy, value = gain per energy × (gap to its share − band) × happy weight.
+ * While any stat is more than the on-build band (ON_BUILD_PP) under its
+ * share, only those count, each measured to the band's edge: every stat
+ * lands inside the band together, so the build is reached as early as the
+ * old rule reaches it. Once all are inside, any stat under its share, the
+ * fastest first ("near the build, the fastest mix"). When none of those can
+ * train (no gym here, a specialist limit), the old rule's pick, so energy
+ * is never left unspent where it used to be spent.
+ *
+ * @param {{k:string, dots:number, energy:number}[]} cands - stats that can train now, with the gym's dots and energy per train
+ * @param {object} s - stats now
+ * @param {object} shares - build shares
+ * @param {number} happy - happy now (it falls with every train)
+ * @param {object|null} [perks] - per-stat multipliers
+ * @param {string} [rule]
+ * @param {number} [happyRef] - the happy later trains happen at (SPLIT_HAPPY_REF; the build projection, which starts
+ *   every session at the same happy, passes that happy)
+ * @param {number|null} [happyMax] - the property's max happy: a boost above it is weighed as if at the max (every
+ *   train of a jump is boosted, so the boost itself says nothing about which stat should get it)
+ * @returns {object|null} the chosen candidate
+ */
+export function pickStat(cands, s, shares, happy, perks = null, rule = SPLIT_RULE, happyRef = SPLIT_HAPPY_REF, happyMax = null) {
+    const total = totalOf(s);
+    if (rule !== 'deficit') {
+        const band = ON_BUILD_PP / 100;
+        const hNow = happyMax !== null && happy > happyMax ? happyMax : happy;
+        const weigh = SPLIT_HAPPY_WEIGHT > 0 && hNow !== happyRef;
+        // The happy parts of the formula are the same for every stat: once per pick (this runs for every simulated train).
+        const tNow = happyTerms(happy);
+        const tAt = hNow === happy ? tNow : happyTerms(hNow);
+        const tRef = weigh ? happyTerms(happyRef) : null;
+        for (const cut of [band, 0]) {
+            let pick = null;
+            let best = 0;
+            for (const c of cands) {
+                const w = shares[c.k] - (total > 0 ? s[c.k] / total : 0) - cut;
+                if (!(w > 0)) continue;
+                const eff = effectiveStat(s[c.k]);
+                // Gain per energy up to the same factor for every stat (dots × perks ÷ 200,000).
+                const scale = c.dots * (perks ? perks[c.k] : 1);
+                const now = innerGain(c.k, eff, tNow) * scale;
+                let v = now * w;
+                if (weigh) {
+                    const later = innerGain(c.k, eff, tRef);
+                    if (later > 0) v *= Math.pow((tAt === tNow ? now / scale : innerGain(c.k, eff, tAt)) / later, SPLIT_HAPPY_WEIGHT);
+                }
+                if (v > best) {
+                    best = v;
+                    pick = c;
+                }
+            }
+            if (pick) return pick;
+        }
+    }
+    let pick = null;
+    let best = -Infinity;
+    for (const c of cands) {
+        const d = shares[c.k] - (total > 0 ? s[c.k] / total : 0);
+        if (d > best) {
+            best = d;
+            pick = c;
+        }
+    }
+    return pick;
+}
+
+/**
+ * The session's trains as parts, "George's: STR × 12 → Frontline: DEX × 8":
+ * one part per gym and stat, the gym you're in first, then each gym in the
+ * order the split first used it, so you switch gyms as few times as
+ * possible. Replayed in that order (happy falls train by train, specialist
+ * access is checked again); when that order would lose a gym the build
+ * relies on, or use a gym before its ratio opens, the split's own order is
+ * kept instead.
+ * @returns {{parts:object[], statsAfter:object, happyAfter:number, gains:number[]}|null}
+ */
+function groupParts(seq, { stats, happy, perks, keepNow, table, active, happyLossMult }) {
+    const byKey = new Map();
+    const gymOrder = [];
+    for (const x of seq) {
+        const key = x.gym.id + ':' + x.k;
+        if (!byKey.has(key)) byKey.set(key, { gym: x.gym, stat: x.k, trains: 0 });
+        byKey.get(key).trains++;
+        if (!gymOrder.includes(x.gym.id)) gymOrder.push(x.gym.id);
+    }
+    const a = Number(active);
+    if (gymOrder.includes(a)) {
+        gymOrder.splice(gymOrder.indexOf(a), 1);
+        gymOrder.unshift(a);
+    }
+    const grouped = [];
+    for (const id of gymOrder) for (const p of byKey.values()) if (p.gym.id === id) grouped.push(p);
+    const replay = (list) => {
+        const s = { ...stats };
+        let h = happy;
+        const gains = [];
+        for (const p of list) {
+            let g = 0;
+            for (let i = 0; i < p.trains; i++) {
+                if (p.gym.specialist && !gymAccess(p.gym, s).ok) return null;
+                const d = gainPerTrain(p.stat, s[p.stat], h, p.gym.dots[p.stat], p.gym.energy, perks ? perks[p.stat] : 1);
+                s[p.stat] += d;
+                if (keepNow.some((id) => !gymAccess(gymById(id, table), s).ok)) return null;
+                h = Math.max(0, h - HAPPY_LOSS_PER_ENERGY * p.gym.energy * happyLossMult);
+                g += d;
+            }
+            gains.push(g);
+        }
+        return { s, h, gains };
+    };
+    let list = grouped;
+    let r = replay(grouped);
+    if (!r) {
+        // The split's own order, consecutive trains of one stat in one gym joined.
+        list = [];
+        for (const x of seq) {
+            const last = list[list.length - 1];
+            if (last && last.gym.id === x.gym.id && last.stat === x.k) last.trains++;
+            else list.push({ gym: x.gym, stat: x.k, trains: 1 });
+        }
+        r = replay(list);
+        if (!r) return null;
+    }
+    const parts = list.map((p, i) => ({ gymId: p.gym.id, gymName: p.gym.name, stat: p.stat, trains: p.trains, energy: p.trains * p.gym.energy, perTrain: p.gym.energy, gain: Math.round(r.gains[i]) }));
+    return { parts, statsAfter: r.s, happyAfter: r.h, gains: r.gains };
+}
+
+/**
+ * Split one session's energy across the stats, one train at a time (the
+ * stat pickStat chooses), each at that stat's best unlocked and accessible
+ * gym. A train that would lose a gym in `keep` is never planned; that stat
+ * gets `stopAt`. The trains come back grouped as `parts`, in train order.
  *
  * @param {object} o
  * @param {object} o.stats - {str,spd,def,dex}
@@ -164,9 +333,14 @@ export function allowedTrains({ stat, stats, gym, happy, perks = 1, keep = [], m
  * @param {number[]} [o.keep] - gym ids the plan relies on
  * @param {object[]} [o.table] - gym table
  * @param {number} [o.happyLossMult] - Goal Oriented perk etc.
- * @returns {{perStat:object, gain:number, energyUsed:number, energyLeft:number, happyAfter:number, statsAfter:object, order:string[]}}
+ * @param {number} [o.active] - the gym you're in (its part comes first)
+ * @param {string} [o.rule] - SPLIT_RULE, or 'deficit' (the old rule)
+ * @param {number} [o.happyRef] - the happy later trains happen at (pickStat)
+ * @param {number} [o.happyMax] - the property's max happy (pickStat)
+ * @returns {{perStat:object, gain:number, energyUsed:number, energyLeft:number, happyAfter:number, statsAfter:object, order:string[],
+ *   parts:{gymId:number, gymName:string, stat:string, trains:number, energy:number, perTrain:number, gain:number, stopAt?:number, stopReason?:string}[]}}
  */
-export function splitSession({ stats, shares, energy, happy, unlocked, perks = null, keep = [], table = GYMS, drugsTaken = null, happyLossMult = 1, active = null }) {
+export function splitSession({ stats, shares, energy, happy, unlocked, perks = null, keep = [], table = GYMS, drugsTaken = null, happyLossMult = 1, active = null, rule = SPLIT_RULE, happyRef = SPLIT_HAPPY_REF, happyMax = null }) {
     const s = { ...stats };
     let h = happy;
     let left = energy;
@@ -174,21 +348,16 @@ export function splitSession({ stats, shares, energy, happy, unlocked, perks = n
     for (const k of STATS) perStat[k] = { trains: 0, energy: 0, gain: 0, gym: null, stopAt: null, stopReason: null };
     const blocked = new Set();
     const keepNow = keep.filter((id) => gymAccess(gymById(id, table), s).ok);
-    const order = [];
+    const seq = [];
     for (let guard = 0; guard < 100000; guard++) {
-        const total = totalOf(s);
-        let pick = null;
-        let best = -Infinity;
+        const cands = [];
         for (const k of STATS) {
             if (blocked.has(k)) continue;
             const gym = bestGymFor(k, s, unlocked, { table, drugsTaken, active });
             if (!gym || gym.energy > left) continue;
-            const deficit = shares[k] - (total > 0 ? s[k] / total : 0);
-            if (deficit > best) {
-                best = deficit;
-                pick = { k, gym };
-            }
+            cands.push({ k, gym, dots: gym.dots[k], energy: gym.energy });
         }
+        const pick = pickStat(cands, s, shares, h, perks, rule, happyRef, happyMax);
         if (!pick) break;
         const { k, gym } = pick;
         const d = gainPerTrain(k, s[k], h, gym.dots[k], gym.energy, perks ? perks[k] : 1);
@@ -208,28 +377,57 @@ export function splitSession({ stats, shares, energy, happy, unlocked, perks = n
         p.energy += gym.energy;
         p.gain += d;
         p.gym = gym;
-        if (order[order.length - 1] !== k) order.push(k);
+        seq.push({ k, gym });
     }
+    let statsAfter = s;
+    let happyAfter = h;
+    let parts = [];
+    if (seq.length) {
+        const g = groupParts(seq, { stats, happy, perks, keepNow, table, active, happyLossMult });
+        if (g) {
+            parts = g.parts;
+            statsAfter = g.statsAfter;
+            happyAfter = g.happyAfter;
+            // Gains as trained in the parts' order.
+            for (const k of STATS) perStat[k].gain = 0;
+            g.parts.forEach((p, i) => (perStat[p.stat].gain += g.gains[i]));
+        }
+        for (const k of STATS) {
+            if (perStat[k].stopAt === null) continue;
+            const last = [...parts].reverse().find((p) => p.stat === k);
+            if (last) {
+                last.stopAt = last.trains;
+                last.stopReason = perStat[k].stopReason;
+            }
+        }
+    }
+    const order = [];
+    for (const p of parts) if (!order.includes(p.stat)) order.push(p.stat);
     const gain = STATS.reduce((a, k) => a + perStat[k].gain, 0);
-    return { perStat, gain, energyUsed: energy - left, energyLeft: left, happyAfter: h, statsAfter: s, order };
+    return { perStat, gain, energyUsed: energy - left, energyLeft: left, happyAfter, statsAfter, order, parts };
 }
 
 /**
  * Trains per stat for each of the next `days` days at `energyPerDay`, and
- * the day the build is reached (null if not within `days`).
+ * the day the build is reached (null if not within `days`). `catchUp`: per
+ * stat, the day it is back within the on-build band of its share (0 = it
+ * is already; null = not within `days`).
  */
-export function projectBuild({ stats, shares, energyPerDay, happy, unlocked, perks = null, keep = [], days = 7, sessionsPerDay = 6, table = GYMS, active = null }) {
+export function projectBuild({ stats, shares, energyPerDay, happy, unlocked, perks = null, keep = [], days = 7, sessionsPerDay = 6, table = GYMS, active = null, rule = SPLIT_RULE }) {
     let s = { ...stats };
     const out = [];
     let reachedDay = onBuild(s, shares) ? 0 : null;
+    const caughtUp = (st, k) => st[k] / Math.max(1, totalOf(st)) >= shares[k] - ON_BUILD_PP / 100;
+    const catchUp = {};
+    for (const k of STATS) catchUp[k] = caughtUp(s, k) ? 0 : null;
     const perSession = Math.floor(energyPerDay / sessionsPerDay);
     for (let d = 1; d <= days; d++) {
         const day = { str: 0, spd: 0, def: 0, dex: 0, gain: 0 };
         let left = energyPerDay;
         for (let i = 0; i < sessionsPerDay && left > 0; i++) {
             const e = i === sessionsPerDay - 1 ? left : Math.min(left, perSession);
-            // Happy is back at its usual level at the start of each session (regeneration + Xanax).
-            const r = splitSession({ stats: s, shares, energy: e, happy, unlocked, perks, keep, table, active });
+            // Happy is back at its usual level at the start of each session (regeneration + Xanax), so later trains get it too.
+            const r = splitSession({ stats: s, shares, energy: e, happy, unlocked, perks, keep, table, active, rule, happyRef: happy });
             for (const k of STATS) day[k] += r.perStat[k].trains;
             day.gain += r.gain;
             left -= r.energyUsed;
@@ -238,6 +436,7 @@ export function projectBuild({ stats, shares, energyPerDay, happy, unlocked, per
         }
         out.push(day);
         if (reachedDay === null && onBuild(s, shares)) reachedDay = d;
+        for (const k of STATS) if (catchUp[k] === null && caughtUp(s, k)) catchUp[k] = d;
     }
-    return { days: out, reachedDay, statsAfter: s };
+    return { days: out, reachedDay, statsAfter: s, catchUp };
 }

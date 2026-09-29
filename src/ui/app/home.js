@@ -15,6 +15,7 @@ import { tornDayStart, DAY } from '../../core/bars.js';
 import { itemsUrl, gymUrl, pointsUrl, itemMarketUrl, pointsMarketUrl } from '../../sources/route.js';
 import { stackBars } from '../charts.js';
 import { clock, cd, sectionHead, meta, trainsText, headsList, STAT_COLOR, DAY_NAMES, MONTH_NAMES } from './common.js';
+import { partsText, trainInText } from '../../core/gympage.js';
 
 const DAYS = DAY_NAMES;
 const MONTHS = MONTH_NAMES;
@@ -50,11 +51,12 @@ export function stepWords(s) {
     }
 }
 
-/** "George's · +72,335 · 400 energy". */
+/** "George's: STR × 12 → Frontline Fitness: DEX × 8 · +72,335 · 400 energy". */
 function stepSub(s) {
     const parts = [];
     const gyms = [...new Set(Object.values(s.gyms || {}).filter(Boolean))];
-    if (gyms.length) parts.push(gyms.join(' / '));
+    if (s.parts && s.parts.length) parts.push(partsText(s.parts));
+    else if (gyms.length) parts.push(gyms.join(' / '));
     if (s.gain) parts.push(fmtSigned(s.gain));
     if (s.energy) parts.push(fmtInt(s.energy) + ' energy');
     if (s.note) parts.push(s.note);
@@ -135,6 +137,8 @@ function youVsBuild(m) {
 
 function buildFoot(m) {
     const foot = [];
+    const tin = trainInText(m);
+    if (tin) foot.push(h('span', {}, ['Train in ', h('b', { text: tin })]));
     if (m.reachedDay !== null && m.reachedDay !== undefined) foot.push(h('span', {}, [m.build.name + ' in ', h('b', { text: m.reachedDay === 0 ? 'now' : 'about ' + m.reachedDay + ' day' + (m.reachedDay === 1 ? '' : 's') })]));
     if (m.nextGym && m.nextGym.gym) foot.push(h('span', {}, [m.nextGym.gym.name + ' ', h('b', { text: m.nextGym.known ? 'in ' + fmtInt(m.nextGym.energyLeft) + ' E' : 'next' }), m.nextGym.known ? ' (about ' + Math.max(1, Math.round(m.nextGym.days)) + ' days)' : ' · open Torn’s gym page once to track it']));
     return foot.length ? h('div', { class: 'sgfoot num' }, foot) : null;

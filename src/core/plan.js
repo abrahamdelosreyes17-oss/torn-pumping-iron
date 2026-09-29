@@ -84,8 +84,9 @@ export function goalEta({ stats, targets, gyms, happy, energyPerDay }) {
 
 /* --------------------------------------------------------------- timeline */
 
-function sessionGain(ctx, stats, energy, happy) {
+function sessionGain(ctx, stats, energy, happy, happyMax = null) {
     return splitSession({
+        happyMax,
         stats,
         shares: ctx.shares,
         energy,
@@ -111,6 +112,11 @@ function gymsOf(split) {
     return out;
 }
 
+/** The session in gym parts, in train order: [{gymId, gymName, stat, trains, energy, perTrain, gain, stopAt?, stopReason?}]. */
+function partsOf(split) {
+    return (split.parts || []).map((p) => ({ gymId: p.gymId, gymName: p.gymName, stat: p.stat, trains: p.trains, energy: p.energy, perTrain: p.perTrain, gain: p.gain, ...(p.stopAt !== undefined ? { stopAt: p.stopAt, stopReason: p.stopReason } : {}) }));
+}
+
 /**
  * The day's remaining steps, worked out from the live state.
  *
@@ -124,7 +130,7 @@ function gymsOf(split) {
  *   holdBooster (an event that needs the booster cooldown is near: no boosters), candyMult, canMult,
  *   toyShop5, adultNovelties10}
  * @param {number} [o.until] - end of the window (default: the next Torn midnight)
- * @returns {object[]} steps {id, at, kind, label, items:[{id,qty}], trains:{}, gyms:{}, gain, energy, strict, warnAt, note}
+ * @returns {object[]} steps {id, at, kind, label, items:[{id,qty}], trains:{}, gyms:{}, parts:[] (train steps: the session in gym parts), gain, energy, strict, warnAt, note}
  */
 export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     const end = until || tornDayStart(now) + DAY;
@@ -160,9 +166,9 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     const train = (at, kind, label, items, extra = {}) => {
         // A faction war (Settings › Keep for war days): never train below the energy kept for it.
         const keep = Math.max(0, Math.min(E, ctx.keepEnergy || 0));
-        const split = sessionGain(ctx, stats, E - keep, H);
+        const split = sessionGain(ctx, stats, E - keep, H, happyMax);
         stats = split.statsAfter;
-        const step = { id: kind + '-' + ++n, at, kind, label, items, trains: trainsOf(split), gyms: gymsOf(split), gain: Math.round(split.gain), energy: split.energyUsed, strict: false, warnAt: null, ...extra };
+        const step = { id: kind + '-' + ++n, at, kind, label, items, trains: trainsOf(split), gyms: gymsOf(split), parts: partsOf(split), gain: Math.round(split.gain), energy: split.energyUsed, strict: false, warnAt: null, ...extra };
         if (keep > 0) step.note = (step.note ? step.note + ' · ' : '') + 'keeps ' + keep + ' energy for the war';
         E = split.energyLeft + keep;
         H = split.happyAfter;

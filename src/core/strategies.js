@@ -11,6 +11,7 @@
 import { STATS, STAT_LABEL, gainPerTrain, HAPPY_CAP, HAPPY_LOSS_PER_ENERGY, totalOf } from './gain.js';
 import { XANAX, ECSTASY, EDVD, FHC, CANDY_KISSES, POINTS, REFILL_POINTS, XANAX_CD_MIN, ECSTASY_CD_MIN, ITEMS, boostersThatFit, boosterHours, BOOSTER_CAP_H, GAME_CONSOLE } from './items.js';
 import { candyWords } from './candy.js';
+import { pickStat } from './builds.js';
 
 export const STRATEGY_IDS = ['steady', 'dailyChoco', 'chocoJump', 'edvdJump', 'happy99k', 'blissSteady', 'steadyBoost', 'steadyMax', 'candyXanax', 'consoleJump', 'consoleJumpToy', 'edvdJumpAN'];
 
@@ -132,6 +133,7 @@ export const TICK_OFFSET_MIN = 5;
  * @param {object} [o.jobHappy] - job-point happy specials where the player works: {specials:[{jp, happy}], jpPerDay, bank}
  *   spent in each boosted session (steady plans: the first Xanax session of a day), before the Ecstasy
  * @param {number} [o.freeEdvdPerDay] - Adult Novelties 3★ "Voyeur" (20 JP → 1 EDVD): EDVD the job pays for, a day
+ * @param {string} [o.splitRule] - builds.js SPLIT_RULE (default) or 'deficit' (the old split, for the simulator check)
  * @returns {{id, gained:number, perStat:object, cost:number, energyTrained:number, daily:number[], used:object}}
  * Refills (points or special) set energy to the maximum, never above it: anything over is wasted (O2, owner).
  */
@@ -191,20 +193,12 @@ export function simulateStrategy(id, o) {
     const daily = [];
     const start = totalOf(S);
 
+    // Toward a build: the same per-train split as the day plan (builds.js pickStat), in each stat's gym.
+    const cands = single ? null : STATS.filter((k) => o.gyms[k] && o.gyms[k].dots > 0).map((k) => ({ k, dots: o.gyms[k].dots, energy: o.gyms[k].energy }));
     const pick = () => {
         if (single) return single;
-        const tot = totalOf(S);
-        let best = null;
-        let bd = -Infinity;
-        for (const k of STATS) {
-            if (!o.gyms[k] || !(o.gyms[k].dots > 0)) continue;
-            const d = shares[k] - S[k] / tot;
-            if (d > bd) {
-                bd = d;
-                best = k;
-            }
-        }
-        return best;
+        const c = pickStat(cands, S, shares, H, o.perks || null, o.splitRule, undefined, maxH);
+        return c ? c.k : null;
     };
     const train = (keep = 0) => {
         for (;;) {

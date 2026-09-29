@@ -74,7 +74,8 @@ test('a build target spreads trains across stats by deficit', () => {
         days: 10,
     });
     assert.ok(r.perStat.dex > r.perStat.def && r.perStat.def > r.perStat.spd && r.perStat.spd >= r.perStat.str);
-    assert.equal(Object.values(r.perStat).reduce((a, b) => a + b, 0), r.gained);
+    // Each stat and the total are rounded on their own.
+    assert.ok(Math.abs(Object.values(r.perStat).reduce((a, b) => a + b, 0) - r.gained) <= 2);
 });
 
 test('a non-donator bar (15 min) trains less', () => {

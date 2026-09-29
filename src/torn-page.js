@@ -11,9 +11,9 @@ import { onModel, isVisible, refresh } from './runtime.js';
 import { isPaused, onPauseChange } from './turns.js';
 import { Overlay } from './ui/overlay.js';
 import { ensureMarkCss, clearMarks, drawGymMarks, outline } from './ui/marks/marks.js';
-import { gymRoot, gymLoading, readStatBoxes, readGymButtons, gymListSummary } from './sources/dom/gym.js';
+import { gymRoot, gymLoading, readStatBoxes, readGymButtons, gymListSummary, readEnergyBar } from './sources/dom/gym.js';
 import { readItemRows, readBazaarCards, readItemMarketRows, readPointsRows } from './sources/dom/market.js';
-import { planGymPage } from './core/gympage.js';
+import { planGymPage, pageReading, nextSession } from './core/gympage.js';
 import { unlockEnergyAfter } from './core/gyms.js';
 import { needsForWindow } from './ui/app/buy.js';
 import { loadPrices } from './app-page.js';
@@ -133,11 +133,17 @@ function drawGym(m) {
         return;
     }
     const boxes = readStatBoxes(root);
-    const plan = planGymPage(m, { selectedId: sum.selectedId || m.state.gymId, boxes });
+    // The walk-through: Torn's own boxes and energy bar move the moment a train lands (the model can be 30 s old).
+    const now = Date.now();
+    const reading = pageReading(m, boxes, readEnergyBar());
+    const prev = get(K.gymSession, null);
+    const session = nextSession(prev, m, reading, now, { table: m.pc.table, perks: m.pc.perks.mult });
+    if (JSON.stringify(session) !== JSON.stringify(prev)) set(K.gymSession, session);
+    const plan = planGymPage(m, { selectedId: sum.selectedId || m.state.gymId, boxes, reading }, session, now);
     tp.lastGymPlan = plan;
     tp.drawing = true;
     try {
-        drawGymMarks(root, plan, boxes, (stat) => readStatBoxes(gymRoot()).find((b) => b.stat === stat));
+        drawGymMarks(root, plan, boxes, (stat) => readStatBoxes(gymRoot()).find((b) => b.stat === stat), buttons);
     } finally {
         tp.drawing = false;
     }
