@@ -7,6 +7,7 @@
 
 import { TornApiError } from './client.js';
 import { TRAINING_EVENTS } from '../core/events.js';
+import { itemsInfoFrom } from '../core/market.js';
 
 /** Torn's "incorrect category" and "access level too low". */
 export const TORN_ERROR_WRONG_FIELDS = 4;
@@ -16,8 +17,8 @@ export const TORN_ERROR_INCORRECT_CATEGORY = 21;
 /** The one call Home and the overlay live on, every 30 s while visible (Limited key). */
 export const USER_STATE_SELECTIONS = 'bars,cooldowns,refills,battlestats,gym';
 
-/** Inventory categories a gym plan cares about (always sent: no-cat answers 21). */
-export const INVENTORY_CATS = ['Drug', 'Booster', 'Candy', 'Energy Drink'];
+/** Inventory categories a gym plan cares about (always sent: no-cat answers 21). Special: the Game Console. */
+export const INVENTORY_CATS = ['Drug', 'Booster', 'Candy', 'Energy Drink', 'Special'];
 
 /** key/info access levels (v1 numbering, assumed the same in v2). */
 export const ACCESS_CUSTOM = 0;
@@ -232,4 +233,36 @@ export function missingSelections(info) {
 export function keyIsEnough(info) {
     const missing = missingSelections(info);
     return missing === null ? null : missing.length === 0;
+}
+
+/**
+ * Your job (Public): a company {type:'company', id, type_id, name, rating (stars),
+ * position, days_in_company}, a city job, or null. Company what-ifs read it.
+ */
+export async function fetchJob(client) {
+    const d = await client.get('v2/user/job');
+    return (d && d.job) || null;
+}
+
+/**
+ * Job points (Minimal): {jobs:{army,...}, companies:[{company:{id: type id, name}, points}]}.
+ * A key that can't read it answers null, not an error.
+ */
+export async function fetchJobPoints(client) {
+    try {
+        const d = await client.get('v2/user/jobpoints');
+        return (d && d.jobpoints) || null;
+    } catch (error) {
+        if (error instanceof TornApiError && (error.code === TORN_ERROR_ACCESS_LEVEL || error.code === TORN_ERROR_WRONG_FIELDS)) return null;
+        throw error;
+    }
+}
+
+/**
+ * Torn's data for the items the plan may buy (candy, the Game Console): Torn's
+ * market price and the city shops that sell each (`value.shops`), kept small.
+ * @returns {Promise<object>} {[id]: {market, shops:[{shop, buy}]}}
+ */
+export async function fetchItemsInfo(client, itemIds) {
+    return itemsInfoFrom(await fetchItems(client, itemIds));
 }

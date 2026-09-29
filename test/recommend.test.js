@@ -20,7 +20,8 @@ test('the friend on $150M: steady training is recommended (EDVD gains more but i
     assert.equal(r.recommended, 'steady');
     const edvd = r.alternatives.find((a) => a.id === 'edvdJump');
     assert.equal(edvd.verdict, 'overBudget');
-    assert.ok(Math.round(edvd.deltaStatsPct) === 13);
+    // 14% since refills fill energy to the maximum, never above it (O2): steady lost ~0.5%.
+    assert.ok(Math.round(edvd.deltaStatsPct) === 14);
     assert.ok(Math.abs(edvd.deltaCost - 387.45e6) < 1e6);
     assert.ok(r.reasons.some((x) => /budget/.test(x)));
 });
@@ -41,7 +42,7 @@ test('picking the choco jump warns, with its reasons', () => {
     const w = pickWarning(FRIEND.steady, FRIEND.chocoJump);
     assert.equal(w.warn, true);
     assert.equal(w.title, "A choco jump isn't worth it for you");
-    assert.equal(w.text, '30 days: about +592k stats, against +994k on steady, and $14.2M more.');
+    assert.equal(w.text, '30 days: about +592k stats, against +989k on steady, and $14.2M more.');
     assert.ok(w.reasons.includes('Holding four Xanax stops natural energy.'));
     assert.ok(w.reasons.includes('The Ecstasy uses a drug cooldown a Xanax would have filled.'));
     assert.ok(w.reasons.includes('Worth it only if you read Ignorance Is Bliss.'));

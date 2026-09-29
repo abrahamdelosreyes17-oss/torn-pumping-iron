@@ -159,6 +159,32 @@ export function itemMarketUrl(itemId) {
     return TORN + 'page.php?sid=ItemMarket#/market/view=search&itemID=' + encodeURIComponent(String(itemId));
 }
 
+/**
+ * City shops by the name /torn/items gives them (value.shops[].shop), as
+ * shops.php?step= pages (TornTools links the Pharmacy as step=pharmacy).
+ * Sally's Sweet Shop is step=candy [verify]; a shop not listed opens the city map.
+ */
+export const SHOP_STEPS = {
+    "Sally's Sweet Shop": 'candy',
+    Pharmacy: 'pharmacy',
+    "Bits 'n' Bobs": 'bitsnbobs',
+    'Super Store': 'super',
+    'Cyber Force': 'cyberforce',
+    'Jewelry Store': 'jewelry',
+    'Nikeh Sports': 'nikeh',
+    'TC Clothing': 'clothes',
+    Docks: 'docks',
+    'Post Office': 'postoffice',
+    'Pawn Shop': 'pawnshop',
+    'Recycling Center': 'recyclingcenter',
+    'Print Shop': 'printstore',
+};
+
+export function shopUrl(shop) {
+    const step = SHOP_STEPS[shop];
+    return step ? TORN + 'shops.php?step=' + step : TORN + 'city.php';
+}
+
 export function profileUrl(userId) {
     return TORN + 'profiles.php?XID=' + encodeURIComponent(String(userId));
 }

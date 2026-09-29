@@ -102,7 +102,7 @@ test('inventory: one call per category; a category Torn refuses is skipped', asy
     });
     const inv = await torn.fetchInventory(tornClient(f));
     assert.deepEqual(inv, { 206: 1, 197: 2 });
-    assert.deepEqual(f.calls.map((x) => new URL(x.url).searchParams.get('cat')), ['Drug', 'Booster', 'Candy', 'Energy Drink']);
+    assert.deepEqual(f.calls.map((x) => new URL(x.url).searchParams.get('cat')), ['Drug', 'Booster', 'Candy', 'Energy Drink', 'Special']);
 });
 
 test('a dead key during inventory stops it (not skipped)', async () => {

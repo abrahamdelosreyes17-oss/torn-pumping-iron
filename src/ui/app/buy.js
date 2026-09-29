@@ -8,10 +8,12 @@
 
 import { h, t, sparkline } from '../dom.js';
 import { fmtInt, fmtMoney } from '../../core/format.js';
-import { itemName, ITEMS, REFILL_POINTS, POINTS, XANAX, ECSTASY, EDVD, FHC, CANDY_KISSES, MUNSTER } from '../../core/items.js';
+import { itemName, ITEMS, REFILL_POINTS, POINTS, XANAX, ECSTASY, EDVD, FHC, CANDY_KISSES, MUNSTER, CANDY_IDS, GAME_CONSOLE } from '../../core/items.js';
 import { itemsNeeded } from '../../core/plan.js';
 import { tornDayStart, DAY } from '../../core/bars.js';
-import { needList, fillCheapest, whereText, linkFor, WINDOWS, SOURCE_BAZAAR, SOURCE_ITEM_MARKET } from '../../core/market.js';
+import { needList, fillCheapest, whereText, linkFor, WINDOWS, SOURCE_BAZAAR, SOURCE_ITEM_MARKET, SOURCE_NPC, npcListing, candyShopsFrom } from '../../core/market.js';
+import { itemContext } from '../../core/model.js';
+import { CANDY_PLANS } from '../../core/strategies.js';
 import { W3B_SITE_URL } from '../../api/w3b.js';
 import { itemMarketUrl, pointsMarketUrl } from '../../sources/route.js';
 import { sectionHead, meta } from './common.js';
@@ -41,21 +43,68 @@ export function typeOf(id) {
     return 'booster';
 }
 
-/** The plan's needs for a window: today's steps, plus later days at the plan's daily average. */
+/**
+ * The plan's needs for a window: the real schedule (today's steps, and the
+ * next boost or jump in full whatever day it lands, with its Xanax stack),
+ * then the days after it at the plan's daily average.
+ * @param {object} m - the model ({now, steps, ahead}: `ahead` runs on to the next boost)
+ */
 export function needsForWindow(m, compare, plan, windowKey, horizonDays) {
     const days = WINDOWS[windowKey] || 1;
-    const today = itemsNeeded(m.steps.filter((s) => s.at < tornDayStart(m.now) + DAY));
-    if (days <= 1) return today;
+    const dayStart = tornDayStart(m.now);
+    const steps = (m.ahead && m.ahead.length ? m.ahead : m.steps) || [];
+    const boostAt = steps.findIndex((s) => s.kind === 'jump' || s.kind === 'boost');
+    const real = steps.filter((s, i) => s.at < dayStart + DAY || (boostAt >= 0 && i <= boostAt));
+    const out = itemsNeeded(real);
+    if (days <= 1) return out;
+    // Days the real schedule already covers (at least today); the rest at the 30-day average.
+    const last = real.length ? Math.max(...real.map((s) => s.at)) : m.now;
+    const covered = Math.max(1, Math.ceil((last + 1 - dayStart) / DAY));
+    const rest = days - covered;
     const r = compare && compare[plan.strategy];
-    const out = { ...today };
-    if (r) {
+    if (r && rest > 0) {
         for (const [id, n] of Object.entries(r.used || {})) {
-            if (id === 'special') continue;
-            const extra = ((n || 0) / (horizonDays || 30)) * (days - 1);
+            // Not bought: special refills (and their counters), EDVD the job pays for; the console is bought once.
+            if (id !== POINTS && !/^\d+$/.test(id)) continue;
+            if (Number(id) === GAME_CONSOLE) continue;
+            const extra = ((n || 0) / (horizonDays || 30)) * rest;
             if (extra > 0) out[id] = Math.ceil((out[id] || 0) + extra - 1e-9);
         }
     }
     return out;
+}
+
+/**
+ * The item-type ticks: what the player chose, plus every type the plan uses
+ * (candy was hidden by default), unless the player turned that one off.
+ */
+export function shownTypes(settings, planTypes = []) {
+    const show = new Set(Array.isArray(settings.buyTypes) ? settings.buyTypes : DEFAULT_BUY_TYPES);
+    const off = new Set(Array.isArray(settings.buyTypesOff) ? settings.buyTypesOff : []);
+    for (const k of planTypes) if (!off.has(k)) show.add(k);
+    return show;
+}
+
+/** A tick clicked: the settings patch ({buyTypes, buyTypesOff}). */
+export function toggleType(settings, planTypes, k) {
+    const show = shownTypes(settings, planTypes);
+    const off = new Set(Array.isArray(settings.buyTypesOff) ? settings.buyTypesOff : []);
+    const on = new Set(Array.isArray(settings.buyTypes) ? settings.buyTypes : DEFAULT_BUY_TYPES);
+    if (show.has(k)) {
+        on.delete(k);
+        off.add(k);
+    } else {
+        on.add(k);
+        off.delete(k);
+    }
+    return { buyTypes: [...on], buyTypesOff: [...off] };
+}
+
+/** "Lollipop · the plan’s pick: most stats in your budget, of 6 candy weighed". */
+export function candyNote(candy, pickBy = 'most') {
+    if (!candy) return '';
+    const rule = pickBy === 'value' ? 'the most stats per $1M' : pickBy === 'max' ? 'the most stats, no budget' : 'the most stats in your budget';
+    return 'the plan’s pick: ' + rule + (candy.options > 1 ? ', of ' + candy.options + ' candy weighed' : '');
 }
 
 export function agoShort(at, now) {
@@ -83,6 +132,7 @@ function sideLine(listings) {
 }
 
 function checkedText(row, p, now) {
+    if (row.source === SOURCE_NPC) return 'Torn item data';
     if (row.source === SOURCE_BAZAAR) return 'TornW3B · ' + agoShort(row.dataAt || p.w3bAt, now);
     return 'Torn API · ' + agoShort(p.imAt, now);
 }
@@ -95,11 +145,18 @@ export function renderBuy(m, ctx) {
     const s = ctx.settings;
     const now = m.now;
     const win = s.buyWindow || 'three';
-    const show = new Set(Array.isArray(s.buyTypes) ? s.buyTypes : DEFAULT_BUY_TYPES);
     const inv = ctx.statics.inventory || {};
     const needs = needList(needsForWindow(m, ctx.compare, ctx.plan, win, s.horizonDays), inv);
+    const planTypes = [...new Set(needs.map((n) => typeOf(n.id)))];
+    const show = shownTypes(s, planTypes);
     const toBuy = needs.filter((n) => n.buy > 0 && show.has(typeOf(n.id)));
-    ctx.wantPrices([...new Set(toBuy.map((n) => n.id).concat(TRACKED.filter((id) => show.has(typeOf(id)))))]);
+    // The plan's candy (picked in the comparison), and the city shops the player may buy from.
+    const mine = ctx.compare && ctx.compare[ctx.plan.strategy];
+    const candy = mine && mine.candy ? mine.candy : null;
+    const ic = itemContext(ctx.statics, s);
+    const tracked = TRACKED.map((id) => (id === CANDY_KISSES && candy ? candy.id : id));
+    // Every candy the plan might pick is priced too (fewer listings, every 30 min), so the pick can change with prices.
+    ctx.wantPrices([...new Set(toBuy.map((n) => n.id).concat(tracked.filter((id) => show.has(typeOf(id)))))], CANDY_PLANS.has(ctx.plan.strategy) ? CANDY_IDS : []);
     const prices = ctx.prices || {};
     let total = 0;
     const firstOpen = { done: false };
@@ -107,17 +164,20 @@ export function renderBuy(m, ctx) {
     const rows = [];
     for (const n of toBuy) {
         const p = prices[n.id] || {};
-        const listings = Array.isArray(p.listings) ? p.listings : [];
+        // A city shop the player ticked sells it: its price joins the listings (as many as needed).
+        const shop = ic.npc[n.id] ? npcListing(ic.npc[n.id], n.buy) : null;
+        const listings = (Array.isArray(p.listings) ? p.listings : []).concat(shop ? [shop] : []);
         const fill = listings.length ? fillCheapest(listings, n.buy, n.id) : null;
         if (fill) total += fill.total;
         const days = WINDOWS[win] || 1;
-        const perDay = days > 1 ? Math.round((n.need / days) * 10) / 10 + ' a day' : n.need + ' today';
+        const perDay = n.id === GAME_CONSOLE ? 'once, for the console jump' : days > 1 ? Math.round((n.need / days) * 10) / 10 + ' a day' : n.need + ' today';
         const side = listings.length ? sideLine(listings) : null;
+        const picked = candy && Number(n.id) === candy.id ? candyNote(candy, ctx.plan.pickBy) : '';
         rows.push(
             h('tr', { class: 'ih' }, [
                 h('td', { colspan: '6' }, [
                     h('b', { text: n.name + ' × ' + fmtInt(n.buy) }),
-                    h('span', { class: 'muted', text: ' · ' + (n.id === POINTS ? refillWords() : perDay) + ' · you have ' + fmtInt(n.have) + (fill ? ' · ' + fmtMoney(fill.total) : '') }),
+                    h('span', { class: 'muted', text: ' · ' + (n.id === POINTS ? refillWords() : perDay) + ' · you have ' + fmtInt(n.have) + (fill ? ' · ' + fmtMoney(fill.total) : '') + (picked ? ' · ' + picked : '') }),
                     side ? h('span', { class: 'verdict c-good', style: 'margin-left:10px', text: side.text }) : null,
                 ]),
             ]),
@@ -139,6 +199,7 @@ export function renderBuy(m, ctx) {
                     h('td', { class: 'r' }, [openBtn(r.link, primary)]),
                 ]),
             );
+            if (r.source === SOURCE_NPC) rows.push(h('tr', { class: 'sub' }, [h('td', { colspan: '6', class: 'muted', text: 'City shop purchases count against Torn’s daily items allowance. Shown because you ticked ' + r.shop + ' under “Shops I can buy from”.' })]));
         }
         if (fill.short > 0) rows.push(h('tr', { class: 'sub' }, [h('td', { colspan: '6', class: 'c-bad', text: 'Only ' + fmtInt(fill.filled) + ' listed at these prices' })]));
         // The Item Market's cheapest, when the fill didn't need it: a check that bazaars really are cheaper.
@@ -159,7 +220,7 @@ export function renderBuy(m, ctx) {
     const deals = [];
     let hiddenDeals = 0;
     const planIds = new Set(needs.map((n) => String(n.id)));
-    for (const id of TRACKED) {
+    for (const id of tracked) {
         const p = prices[id];
         if (!p || !Array.isArray(p.listings) || !p.listings.length) continue;
         const best = p.listings.slice().sort((a, b) => a.price - b.price)[0];
@@ -182,7 +243,7 @@ export function renderBuy(m, ctx) {
             ]),
         );
     }
-    const notInPlan = TRACKED.filter((id) => !planIds.has(String(id)) && show.has(typeOf(id)));
+    const notInPlan = tracked.filter((id) => !planIds.has(String(id)) && show.has(typeOf(id)));
     const cheapestRows = notInPlan.map((id) => {
         const p = prices[id];
         const best = p && Array.isArray(p.listings) && p.listings.length ? p.listings.slice().sort((a, b) => a.price - b.price)[0] : null;
@@ -198,13 +259,13 @@ export function renderBuy(m, ctx) {
     ]);
 
     // Pane: 7-day prices, what you hold, where prices come from.
-    const spark = TRACKED.filter((id) => show.has(typeOf(id))).map((id) => {
+    const spark = tracked.filter((id) => show.has(typeOf(id))).map((id) => {
         const p = prices[id] || {};
         const cheapest = p.listings && p.listings.length ? Math.min(...p.listings.map((l) => l.price)) : null;
         const pct = cheapest && p.avg7 ? (100 * (cheapest - p.avg7)) / p.avg7 : null;
         return h('tr', {}, [h('td', {}, [h('b', { class: 'w', text: itemName(id) })]), h('td', { style: 'width:96px' }, [sparkline(p.lows7 || [], { w: 90, h: 22, color: planIds.has(String(id)) ? '#efebe2' : '#6c737a' })]), h('td', { class: 'r' + (cheapest ? '' : ' muted'), text: cheapest ? '$' + fmtInt(cheapest) : ctx.paused ? 'paused' : p.error ? 'no answer' : 'loading…' }), h('td', { class: 'r ' + (pct !== null && pct < -1 ? 'c-good' : 'muted'), text: pct === null ? '' : (pct >= 0 ? '+' : '−') + Math.abs(pct).toFixed(1) + '%' })]);
     });
-    const heldIds = [...new Set([XANAX, POINTS, ECSTASY, EDVD, CANDY_KISSES, FHC, MUNSTER].map(String))];
+    const heldIds = [...new Set([XANAX, POINTS, ECSTASY, EDVD, candy ? candy.id : CANDY_KISSES, FHC, MUNSTER].map(String))];
     const held = heldIds.map((id) => [id === POINTS ? 'Points' : itemName(Number(id)), Number(inv[id === POINTS ? POINTS : Number(id)]) || 0]);
     const im = Object.values(prices).map((p) => p.imAt || 0);
     const bz = Object.values(prices).map((p) => p.w3bAt || 0);
@@ -224,12 +285,36 @@ export function renderBuy(m, ctx) {
         'div',
         { class: 'ticks', role: 'group', 'aria-label': 'Show' },
         BUY_TYPES.map(([k, label]) =>
-            h('button', { type: 'button', class: 'tk', 'aria-pressed': String(show.has(k)), onclick: () => { const next = new Set(show); if (next.has(k)) next.delete(k); else next.add(k); ctx.setSettings({ buyTypes: [...next] }); } }, [h('i'), label]),
+            h('button', { type: 'button', class: 'tk', 'aria-pressed': String(show.has(k)), onclick: () => ctx.setSettings(toggleType(s, planTypes, k)) }, [h('i'), label]),
         ),
     );
     const ctl = [t('lab', 'Buy for'), seg, h('span', { class: 'muted' }, [summary ? summary + ' · ' : 'Nothing to buy · ', h('b', { class: 'white', text: fmtMoney(total) })]), h('span', { class: 'sep' }), t('lab', 'Show'), ticks];
     const newest = Math.max(0, ...Object.values(prices).map((p) => p.at || 0));
-    return { ctl: [ctl], upd: newest ? 'prices ' + agoShort(newest, now) + ' ago' : 'prices load now', main: [listCard, dealsCard], pane };
+    const shops = shopsControl(ctx);
+    return { ctl: shops ? [ctl, shops] : [ctl], upd: newest ? 'prices ' + agoShort(newest, now) + ' ago' : 'prices load now', main: [listCard, dealsCard], pane };
+}
+
+/**
+ * "Shops I can buy from": a tick per city shop Torn's item data lists for
+ * candy, all off until ticked. Torn's API can't tell who may buy there (the
+ * owner: Sally's Sweet Shop is for newbies only), so the plan uses a shop's
+ * price only once it's ticked.
+ */
+function shopsControl(ctx) {
+    const list = candyShopsFrom((ctx.statics && ctx.statics.items) || {});
+    if (!list.length) return null;
+    const on = new Set(Array.isArray(ctx.settings.npcShops) ? ctx.settings.npcShops : []);
+    return [
+        t('lab', 'Shops I can buy from'),
+        h(
+            'div',
+            { class: 'ticks', role: 'group', 'aria-label': 'Shops I can buy from' },
+            list.map((shop) =>
+                h('button', { type: 'button', class: 'tk shop', 'aria-pressed': String(on.has(shop)), onclick: () => { const next = new Set(on); if (next.has(shop)) next.delete(shop); else next.add(shop); ctx.setSettings({ npcShops: [...next] }); } }, [h('i'), shop]),
+            ),
+        ),
+        h('span', { class: 'info', title: 'Torn doesn’t say who may buy at a city shop (Sally’s Sweet Shop is for newbies only). Tick the ones that sell to you and the plan may pick their candy; each row links to the shop. City shop buys count against Torn’s daily items allowance.', text: 'i' }),
+    ];
 }
 
 function refillWords() {

@@ -152,20 +152,22 @@ export function energyLadder({ state, pc, shares, prices = {}, compare = null, r
         rows.push({ id: can.id, name: 'Cans (' + ITEMS[can.id].name.replace(/^Can of /, '') + ')', cooldown: 'booster · 2 h each', energy: String(can.energy), costPerStat: perStat(can.price, can.energy), perDay: 'up to ' + (boostersThatFit(can.id, capH) - 1), inPlan: canIn, note: canIn ? null : 'FHC fills the booster better (' + maxE + ' E per 6 h vs ' + can.energy * 3 + ' E)' });
     }
 
-    const candyP = priceFor(CANDY_KISSES, prices);
+    // The candy the Candy + Xanax plan picked (by name), else Candy Kisses.
+    const cx = compare && compare.candyXanax;
+    const candyId = cx && cx.candy ? cx.candy.id : CANDY_KISSES;
+    const candyP = cx && cx.candy ? cx.candy.unit : priceFor(CANDY_KISSES, prices);
     if (candyP) {
-        const n = boostersThatFit(CANDY_KISSES, capH);
-        const add = Math.round(n * ITEMS[CANDY_KISSES].happy * (perks.candyMult || 1));
-        const cx = compare && compare.candyXanax;
+        const n = cx && cx.candy ? cx.candy.count : boostersThatFit(candyId, capH, 0, perks.consumableCdMult || 1);
+        const add = Math.round(n * ITEMS[candyId].happy * (perks.candyMult || 1));
         const extra = cx && steady ? cx.gained - steady.gained : null;
         rows.push({
             id: 'candy',
-            name: 'Candy, no Ecstasy',
+            name: 'Candy (' + (ITEMS[candyId].short || ITEMS[candyId].name) + '), no Ecstasy',
             cooldown: 'booster · 30 min each',
             energy: '0 (+' + add.toLocaleString('en-US') + ' happy)',
             costPerStat: extra > 0 && cx.cost > steady.cost ? (cx.cost - steady.cost) / extra : null,
             perDay: String(n - 1),
-            inPlan: usedIn(CANDY_KISSES) && recommended === 'candyXanax',
+            inPlan: usedIn(candyId) && recommended === 'candyXanax',
             note: extra === null ? null : extra > 0 ? 'tops up happy your trains use up: +' + fmtShort(extra) + ' stats in ' + days + ' days for ' + fmtMoney(cx.cost - steady.cost) : 'adds nothing at your stats',
         });
     }

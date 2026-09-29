@@ -11,8 +11,9 @@
 import { STATS, totalOf, trainsToReach } from './gain.js';
 import { splitSession } from './builds.js';
 import { energyAt, happyAt, drugFreeAt, boosterFreeAt, refillAvailable, tornDayStart, nextQuarterTick, DAY, MIN, HOUR } from './bars.js';
-import { XANAX, ECSTASY, EDVD, FHC, CANDY_KISSES, POINTS, REFILL_POINTS, ITEMS, XANAX_CD_MIN, ECSTASY_CD_MIN, BOOSTER_CAP_H, boostersThatFit } from './items.js';
-import { STRATEGIES, JUMP_STACK, SPECIAL, CONSOLE_STACK, CONSOLE_USES, CONSOLE_ENERGY_EACH, CONSOLE_HAPPY_EACH, CONSOLE_CANDY, CONSOLE_ITEM } from './strategies.js';
+import { XANAX, ECSTASY, EDVD, FHC, CANDY_KISSES, POINTS, REFILL_POINTS, ITEMS, XANAX_CD_MIN, ECSTASY_CD_MIN, BOOSTER_CAP_H, boostersThatFit, itemName } from './items.js';
+import { STRATEGIES, JUMP_STACK, SPECIAL, CONSOLE_STACK, CONSOLE_USES, CONSOLE_ENERGY_EACH, CONSOLE_HAPPY_EACH, CONSOLE_ITEM } from './strategies.js';
+import { spendJobPoints, jobHappyWords } from './jobs.js';
 import { HAPPY_CAP, HAPPY_LOSS_PER_ENERGY } from './gain.js';
 import { catchUpLabel } from './turns.js';
 
@@ -165,22 +166,67 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         return step;
     };
     const fullAt = () => (E >= maxE ? t : t + Math.ceil((maxE - E) / inc) * interval);
+    // A refill (points or special) or an FHC sets energy to the maximum, never above it (O2): `qty` of them are
+    // used one at a time, each once the last is trained, and shown as one step.
+    const trainEach = (at, kind, label, items, qty, extra = {}, happyEach = 0) => {
+        const first = steps.length;
+        for (let i = 0; i < qty; i++) {
+            E = Math.max(E, maxE);
+            H += happyEach;
+            train(at, kind, label, items, extra);
+        }
+        const parts = steps.splice(first);
+        if (!parts.length) return null;
+        const one = parts[0];
+        for (const p of parts.slice(1)) {
+            for (const [k, v] of Object.entries(p.trains || {})) one.trains[k] = (one.trains[k] || 0) + v;
+            Object.assign(one.gyms, p.gyms || {});
+            one.gain += p.gain || 0;
+            one.energy += p.energy || 0;
+            if (Array.isArray(one.parts) && Array.isArray(p.parts)) one.parts = one.parts.concat(p.parts);
+        }
+        steps.push(one);
+        return one;
+    };
     // Special refills the plan may use: all in the session that gains most (a jump or boost; else the next Xanax session).
     // In a boosted session: as many as keep happy above the maximum; otherwise what's left of today's share.
-    let specialLeft = Math.max(0, Math.floor(ctx.specialLeft || 0));
+    // While specials are held the day's refill is one of them (Torn blocks the points refill until they're spent [verify]).
+    let heldLeft = Math.max(0, Math.floor(ctx.specialHeld || 0));
+    let specialLeft = Math.min(Math.max(0, Math.floor(ctx.specialLeft || 0)), ctx.specialHeld === undefined || ctx.specialHeld === null ? Infinity : heldLeft);
     let shareLeft = Math.max(0, Math.floor((ctx.specialPerDay || 0) - (ctx.specialToday || 0)));
     const special = (at) => {
+        specialLeft = Math.min(specialLeft, ctx.specialHeld === undefined || ctx.specialHeld === null ? Infinity : heldLeft);
         if (!specialLeft) return;
         const drain = HAPPY_LOSS_PER_ENERGY * maxE * (ctx.happyLossMult || 1);
         let qty = Math.min(specialLeft, shareLeft);
         while (qty < specialLeft && H - drain * (qty + 1) > happyMax) qty++;
         shareLeft = Math.max(0, shareLeft - qty);
         if (!qty) return;
-        E += qty * maxE;
-        train(at, 'special', 'Special refills × ' + qty, [{ id: SPECIAL, qty }], { note: 'free: they come with your account' });
+        trainEach(at, 'special', 'Special refills × ' + qty + ', train after each', [{ id: SPECIAL, qty }], qty, { note: 'free: they come with your account · each fills energy to ' + maxE + ', never above' });
         specialLeft -= qty;
+        heldLeft = Math.max(0, heldLeft - qty);
+    };
+    // The day's refill: a special while any are held (never both on one day), else 30 points.
+    const refill = (at, extra = {}) => {
+        if (heldLeft > 0) {
+            heldLeft--;
+            specialLeft = Math.min(specialLeft, heldLeft);
+            return trainEach(at, 'refill', 'Special refill (instead of the points refill)', [{ id: SPECIAL, qty: 1 }], 1, { ...extra, note: 'Torn lets you use the points refill only once your special refills are spent [1 source]' });
+        }
+        return trainEach(at, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }], 1, extra);
     };
     const candyMult = ctx.candyMult || 1;
+    const candyId = ctx.candyId && ITEMS[ctx.candyId] ? ctx.candyId : CANDY_KISSES;
+    const candyQty = () => ctx.candyCount || boostersThatFit(candyId, ctx.boosterCapH || BOOSTER_CAP_H, 0, ctx.cdMult || 1);
+    const candyName = itemName(candyId);
+    // Job points banked where the player works: happy specials spent in the boosted session.
+    let jpBank = ctx.jobHappy ? Math.max(0, Number(ctx.jobHappy.bank) || 0) : 0;
+    const jobPoints = () => {
+        if (!ctx.jobHappy) return { happy: 0, jp: 0, words: '' };
+        const r = spendJobPoints(ctx.jobHappy, jpBank);
+        jpBank -= r.jp;
+        return { ...r, words: r.jp ? jobHappyWords(ctx.jobHappy, r.jp) : '' };
+    };
 
     const s = STRATEGIES[strategy] ? strategy : 'steady';
     const isConsole = s === 'consoleJump' || s === 'consoleJumpToy';
@@ -204,34 +250,41 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         const capH = ctx.boosterCapH || BOOSTER_CAP_H;
         let items;
         let label;
+        let note = 'Right after the ' + clockOf(tick) + ' tick';
+        const jp = jobPoints();
         if (isConsole) {
-            // The Game Console's "Hardcore Game" turns energy into happy [verify: the friend's guide].
+            // The Game Console's "Hardcore Game": 5 energy for 80–120 happy (×2 with the 5★ Toy/Game Shop "Gamer" perk),
+            // then candy to the booster cap, the Ecstasy, train, refill, train (docs/research-console-jump.md).
             const uses = Math.min(CONSOLE_USES, Math.floor(E / CONSOLE_ENERGY_EACH));
             const each = CONSOLE_HAPPY_EACH * (s === 'consoleJumpToy' || ctx.toyShop5 ? 2 : 1);
             E -= uses * CONSOLE_ENERGY_EACH;
-            const candyId = ctx.candyId || CANDY_KISSES;
-            H += uses * each + CONSOLE_CANDY * ITEMS[candyId].happy * candyMult;
-            items = [{ id: CONSOLE_ITEM, qty: 0, uses }, { id: candyId, qty: CONSOLE_CANDY }];
-            label = 'Game Console × ' + uses + ' (Hardcore), candy × ' + CONSOLE_CANDY + ' + Ecstasy, then train it all';
+            const qty = candyQty();
+            H += uses * each + qty * ITEMS[candyId].happy * candyMult;
+            items = [{ id: CONSOLE_ITEM, qty: 0, uses }, { id: candyId, qty }];
+            if (!ctx.consoleOwned) items.push({ id: CONSOLE_ITEM, qty: 1 });
+            label = 'Game Console × ' + uses + ' (Hardcore) + ' + candyName + ' × ' + qty + ' + Ecstasy, then train it all';
+            note += '; the Xanax cooldown must be clear for the Ecstasy' + (ctx.consoleOwned ? '' : '; buy a Game Console first');
         } else if (s === 'chocoJump') {
-            const candyId = ctx.candyId || CANDY_KISSES;
-            const qty = ctx.candyCount || boostersThatFit(candyId, capH);
+            const qty = candyQty();
             H += qty * ITEMS[candyId].happy * candyMult;
             items = [{ id: candyId, qty }];
-            label = 'Candy × ' + qty + ' + Ecstasy, then train it all';
+            label = candyName + ' × ' + qty + ' + Ecstasy, then train it all';
         } else {
             const qty = ctx.edvdCount || (s === 'happy99k' ? boostersThatFit(EDVD, capH) : 5);
             H += qty * ITEMS[EDVD].happy * (ctx.adultNovelties10 || s === 'edvdJumpAN' ? 2 : 1);
             items = [{ id: EDVD, qty }];
             label = 'EDVD × ' + qty + ' + Ecstasy, then train it all';
         }
+        if (jp.happy) {
+            H += jp.happy;
+            note += '; before the Ecstasy: ' + jp.words;
+        }
         H = Math.min(HAPPY_CAP, H * ITEMS[ECSTASY].happyMult);
         items.push({ id: ECSTASY, qty: 1 });
-        const jump = train(at, 'jump', label, items, { strict: true, warnAt: tick - STRICT_WARN_MS, note: 'Right after the ' + clockOf(tick) + ' tick' });
+        const jump = train(at, 'jump', label, items, { strict: true, warnAt: tick - STRICT_WARN_MS, note });
         jump.tick = tick;
         if (refillLeft) {
-            E += Math.max(0, maxE - E);
-            train(at + MIN, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }]);
+            refill(at + MIN);
             refillLeft = false;
         }
         special(at + 2 * MIN);
@@ -262,13 +315,12 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             const at = tick + MIN;
             if (at >= end && steps.length) break;
             advance(at);
-            const candyId = ctx.candyId || CANDY_KISSES;
-            const qty = ctx.candyCount || boostersThatFit(candyId, ctx.boosterCapH || BOOSTER_CAP_H);
-            H = Math.min(HAPPY_CAP, (H + qty * ITEMS[candyId].happy * candyMult) * ITEMS[ECSTASY].happyMult);
-            train(at, 'boost', 'Candy × ' + qty + ' + Ecstasy, then train it all', [{ id: candyId, qty }, { id: ECSTASY, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick });
+            const qty = candyQty();
+            const jp = jobPoints();
+            H = Math.min(HAPPY_CAP, (H + qty * ITEMS[candyId].happy * candyMult + jp.happy) * ITEMS[ECSTASY].happyMult);
+            train(at, 'boost', candyName + ' × ' + qty + ' + Ecstasy, then train it all', [{ id: candyId, qty }, { id: ECSTASY, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, ...(jp.happy ? { note: 'Before the Ecstasy: ' + jp.words } : {}) });
             if (refillLeft) {
-                E += Math.max(0, maxE - E);
-                train(at + MIN, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }]);
+                refill(at + MIN);
                 refillLeft = false;
             }
             special(at + 2 * MIN);
@@ -303,13 +355,12 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             const tick = nextQuarterTick(drugAt - 1);
             const at = tick + MIN;
             advance(at);
-            const candyId = ctx.candyId || CANDY_KISSES;
-            const qty = ctx.candyCount || boostersThatFit(candyId, ctx.boosterCapH || BOOSTER_CAP_H);
-            H = Math.min(HAPPY_CAP, H + qty * ITEMS[candyId].happy * candyMult);
-            train(at, 'boost', 'Candy × ' + qty + ' + Xanax #' + xanN++ + ', then train it all', [{ id: candyId, qty }, { id: XANAX, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, note: 'Right after the ' + clockOf(tick) + ' tick' });
+            const qty = candyQty();
+            const jp = jobPoints();
+            H = Math.min(HAPPY_CAP, H + qty * ITEMS[candyId].happy * candyMult + jp.happy);
+            train(at, 'boost', candyName + ' × ' + qty + ' + Xanax #' + xanN++ + ', then train it all', [{ id: candyId, qty }, { id: XANAX, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, note: 'Right after the ' + clockOf(tick) + ' tick' + (jp.happy ? '; with it: ' + jp.words : '') });
             if (refillLeft) {
-                E += Math.max(0, maxE - E);
-                train(at + MIN, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }]);
+                refill(at + MIN);
                 refillLeft = false;
             }
             special(at + 2 * MIN);
@@ -319,6 +370,15 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         }
         const items = [{ id: XANAX, qty: 1 }];
         let label = 'Xanax #' + xanN++;
+        // Steady plans spend the job's banked happy points on the day's first Xanax session.
+        let xNote = null;
+        if (!daily && !candyDaily && ctx.jobHappy && jpBank > 0) {
+            const jp = jobPoints();
+            if (jp.happy) {
+                H += jp.happy;
+                xNote = 'Just before: ' + jp.words;
+            }
+        }
         if (blissEdvd) {
             const qty = Math.floor((capMs - Math.max(0, boosterAt - drugAt)) / edvdMs);
             if (qty > 0) {
@@ -328,12 +388,11 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
                 boosterAt = Math.max(boosterAt, drugAt) + qty * edvdMs;
             }
         }
-        train(drugAt, 'xanax', label, items);
+        train(drugAt, 'xanax', label, items, xNote ? { note: xNote } : {});
         // The refill is worth most right after a session, when energy is near zero.
         if (refillLeft && !daily && drugAt + 5 * MIN < end) {
             advance(drugAt + 5 * MIN);
-            E += Math.max(0, maxE - E);
-            train(t, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }]);
+            refill(t);
             refillLeft = false;
         }
         if (!daily && !candyDaily) special(t + MIN);
@@ -348,11 +407,12 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             }
             if (qty > 0) {
                 advance(at);
-                if (it.toMax) {
-                    E += qty * maxE;
-                    H += qty * (it.happy || 0);
-                } else E += qty * Math.round(it.energy * (ctx.canMult || 1));
-                train(at, 'booster', itemNameShort(eb.id) + ' × ' + qty + ', train after each', [{ id: eb.id, qty }]);
+                // An FHC sets energy to the maximum (never above): one at a time, train after each.
+                if (it.toMax) trainEach(at, 'booster', itemNameShort(eb.id) + ' × ' + qty + ', train after each', [{ id: eb.id, qty }], qty, {}, it.happy || 0);
+                else {
+                    E += qty * Math.round(it.energy * (ctx.canMult || 1));
+                    train(at, 'booster', itemNameShort(eb.id) + ' × ' + qty + ', train after each', [{ id: eb.id, qty }]);
+                }
                 ebToday += qty;
             }
         }
@@ -372,8 +432,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     if (refillLeft) {
         const at = Math.max(now, end - REFILL_LAST_CALL_MS);
         advance(at);
-        E += Math.max(0, maxE - E);
-        train(at, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }], { note: 'Use before 00:00 Torn time' });
+        refill(at, { note: 'Use before 00:00 Torn time' });
     }
     return steps.sort((a, b) => a.at - b.at);
 }
@@ -388,10 +447,13 @@ export function strictWarnings(steps, now) {
     return (steps || []).filter((s) => s.strict && s.warnAt !== null && now >= s.warnAt && now < s.at).map((s) => ({ stepId: s.id, at: s.at, text: 'In ' + Math.max(1, Math.ceil((s.at - now) / MIN)) + ' min: ' + s.label }));
 }
 
-/** Items a list of steps uses, summed: {[itemId]: qty}. Special refills and the console aren't bought. */
+/**
+ * Items a list of steps uses, summed: {[itemId]: qty}. Special refills aren't bought; the Game Console
+ * is (once) only when the player has none (its uses ride along with qty 0).
+ */
 export function itemsNeeded(steps) {
     const out = {};
-    for (const s of steps || []) for (const it of s.items || []) if (it.id !== SPECIAL && it.id !== CONSOLE_ITEM && it.qty > 0) out[it.id] = (out[it.id] || 0) + it.qty;
+    for (const s of steps || []) for (const it of s.items || []) if (it.id !== SPECIAL && it.qty > 0) out[it.id] = it.id === CONSOLE_ITEM ? 1 : (out[it.id] || 0) + it.qty;
     return out;
 }
 

@@ -11,13 +11,15 @@ import { mergeLiveGyms, unlockedGyms, bestGymFor, gymAccess, gymById, nextGym, G
 import { buildGaps, projectBuild, resolveBuild } from './builds.js';
 import { energyAt, happyAt, drugFreeAt, boosterFreeAt, refillAvailable, tornDayStart, msToTornMidnight, DAY } from './bars.js';
 import { dayTimeline, targetShares, drugsToday, itemsNeeded, strictWarnings, REFILL_WARN_MS } from './plan.js';
-import { simulateStrategy, feasibleStrategies, STRATEGIES } from './strategies.js';
+import { simulateStrategy, feasibleStrategies, STRATEGIES, CANDY_PLANS, consoleBlocked } from './strategies.js';
 import { recommend, pickWarning } from './recommend.js';
-import { needList, livePrices } from './market.js';
+import { needList, livePrices, marketPricesFrom, npcPricesFrom } from './market.js';
+import { bestCandy } from './candy.js';
+import { companyJob, jobHappyOf, freeEdvdPerDayOf, worksAt, VOYEUR_JP, JOB_LOCK_H } from './jobs.js';
 import { energyLadder, boosterChoice, priceFor } from './ladder.js';
 import { upcomingEvents, holdBoosterFor, eventHeadsUp, eventMults } from './events.js';
 import { PICK_BY } from './recommend.js';
-import { XANAX, SAMPLE_PRICES, ITEMS, XANAX_CD_MIN } from './items.js';
+import { XANAX, SAMPLE_PRICES, ITEMS, XANAX_CD_MIN, GAME_CONSOLE } from './items.js';
 import { HAPPY_CAP } from './gain.js';
 import { JUMP_STACK } from './strategies.js';
 
@@ -88,10 +90,32 @@ export function specialLeft(plan, state) {
     return Math.max(0, Math.min(state.specialRefills, use - spent));
 }
 
+/**
+ * What the player's items, job and shop ticks add to the plan (candy choice,
+ * the console, job points, NPC prices). Pure; read from the stored statics.
+ * @param {object} statics - {inventory, items (Torn item data), job, jobPoints}
+ * @param {object} settings - {npcShops: the city shops the player ticked}
+ */
+export function itemContext(statics = {}, settings = {}) {
+    const info = (statics && statics.items) || {};
+    const inv = (statics && statics.inventory) || {};
+    const cj = companyJob(statics && statics.job, statics && statics.jobPoints);
+    return {
+        // Torn's own market price: a candy's price until its listings load (never over a live listing).
+        marketPrices: marketPricesFrom(info),
+        npc: npcPricesFrom(info, settings.npcShops),
+        consoleOwned: Number(inv[GAME_CONSOLE]) > 0,
+        job: cj,
+        jobHappy: jobHappyOf(cj),
+        freeEdvdPerDay: freeEdvdPerDayOf(cj),
+    };
+}
+
 /** The simulation inputs every strategy shares. */
-function simInputs({ state, pc, shares, settings, prices, special = 0 }) {
+function simInputs({ state, pc, shares, settings, prices, special = 0, statics = {} }) {
     const gyms = {};
     for (const k of STATS) if (pc.best[k]) gyms[k] = { dots: pc.best[k].dots[k], energy: pc.best[k].energy };
+    const ic = itemContext(statics, settings);
     return {
         stats: pc.stats,
         target: shares,
@@ -102,31 +126,67 @@ function simInputs({ state, pc, shares, settings, prices, special = 0 }) {
         fastEnergy: state.energy.interval <= 600,
         days: settings.horizonDays || 30,
         // Stored price rows are objects: count what 10 units cost from the cheapest up (never $0).
-        prices: { ...SAMPLE_PRICES, ...livePrices(prices) },
+        prices: { ...SAMPLE_PRICES, ...ic.marketPrices, ...livePrices(prices) },
+        npc: ic.npc,
         bliss: pc.perks.bliss,
         happyLossMult: pc.perks.happyLossMult,
         boosterCapH: boosterCapOf(pc, settings),
         special,
+        // Special refills held: the daily refill uses them while any are left (the points refill waits) [verify].
+        specialHeld: Math.max(0, Number(state.specialRefills) || 0),
         canMult: pc.perks.canMult || 1,
         candyMult: pc.perks.candyMult || 1,
-        toyShop5: Boolean(pc.perks.toyShop5),
-        adultNovelties10: Boolean(pc.perks.adultNovelties10),
+        cdMult: pc.perks.consumableCdMult || 1,
+        toyShop5: Boolean(pc.perks.toyShop5) || worksAt(ic.job, 'Toy Shop', 5) || worksAt(ic.job, 'Game Shop', 5),
+        adultNovelties10: Boolean(pc.perks.adultNovelties10) || worksAt(ic.job, 'Adult Novelties', 10),
+        consoleOwned: ic.consoleOwned,
+        jobHappy: ic.jobHappy,
+        freeEdvdPerDay: ic.freeEdvdPerDay,
     };
+}
+
+/**
+ * The candy a plan uses, picked by the Plan's rule: every candy with a known
+ * price is run through the plan (the dominated ones skipped), and the one
+ * with the most stats in the budget (or per $1M, or no budget) wins.
+ * @returns {{result:object, candy:object|null}}
+ */
+function withBestCandy(id, base, { budget = Infinity, pickBy = 'most' } = {}) {
+    const runs = {};
+    const evaluate = (cid, n) => (runs[cid] = runs[cid] || simulateStrategy(id, { ...base, special: 0, candyId: cid, candyCount: n }));
+    const pick = bestCandy({ prices: base.prices, npc: base.npc, capH: base.boosterCapH, cdCuts: base.cdMult, happyMult: base.candyMult, budget, pickBy, evaluate });
+    if (!pick) return { result: withBestSpecial(id, base), candy: null };
+    const input = { ...base, candyId: pick.id, candyCount: pick.count };
+    const result = base.special > 0 ? withBestSpecial(id, input) : runs[pick.id];
+    const candy = { id: pick.id, count: pick.count, unit: pick.unit, source: pick.source, shop: pick.shop, perBoost: pick.perBoost, options: pick.options.length };
+    return { result: { ...result, candy }, candy };
 }
 
 /**
  * Run every feasible strategy for the horizon (cached by the caller). Also
  * "Steady + energy boosters": what's left of the budget each day, spent on
  * FHC or cans on the booster cooldown (the ladder's next rung).
- * @param {object} o - {state, pc, shares, settings, prices, special}
+ * Candy plans name their candy (result.candy), picked under the Plan's rule
+ * (`pickBy`). The console jump carries `blocked` when a stat it trains is at
+ * or over 250k (never recommended then).
+ * @param {object} o - {state, pc, shares, settings, prices, special, statics, pickBy}
  */
-export function compareStrategies({ state, pc, shares, settings, prices, special = 0 }) {
-    const base = simInputs({ state, pc, shares, settings, prices, special });
+export function compareStrategies({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most' }) {
+    const base = simInputs({ state, pc, shares, settings, prices, special, statics });
     const results = {};
-    for (const id of feasibleStrategies({ bliss: pc.perks.bliss, boosterCapH: base.boosterCapH, toyShop5: base.toyShop5, adultNovelties10: base.adultNovelties10 })) {
-        results[id] = withBestSpecial(id, base);
-    }
     const budget = settings.budget || Infinity;
+    for (const id of feasibleStrategies({ bliss: pc.perks.bliss, boosterCapH: base.boosterCapH, toyShop5: base.toyShop5, adultNovelties10: base.adultNovelties10 })) {
+        if (id === 'consoleJump' || id === 'consoleJumpToy') {
+            // Low-stat players only: over 250k in a stat it trains, it's shown (behind the tick) and never picked.
+            const probe = simulateStrategy(id, { ...base, special: 0 });
+            const blocked = consoleBlocked(pc.stats, probe.perStat);
+            if (blocked) {
+                results[id] = { ...probe, blocked };
+                continue;
+            }
+        }
+        results[id] = CANDY_PLANS.has(id) ? withBestCandy(id, base, { budget, pickBy }).result : withBestSpecial(id, base);
+    }
     if (results.steady && Number.isFinite(budget)) {
         const choice = boosterChoice({ perDay: (budget - results.steady.cost) / base.days, maxE: base.energyMax, prices: base.prices, canMult: base.canMult, capH: base.boosterCapH });
         // Only a real middle rung: fewer than steadyMax's FHC every time.
@@ -161,9 +221,41 @@ function boostersPerDayMax(base) {
  * Ignorance Is Bliss, what if (Plan's Bliss card): the plans the book
  * changes most, run as if it were active. Not recommended from; shown.
  */
-export function blissWhatIf({ state, pc, shares, settings, prices, special = 0 }) {
-    const base = { ...simInputs({ state, pc, shares, settings, prices, special }), bliss: true };
-    return { blissSteady: { ...simulateStrategy('blissSteady', base), whatIf: true }, dailyChoco: { ...simulateStrategy('dailyChoco', base), whatIf: true } };
+export function blissWhatIf({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most' }) {
+    const base = { ...simInputs({ state, pc, shares, settings, prices, special, statics }), bliss: true };
+    return { blissSteady: { ...simulateStrategy('blissSteady', base), whatIf: true }, dailyChoco: { ...withBestCandy('dailyChoco', base, { budget: settings.budget || Infinity, pickBy }).result, whatIf: true } };
+}
+
+/**
+ * Company what-ifs (Plan, beside the Bliss what-if): the jump variants a job
+ * makes better, run as if the player were hired there. Only the ones that
+ * beat the recommended plan are kept (within the budget unless "Max gains").
+ * - 10★ Adult Novelties: EDVD happy ×2, and 3★ "Voyeur" 20 JP → 1 EDVD (10 JP a day: a free EDVD every 2 days);
+ * - 5★ Toy Shop or Game Shop "Gamer": the console jump's happy ×2 (low stats only, like the console jump).
+ * @param {object} o - as compareStrategies, plus `compare` (the real plans) and `recommended` (its id)
+ * @returns {object[]} [{id, strategy, company, stars, title, result, deltaPct, note}]
+ */
+export function companyWhatIf({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', compare = null, recommended = null }) {
+    const best = compare && recommended ? compare[recommended] : null;
+    if (!best) return [];
+    const base = simInputs({ state, pc, shares, settings, prices, special, statics });
+    const cj = companyJob(statics.job, statics.jobPoints);
+    const limit = pickBy === 'max' ? Infinity : settings.budget || Infinity;
+    const out = [];
+    const note = 'It means being hired by that company (its director hires you), and job specials are locked for ' + JOB_LOCK_H + ' h after joining.';
+    const add = (key, strategy, company, stars, r) => {
+        if (!r || !(r.gained > best.gained) || r.cost > limit) return;
+        const deltaPct = best.gained > 0 ? (100 * (r.gained - best.gained)) / best.gained : 0;
+        out.push({ id: key, strategy, company, stars, title: 'Hired at a ' + stars + '★ ' + company, result: { ...r, whatIf: true }, deltaPct, note });
+    };
+    if (!worksAt(cj, 'Adult Novelties', 10) && !base.adultNovelties10) {
+        add('an10', 'edvdJumpAN', 'Adult Novelties', 10, withBestSpecial('edvdJumpAN', { ...base, adultNovelties10: true, freeEdvdPerDay: 10 / VOYEUR_JP, jobHappy: null }));
+    }
+    if (!base.toyShop5) {
+        const probe = simulateStrategy('consoleJumpToy', { ...base, special: 0, toyShop5: true, jobHappy: null });
+        if (!consoleBlocked(pc.stats, probe.perStat)) add('toy5', 'consoleJumpToy', 'Toy Shop or Game Shop', 5, withBestCandy('consoleJumpToy', { ...base, toyShop5: true, jobHappy: null }, { budget: settings.budget || Infinity, pickBy }).result);
+    }
+    return out.sort((a, b) => b.result.gained - a.result.gained);
 }
 
 /**
@@ -198,7 +290,7 @@ export function drugNotBefore(skipped, now) {
     return Math.max(...today.map((x) => x.stepAt)) + XANAX_CD_MIN * 60 * 1000;
 }
 
-export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, now }) {
+export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, now }) {
     if (!state) return { ready: false };
     // One player context per refresh: the comparison's, when the caller has it.
     const pc = pcIn || playerContext(state, statics, { unlockedKnown, learnedMult });
@@ -236,6 +328,19 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         toyShop5: Boolean(pc.perks.toyShop5),
         adultNovelties10: Boolean(pc.perks.adultNovelties10),
     };
+    // Items: the plan's candy (picked in the comparison), cooldown cuts, the console, specials held, job points.
+    const ic = itemContext(statics, settings);
+    const mineR = compare && compare[plan.strategy];
+    if (mineR && mineR.candy) {
+        ctx.candyId = mineR.candy.id;
+        ctx.candyCount = mineR.candy.count;
+    }
+    ctx.cdMult = pc.perks.consumableCdMult || 1;
+    ctx.specialHeld = Math.max(0, Number(state.specialRefills) || 0);
+    ctx.consoleOwned = ic.consoleOwned;
+    ctx.toyShop5 = ctx.toyShop5 || worksAt(ic.job, 'Toy Shop', 5) || worksAt(ic.job, 'Game Shop', 5);
+    ctx.adultNovelties10 = ctx.adultNovelties10 || worksAt(ic.job, 'Adult Novelties', 10);
+    if (ic.jobHappy) ctx.jobHappy = ic.jobHappy;
     // Torn events that change training: a heads-up, and no boosters in the day before one that needs the booster cooldown.
     const events = statics.calendar ? upcomingEvents(statics.calendar.calendar, now, { startTime: statics.calendar.startTime }) : [];
     const hold = holdBoosterFor(events, now, plan.strategy);
@@ -250,6 +355,9 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     ctx.candyMult = (ctx.candyMult || 1) * em.candyMult;
     const steps = withoutSkipped(dayTimeline({ state, now, strategy: plan.strategy, ctx }), skipped);
     const next = steps[0] || null;
+    // Buy: the next boost or jump in full, whatever day it lands (today's steps stop at Torn midnight).
+    const kindNow = (STRATEGIES[plan.strategy] || {}).kind;
+    const ahead = (kindNow === 'boost' || kindNow === 'jump') && !steps.some((s) => s.kind === 'boost' || s.kind === 'jump') ? withoutSkipped(dayTimeline({ state, now, strategy: plan.strategy, ctx, until: tornDayStart(now) + 3 * DAY }), skipped) : steps;
 
     // Status strip
     const energy = energyAt(state, now);
@@ -344,6 +452,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         shares,
         keep,
         steps,
+        ahead,
         next,
         done: today,
         strip,
@@ -361,11 +470,16 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         recommendation: rec,
         compare,
         whatIf,
+        // Company what-ifs that still beat the recommended plan (the runtime works them out with the comparison).
+        jobWhatIf: rec && compare && compare[rec.recommended] ? (jobWhatIf || []).filter((w) => w && w.result && w.result.gained > compare[rec.recommended].gained) : [],
+        job: ic.job,
+        consoleOwned: ic.consoleOwned,
         ladder,
         spend,
         events,
         pickBy,
-        special: { have: state.specialRefills, left: specialLeft(plan, state), use: plan.specialUse || 0 },
+        // held: while any are held the daily refill is a special (Torn blocks the points refill until they're spent [verify]).
+        special: { have: state.specialRefills, left: specialLeft(plan, state), use: plan.specialUse || 0, held: ctx.specialHeld },
         prices,
     };
 }

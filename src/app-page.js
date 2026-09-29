@@ -46,14 +46,29 @@ export function ffsClient() {
     return page.ffs;
 }
 
-/** Fetch listings for the items the Buy list shows, if older than 5 minutes. */
-export async function loadPrices(ids) {
+/**
+ * Listings kept for an item priced only so the plan can weigh it (every candy
+ * the plan might pick): the cheapest few, enough for a boost's 49.
+ */
+export const PRICE_LISTINGS_SLIM = 15;
+
+/** ...and are asked again every 30 minutes, not 5 (about 19 candy: Torn's own market price fills in between). */
+export const PRICE_SLIM_FRESH_MS = 30 * 60 * 1000;
+
+/**
+ * Fetch listings for the items the Buy list shows, if older than 5 minutes.
+ * `slim` ids (priced only to weigh them: the candy the plan might pick) keep fewer listings.
+ */
+export async function loadPrices(ids, slim = []) {
     // Nothing from Torn or TornW3B while Torn Trading runs (the two take turns).
     if (!getKey(K.apiKey) || isPaused() || get(K.apiKeyDead, false)) return;
     const prices = { ...(getPrices()) };
     const skip = new Set();
     const now = Date.now();
-    const due = [...new Set(ids.map(String))].filter((id) => !page.loading.has(id) && !(prices[id] && now - (prices[id].at || 0) < PRICE_FRESH_MS));
+    const full = new Set(ids.map(String));
+    const slimSet = new Set(slim.map(String).filter((id) => !full.has(id)));
+    const fresh = (id) => (slimSet.has(id) ? PRICE_SLIM_FRESH_MS : PRICE_FRESH_MS);
+    const due = [...new Set([...full, ...slimSet])].filter((id) => !page.loading.has(id) && !(prices[id] && now - (prices[id].at || 0) < fresh(id)));
     if (!due.length) return;
     for (const id of due) page.loading.add(id);
     let hist = readPriceHistory(get(K.priceHistory, null));
@@ -101,7 +116,7 @@ export async function loadPrices(ids) {
             row.at = retryAt;
         }
         // Kept small: the cheapest listings only (GM storage is read on every Torn page).
-        row.listings = row.listings.sort((a, b) => a.price - b.price).slice(0, PRICE_LISTINGS_KEPT);
+        row.listings = row.listings.sort((a, b) => a.price - b.price).slice(0, slimSet.has(id) ? PRICE_LISTINGS_SLIM : PRICE_LISTINGS_KEPT);
         const cheapest = row.listings.length ? row.listings[0].price : null;
         if (cheapest) hist = recordPrice(hist, id, Date.now(), cheapest);
         const avg = average7(hist, id, Date.now());
@@ -286,8 +301,8 @@ function getCtx() {
             refresh();
             page.app.render(true);
         },
-        wantPrices: (ids) => {
-            if (isVisible()) setTimeout(() => loadPrices(ids).catch(() => {}), 0);
+        wantPrices: (ids, slim = []) => {
+            if (isVisible()) setTimeout(() => loadPrices(ids, slim).catch(() => {}), 0);
         },
         saveTornKey,
         saveFfsKey,
