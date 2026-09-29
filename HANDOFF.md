@@ -1,7 +1,7 @@
 # HANDOFF: Torn Pumping Iron
 
-**Released: 1.0.1 (2026-09-29; 1.0.0 the same day).** Local `main` is 2+ commits ahead (not released: faster plan changes, first read in 0.5 s, why-not lines).
-- Install (pinned 1.0.1): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/9fda20d860586259412d26701986fc40ce67bfad/torn-pumping-iron.user.js
+**Released: 1.1.0 (2026-09-29; before it 1.0.1 and 1.0.0 the same day).** Round 3: the redesign, energy ladder + Plan dropdown, taking turns with Torn Trading, learning from your own trains, the Discord bot, and every fix from the three-pass review.
+- Install (pinned 1.1.0): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/b7c9a6a591b3549cb3798c908b9dbd5789ea2f64/torn-pumping-iron.user.js
 - Auto-update URL (`@updateURL`): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/main/torn-pumping-iron.user.js
 - Webpage: https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html (gh-pages branch; without the script it shows the placeholder)
 - Repo: https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron (public; `main` + `gh-pages`)
