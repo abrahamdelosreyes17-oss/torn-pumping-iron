@@ -399,6 +399,17 @@ test('watch list: /settings kind:watch off stops the reads; the price watch is i
     assert.equal(tornPaths(f).filter((p) => p.endsWith('/profile')).length, 0);
 });
 
+test('/settings: war pings per hour and lead time', async () => {
+    const { env, user } = await linkedEnv();
+    let r = await body(handleInteraction(command('settings'), env, world(), ctx(), T0));
+    assert.match(r.data.content, /War pings: at most 30 an hour \(their own cap\) · 3 min ahead/);
+    r = await body(handleInteraction(command('settings', { war_per_hour: 12, war_lead: 5 }), env, world(), ctx(), T0));
+    assert.match(r.data.content, /^Saved: war pings per hour, war lead\./);
+    assert.match(r.data.content, /War pings: at most 12 an hour \(their own cap\) · 5 min ahead/);
+    const st = JSON.parse(user().settings);
+    assert.deepEqual([st.warPerHour, st.warLead], [12, 5]);
+});
+
 test('free plan: users in a war with 25 watched players still fit one run (45 subrequests, 45 queries)', async () => {
     const env = await botEnv();
     const watch = Array.from({ length: 25 }, (_, i) => ({ id: 100 + i, name: 'W' + i, level: 20, band: 'stomp', win: 99, keep: 90, tag: null }));

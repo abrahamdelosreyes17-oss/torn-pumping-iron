@@ -7,19 +7,28 @@ compatibility_date = "2026-09-01"
 [triggers]
 crons = ["* * * * *"]
 
-# Users, their plans, pings sent, link codes, acks, price watches.
+# Users, their plans, pings sent, link codes, logins, acks, price watches.
 [[d1_databases]]
 binding = "DB"
 database_name = "pumping-iron"
 database_id = "e1ff3c05-3813-4d46-bd4e-fbaecc6c075a"
 
 # Secrets (not here; `npx wrangler secret put NAME`):
-#   INVITE_CODE          the word a first connect needs
-#   KEY_ENC              32 random bytes, base64: encrypts Torn keys in D1
-#   BOT_TOKEN            the Discord bot's token
-#   DISCORD_PUBLIC_KEY   the application's public key (checks /interactions)
-#   DISCORD_APP_ID       the application id
+#   KEY_ENC                32 random bytes, base64: encrypts Torn keys in D1
+#   BOT_TOKEN              the Discord bot's token
+#   DISCORD_PUBLIC_KEY     the application's public key (checks /interactions)
+#   DISCORD_APP_ID         the application id
+#   DISCORD_CLIENT_SECRET  OAuth2 → Client Secret: "Log in with Discord"
+#   INVITE_CODE            (optional) the word the manual connect needs ("Advanced: your own service")
+#
+# "Log in with Discord" also needs, on the Discord application's OAuth2 page,
+# the redirect <address>/login/callback, for example
+#   https://pumping-iron.pumping-iron-worker.workers.dev/login/callback
 
+[vars]
+# The owner's Discord server: being a member of it is what lets someone log in.
+GUILD_ID = "1551784561237561344"
+# People this service serves (default 10).
+# MAX_USERS = "10"
 # Test mode: read Torn, send nothing (messages go to the outbox table).
-# [vars]
 # DRY_RUN = "1"

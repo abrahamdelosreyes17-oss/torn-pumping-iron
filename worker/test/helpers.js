@@ -20,7 +20,14 @@ export function recorder(handler) {
     const f = async (url, init = {}) => {
         const u = new URL(String(url));
         if (!ALLOWED.includes(u.hostname)) throw new Error('Test: called a host that is not allowed: ' + u.hostname);
-        calls.push({ url: String(url), init, body: init.body ? JSON.parse(init.body) : null });
+        // JSON bodies parsed; a form (the OAuth token exchange) kept as text.
+        let b = null;
+        try {
+            b = init.body ? JSON.parse(init.body) : null;
+        } catch {
+            b = init.body;
+        }
+        calls.push({ url: String(url), init, body: b });
         return handler(String(url), init);
     };
     f.calls = calls;
