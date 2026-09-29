@@ -6,10 +6,18 @@
 
 import { parse } from './db.js';
 
-/** Chain pings are for people who chain: off until switched on. */
-export const KIND_DEFAULTS = { drug: true, drugready: true, booster: true, energy: true, refill: true, jump: true, landed: true, watch: true, war: true, chain: false, stale: true };
+/**
+ * Chain pings are for people who chain: off until switched on. `price` is
+ * a price watch (/watch); `watch` is Torn Eye's watch list (players).
+ */
+export const KIND_DEFAULTS = { drug: true, drugready: true, booster: true, energy: true, refill: true, jump: true, landed: true, price: true, watch: true, war: true, chain: false, stale: true };
 
-export const DEFAULT_SETTINGS = { delivery: 'dm', quiet: null, perHour: 10, perDay: 60, kinds: {}, mute: {} };
+/**
+ * warPerHour: war pings have their own cap (a war can be busy), apart from
+ * perHour / perDay. warLead: minutes ahead for "out of hospital soon" and
+ * "lands soon" (war and watch list).
+ */
+export const DEFAULT_SETTINGS = { delivery: 'dm', quiet: null, perHour: 10, perDay: 60, warPerHour: 30, warLead: 3, kinds: {}, mute: {} };
 
 /** A synced plan older than this is "out of date": only state pings go out. */
 export const PLAN_STALE_S = 12 * 3600;

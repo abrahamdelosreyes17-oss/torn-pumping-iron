@@ -9,11 +9,14 @@
  * Routes:
  *   GET  /health          → {ok}
  *   PUT  /plan            (Authorization: Bearer <secret>) store {tornKey?, discordId, webhookUrl, plan, rules,
- *                         targets?, factionId?, playerId?, ackIds?}; answers {ready, paused, lastError, linked, bot, acks}
- *                         the first PUT for a secret needs X-Invite: <INVITE_CODE>
+ *                         targets?, war?, watch?, factionId?, playerId?, ackIds?}; answers {ready, paused, lastError, linked, bot, acks}
+ *                         the first PUT for a secret needs X-Invite: <INVITE_CODE> (or a finished Discord login)
  *   POST /test            (Authorization: Bearer <secret>) send a test ping
  *   DELETE /plan          (Authorization: Bearer <secret>) forget this user
  *   POST /link            (Authorization: Bearer <secret>) a one-time code for /link in Discord (10 min)
+ *   POST /login/start     (Authorization: Bearer <secret>) → {id, url, expiresAt}: "Log in with Discord" (login.js)
+ *   POST /login/status    (Authorization: Bearer <secret>) {id} → {state, name}
+ *   GET  /login?id=…      → Discord's authorize page; GET /login/callback: Discord sends the browser back here
  *   POST /interactions    Discord's slash commands and buttons (Ed25519-signed)
  */
 
@@ -22,10 +25,11 @@ import { runCron, sendAlerts } from './cron.js';
 import { canDeliver, hookUrl } from './deliver.js';
 import { pendingAcks } from './buttons.js';
 import { sealKey, openKey, isSealed } from './keys.js';
-import { cleanTargets } from './cmd-torn.js';
+import { cleanTargets, cleanWarList, cleanWatch } from './cmd-torn.js';
+import { loginStart, loginStatus, loginGo, loginCallback } from './login.js';
 
-/** A plan, its targets and bands fit easily in this (a 24-step plan + 50 targets + 500 bands is under 10 kB). */
-const MAX_BODY = 30000;
+/** A 24-step plan + 50 targets + 500 bands + a 100-member war list + 25 watched players is under 40 kB. */
+export const MAX_BODY = 64000;
 
 /** People one Worker serves (a leaked invite can't fill it); MAX_USERS in wrangler.toml [vars] changes it. */
 export const DEFAULT_MAX_USERS = 10;
@@ -70,12 +74,16 @@ async function userFor(req, env) {
     return { id, row };
 }
 
+/** People this Worker serves (MAX_USERS in [vars], else 10). */
+export const maxUsers = (env) => (Number(env.MAX_USERS) > 0 ? Number(env.MAX_USERS) : DEFAULT_MAX_USERS);
+
 async function putPlan(req, env) {
     const { id, row, error } = await userFor(req, env);
     if (error) return error;
-    if (!row && !(env.INVITE_CODE && (await sameSecret(req.headers.get('x-invite'), env.INVITE_CODE)))) return json({ ok: false, error: 'Unknown secret: the first sync needs the invite code' }, 403);
+    // A row made by "Log in with Discord" needs no invite: the login checked the server membership.
+    if (!row && !(env.INVITE_CODE && (await sameSecret(req.headers.get('x-invite'), env.INVITE_CODE)))) return json({ ok: false, error: 'Unknown secret: log in with Discord first (or the first sync needs the invite code)' }, 403);
     if (!row) {
-        const max = Number(env.MAX_USERS) > 0 ? Number(env.MAX_USERS) : DEFAULT_MAX_USERS;
+        const max = maxUsers(env);
         const n = await env.DB.prepare(Q.usersCount).first();
         if (Number(n && n.n) >= max) return json({ ok: false, error: 'This Worker is full (' + max + ' people). Ask its owner, or deploy your own (SETUP.md).' }, 403);
     }
@@ -129,8 +137,12 @@ async function putPlan(req, env) {
     const idOrKeep = (v, old) => (v === undefined ? old || null : Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
     const factionId = idOrKeep(body.factionId, row && row.faction_id);
     const playerId = idOrKeep(body.playerId, row && row.player_id);
-    if (row) await env.DB.prepare(Q.userSync).bind(tornKey, discordId, hook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId, id).run();
-    else await env.DB.prepare(Q.userInsert).bind(id, tornKey, discordId, hook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId).run();
+    // The enemy faction as Torn Eye sees it, and the watch list: left out keeps them, null clears.
+    const listOrKeep = (v, clean, old) => (v === undefined ? old || null : ((c) => (c ? JSON.stringify(c) : null))(clean(v, nowS)));
+    const warList = listOrKeep(body.war, cleanWarList, row && row.war_list);
+    const watchList = listOrKeep(body.watch, cleanWatch, row && row.watch_list);
+    if (row) await env.DB.prepare(Q.userSync).bind(tornKey, discordId, hook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId, warList, watchList, id).run();
+    else await env.DB.prepare(Q.userInsert).bind(id, tornKey, discordId, hook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId, warList, watchList).run();
     // Acks (Done / Skip in Discord): the userscript says which it applied; the rest go back to it.
     const ackIds = Array.isArray(body.ackIds) ? body.ackIds.filter((a) => typeof a === 'string' && a.length <= 120).slice(0, MAX_ACK_IDS) : [];
     if (ackIds.length) await env.DB.prepare(ackDeleteMany(ackIds.length)).bind(id, ...ackIds).run();
@@ -161,8 +173,15 @@ async function testPing(req, env, fetchImpl) {
 async function forget(req, env) {
     const { id, error } = await userFor(req, env);
     if (error) return error;
-    for (const sql of [Q.userDelete, Q.sentDeleteUser, Q.ackDeleteUser, Q.watchDeleteUser, Q.linkDeleteUser, Q.priceDeleteUser]) await env.DB.prepare(sql).bind(id).run();
+    for (const sql of [Q.userDelete, Q.sentDeleteUser, Q.ackDeleteUser, Q.watchDeleteUser, Q.linkDeleteUser, Q.priceDeleteUser, Q.loginDeleteUser]) await env.DB.prepare(sql).bind(id).run();
     return json({ ok: true });
+}
+
+/** Routes that only need the browser's secret (its user row may not exist yet). */
+async function withUser(req, env, h) {
+    const secret = bearer(req);
+    if (!secret) return json({ ok: false, error: 'Missing or malformed secret' }, 401);
+    return h(req, env, await sha256(secret));
 }
 
 const NO_CTX = { waitUntil: () => {} };
@@ -176,6 +195,10 @@ export async function handle(req, env, fetchImpl = fetch, ctx = NO_CTX) {
     if (url.pathname === '/plan' && req.method === 'DELETE') return forget(req, env);
     if (url.pathname === '/test' && req.method === 'POST') return testPing(req, env, fetchImpl);
     if (url.pathname === '/link' && req.method === 'POST') return linkCode(req, env);
+    if (url.pathname === '/login/start' && req.method === 'POST') return withUser(req, env, loginStart);
+    if (url.pathname === '/login/status' && req.method === 'POST') return withUser(req, env, loginStatus);
+    if (url.pathname === '/login' && req.method === 'GET') return loginGo(req, env);
+    if (url.pathname === '/login/callback' && req.method === 'GET') return loginCallback(req, env, guard(fetchImpl), { maxUsers: maxUsers(env) });
     return json({ ok: false, error: 'Not found' }, 404);
 }
 

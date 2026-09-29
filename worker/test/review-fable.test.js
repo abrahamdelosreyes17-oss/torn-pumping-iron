@@ -24,9 +24,9 @@ test('S-2: one Worker serves at most MAX_USERS people; people already on it keep
     assert.ok(DEFAULT_MAX_USERS >= 2);
 });
 
-test('S-2: a sync over 30 kB is refused', async () => {
+test('S-2: a sync over 64 kB is refused', async () => {
     const env = await botEnv();
-    const r = await handle(req('PUT', '/plan', { invite: 'x', body: { tornKey: KEY, plan: { steps: [], pad: 'x'.repeat(31000) } } }), env);
+    const r = await handle(req('PUT', '/plan', { invite: 'x', body: { tornKey: KEY, plan: { steps: [], pad: 'x'.repeat(65000) } } }), env);
     assert.equal(r.status, 413);
 });
 

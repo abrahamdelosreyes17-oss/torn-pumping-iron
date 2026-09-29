@@ -36,16 +36,16 @@ export function fakeD1() {
         [Q.userByDiscord]: ([d]) => ({ first: [...users.values()].find((u) => u.discord_id === d && Number(u.linked) === 1) || null }),
         [Q.usersCount]: () => ({ first: { n: users.size } }),
         [Q.usersDue]: ([limit]) => ({ all: [...users.values()].filter((u) => !Number(u.paused) && u.torn_key && (u.webhook || Number(u.linked) === 1)).sort((a, b) => (Number(a.ran) || 0) - (Number(b.ran) || 0)).slice(0, limit) }),
-        [Q.userInsert]: ([id, torn_key, discord_id, webhook, plan, rules, paused, last_error, updated, plan_at, targets, faction_id, player_id]) => {
+        [Q.userInsert]: ([id, torn_key, discord_id, webhook, plan, rules, paused, last_error, updated, plan_at, targets, faction_id, player_id, war_list, watch_list]) => {
             if (users.has(id)) throw new Error('UNIQUE constraint failed: users.id');
-            users.set(id, { id, torn_key, discord_id, webhook, plan, rules, paused, last_error, updated, plan_at, targets, faction_id, player_id, linked: 0, ran: 0, settings: null, dm_channel: null, dm_fail: 0, prev: null, war: null, cmd_at: 0 });
+            users.set(id, { id, torn_key, discord_id, webhook, plan, rules, paused, last_error, updated, plan_at, targets, faction_id, player_id, war_list, watch_list, linked: 0, ran: 0, settings: null, dm_channel: null, dm_fail: 0, prev: null, war: null, watch_state: null, cmd_at: 0 });
             return {};
         },
-        [Q.userSync]: ([torn_key, discord_id, webhook, plan, rules, paused, last_error, updated, plan_at, targets, faction_id, player_id, id]) => patch(users, id, { torn_key, discord_id, webhook, plan, rules, paused, last_error, updated, plan_at, targets, faction_id, player_id }),
+        [Q.userSync]: ([torn_key, discord_id, webhook, plan, rules, paused, last_error, updated, plan_at, targets, faction_id, player_id, war_list, watch_list, id]) => patch(users, id, { torn_key, discord_id, webhook, plan, rules, paused, last_error, updated, plan_at, targets, faction_id, player_id, war_list, watch_list }),
         [Q.userPause]: ([last_error, id]) => patch(users, id, { paused: 1, last_error }),
         [Q.userDelete]: ([id]) => (users.delete(id), {}),
         [Q.userRan]: ([ran, prev, war, id]) => patch(users, id, { ran, prev, war }),
-        [Q.userWar]: ([war, id]) => patch(users, id, { war }),
+        [Q.userLive]: ([war, watch_state, id]) => patch(users, id, { war, watch_state }),
         [Q.usersPlainKeys]: () => ({ all: [...users.values()].filter((u) => u.torn_key && !String(u.torn_key).startsWith('v1.')).slice(0, 5).map((u) => ({ id: u.id, torn_key: u.torn_key })) }),
         [Q.userKey]: ([torn_key, id]) => patch(users, id, { torn_key }),
         [Q.userLink]: ([discord_id, id]) => patch(users, id, { discord_id, linked: 1, dm_channel: null, dm_fail: 0 }),
@@ -63,6 +63,10 @@ export function fakeD1() {
         [Q.sentPut]: ([user, alert, at, state, until, channel, message, body, via]) => (sent.set(user + '|' + alert, { user, alert, at, state, until, channel, message, body, via }), {}),
         [Q.sentState]: ([state, until, u, a]) => patch(sent, u + '|' + a, { state, until }),
         [Q.sentBody]: ([body, u, a]) => patch(sent, u + '|' + a, { body }),
+        [Q.sentCleanLive]: ([t]) => {
+            for (const [k, r] of [...sent]) if (r.at < t && /^(war|eye):/.test(r.alert)) sent.delete(k);
+            return {};
+        },
         [Q.sentDeleteUser]: ([u]) => (dropUser(sent, u), {}),
         [Q.sentClean]: ([t]) => {
             for (const [k, r] of [...sent]) if (r.at < t) sent.delete(k);

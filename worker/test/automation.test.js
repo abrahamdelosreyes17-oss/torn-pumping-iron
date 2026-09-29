@@ -194,7 +194,7 @@ test('many users: one run stays under 50 subrequests and 50 D1 queries; the rest
     const { fakeD1 } = await import('./fake-d1.js');
     const { Q } = await import('../src/db.js');
     const fresh = { ...env, DB: fakeD1() };
-    for (const u of env.DB.users.values()) await fresh.DB.prepare(Q.userInsert).bind(u.id, u.torn_key, u.discord_id, '', u.plan, u.rules, 0, null, T0, T0, null, null, null).run();
+    for (const u of env.DB.users.values()) await fresh.DB.prepare(Q.userInsert).bind(u.id, u.torn_key, u.discord_id, '', u.plan, u.rules, 0, null, T0, T0, null, null, null, null, null).run();
     for (const u of fresh.DB.users.values()) Object.assign(u, { linked: 1 });
     const n0 = fresh.DB.log.length;
     await runCron(fresh, T0, world());
