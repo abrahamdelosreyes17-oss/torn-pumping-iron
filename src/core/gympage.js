@@ -153,6 +153,12 @@ export function sessionProgress(session) {
     return { parts, current, done: current === null };
 }
 
+/** Torn lists its gyms in groups of eight: the one a gym is in, to find its button. */
+export function gymGroupWord(gymId) {
+    const id = Number(gymId);
+    return id <= 8 ? 'a lightweight gym' : id <= 16 ? 'a middleweight gym' : id <= 24 ? 'a heavyweight gym' : 'a specialist gym';
+}
+
 /** Energy the session still needs. */
 export function sessionEnergyLeft(session) {
     return sessionProgress(session).parts.reduce((a, p) => a + p.left * p.perTrain, 0);
@@ -255,9 +261,11 @@ export function planGymPage(m, page = {}, session = null, now = m.now) {
 
     if (cur && !here) {
         const label = 'Next: ' + cur.gymName + ' · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
-        out.nextGym = { id: cur.gymId, label };
-        out.switchHint = label;
+        out.nextGym = { id: cur.gymId, label, group: gymGroupWord(cur.gymId) };
+        out.switchHint = 'Switch to ' + cur.gymName + ' (' + gymGroupWord(cur.gymId) + ') · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
     }
+    // In the right gym: its button is outlined too, so where to train is never a guess.
+    if (cur && here) out.hereGym = { id: cur.gymId, label: 'Train here · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left };
 
     out.strip.push(m.build.name);
     if (m.nextGym && m.nextGym.gym) {

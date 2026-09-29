@@ -38,7 +38,7 @@ export function setTargetsForSync(list, bands) {
 
 /* Torn Eye's war and watch list for the Worker (ROUND4-PLAN §B8, §I): the lead sends them with the plan. */
 const EYE_SYNC_WAR_MAX = 100;
-const EYE_SYNC_WATCH_MAX = 25;
+const EYE_SYNC_WATCH_MAX = 50;
 const EYE_BANDS = ['stomp', 'good', 'tough', 'cant', 'none'];
 
 function eyeSyncRow(r, withTag = false) {
@@ -105,7 +105,7 @@ export function discordState() {
 
 function planPayload(m) {
     if (!m || !m.ready) return null;
-    return { type: m.steps.some((s) => s.kind === 'stack' || s.kind === 'jump') ? 'jump' : 'steady', steps: stepsForWorker(m.steps) };
+    return { type: m.steps.some((s) => s.kind === 'stack' || s.kind === 'jump') ? 'jump' : 'steady', steps: stepsForWorker(m.steps), ...(m.noRefill ? { noRefill: true } : {}) };
 }
 
 /** Your Discord id, if linked in Torn (/user/discord). */

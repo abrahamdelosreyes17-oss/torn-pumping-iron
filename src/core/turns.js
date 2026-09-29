@@ -21,7 +21,7 @@ export const TRADING_GRACE_MS = 60 * 1000;
 export const TRADING_MARK_EVERY_MS = 15 * 1000;
 
 /** Torn Trading's own limits, which Pumping Iron may use while it runs alone. */
-export const TORN_PER_MINUTE_ALONE = 70;
+export const TORN_PER_MINUTE_ALONE = 85;
 export const W3B_PER_MINUTE_ALONE = 80;
 
 /** Is Torn Trading running now (seen within the grace period)? */

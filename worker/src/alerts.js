@@ -99,7 +99,8 @@ export function dueAlerts(state, plan, nowS, rules = {}, ctx = {}) {
 
     // Refill unused, two hours before Torn midnight (UTC).
     const toMidnight = DAY_S - (nowS % DAY_S);
-    if (on.refill && refills.energy === false && toMidnight <= REFILL_WARN_S) {
+    // The plan left the points refill out (not worth its price for this player): no nudge to use it.
+    if (on.refill && refills.energy === false && toMidnight <= REFILL_WARN_S && !(plan && plan.noRefill)) {
         out.push({ id: 'refill:' + Math.floor(nowS / DAY_S), kind: 'refill', link: LINKS.points, title: 'Refill unused', text: 'Use it before 00:00 Torn time (' + Math.round(toMidnight / 60) + ' min left)', step: null });
     }
 

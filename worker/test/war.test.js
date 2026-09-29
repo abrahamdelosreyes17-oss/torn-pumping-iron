@@ -435,10 +435,10 @@ test('free plan: users in a war with 25 watched players still fit one run (45 su
 
 /* ---------- PUT /plan: the war list and the watch list ---------- */
 
-test('PUT /plan war and watch: cleaned, capped (100, 25), kept when left out, cleared with null', async () => {
+test('PUT /plan war and watch: cleaned, capped (100, 50), kept when left out, cleared with null', async () => {
     const { env, user } = await linkedEnv();
     const many = Array.from({ length: 130 }, (_, i) => ({ id: i + 1, name: 'N'.repeat(60), level: 10, band: i % 2 ? 'stomp' : 'weird', win: 140, keep: -5 }));
-    const watch = [...Array.from({ length: 30 }, (_, i) => ({ id: 500 + i, band: 'good', tag: 'x'.repeat(40) })), { id: 'nope' }];
+    const watch = [...Array.from({ length: 60 }, (_, i) => ({ id: 500 + i, band: 'good', tag: 'x'.repeat(40) })), { id: 'nope' }];
     let r = await handle(req('PUT', '/plan', { body: { war: { factionId: 888, members: [...many, { id: 1, band: 'good' }] }, watch } }), env);
     assert.equal(r.status, 200);
     const w = JSON.parse(user().war_list);
@@ -447,7 +447,7 @@ test('PUT /plan war and watch: cleaned, capped (100, 25), kept when left out, cl
     assert.deepEqual(w.members[0], { id: 1, name: 'N'.repeat(40), level: 10, band: 'none', win: 100, keep: 0 });
     assert.equal(w.members[1].band, 'stomp');
     const l = JSON.parse(user().watch_list);
-    assert.equal(l.list.length, 25);
+    assert.equal(l.list.length, 50);
     assert.equal(l.list[0].tag.length, 24);
     // Left out: kept. null: cleared.
     await handle(req('PUT', '/plan', { body: { plan: PLAN } }), env);

@@ -12,7 +12,7 @@ import { applyFightModel } from './core/learn.js';
 import { idbGet, idbSet } from './platform/idb.js';
 import { pi, tornClient, isVisible } from './runtime.js';
 import { isPaused } from './turns.js';
-import { fetchProfile, fetchPersonalStats, fetchAttacks, fetchEquipment } from './api/torn.js';
+import { fetchProfile, fetchPersonalStats, fetchAttacks, fetchEquipment, fetchFactionMembers } from './api/torn.js';
 import { makeFfsClient, fetchFfsStats, fetchFfsTargets, FFS_MEMORY_MS, FFS_STORED_MS } from './api/ffscouter.js';
 import { makeTsClient, fetchSpyUser } from './api/tornstats.js';
 import { estimatePlayer } from './core/eye/estimate.js';
@@ -504,7 +504,7 @@ export function watchStates() {
 
 /**
  * Watch or stop watching a player.
- * @returns {{ok, watching, reason?}} reason 'full' at 20 players
+ * @returns {{ok, watching, reason?}} reason 'full' at WATCH_MAX (50) players
  */
 export function toggleWatch(player) {
     const cur = getWatch();
@@ -563,11 +563,26 @@ export async function pollWatch({ members = null } = {}) {
     watchRun.busy = true;
     const read = [];
     try {
+        // Watched players in the same faction (two or more due): one faction read covers them all.
+        const byFaction = new Map();
+        for (const x of due) {
+            const fid = players[x.id] && players[x.id].faction;
+            if (!fid || fromList.has(Number(x.id))) continue;
+            byFaction.set(fid, (byFaction.get(fid) || 0) + 1);
+        }
+        for (const [fid, n] of byFaction) {
+            if (n < 2 || isPaused() || !isVisible()) continue;
+            try {
+                for (const mm of await fetchFactionMembers(tornClient(), fid)) if (mm && mm.id) fromList.set(Number(mm.id), { ...mm, faction: fid });
+            } catch (error) {
+                if (error && error.takingTurns) break;
+            }
+        }
         for (const x of due) {
             if (isPaused() || !isVisible()) break;
             let rec = null;
             const m = fromList.get(Number(x.id));
-            if (m) rec = { name: m.name || null, level: m.level || null, status: m.status || null, last_action: m.last_action || null, has_early_discharge: Boolean(m.has_early_discharge), is_revivable: Boolean(m.is_revivable) };
+            if (m) rec = { name: m.name || null, level: m.level || null, status: m.status || null, last_action: m.last_action || null, has_early_discharge: Boolean(m.has_early_discharge), is_revivable: Boolean(m.is_revivable), faction: m.faction || (players[x.id] && players[x.id].faction) || null };
             else {
                 try {
                     const p = await fetchProfile(tornClient(), x.id);

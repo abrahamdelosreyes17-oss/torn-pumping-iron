@@ -117,5 +117,5 @@ test('Watched: rows with reasons, the "Watch?" offer and the heads-up', () => {
     assert.match(t, /Mugger.*mugged you 2 min ago/);
     assert.match(t, /Brix is out of hospital in 1:4\d/);
     assert.match(t, /Remove/);
-    assert.match(t, /2 of 20 players/);
+    assert.match(t, /2 of 50 players/);
 });

@@ -232,6 +232,8 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             specialLeft = Math.min(specialLeft, heldLeft);
             return trainEach(at, 'refill', 'Special refill (instead of the points refill)', [{ id: SPECIAL, qty: 1 }], 1, { ...extra, note: 'Torn lets you use the points refill only once your special refills are spent [1 source]' });
         }
+        // Not worth its price under the Plan rule (the comparison decided): the points refill is left out.
+        if (ctx.noRefill) return null;
         return trainEach(at, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }], 1, extra);
     };
     const candyMult = ctx.candyMult || 1;

@@ -36,8 +36,8 @@ export const MAX_PENDING = 20;
 /** "Came online" at most once per player in this long. */
 export const ONLINE_EVERY_S = 30 * 60;
 export const MAX_WAR_MEMBERS = 100;
-export const MAX_WATCH = 25;
-/** Watched players read per minute at most; each is read at least every 5 minutes. */
+export const MAX_WATCH = 50;
+/** Watched players read per minute at most, in turn; with 50, each at least every 10 minutes. */
 export const EYE_PER_RUN = 5;
 export const EYE_CYCLE = 5;
 export const EYE_FRESH_S = 6 * 60;

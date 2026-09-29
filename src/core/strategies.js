@@ -306,6 +306,8 @@ export function simulateStrategy(id, o) {
             used.dailySpecial = (used.dailySpecial || 0) + 1;
             return;
         }
+        // The points refill left out (it isn't worth its price under the Plan rule): special refills above still count.
+        if (o.noRefill) return;
         E = Math.max(E, maxE);
         buy(POINTS, REFILL_POINTS);
     };

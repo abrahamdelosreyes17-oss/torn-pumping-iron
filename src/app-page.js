@@ -6,7 +6,7 @@
 
 import { gmOnChange } from './platform/gm.js';
 import { K, get, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup, getPrices, PRICE_LISTINGS_KEPT } from './platform/store.js';
-import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE } from './runtime.js';
+import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE, beatFocus, apiFocus } from './runtime.js';
 import { PiApp } from './ui/app/app.js';
 import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, fetchFactionMembers, fetchFactionWars, keyIsEnough } from './api/torn.js';
 import { outEarly, enemiesFromWars } from './core/eye/war.js';
@@ -190,6 +190,11 @@ function diagnostics() {
     return {
         torn: tornClient().stats().usedLastMinute,
         tornMax: TORN_PER_MINUTE,
+        // Which calls go first right now (Settings › Diagnostics).
+        focus: (() => {
+            const f = apiFocus();
+            return f.eye && f.prices ? 'Torn Eye and prices, half each' : f.eye ? (f.war ? 'the war, then Torn Eye' : 'Torn Eye') : f.prices ? 'prices' : '';
+        })(),
         ffs: page.ffs ? page.ffs.stats().usedLastMinute : 0,
         w3b,
         lastError: err ? new Date(err.at).toISOString().slice(11, 16) + ' ' + err.message : null,
@@ -485,6 +490,10 @@ function getCtx() {
 
 export function bootAppPage({ renderers = {} } = {}) {
     page.app = new PiApp({ getCtx, renderers: { eye: renderEye, ...renderers }, getUpdated: () => (get(K.userState, null) || {}).at || null });
+    // The API lanes: Torn Eye's calls go first while its tab is open (War mode: the war read first), prices while Buy is.
+    pi.focusOf = () => ({ focus: page.app.tab === 'eye' ? 'eye' : page.app.tab === 'buy' ? 'prices' : null, war: page.app.tab === 'eye' && page.app.ui.eyeMode === 'war' });
+    window.addEventListener('hashchange', () => beatFocus());
+    beatFocus();
     onEye(() => {
         gearCount().then((n) => (page.eye.gear = n));
         page.app.render(true);

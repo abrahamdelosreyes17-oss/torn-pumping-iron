@@ -262,8 +262,9 @@ test('the model: ladder, spend a day and how long the cash lasts, special refill
     assert.equal(m.pickBy, 'most');
     assert.deepEqual(m.special, { have: 100, left: 100, use: 100, held: 100 });
     assert.ok(m.ladder.rows.some((r) => r.id === 'special'));
-    assert.ok(Math.abs(m.spend.perDay - compare.steady.cost / 30) < 1);
-    assert.equal(Math.round(m.spend.lastsDays), Math.round(200e6 / (compare.steady.cost / 30)));
+    const rec = compare[m.recommendation.recommended];
+    assert.ok(Math.abs(m.spend.perDay - rec.cost / 30) < 1);
+    assert.equal(Math.round(m.spend.lastsDays), Math.round(200e6 / (rec.cost / 30)));
     const sp = m.steps.filter((s) => s.kind === 'special');
     if (compare.steady.specialHelps) assert.ok(sp.length && sp.reduce((a, s) => a + s.items[0].qty, 0) <= 4, 'steady: today’s share only (100 over 30 days)');
     else assert.equal(sp.length, 0, 'steady: not where they don’t help');

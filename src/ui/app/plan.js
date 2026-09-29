@@ -233,6 +233,7 @@ function recommendedCard(m, ctx, rec, compare, days) {
         ctx.plan.pickBy === 'auto' && a && a.wait ? h('div', { class: 'warnb', style: 'margin-top:10px' }, [h('b', { text: a.needsKey ? 'Auto mode needs a Full key' : 'Reading your income' }), h('p', { text: a.wait }), a.needsKey ? h('div', { class: 'acts' }, [h('button', { class: 'btn primary sm', type: 'button', onclick: () => ctx.go('settings'), text: 'Add it in Settings' })]) : null]) : null,
         autoOn && a.breakdown && a.breakdown.lines.length ? incomeLines(a.breakdown) : null,
         m.unlock ? unlockBlock(m, ctx, days) : null,
+        refillLine(best, days),
         h('div', { class: 'note2', text: 'If you’re late: steady and goal plans re-time by themselves. Jump plans warn 5 min before the tick, then re-time.' }),
     ];
     if (ctx.ui.goalForm) kids.push(goalForm(m, ctx));
@@ -251,6 +252,14 @@ function recommendedCard(m, ctx, rec, compare, days) {
         );
     }
     return h('div', { class: 'lead' }, kids);
+}
+
+/** Is the daily points refill worth it in this plan? (The comparison ran it with and without when it mattered.) */
+function refillLine(r, days) {
+    if (!r || r.refill === undefined) return null;
+    const words = r.refillGain > 0 ? ' +' + fmtShort(r.refillGain) + ' stats for ' + fmtMoney(r.refillCost) + ' over ' + days + ' days' : '';
+    if (r.refill === false) return h('div', { class: 'note2 num' }, [h('b', { class: 'white', text: 'Daily refill: left out.' }), words ? ' It would add' + words + ', which isn’t worth it under your Plan rule.' : ' Not worth its price under your Plan rule.']);
+    return h('div', { class: 'note2 num' }, [h('b', { class: 'white', text: 'Daily refill: worth it.' }), words ? ' It adds' + words + '.' : ' It fits your budget.']);
 }
 
 /** Where Auto's income comes from, from the money log (the Full key). */

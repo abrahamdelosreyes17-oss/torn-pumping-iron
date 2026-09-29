@@ -1,5 +1,5 @@
 /*
- * What every tab shares at run time: the one Torn client (70/min across
+ * What every tab shares at run time: the one Torn client (85/min across
  * tabs, visible only, silent while Torn Trading runs), the state feed, and the model every surface renders
  * from. Userscript-only; core/ and api/ stay plain modules.
  */
@@ -8,6 +8,7 @@ import { gmOnChange } from './platform/gm.js';
 import { K, get, set, del, getKey, getSettings, getPlan, setPlan, getPrices, getShared } from './platform/store.js';
 import { tabWindow } from './platform/tab-window.js';
 import { makeTabId, LEADER_HEARTBEAT_MS } from './core/leader.js';
+import { focusFrom, FOCUS_FRESH_MS } from './core/lanes.js';
 import { TornApiClient } from './api/client.js';
 import { StateFeed } from './feed/state.js';
 import { normalizeState, tornDayStart } from './core/bars.js';
@@ -51,7 +52,41 @@ export const storeApi = { get: (k, fb) => get(k, fb), set: (k, v) => set(k, v), 
  */
 export const TORN_PER_MINUTE = TORN_PER_MINUTE_ALONE;
 
-/** The one Torn client every part of this tab uses: 70/min across tabs, visible only, nothing while paused. */
+/** Where each tab's focus heartbeat is kept ({tabId: {focus, war, at}}), and each side's shared minute. */
+const FOCUS_KEY = 'apiFocus';
+const laneWindows = {};
+function laneWindow(side) {
+    if (!laneWindows[side]) laneWindows[side] = tabWindow('apiLane_' + side, pi.tabId, storeApi);
+    return laneWindows[side];
+}
+
+/** What's open across the tabs (core/lanes.js): Torn Eye, prices, both or neither. */
+export function apiFocus(now = Date.now()) {
+    return focusFrom(get(FOCUS_KEY, {}) || {}, now);
+}
+
+/** Lane options every Torn client in this tab shares. */
+function laneOptions() {
+    return { focus: () => apiFocus(), loadLaneWindow: (side) => laneWindow(side).load(), addLaneWindow: (side, at) => laneWindow(side).add(at) };
+}
+
+/**
+ * This tab says what it shows, so the Torn calls for it go first: a page
+ * sets `pi.focusOf` (() => {focus: 'eye'|'prices'|null, war}); a heartbeat
+ * every few seconds keeps it fresh while the tab is visible.
+ */
+export function beatFocus(now = Date.now()) {
+    const all = { ...(get(FOCUS_KEY, {}) || {}) };
+    const mine = isVisible() && pi.focusOf ? pi.focusOf() : null;
+    const had = all[pi.tabId];
+    // Old entries from closed tabs go too.
+    for (const [id, b] of Object.entries(all)) if (!b || !(now - (b.at || 0) < FOCUS_FRESH_MS * 4)) delete all[id];
+    if (mine && (mine.focus || mine.war)) all[pi.tabId] = { focus: mine.focus || null, war: Boolean(mine.war), at: now };
+    else delete all[pi.tabId];
+    if (JSON.stringify(had || null) !== JSON.stringify(all[pi.tabId] || null) || (all[pi.tabId] && now - ((had && had.at) || 0) > FOCUS_FRESH_MS / 3)) set(FOCUS_KEY, all);
+}
+
+/** The one Torn client every part of this tab uses: 85/min across tabs, visible only, nothing while paused; what's open goes first. */
 export function tornClient() {
     if (pi.client) return pi.client;
     const win = tabWindow('apiWindow', pi.tabId, storeApi);
@@ -66,6 +101,7 @@ export function tornClient() {
         isVisible,
         onDeadKey: () => set(K.apiKeyDead, true),
         isPaused: () => isPaused(),
+        ...laneOptions(),
     });
     return pi.client;
 }
@@ -87,6 +123,7 @@ export function fullKeyClient() {
         isVisible,
         onDeadKey: () => set(K.fullKeyState, { ...(get(K.fullKeyState, {}) || {}), ok: false, dead: true, error: 'Torn refused the Full key', at: Date.now() }),
         isPaused: () => isPaused(),
+        ...laneOptions(),
     });
     return pi.fullClient;
 }
@@ -371,6 +408,13 @@ export function startFeed() {
     gmOnChange(K.settings, refresh);
     gmOnChange(K.stateError, refresh);
     gmOnChange(K.apiKeyDead, refresh);
+    // What this tab shows (Torn Eye, prices): its Torn calls go first while it's open.
+    setInterval(() => beatFocus(), 4000);
+    document.addEventListener('visibilitychange', () => beatFocus());
+    window.addEventListener('pagehide', () => {
+        pi.focusOf = null;
+        beatFocus();
+    });
     // Countdowns tick by themselves every second; the model itself is worked out again every 5 s, in a tab you can see.
     setInterval(() => {
         if (isVisible()) refresh();

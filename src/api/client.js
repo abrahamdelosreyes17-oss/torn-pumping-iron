@@ -8,11 +8,12 @@
  *      key, because no third party can be addressed from this client.
  *   2. The key is never logged. Errors are redacted before they are thrown,
  *      so a stack trace pasted into Discord cannot leak it.
- *   3. Every call goes through one rate-limited queue (<=70/min against
+ *   3. Every call goes through one rate-limited queue (85/min by default against
  *      Torn's ~100/min ceiling) with request dedup and exponential backoff.
  *      A key that trips abuse detection is a worse outcome than a slow panel.
  */
 
+import { laneOf, sideOf, laneCap, laneRank } from '../core/lanes.js';
 import { gmFetch } from '../platform/gm.js';
 
 export const TORN_API_BASE = 'https://api.torn.com/';
@@ -120,7 +121,18 @@ export class TornApiClient {
         addToWindow = null,
         onDeadKey = null,
         isPaused = () => false,
+        focus = null,
+        loadLaneWindow = null,
+        addLaneWindow = null,
     } = {}) {
+        // What's open across the tabs (core/lanes.js): decides which calls go first and each side's share.
+        this.focus = focus;
+        this.loadLaneWindow = loadLaneWindow;
+        this.addLaneWindow = addLaneWindow;
+        /** Calls waiting their turn: {lane, run, resolve, reject, n}. */
+        this.queue = [];
+        this.pumping = false;
+        this.queued = 0;
         this.onDeadKey = onDeadKey;
         this.isPaused = isPaused;
         this.addToWindow = addToWindow;
@@ -178,8 +190,27 @@ export class TornApiClient {
             .sort((a, b) => a - b);
     }
 
-    /** Block until the sliding window has room for one more request. */
-    async waitForSlot() {
+    /** The focus now (what's open across the tabs), or null when nobody said. */
+    focusNow() {
+        try {
+            return this.focus ? this.focus() : null;
+        } catch {
+            return null;
+        }
+    }
+
+    /** Slots a side (Torn Eye or prices) used in the last minute, across the tabs. */
+    sideUsed(side, now = Date.now()) {
+        if (!side || !this.loadLaneWindow) return 0;
+        try {
+            return (this.loadLaneWindow(side) || []).filter((t) => now - t < 60000).length;
+        } catch {
+            return 0;
+        }
+    }
+
+    /** Block until the sliding window has room for one more request (and this lane is inside its share). */
+    async waitForSlot(lane = 'other') {
         for (;;) {
             const now = Date.now();
             this.syncWindow(now);
@@ -191,7 +222,17 @@ export class TornApiClient {
                 continue;
             }
 
+            // (A side over its share never gets here: the queue passes it over until it has room, see pump().)
+            const side = sideOf(lane);
+
             if (this.recent.length < this.maxPerMinute) {
+                if (side && this.addLaneWindow) {
+                    try {
+                        this.addLaneWindow(side, now);
+                    } catch {
+                        // Best-effort: the whole-minute window below still limits every call.
+                    }
+                }
                 this.recent.push(now);
                 if (this.addToWindow) {
                     try {
@@ -221,7 +262,7 @@ export class TornApiClient {
      * @param {string} path - e.g. "torn" or "user" or "market/123"
      * @param {object} params - query params; `key` is added here and only here
      */
-    async get(path, params = {}) {
+    async get(path, params = {}, { lane = null } = {}) {
         const cacheKey = path + '?' + new URLSearchParams(params).toString();
 
         const cached = this.cache.get(cacheKey);
@@ -232,12 +273,12 @@ export class TornApiClient {
         const existing = this.inflight.get(cacheKey);
         if (existing) return existing;
 
-        // Queue behind whatever is already scheduled, then take a slot.
-        const promise = this.chain
-            .catch(() => {})
-            .then(() => this.execute(path, params, cacheKey));
-
-        this.chain = promise.catch(() => {});
+        // Wait its turn: the plan first, then what's open (core/lanes.js), in order within a lane.
+        const ln = lane || laneOf(path);
+        const promise = new Promise((resolve, reject) => {
+            this.queue.push({ lane: ln, run: () => this.execute(path, params, cacheKey, ln), resolve, reject, n: this.queued++ });
+            this.pump();
+        });
         this.inflight.set(cacheKey, promise);
 
         try {
@@ -247,6 +288,57 @@ export class TornApiClient {
             return data;
         } finally {
             this.inflight.delete(cacheKey);
+        }
+    }
+
+    /** Is this lane's side inside its share of the minute (what's open decides the share)? */
+    laneHasRoom(lane, focus, used) {
+        const side = sideOf(lane);
+        if (!side) return true;
+        const cap = laneCap(lane, focus, this.maxPerMinute);
+        return cap >= this.maxPerMinute || (used[side] || 0) < cap;
+    }
+
+    /**
+     * Run the queue one call at a time, the best-ranked first. A call whose
+     * side has used its share waits in the queue while the others go past it,
+     * so one side never holds up another.
+     */
+    async pump() {
+        if (this.pumping) return;
+        this.pumping = true;
+        try {
+            while (this.queue.length) {
+                const focus = this.focusNow();
+                const now = Date.now();
+                const used = { eye: this.sideUsed('eye', now), prices: this.sideUsed('prices', now) };
+                let best = -1;
+                for (let i = 0; i < this.queue.length; i++) {
+                    const a = this.queue[i];
+                    if (!this.laneHasRoom(a.lane, focus, used)) continue;
+                    if (best < 0) {
+                        best = i;
+                        continue;
+                    }
+                    const b = this.queue[best];
+                    const ra = laneRank(a.lane, focus, used);
+                    const rb = laneRank(b.lane, focus, used);
+                    if (ra < rb || (ra === rb && a.n < b.n)) best = i;
+                }
+                if (best < 0) {
+                    // Everything waiting is over its share: look again in a second (the minute rolls on).
+                    await apiSleep(1000);
+                    continue;
+                }
+                const job = this.queue.splice(best, 1)[0];
+                try {
+                    job.resolve(await job.run());
+                } catch (error) {
+                    job.reject(error);
+                }
+            }
+        } finally {
+            this.pumping = false;
         }
     }
 
@@ -265,7 +357,7 @@ export class TornApiClient {
         throw e;
     }
 
-    async execute(path, params, cacheKey) {
+    async execute(path, params, cacheKey, lane = 'other') {
         if (!this.fetchImpl) {
             throw new TornApiError('No fetch implementation available.');
         }
@@ -287,7 +379,7 @@ export class TornApiClient {
 
         while (attempt <= this.maxRetries) {
             this.throwIfPaused(mine);
-            await this.waitForSlot();
+            await this.waitForSlot(lane);
             // Another tab may have hit a block while this one waited.
             this.throwIfPaused(mine);
             this.throwIfTakingTurns();

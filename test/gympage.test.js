@@ -43,9 +43,9 @@ test('in a gym the current part isn\'t in: that gym\'s button is outlined ("Next
     // At Pour Femme (6): DEX 3.8 there, but the part is at Gun Shop (6.2).
     const m = model({ stats: FRIEND, energy: 150, gymId: 18 });
     const p = planGymPage(m, { selectedId: 6 });
-    assert.deepEqual(p.nextGym, { id: 18, label: 'Next: Gun Shop · DEX × 15' });
-    assert.equal(p.switchHint, 'Next: Gun Shop · DEX × 15');
-    assert.equal(p.pill, 'Next: Gun Shop · DEX × 15');
+    assert.deepEqual(p.nextGym, { id: 18, label: 'Next: Gun Shop · DEX × 15', group: 'a heavyweight gym' });
+    assert.equal(p.switchHint, 'Switch to Gun Shop (a heavyweight gym) · DEX × 15');
+    assert.equal(p.pill, 'Switch to Gun Shop (a heavyweight gym) · DEX × 15');
     assert.ok(Object.values(p.perStat).every((x) => x.kind === 'grey'), 'nothing to Fill here');
     assert.equal(p.perStat.dex.text, 'Next · DEX × 15 at Gun Shop');
 });
@@ -94,7 +94,7 @@ test('the walk-through moves on with every train Torn shows: part 1 ticks, then 
     s = nextSession(s, m, r, T0 + 120e3);
     p = planGymPage(m, { selectedId: 8, reading: r }, s, T0 + 120e3);
     assert.deepEqual(p.parts.map((x) => x.state), ['done', 'current']);
-    assert.deepEqual(p.nextGym, { id: 9, label: 'Next: Knuckle Heads · STR × 25' });
+    assert.deepEqual(p.nextGym, { id: 9, label: 'Next: Knuckle Heads · STR × 25', group: 'a middleweight gym' });
     assert.ok(Object.values(p.perStat).every((x) => x.kind === 'grey'));
     assert.equal(p.perStat.def.text, 'Done ✓ · DEF × 30');
     // At Knuckle Heads: STR outlined, Fill 25.

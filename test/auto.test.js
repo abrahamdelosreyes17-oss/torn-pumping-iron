@@ -283,3 +283,30 @@ test('review fix: with energy kept for a war above the maximum, no refill is pla
     const steps = dayTimeline({ state, now, strategy: 'steady', ctx, until: now + 3 * 3600e3 });
     assert.ok(!steps.some((s) => s.kind === 'refill' && (s.items || []).some((it) => it.id === 'points')), JSON.stringify(steps.map((s) => s.kind + ':' + s.energy)));
 });
+
+test('daily refill: kept when it fits the budget, left out when it tips the plan over, judged per $1M for best value', async () => {
+    const { withBestRefill } = await import('../src/core/model.js');
+    const { POINTS } = await import('../src/core/items.js');
+    const run = (b) => (b.noRefill ? { id: 'steady', gained: 900, cost: 60e6, used: {} } : { id: 'steady', gained: 1000, cost: 100e6, used: { [POINTS]: 900 } });
+    assert.equal(withBestRefill('steady', {}, { budget: 150e6 }, run).refill, true, 'fits: kept');
+    const over = withBestRefill('steady', {}, { budget: 80e6 }, run);
+    assert.equal(over.refill, false, 'it is what puts the plan over: left out');
+    assert.equal(over.refillGain, 100);
+    assert.equal(over.refillCost, 40e6);
+    assert.equal(over.gained, 900);
+    const value = withBestRefill('steady', {}, { budget: 150e6, pickBy: 'value' }, run);
+    assert.equal(value.refill, false, '1000/$100M < 900/$60M: left out for best value');
+    assert.equal(withBestRefill('steady', {}, { budget: Infinity, pickBy: 'max' }, run).refill, true);
+});
+
+test('daily refill left out: the day plan has no points refill', async () => {
+    const { dayTimeline } = await import('../src/core/plan.js');
+    const { BUILDS } = await import('../src/core/builds.js');
+    const now = Date.UTC(2026, 8, 29, 10, 0);
+    const state = { at: now, energy: { current: 150, maximum: 150, increment: 5, interval: 600, fullTime: 0 }, happy: { current: 5000, maximum: 5000, increment: 5, interval: 900, fullTime: 0 }, cooldowns: { drug: 0, booster: 0, medical: 0 }, drugCd: 0, boosterCd: 0, refillUsed: false, stats: { str: 1e6, spd: 1e6, def: 1e6, dex: 1e6 }, gymId: 1, specialRefills: 0 };
+    const ctx = { shares: BUILDS.balanced.shares, unlocked: [1], perks: { str: 1, spd: 1, def: 1, dex: 1 }, keep: [], active: 1 };
+    const withIt = dayTimeline({ state, now, strategy: 'steady', ctx });
+    const without = dayTimeline({ state, now, strategy: 'steady', ctx: { ...ctx, noRefill: true } });
+    assert.ok(withIt.some((s) => s.kind === 'refill'));
+    assert.ok(!without.some((s) => s.kind === 'refill'));
+});

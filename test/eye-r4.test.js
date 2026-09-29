@@ -372,16 +372,16 @@ test('pollWatch: one profile per due player through the Torn client, a war list 
 
 /* ----------------------------------------------------------------- sync */
 
-test('sync: war (≤100) and watch (≤25) rows for the Worker, band/win/keep cleaned; sig changes with them', () => {
+test('sync: war (≤100) and watch (≤50) rows for the Worker, band/win/keep cleaned; sig changes with them', () => {
     const members = Array.from({ length: 120 }, (_, i) => ({ id: i + 1, name: 'M' + i, level: 50, band: i === 0 ? 'weird' : 'good', win: i === 1 ? 104.4 : 91.6, keep: null }));
-    const watch = Array.from({ length: 30 }, (_, i) => ({ id: 1000 + i, name: 'W' + i, level: 10, band: 'stomp', win: 100, keep: 88, tag: 'a much too long reason for the worker' }));
+    const watch = Array.from({ length: 60 }, (_, i) => ({ id: 1000 + i, name: 'W' + i, level: 10, band: 'stomp', win: 100, keep: 88, tag: 'a much too long reason for the worker' }));
     setEyeForSync({ war: { factionId: 7777, members }, watch });
     const p = eyeSyncPayload();
     assert.equal(p.war.factionId, 7777);
     assert.equal(p.war.members.length, 100);
     assert.deepEqual(p.war.members[0], { id: 1, name: 'M0', level: 50, band: 'none', win: 92, keep: null });
     assert.equal(p.war.members[1].win, 100);
-    assert.equal(p.watch.length, 25);
+    assert.equal(p.watch.length, 50);
     assert.deepEqual(Object.keys(p.watch[0]), ['id', 'name', 'level', 'band', 'win', 'keep', 'tag']);
     assert.equal(p.watch[0].tag.length, 24);
     const sig = p.sig;

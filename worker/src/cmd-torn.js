@@ -144,7 +144,7 @@ export function cleanWarList(w, nowS) {
     return { at: nowS, factionId: posInt(w.factionId), members };
 }
 
-/** The watch list (PUT /plan `watch`): [{id, name, level, band, win, keep, tag}] ≤ 25; null clears. */
+/** The watch list (PUT /plan `watch`): [{id, name, level, band, win, keep, tag}] ≤ 50; null clears. */
 export function cleanWatch(list, nowS) {
     if (!Array.isArray(list)) return null;
     return { at: nowS, list: uniqueById(list.slice(0, MAX_WATCH).map((x) => cleanPlayer(x, true))) };

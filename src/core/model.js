@@ -19,7 +19,7 @@ import { companyJob, jobHappyOf, freeEdvdPerDayOf, worksAt, VOYEUR_JP, JOB_LOCK_
 import { energyLadder, boosterChoice, priceFor } from './ladder.js';
 import { upcomingEvents, holdBoosterFor, eventHeadsUp, eventMults } from './events.js';
 import { PICK_BY } from './recommend.js';
-import { XANAX, SAMPLE_PRICES, ITEMS, XANAX_CD_MIN, GAME_CONSOLE } from './items.js';
+import { XANAX, SAMPLE_PRICES, ITEMS, XANAX_CD_MIN, GAME_CONSOLE, POINTS } from './items.js';
 import { HAPPY_CAP } from './gain.js';
 import { JUMP_STACK } from './strategies.js';
 import { budgetOf, effectivePickBy, eventSwitchHeads, affordLine, autoWaitLine, unlockDays, unlockEnergyLeft } from './auto.js';
@@ -186,7 +186,7 @@ export function compareStrategies({ state, pc, shares, settings, prices, special
                 continue;
             }
         }
-        results[id] = CANDY_PLANS.has(id) ? withBestCandy(id, base, { budget, pickBy }).result : withBestSpecial(id, base);
+        results[id] = withBestRefill(id, base, { budget, pickBy }, (b) => (CANDY_PLANS.has(id) ? withBestCandy(id, b, { budget, pickBy }).result : withBestSpecial(id, b)));
     }
     if (results.steady && Number.isFinite(budget)) {
         const choice = boosterChoice({ perDay: (budget - results.steady.cost) / base.days, maxE: base.energyMax, prices: base.prices, canMult: base.canMult, capH: base.boosterCapH });
@@ -196,6 +196,28 @@ export function compareStrategies({ state, pc, shares, settings, prices, special
         }
     }
     return results;
+}
+
+/**
+ * Is the daily points refill worth its price (owner, 2026-09-29)? The plan
+ * is run without it too, and the refill is kept only when the Plan rule
+ * says so: inside the budget it's kept (more stats), unless it's what puts
+ * the plan over the budget; for "best value" it's kept only if it doesn't
+ * lower the stats per $1M. The result says which (`refill`, `refillGain`,
+ * `refillCost`), and the day plan follows it.
+ */
+export function withBestRefill(id, base, { budget = Infinity, pickBy = 'most' } = {}, run) {
+    const withIt = run(base);
+    // Nothing to decide: no points bought for refills in this plan (special refills stand in), or no limit and "most".
+    if (!(withIt.used && withIt.used[POINTS] > 0)) return withIt;
+    const limit = pickBy === 'max' ? Infinity : budget;
+    if (pickBy !== 'value' && withIt.cost <= limit) return { ...withIt, refill: true };
+    const without = run({ ...base, noRefill: true });
+    const gain = withIt.gained - without.gained;
+    const cost = withIt.cost - without.cost;
+    const per = (r) => (r.cost > 0 ? r.gained / r.cost : Infinity);
+    const keep = pickBy === 'value' ? per(withIt) >= per(without) && withIt.cost <= limit : withIt.cost <= limit || without.cost > limit;
+    return keep ? { ...withIt, refill: true, refillGain: gain, refillCost: cost } : { ...without, refill: false, refillGain: gain, refillCost: cost };
 }
 
 /**
@@ -326,6 +348,8 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         boostersToday: today.filter((e) => e.kind === 'booster').length,
         candyMult: pc.perks.candyMult || 1,
         canMult: pc.perks.canMult || 1,
+        // The comparison found the points refill not worth it in this plan: the day plan leaves it out.
+        noRefill: Boolean(compare && compare[plan.strategy] && compare[plan.strategy].refill === false),
         toyShop5: Boolean(pc.perks.toyShop5),
         adultNovelties10: Boolean(pc.perks.adultNovelties10),
     };
@@ -420,7 +444,11 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const heads = [];
     if (!plan.buildPicked) heads.push({ tone: 'warn', text: 'Pick your build type', sub: 'Plan › Build: the plan trains toward it', go: 'plan' });
     for (const w of strictWarnings(steps, now)) heads.push({ tone: 'warn', text: w.text });
-    if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
+    if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS && !ctx.noRefill) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
+    if (ctx.noRefill) {
+        const r = compare[plan.strategy];
+        heads.push({ tone: 'plain', text: 'Daily refill left out', sub: 'not worth its price in your plan' + (r && r.refillGain > 0 ? ' (+' + Math.round(r.refillGain).toLocaleString('en-US') + ' stats for $' + Math.round(r.refillCost / 1e6) + 'M over the plan)' : ''), go: 'plan' });
+    }
     if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.known ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost), go: 'progress' });
     for (const e of events.slice(0, 2)) {
         const hu = eventHeadsUp(e, now);
@@ -505,6 +533,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         events,
         pickBy,
         keepEnergy: warKeep,
+        noRefill: Boolean(ctx.noRefill),
         auto: auto ? { ...auto, afford: affordLine(auto, recRow ? recRow.cost / horizon : 0), wait: autoWaitLine(auto), switch: autoSwitch } : null,
         unlock,
         // held: while any are held the daily refill is a special (Torn blocks the points refill until they're spent [verify]).

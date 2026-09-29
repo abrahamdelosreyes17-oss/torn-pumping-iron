@@ -123,7 +123,7 @@ const TABS = {
     buy: ['Buy for', 'Your list', 'Xanax', 'Iron_Monk', 'Points market', 'Deals', '7-day prices', 'You hold', 'TornW3B'],
     progress: ['Total stats against the plan', 'Each stat', 'Gained against plan', 'Receipts', 'Energy trained', '$ per 1,000 stats', 'What if you’d done another plan', 'the comparison appears after two days', 'Last trains', 'This week', 'Budget', 'Force Training'],
     eye: ['Targets', 'Chain', 'War', 'How sure', 'FFScouter', 'Gear seen', 'Your side'],
-    settings: ['Torn API key', 'How this key is used', 'Full key (Auto mode)', 'Keep for war days', 'Discord pings', 'Log in with Discord', 'FFScouter', 'data policy', 'TornStats', 'Torn Eye colours', 'On Torn’s pages', 'Developer', 'Export as .zip', 'Your data', 'Diagnostics', 'of 70'],
+    settings: ['Torn API key', 'How this key is used', 'Full key (Auto mode)', 'Keep for war days', 'Discord pings', 'Log in with Discord', 'FFScouter', 'data policy', 'TornStats', 'Torn Eye colours', 'On Torn’s pages', 'Developer', 'Export as .zip', 'Your data', 'Diagnostics', 'of 85'],
 };
 
 const { page, errors, tornHits } = await openApp('');
@@ -140,13 +140,15 @@ if (!only.length || only.includes('plan')) {
     await page.waitForTimeout(300);
     let m = await measure(page);
     ok(m.text.includes("A choco jump isn't worth it for you"), 'plan: picking the choco jump warns');
-    ok(m.text.includes('Keep steady'), 'plan: the warning offers to keep steady');
+    // The warning offers to keep the recommended plan (whichever it is: the refill check can change it).
+    const keep = page.locator('#pi-app .warnb button', { hasText: /^Keep / });
+    ok((await keep.count()) === 1, 'plan: the warning offers to keep the recommended plan (' + (await keep.count() ? await keep.first().textContent() : 'none') + ')');
     const stored = await page.evaluate(() => JSON.parse(_store['pumpingIron.v1.plan'] || 'null'));
-    ok(!stored || stored.strategy === 'steady', 'plan: nothing saved before a choice');
-    await page.locator('#pi-app button', { hasText: 'Keep steady' }).click();
+    ok(!stored || stored.strategy !== 'chocoJump', 'plan: nothing saved before a choice');
+    await keep.first().click();
     await page.waitForTimeout(300);
     m = await measure(page);
-    ok(!m.text.includes("isn't worth it"), 'plan: keeping steady closes the warning');
+    ok(!m.text.includes("isn't worth it"), 'plan: keeping the recommended plan closes the warning');
     // Build type is yours: pick DEF as the high stat, then Hank's.
     await page.locator('#pi-app .seg[aria-label="High stat"] button', { hasText: 'DEF' }).click();
     await page.waitForTimeout(300);

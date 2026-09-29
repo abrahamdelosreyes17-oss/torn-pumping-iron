@@ -94,6 +94,12 @@ export function drawGymMarks(root, plan, boxes, rereadBox, buttons = []) {
     if (plan.nextGym) {
         const b = buttons.find((x) => x.id === plan.nextGym.id);
         if (b && b.el) outline(b.el, plan.nextGym.label);
+        // Its button isn't on the page (Torn shows one group of gyms at a time): the strip says which group to open.
+        else strip.appendChild(h('span', { class: 'pi-hint', text: ' · open ' + plan.nextGym.group.replace(/^a /, 'the ') + 's to find it' }));
+    }
+    if (plan.hereGym) {
+        const b = buttons.find((x) => x.id === plan.hereGym.id);
+        if (b && b.el) outline(b.el, plan.hereGym.label);
     }
     for (const box of boxes) {
         const p = plan.perStat[box.stat];

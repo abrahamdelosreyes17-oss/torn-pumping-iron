@@ -7,7 +7,7 @@
 import { gmMenu, gmOpenTab } from './platform/gm.js';
 import { K, get, set, getKey, getSettings, getPlan, getPrices } from './platform/store.js';
 import { keyProblem } from './ui/key-status.js';
-import { onModel, isVisible, refresh } from './runtime.js';
+import { onModel, isVisible, refresh, pi, beatFocus } from './runtime.js';
 import { isPaused, onPauseChange } from './turns.js';
 import { Overlay } from './ui/overlay.js';
 import { ensureMarkCss, clearMarks, drawGymMarks, outline } from './ui/marks/marks.js';
@@ -24,7 +24,7 @@ import { trainsText } from './ui/app/common.js';
 import { tornClock } from './core/bars.js';
 import { fmtInt } from './core/format.js';
 import { POINTS } from './core/items.js';
-import { detectPage, bazaarOwnerId, itemMarketItemOf, APP_PAGE_URL, PAGE_GYM, PAGE_ITEMS, PAGE_BAZAAR, PAGE_ITEM_MARKET, PAGE_POINTS } from './sources/route.js';
+import { detectPage, bazaarOwnerId, itemMarketItemOf, APP_PAGE_URL, PAGE_GYM, PAGE_ITEMS, PAGE_BAZAAR, PAGE_ITEM_MARKET, PAGE_POINTS, PAGE_PROFILE, PAGE_FACTION, PAGE_ATTACK } from './sources/route.js';
 
 const tp = { overlay: null, model: null, observer: null, drawing: false, lastGymPlan: null };
 
@@ -247,8 +247,18 @@ function pageRowsCount(p) {
     return 0;
 }
 
+/** What this Torn page is about, for the API lanes: Torn Eye pages or market pages go first while open. */
+export function tornPageFocus(href = location.href) {
+    const p = detectPage(href);
+    if (p === PAGE_PROFILE || p === PAGE_FACTION || p === PAGE_ATTACK) return { focus: 'eye', war: p === PAGE_FACTION && Boolean(document.getElementById('faction_war_list_id')) };
+    if (p === PAGE_ITEMS || p === PAGE_BAZAAR || p === PAGE_ITEM_MARKET || p === PAGE_POINTS) return { focus: 'prices', war: false };
+    return { focus: null, war: false };
+}
+
 export function bootTornPage() {
     ensureMarkCss();
+    pi.focusOf = () => tornPageFocus();
+    beatFocus();
     tp.overlay = new Overlay({
         // A key problem opens straight on Settings, where the key is replaced.
         onOpen: () => gmOpenTab(APP_PAGE_URL + (currentProblem() && !(tp.model && tp.model.ready) ? '#settings' : '')),

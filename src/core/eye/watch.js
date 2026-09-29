@@ -12,7 +12,7 @@
 
 import { memberState, travelOf, landingAt } from './war.js';
 
-export const WATCH_MAX = 20;
+export const WATCH_MAX = 50;
 export const WATCH_TAGS = ['hospitalize', 'mug', 'revenge', 'bounty'];
 export const TAG_MAX = 24;
 export const WATCH_POLL_MS = 60 * 1000;

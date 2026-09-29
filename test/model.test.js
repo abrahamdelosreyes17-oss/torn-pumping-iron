@@ -54,8 +54,10 @@ test('heads-up: refill unused near midnight, the next gym, and the plan check', 
     const texts = m.heads.map((h) => h.text);
     assert.ok(texts.includes('Refill unused'));
     assert.ok(texts.some((t) => /^Force Training/.test(t)));
-    assert.ok(texts.includes('Steady training is still best'));
-    assert.equal(m.recommendation.recommended, 'steady');
+    // Candy + Xanax without the daily refill fits the $150M budget and gains more than steady (the refill check, 1.2.1).
+    assert.equal(m.recommendation.recommended, 'candyXanax');
+    assert.equal(compare.candyXanax.refill, false);
+    assert.ok(texts.includes('Candy + Xanax would gain more'), JSON.stringify(texts));
 });
 
 test('the next gym uses the gym page\'s progress when it matches the gym being unlocked', () => {
