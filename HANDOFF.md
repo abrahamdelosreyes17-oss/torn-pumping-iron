@@ -134,6 +134,7 @@ Links:
      1. Progress and Home: "Today +305,123 (STR +169,900 · DEX +135,223)", plus 7 and 30 days, from real stats (statsHistory / receipts).
      2. The "Last trains" note: "reads with one stat and nothing taken in between, used to check the gain maths", plus a total row.
      3. Optionally a per-day "gained" bar next to "planned".
+     4. **Group a session's reads into one row with its total.** The owner meant "300k on the 15 trains": STR × 10 + DEX × 1 + DEX × 4 = 15 trains, +305,123. The table split them into three 30 s reads, which looked like less.
 14. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
 Research and background: `docs/research-events-perks.md` (events, job perks, the console), `docs/review-fable-2026-09-29.md` (the three-pass review, all fixed), `docs/research-learning.md`, `docs/discord-bot-design.md`, `worker/USERSCRIPT-INTERFACE.md`, `docs/ENGINE-SPEC.md`, `docs/DESIGN.md` + `mockups/round3/` (the look every page follows now).
 
