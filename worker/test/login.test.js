@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { handle } from '../src/index.js';
-import { LOGIN_TTL_S } from '../src/login.js';
+import { LOGIN_TTL_S, LINK_ABANDONED_S, MAX_OPEN_LOGINS } from '../src/login.js';
+import { Q } from '../src/db.js';
 import { recorder, botEnv, body, req, jsonRes, KEY, DISCORD_USER, SECRET } from './helpers.js';
 
 const GUILD = '1551784561237561344';
@@ -23,8 +24,15 @@ function discord({ member = () => jsonRes({ user: { id: DISCORD_USER } }), name 
 
 const get = (path) => new Request(ORIGIN + path, { method: 'GET' });
 
-async function started(env, secret = SECRET) {
-    const r = await handle(req('POST', '/login/start', { secret }), env);
+/** A request from an address (Cloudflare's CF-Connecting-IP). */
+function fromIp(r, ip) {
+    const h = new Headers(r.headers);
+    h.set('cf-connecting-ip', ip);
+    return new Request(r, { headers: h });
+}
+
+async function started(env, secret = SECRET, ip = null) {
+    const r = await handle(ip ? fromIp(req('POST', '/login/start', { secret }), ip) : req('POST', '/login/start', { secret }), env);
     assert.equal(r.status, 200);
     return r.json();
 }
@@ -74,12 +82,14 @@ test('GET /login: off to Discord’s authorize page with the login as state (sco
     assert.match(await bad.text(), /This login has expired/);
 });
 
-test('callback: a member of the server becomes a linked user (no invite); the same Discord account elsewhere is unlinked', async () => {
+test('callback: a member of the server becomes a linked user (no invite); an abandoned row of the same Discord account (7+ days) is forgotten', async () => {
     const env = await loginEnv();
-    // Someone else's row linked to the same Discord account (an older browser).
-    await handle(req('PUT', '/plan', { secret: 'c'.repeat(40), invite: 'x', body: { plan: null } }), env);
+    // An older browser's row linked to the same Discord account, not synced for 8 days, with a key and data.
+    await handle(req('PUT', '/plan', { secret: 'c'.repeat(40), invite: 'x', body: { tornKey: KEY, plan: null } }), env);
     const [oldId] = env.DB.users.keys();
-    Object.assign(env.DB.users.get(oldId), { discord_id: DISCORD_USER, linked: 1 });
+    Object.assign(env.DB.users.get(oldId), { discord_id: DISCORD_USER, linked: 1, updated: Math.floor(Date.now() / 1000) - LINK_ABANDONED_S - 86400 });
+    await env.DB.prepare(Q.ackPut).bind('done:x', oldId, 'done', 'x', null, 1).run();
+    await env.DB.prepare(Q.watchPut).bind(oldId, 206, 800000).run();
     const s = await started(env);
     const f = discord();
     const r = await handle(get('/login/callback?code=the-code&state=' + s.id), env, f);
@@ -98,11 +108,12 @@ test('callback: a member of the server becomes a linked user (no invite); the sa
     assert.deepEqual(Object.fromEntries(new URLSearchParams(tok.body)), { grant_type: 'authorization_code', code: 'the-code', redirect_uri: ORIGIN + '/login/callback' });
     assert.equal(f.calls[1].init.headers.authorization, 'Bearer user-at');
     assert.equal(f.calls[2].init.headers.authorization, 'Bot bot-token');
-    // The row for this browser's secret: created and linked; the old one unlinked.
+    // The row for this browser's secret: created and linked; the old one gone with its key and data.
     const { sha256 } = await import('../src/cmd-core.js');
     const me = env.DB.users.get(await sha256(SECRET));
     assert.deepEqual([me.discord_id, me.linked, me.torn_key], [DISCORD_USER, 1, '']);
-    assert.deepEqual([env.DB.users.get(oldId).discord_id, env.DB.users.get(oldId).linked], ['', 0]);
+    assert.equal(env.DB.users.has(oldId), false);
+    assert.deepEqual([env.DB.users.size, env.DB.acks.size, env.DB.watches.size], [1, 0, 0]);
     assert.deepEqual(await body(handle(req('POST', '/login/status', { body: { id: s.id } }), env)), { ok: true, state: 'done', name: 'Iron Tester' });
     // Used once.
     assert.match(await (await handle(get('/login/callback?code=again&state=' + s.id), env, discord())).text(), /expired/);
@@ -169,6 +180,101 @@ test('the landing page escapes the Discord name', async () => {
     const html = await (await handle(get('/login/callback?code=c&state=' + s.id), env, discord({ name: '<img src=x onerror=alert(1)>"&' }))).text();
     assert.ok(html.includes('Connected as &lt;img src=x onerror=alert(1)&gt;&quot;&amp;'));
     assert.doesNotMatch(html, /<img/);
+});
+
+test('callback: the Discord account linked in another browser that synced lately → "elsewhere", nothing moves', async () => {
+    const env = await loginEnv();
+    await handle(req('PUT', '/plan', { secret: 'c'.repeat(40), invite: 'x', body: { tornKey: KEY, plan: null } }), env);
+    const [otherId] = env.DB.users.keys();
+    Object.assign(env.DB.users.get(otherId), { discord_id: DISCORD_USER, linked: 1, updated: Math.floor(Date.now() / 1000) - LINK_ABANDONED_S + 3600 });
+    const s = await started(env);
+    const html = await (await handle(get('/login/callback?code=c&state=' + s.id), env, discord())).text();
+    assert.match(html, /<h1>Connected in another browser<\/h1>/);
+    assert.ok(html.includes('This Discord account is already connected to Pumping Iron in another browser. Press Disconnect there (Settings › Discord), or type /unlink in Discord, then log in here again.'));
+    assert.deepEqual(await body(handle(req('POST', '/login/status', { body: { id: s.id } }), env)), { ok: true, state: 'elsewhere', name: 'Iron Tester' });
+    // The other row keeps its link and key; no row for this browser.
+    const other = env.DB.users.get(otherId);
+    assert.deepEqual([other.discord_id, other.linked, env.DB.users.size], [DISCORD_USER, 1, 1]);
+    assert.match(other.torn_key, /^v1\./);
+});
+
+test('callback: the same browser logging in again with the same Discord account is fine', async () => {
+    const env = await loginEnv();
+    let s = await started(env);
+    await handle(get('/login/callback?code=c&state=' + s.id), env, discord());
+    s = await started(env);
+    const html = await (await handle(get('/login/callback?code=c&state=' + s.id), env, discord())).text();
+    assert.match(html, /Connected as Iron Tester/);
+    assert.equal(env.DB.users.size, 1);
+    assert.equal([...env.DB.users.values()][0].linked, 1);
+});
+
+test('callback: a Discord error never shows the query text back', async () => {
+    const env = await loginEnv();
+    const s = await started(env);
+    const html = await (await handle(get('/login/callback?error=' + encodeURIComponent('Call 555 now: your account is locked') + '&state=' + s.id), env, discord())).text();
+    assert.match(html, /Discord didn’t finish the login\. Try again in a minute\./);
+    assert.doesNotMatch(html, /555|locked/);
+    assert.equal((await body(handle(req('POST', '/login/status', { body: { id: s.id } }), env))).state, 'failed');
+});
+
+test('POST /login/cancel: the login is dropped; Discord’s page afterwards does nothing', async () => {
+    const env = await loginEnv();
+    const s = await started(env);
+    // Another browser can't cancel it.
+    assert.deepEqual(await body(handle(req('POST', '/login/cancel', { secret: 'b'.repeat(40), body: { id: s.id } }), env)), { ok: true });
+    assert.equal(env.DB.logins.size, 1);
+    assert.equal((await handle(req('POST', '/login/cancel', { secret: null, body: { id: s.id } }), env)).status, 401);
+    assert.equal((await handle(req('POST', '/login/cancel', { body: { id: 'nope' } }), env)).status, 404);
+    assert.deepEqual(await body(handle(req('POST', '/login/cancel', { body: { id: s.id } }), env)), { ok: true });
+    assert.equal(env.DB.logins.size, 0);
+    const f = discord();
+    assert.match(await (await handle(get('/login/callback?code=c&state=' + s.id), env, f)).text(), /This login has expired/);
+    assert.equal(f.calls.length, 0);
+    assert.equal(env.DB.users.size, 0);
+    assert.equal((await handle(req('POST', '/login/status', { body: { id: s.id } }), env)).status, 404);
+});
+
+test('a flood of logins: past 50 open the oldest makes room (no 429); at most 5 open per address', async () => {
+    const env = await loginEnv();
+    const nowS = Math.floor(Date.now() / 1000);
+    // 50 open logins from 50 addresses, the first one oldest.
+    for (let n = 0; n < MAX_OPEN_LOGINS; n++) await env.DB.prepare(Q.loginPut).bind(n.toString(16).padStart(48, '0'), 'u' + n, nowS - 600 + n, 'open', 'ip' + n).run();
+    const s = await started(env, SECRET, '203.0.113.9');
+    assert.equal(env.DB.logins.size, MAX_OPEN_LOGINS);
+    assert.equal(env.DB.logins.has('0'.repeat(48)), false, 'the oldest went');
+    assert.ok(env.DB.logins.has(s.id));
+    // The address is stored hashed with the day, never as is.
+    assert.match(env.DB.logins.get(s.id).ip, /^[0-9a-f]{64}$/);
+    assert.ok(!JSON.stringify([...env.DB.logins.values()]).includes('203.0.113.9'));
+    // Five browsers behind one address: the sixth waits.
+    for (let n = 1; n < 5; n++) await started(env, String(n).repeat(40), '203.0.113.9');
+    const sixth = await handle(fromIp(req('POST', '/login/start', { secret: 'f'.repeat(40) }), '203.0.113.9'), env);
+    assert.equal(sixth.status, 429);
+    assert.match((await sixth.json()).error, /from this network/);
+    // Another address still gets in; a finished login no longer counts.
+    await started(env, 'e'.repeat(40), '198.51.100.7');
+    env.DB.logins.get(s.id).state = 'done';
+    await started(env, 'f'.repeat(40), '203.0.113.9');
+});
+
+test('login bodies: at most 1 kB, counted in bytes; a declared length over it is refused unread', async () => {
+    const env = await loginEnv();
+    const s = await started(env);
+    // 400 three-byte characters: under 1,024 characters, over 1,024 bytes.
+    const wide = JSON.stringify({ id: s.id, pad: '€'.repeat(400) });
+    assert.ok(wide.length < 1024 && new TextEncoder().encode(wide).length > 1024);
+    const post = (path, text, headers = {}) => new Request(ORIGIN + path, { method: 'POST', headers: { authorization: 'Bearer ' + SECRET, ...headers }, body: text });
+    assert.equal((await handle(post('/login/status', wide), env)).status, 413);
+    assert.equal((await handle(post('/login/cancel', wide), env)).status, 413);
+    assert.equal(env.DB.logins.size, 1);
+    // A body sent without a length (a stream) is read only up to the limit.
+    const stream = (text) => new ReadableStream({ start: (c) => (c.enqueue(new TextEncoder().encode(text)), c.close()) });
+    const chunked = new Request(ORIGIN + '/login/status', { method: 'POST', headers: { authorization: 'Bearer ' + SECRET }, body: stream(wide), duplex: 'half' });
+    assert.equal(chunked.headers.get('content-length'), null);
+    assert.equal((await handle(chunked, env)).status, 413);
+    const ok = new Request(ORIGIN + '/login/status', { method: 'POST', headers: { authorization: 'Bearer ' + SECRET }, body: stream(JSON.stringify({ id: s.id })), duplex: 'half' });
+    assert.equal((await body(handle(ok, env))).state, 'open');
 });
 
 test('Forget (DELETE /plan) also drops the browser’s logins', async () => {

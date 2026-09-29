@@ -229,7 +229,9 @@ export async function warCmd(user, i, env, fetchImpl, ctx, nowS) {
         const n = Math.min(page, pages.length);
         const ready = warGroups(players, est, nowS).hit.filter((p) => BEATABLE.has(est(p.id).band));
         const attack = ready.slice(0, 4).map((x) => linkButton('Attack ' + x.name, PAGES.attack(x.id)));
-        return { content: (page > pages.length ? '(Only ' + pages.length + ' page' + (pages.length === 1 ? '' : 's') + '.)\n' : '') + pages[n - 1], components: [actionRow([...attack, linkButton('Faction', PAGES.faction(war.enemy))])] };
+        // Discord's limit is 2,000 characters, the "(Only N pages.)" line included.
+        const note = page > pages.length ? '(Only ' + pages.length + ' page' + (pages.length === 1 ? '' : 's') + '.)\n' : '';
+        return { content: note + pages[n - 1].slice(0, 2000 - note.length), components: [actionRow([...attack, linkButton('Faction', PAGES.faction(war.enemy))])] };
     });
 }
 

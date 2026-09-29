@@ -4,7 +4,7 @@ Same Worker as the 1.0 webhook pings, plus Discord's HTTP interactions at `POST 
 
 ## Log in with Discord (1.2.0)
 
-The normal way in: the owner runs one Worker; a player presses **Log in with Discord** in Pumping Iron. `POST /login/start` (the browser's secret) → the userscript opens `GET /login?id=…` → Discord's authorize page (scope `identify` only, `prompt=none` so a returning player isn't asked again) → `GET /login/callback`: the code is exchanged (Basic auth with `DISCORD_CLIENT_SECRET`), `/users/@me` says who it is, and the bot checks membership of `GUILD_ID` (`GET /guilds/{id}/members/{user}`). A member gets a user row (no invite code; `MAX_USERS` still applies) linked to their Discord account like `/link` (the same account linked elsewhere is unlinked). The userscript asks `POST /login/status` every few seconds (`open` → `done` / `not_member` / `denied` / `full` / `failed` / `expired`), then sends the main Pumping Iron key in `PUT /plan`. Logins last 15 minutes, are single use, at most 50 open at once. The landing page has no scripts (CSP `default-src 'none'`), escapes the Discord name, and can't be framed. Missing `DISCORD_CLIENT_SECRET` or `GUILD_ID`: 501. The invite code and `/link` stay for "your own service".
+The normal way in: the owner runs one Worker; a player presses **Log in with Discord** in Pumping Iron. `POST /login/start` (the browser's secret) → the userscript opens `GET /login?id=…` → Discord's authorize page (scope `identify` only, `prompt=none` so a returning player isn't asked again) → `GET /login/callback`: the code is exchanged (Basic auth with `DISCORD_CLIENT_SECRET`), `/users/@me` says who it is, and the bot checks membership of `GUILD_ID` (`GET /guilds/{id}/members/{user}`). A member gets a user row (no invite code; `MAX_USERS` still applies) linked to their Discord account. A link never moves silently: if that Discord account is linked to another browser's row, the login is refused (`elsewhere`: "Press Disconnect there, or type /unlink in Discord, then log in here again") unless that row hasn't synced for 7 days, in which case it is forgotten (all its data, as Forget) and this login takes over. The same browser logging in again is fine. The userscript asks `POST /login/status` every few seconds (`open` → `done` / `not_member` / `denied` / `full` / `failed` / `elsewhere` / `expired`), then sends the main Pumping Iron key in `PUT /plan`; `POST /login/cancel` drops a login it gave up on. Logins last 15 minutes and are single use; at most 50 open at once (past that the oldest open one makes room, so a flood can't lock people out) and 5 per address (`CF-Connecting-IP`, stored only as a sha256 with the day). Status and cancel bodies: 1 kB at most. Discord's error text is never echoed on the landing page. The landing page has no scripts (CSP `default-src 'none'`), escapes the Discord name, and can't be framed. Missing `DISCORD_CLIENT_SECRET` or `GUILD_ID`: 501. The invite code and `/link` stay for "your own service".
 
 ## Rules it keeps
 
@@ -14,13 +14,15 @@ The normal way in: the owner runs one Worker; a player presses **Log in with Dis
 - Only three hosts are ever called: `api.torn.com`, `discord.com`, `weav3r.dev` (`src/net.js` blocks anything else; every test checks it).
 - Free plan: at most 45 outside calls and 45 D1 queries per run, both enforced (a call past them stops the run; a ping is only sent when there's room to record it, so it is never sent twice). Users are taken oldest-run first, the rest go next minute; only users a ping can reach are picked. The schema is checked once per Worker instance. No fight simulation here: the userscript syncs its results.
 - Every reply is ephemeral (only the asker sees it) and pings nobody.
+- Nothing is kept forever: a user nobody has synced for 30 days is forgotten by the 10-minute cleanup (at most 2 per run; once an hour room for one is always kept), and logins older than 15 minutes are deleted, finished ones too.
 
 ## Commands
 
 | Command | Answers from | Torn calls |
 |---|---|---|
 | `/help` | text | none |
-| `/link CODE`, `/unlink` | D1 (code from `POST /link`, 10 min, single use, stored hashed) | none |
+| `/link CODE` | D1 (code from `POST /link`, 10 min, single use, stored hashed) | none |
+| `/unlink` | the Discord side of Forget: the linked user's row, key, plan, pings, acks, watches and logins are deleted ("Unlinked and forgotten…") | none |
 | `/status` | D1: key, plan age, pings this hour/day vs caps, quiet hours, mutes | none |
 | `/next`, `/plan` | the synced plan, Torn time | none |
 | `/timers` | drug, booster, medical, energy, refill, travel | 1 (deferred) |

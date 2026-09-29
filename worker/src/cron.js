@@ -8,7 +8,8 @@
  */
 
 import { dueAlerts, resolvedBy, nextPrev } from './alerts.js';
-import { Q, parse, meterDb, ensureSchema, QUERY_BUDGET } from './db.js';
+import { Q, parse, meterDb, ensureSchema, forgetUser, FORGET, QUERY_BUDGET } from './db.js';
+import { LOGIN_TTL_S } from './login.js';
 import { guard, BudgetError } from './net.js';
 import { userState, pauseUser, TornError } from './torn.js';
 import { deliver, canDeliver, bodyOf, editAlertMessage, PER_MESSAGE, NO_SNOOZE } from './deliver.js';
@@ -37,8 +38,19 @@ export const WAR_SUBREQUESTS = 0;
 export const WAR_QUERIES = 2;
 /** Extra with a watch list: its pings' rows (the reads, at most 5, are added per user). */
 export const EYE_QUERIES = 5;
-/** The 10-minute cleanup, plus sealing up to 5 plain 1.0 keys. */
-export const CLEANUP_QUERIES = 10;
+/** A user nobody has synced for this long is forgotten (key, plan, pings: as Forget does). */
+export const STALE_USER_S = 30 * 86400;
+/** Stale users forgotten per cleanup at most (each costs FORGET.length queries). */
+export const STALE_PER_RUN = 2;
+/** Sealing up to 5 plain 1.0 keys: one read and five writes. */
+const SEAL_QUERIES = 6;
+/**
+ * The 10-minute cleanup: 5 cleans, the stale-user read and the key
+ * sealing. Stale users are forgotten with what is left over; once an hour
+ * room for one is kept too, so they always go in the end.
+ */
+export const CLEANUP_QUERIES = 5 + 1 + SEAL_QUERIES;
+export const HOURLY_QUERIES = CLEANUP_QUERIES + FORGET.length;
 /** Message edits (auto-close) per user per minute. */
 export const MAX_EDITS = 2;
 /** Cron runs drift by a few seconds: a watch checked 4.5 minutes ago counts as 5. */
@@ -295,12 +307,22 @@ async function sealPlainKeys(env, db) {
     return n;
 }
 
+/** Users not synced for 30 days: forgotten, a few per cleanup, leaving room to seal keys after. */
+async function forgetStale(db, nowS) {
+    const room = Math.min(STALE_PER_RUN, Math.floor((db.left() - 1 - SEAL_QUERIES) / FORGET.length));
+    if (room < 1) return 0;
+    const { results } = await db.prepare(Q.usersStale).bind(nowS - STALE_USER_S, room).all();
+    for (const r of results || []) await forgetUser(db, r.id);
+    return (results || []).length;
+}
+
 export async function runCron(env, nowS = Math.floor(Date.now() / 1000), fetchImpl = fetch) {
     const spent = await ensureSchema(env.DB);
     const f = guard(fetchImpl);
     const db = meterDb(env.DB, QUERY_BUDGET - spent);
     const cleanup = Math.floor(nowS / 60) % 10 === 0;
-    const keep = cleanup ? CLEANUP_QUERIES : 0;
+    const hourly = Math.floor(nowS / 60) % 60 === 0;
+    const keep = hourly ? HOURLY_QUERIES : cleanup ? CLEANUP_QUERIES : 0;
     const out = [];
     try {
         const { results } = await db.prepare(Q.usersDue).bind(20).all();
@@ -333,6 +355,8 @@ export async function runCron(env, nowS = Math.floor(Date.now() / 1000), fetchIm
             await db.prepare(Q.sentCleanLive).bind(nowS - LIVE_KEEP_S).run();
             await db.prepare(Q.ackClean).bind(nowS - SENT_KEEP_S).run();
             await db.prepare(Q.linkClean).bind(nowS).run();
+            await db.prepare(Q.loginClean).bind(nowS - LOGIN_TTL_S).run();
+            await forgetStale(db, nowS);
             await sealPlainKeys(env, db);
         }
     } catch (e) {

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { handle } from '../src/index.js';
 import { handleInteraction } from '../src/interactions.js';
+import { Q } from '../src/db.js';
 import { recorder, ctx, command, botEnv, body, req, signed, KEY, DISCORD_USER, SECRET } from './helpers.js';
 
 const noFetch = recorder(() => {
@@ -78,14 +79,24 @@ test('one Discord account links one user: linking again moves it', async () => {
     assert.equal(env.DB.users.get(b).linked, 1);
 });
 
-test('/unlink stops DMs; Forget removes codes too', async () => {
+test('/unlink is the Discord side of Forget: the user row and its data are deleted', async () => {
     const { env, id } = await connected();
     const { code } = await body(handle(req('POST', '/link'), env));
     await handleInteraction(command('link', { code }), env, noFetch, ctx(), now());
+    await env.DB.prepare(Q.ackPut).bind('done:x', id, 'done', 'x', null, now()).run();
+    await env.DB.prepare(Q.sentPut).bind(id, 'drug:1', now(), 'sent', null, null, null, '{}', 'dm').run();
+    await env.DB.prepare(Q.watchPut).bind(id, 206, 800000).run();
+    await handle(req('POST', '/link'), env);
     const r = await body(handleInteraction(command('unlink'), env, noFetch, ctx(), now()));
-    assert.match(r.data.content, /^Unlinked/);
-    assert.equal(env.DB.users.get(id).linked, 0);
+    assert.match(r.data.content, /^Unlinked and forgotten: your key, plan and pings are deleted from the service\./);
+    assert.deepEqual([env.DB.users.size, env.DB.acks.size, env.DB.sent.size, env.DB.watches.size, env.DB.links.size], [0, 0, 0, 0, 0]);
     assert.match((await body(handleInteraction(command('unlink'), env, noFetch, ctx(), now()))).data.content, /isn’t linked/);
+    // The browser's next sync: an unknown secret (it shows "disconnected").
+    assert.equal((await handle(req('PUT', '/plan', { body: { plan: null } }), env)).status, 403);
+});
+
+test('Forget (DELETE /plan) removes codes too', async () => {
+    const { env } = await connected();
     await handle(req('POST', '/link'), env);
     await handle(req('DELETE', '/plan'), env);
     assert.equal(env.DB.links.size, 0);

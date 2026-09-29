@@ -4,7 +4,7 @@
  * works a plan out itself.
  */
 
-import { Q, parse } from './db.js';
+import { Q, parse, forgetUser } from './db.js';
 import { reply, interactionUser, linkButton, row as actionRow } from './discord.js';
 import { clock, rel, dur, dayStart, DAY_S, PAGES } from './format.js';
 import { settingsOf, kindsOn, planAge, planStale, muted, parseQuiet } from './settings.js';
@@ -63,11 +63,12 @@ export async function linkCmd(i, env, fetchImpl, ctx, nowS) {
     return reply('Linked. ' + dm + ' Try `/timers` or `/next`. `/unlink` undoes this.');
 }
 
+/** /unlink is the Discord side of Forget: the linked user and everything kept for it are deleted. */
 export async function unlinkCmd(i, env) {
     const user = await linkedUser(i, env);
     if (!user) return reply('This Discord account isn’t linked.');
-    await env.DB.prepare(Q.userUnlink).bind(interactionUser(i)).run();
-    return reply('Unlinked: no more DMs. ' + (user.webhook ? 'Pings go to your channel webhook, without buttons.' : 'Pings stop until you link again or add a webhook in Pumping Iron.'));
+    await forgetUser(env.DB, user.id);
+    return reply('Unlinked and forgotten: your key, plan and pings are deleted from the service. Log in with Discord in Pumping Iron to come back.');
 }
 
 export function stepPage(step) {

@@ -16,7 +16,7 @@ After you log in, Pumping Iron sends the service your **main Pumping Iron key** 
 
 | Data storage | Data sharing | Purpose of use | Key storage & sharing | Key access level |
 |---|---|---|---|---|
-| On the owner's Cloudflare Worker (D1), the key encrypted (AES-GCM), until you press Disconnect (Forget) | Nobody: pings and replies only you can see (DMs, replies only you see). The service's owner runs it and could read its database. | Personal gain (gym pings and timers); Competitive advantage (`/war`, `/chain`, war and watch-list pings) | Stored / Used only for automation and the commands you type | Limited (your main Pumping Iron key) |
+| On the owner's Cloudflare Worker (D1), the key encrypted (AES-GCM), until you press Disconnect (Forget), type `/unlink` in Discord, or 30 days without a sync | Nobody: pings and replies only you can see (DMs, replies only you see). The service's owner runs it and could read its database. | Personal gain (gym pings and timers); Competitive advantage (`/war`, `/chain`, war and watch-list pings) | Stored / Used only for automation and the commands you type | Limited (your main Pumping Iron key) |
 
 One person's key is only ever used for that person's own pings and commands. Third party: `/buy` and price watches also read bazaar prices from **TornW3B** (weav3r.dev). No key is sent there.
 
@@ -93,7 +93,7 @@ The free plan is enough: one cron run a minute, at most 45 outside calls and 45 
 3. `GUILD_ID` under `[vars]` in `wrangler.toml` is your server's id (already set: `1551784561237561344`).
 4. `npx wrangler deploy`.
 
-The login asks Discord only who you are (scope `identify`); the bot then checks the person is a member of `GUILD_ID`. A member gets a user row linked to their Discord account; anyone else sees "Not in the server" and nothing is stored. Until `DISCORD_CLIENT_SECRET` and `GUILD_ID` are set, the button answers "Log in with Discord isn't set up on this service yet" (the Worker answers 501).
+The login asks Discord only who you are (scope `identify`); the bot then checks the person is a member of `GUILD_ID`. A member gets a user row linked to their Discord account; anyone else sees "Not in the server" and nothing is stored. A Discord account already connected in another browser is refused ("Press Disconnect there, or type /unlink in Discord") unless that browser hasn't synced for 7 days. Until `DISCORD_CLIENT_SECRET` and `GUILD_ID` are set, the button answers "Log in with Discord isn't set up on this service yet" (the Worker answers 501).
 
 How many people: up to 10 (`MAX_USERS = "20"` under `[vars]` changes it). Past that, a login says "The service is full".
 
@@ -125,13 +125,13 @@ A Torn key for your own Worker: Torn → Settings → API → a **Custom** key n
 
 | Data storage | Data sharing | Purpose of use | Key storage & sharing | Key access level |
 |---|---|---|---|---|
-| On your own Cloudflare Worker (D1), the key encrypted (AES-GCM), until you press Forget | Nobody: pings and replies only you can see (DMs, replies only you see, or your own webhook channel) | Personal gain (gym pings and timers); Competitive advantage (`/war`, `/chain`, war and watch-list pings) | Stored / Used only for automation and the commands you type | Custom (user: basic, profile, bars, cooldowns, refills, travel · faction: members, chain, wars · market: itemmarket) |
+| On your own Cloudflare Worker (D1), the key encrypted (AES-GCM), until you press Forget, type `/unlink`, or 30 days without a sync | Nobody: pings and replies only you can see (DMs, replies only you see, or your own webhook channel) | Personal gain (gym pings and timers); Competitive advantage (`/war`, `/chain`, war and watch-list pings) | Stored / Used only for automation and the commands you type | Custom (user: basic, profile, bars, cooldowns, refills, travel · faction: members, chain, wars · market: itemmarket) |
 
 A channel webhook (optional with the bot, the only way without it): channel settings → Integrations → Webhooks → New Webhook → Copy Webhook URL. Treat it like a password. Without a bot, pings are a post in that channel that tags you (no buttons, no commands); with a bot, the webhook is the fallback when a DM can't reach you.
 
 ## Turning it off
 
-Pumping Iron → Settings → Discord → **Disconnect** (Forget) removes you from the service (your key, plan, pings, watches, war and watch lists). `/unlink` in Discord only stops DMs. To remove the whole service: `npx wrangler delete`, and delete the application in Discord's developer portal.
+Pumping Iron → Settings → Discord → **Disconnect** (Forget) removes you from the service (your key, plan, pings, watches, war and watch lists). `/unlink` in Discord does the same from the Discord side ("Unlinked and forgotten"). A user nobody has synced for 30 days is forgotten by itself. To remove the whole service: `npx wrangler delete`, and delete the application in Discord's developer portal.
 
 ## What it does each minute
 

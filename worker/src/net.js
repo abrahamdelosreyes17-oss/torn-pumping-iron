@@ -39,3 +39,34 @@ export function guardedFetch(fetchImpl, budget = SUBREQUEST_BUDGET) {
 export function guard(fetchImpl, budget) {
     return fetchImpl && fetchImpl.guarded ? fetchImpl : guardedFetch(fetchImpl, budget);
 }
+
+/**
+ * A request body as text, at most `max` bytes (not characters): a
+ * `content-length` over it is refused before anything is read, and a body
+ * without one is read only up to the limit. Null when it is too big.
+ */
+export async function readLimited(req, max) {
+    const declared = Number(req.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > max) return null;
+    if (!req.body) return '';
+    const reader = req.body.getReader();
+    const parts = [];
+    let size = 0;
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > max) {
+            await reader.cancel().catch(() => {});
+            return null;
+        }
+        parts.push(value);
+    }
+    const all = new Uint8Array(size);
+    let at = 0;
+    for (const p of parts) {
+        all.set(p, at);
+        at += p.byteLength;
+    }
+    return new TextDecoder().decode(all);
+}
