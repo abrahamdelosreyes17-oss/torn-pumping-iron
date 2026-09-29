@@ -67,7 +67,7 @@ test('GET /login: off to Discord’s authorize page with the login as state (sco
     assert.equal(r.status, 302);
     const to = new URL(r.headers.get('location'));
     assert.equal(to.origin + to.pathname, 'https://discord.com/oauth2/authorize');
-    assert.deepEqual(Object.fromEntries(to.searchParams), { client_id: '111', response_type: 'code', scope: 'identify', redirect_uri: ORIGIN + '/login/callback', state: s.id, prompt: 'none' });
+    assert.deepEqual(Object.fromEntries(to.searchParams), { client_id: '111', response_type: 'code', scope: 'identify', redirect_uri: ORIGIN + '/login/callback', state: s.id });
     assert.equal(r.headers.get('cache-control'), 'no-store');
     const bad = await handle(get('/login?id=' + 'f'.repeat(48)), env);
     assert.equal(bad.status, 200);

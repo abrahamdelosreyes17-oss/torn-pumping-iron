@@ -52,10 +52,15 @@ h1{margin:0 0 8px;font-size:18px;color:#fff}p{margin:0}small{display:block;margi
 const NOT_READY = 'Log in with Discord isn’t set up on this service yet (it needs DISCORD_CLIENT_SECRET and GUILD_ID).';
 const EXPIRED = ['This login has expired', 'Go back to Pumping Iron → Settings → Discord and press Log in with Discord again.'];
 
-/** Discord's authorize page for this login; `quiet` (prompt=none) skips it when you allowed Pumping Iron before. */
+/**
+ * Discord's authorize page for this login. Always shown (no prompt=none):
+ * a login link someone else started can't then link your Discord account
+ * without you seeing Discord's "Authorize" page first. `quiet` is kept for
+ * the old callers and ignored.
+ */
 function authorizeUrl(env, origin, id, quiet) {
     const q = new URLSearchParams({ client_id: String(env.DISCORD_APP_ID), response_type: 'code', scope: 'identify', redirect_uri: origin + '/login/callback', state: id });
-    if (quiet) q.set('prompt', 'none');
+    void quiet;
     return new Response(null, { status: 302, headers: { location: 'https://discord.com/oauth2/authorize?' + q.toString(), 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' } });
 }
 
