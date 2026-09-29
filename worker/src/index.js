@@ -11,6 +11,7 @@
  *                         the first PUT for a secret needs X-Invite: <INVITE_CODE>
  *   POST /test            (Authorization: Bearer <secret>) send a test ping
  *   DELETE /plan          (Authorization: Bearer <secret>) forget this user
+ *   POST /link            (Authorization: Bearer <secret>) a one-time code for /link in Discord (10 min)
  *   POST /interactions    Discord's slash commands and buttons (Ed25519-signed)
  */
 
@@ -18,6 +19,7 @@ import { dueAlerts, webhookBody, isDiscordWebhook } from './alerts.js';
 import { Q, SCHEMA, ensureSchema } from './db.js';
 import { guard } from './net.js';
 import { interactionsRoute } from './interactions.js';
+import { newLinkCode } from './cmd-core.js';
 
 export { SCHEMA };
 
@@ -70,7 +72,9 @@ async function putPlan(req, env) {
     if (webhook && !isDiscordWebhook(webhook)) return json({ ok: false, error: 'That is not a Discord webhook URL' }, 400);
     const tornKey = body.tornKey !== undefined ? String(body.tornKey || '') : row ? row.torn_key : '';
     if (tornKey && !/^[A-Za-z0-9]{16}$/.test(tornKey)) return json({ ok: false, error: 'A Torn key is 16 letters and numbers' }, 400);
-    const discordId = body.discordId !== undefined ? String(body.discordId || '').replace(/\D/g, '') : row ? row.discord_id : '';
+    // A Discord id linked with /link (signed by Discord) wins over one typed in Settings.
+    const linked = Boolean(row && Number(row.linked));
+    const discordId = !linked && body.discordId !== undefined ? String(body.discordId || '').replace(/\D/g, '') : row ? row.discord_id : '';
     const plan = body.plan !== undefined ? JSON.stringify(body.plan || null) : row ? row.plan : 'null';
     const rules = body.rules !== undefined ? JSON.stringify(body.rules || {}) : row ? row.rules : '{}';
     // A pause for a dead key stays until a new key is sent (plan syncs alone must not undo it).
@@ -84,7 +88,15 @@ async function putPlan(req, env) {
     const playerId = row ? row.player_id || null : null;
     if (row) await env.DB.prepare(Q.userSync).bind(tornKey, discordId, webhook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId, id).run();
     else await env.DB.prepare(Q.userInsert).bind(id, tornKey, discordId, webhook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId).run();
-    return json({ ok: true, created: !row, ready: Boolean(tornKey && webhook), paused: Boolean(paused), lastError });
+    return json({ ok: true, created: !row, ready: Boolean(tornKey && (webhook || (linked && env.BOT_TOKEN))), paused: Boolean(paused), lastError, linked, bot: Boolean(env.BOT_TOKEN && env.DISCORD_PUBLIC_KEY) });
+}
+
+async function linkCode(req, env) {
+    const { id, row, error } = await userFor(req, env);
+    if (error) return error;
+    if (!row) return json({ ok: false, error: 'Unknown secret: connect first' }, 403);
+    const { code, expiresAt } = await newLinkCode(env, id, Math.floor(Date.now() / 1000));
+    return json({ ok: true, code, expiresAt, command: '/link ' + code });
 }
 
 async function postWebhook(fetchImpl, url, body) {
@@ -177,6 +189,7 @@ export async function handle(req, env, fetchImpl = fetch, ctx = NO_CTX) {
     if (url.pathname === '/plan' && req.method === 'PUT') return putPlan(req, env);
     if (url.pathname === '/plan' && req.method === 'DELETE') return forget(req, env);
     if (url.pathname === '/test' && req.method === 'POST') return testPing(req, env, fetchImpl);
+    if (url.pathname === '/link' && req.method === 'POST') return linkCode(req, env);
     return json({ ok: false, error: 'Not found' }, 404);
 }
 

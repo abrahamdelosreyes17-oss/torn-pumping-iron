@@ -24,6 +24,52 @@ export const needsLink = (h) => async (i, env, fetchImpl, ctx, nowS) => {
     return user ? h(user, i, env, fetchImpl, ctx, nowS) : reply(NOT_LINKED);
 };
 
+/* ---------- Linking: the Discord id comes from the signed interaction, never from a form ---------- */
+
+export const LINK_TTL_S = 10 * 60;
+const LINK_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I
+
+export async function sha256(text) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+export function normalCode(text) {
+    return String(text || '')
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, '');
+}
+
+/** A new single-use code for this user (any older one stops working). */
+export async function newLinkCode(env, userId, nowS) {
+    const bytes = crypto.getRandomValues(new Uint8Array(8));
+    const code = [...bytes].map((b) => LINK_ALPHABET[b % 32]).join('');
+    await env.DB.prepare(Q.linkDeleteUser).bind(userId).run();
+    await env.DB.prepare(Q.linkPut).bind(await sha256('link:' + code), userId, nowS + LINK_TTL_S).run();
+    return { code, expiresAt: nowS + LINK_TTL_S };
+}
+
+export async function linkCmd(i, env, fetchImpl, ctx, nowS) {
+    const discordId = interactionUser(i);
+    const code = normalCode(((i.data && i.data.options) || []).find((o) => o.name === 'code')?.value);
+    const hash = await sha256('link:' + code);
+    const row = code.length === 8 ? await env.DB.prepare(Q.linkGet).bind(hash).first() : null;
+    if (!row || Number(row.expires) < nowS) return reply('That code is wrong or expired. Get a new one: Pumping Iron → Settings → Discord → **Get a link code** (it lasts 10 minutes).');
+    await env.DB.prepare(Q.linkDelete).bind(hash).run();
+    // One Discord account ↔ one Pumping Iron user: a link elsewhere moves here.
+    await env.DB.prepare(Q.userUnlink).bind(discordId).run();
+    await env.DB.prepare(Q.userLink).bind(discordId, row.user).run();
+    const dm = env.BOT_TOKEN ? 'Pings now come to you by DM, with Done, Snooze and Skip buttons.' : 'Pings still go to your channel webhook (the bot has no token yet).';
+    return reply('Linked. ' + dm + ' Try `/timers` or `/next`. `/unlink` undoes this.');
+}
+
+export async function unlinkCmd(i, env) {
+    const user = await linkedUser(i, env);
+    if (!user) return reply('This Discord account isn’t linked.');
+    await env.DB.prepare(Q.userUnlink).bind(interactionUser(i)).run();
+    return reply('Unlinked: no more DMs. ' + (user.webhook ? 'Pings go to your channel webhook, without buttons.' : 'Pings stop until you link again or add a webhook in Pumping Iron.'));
+}
+
 export function stepPage(step) {
     if (!step) return PAGES.gym;
     if (step.kind === 'refill') return PAGES.points;
