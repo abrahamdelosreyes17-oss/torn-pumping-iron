@@ -70,7 +70,14 @@ Links:
    - **Cause:** every 25-happy candy is interchangeable, and `candy.js bestCandy` picks the cheapest listing each time prices reload (every 30 min).
    - **Next session:** add a disclaimer line where the candy is named (step label or sub, Plan's "What you do", Buy), e.g. "gives the same happy as Lollipop, Bag of Bon Bons, Chocolate Kisses… (+25 each); any of them works".
    - **Optionally:** keep the day's pick unless another is ≥ 10% cheaper for the whole boost.
-9. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
+9. **Sally's Sweet Shop in the computation (owner, 2026-09-29):** "if we haven't reached the daily limit, it should also be part of the computation".
+   - **Researched** [wiki Sally's_Sweet_Shop via search, 1 source so far; verify]:
+     - Sally's sells Lollipop $25, Bag of Chocolate Kisses $150 and Box of Sweet Hearts $500 (all +25 happy).
+     - City-shop buys count against Torn's **Daily Items Allowance: 100 items a day from NPC shops**, shared by all city shops.
+   - **Remaining allowance today, from the API:** personal stat `cityitemsbought` now, minus its value at the Torn day's start (`user/personalstats?stat=cityitemsbought&timestamp=<day start>`). Two calls, Public access.
+   - **Build:** the candy choice and Buy use Sally's for up to the remaining allowance (e.g. 49 Lollipops fit in 100), and the market for the rest.
+   - The owner earlier said Sally's is "newbies only" but now treats it as usable. Revisit the default-off "Shops I can buy from" tick: probably count it automatically while allowance remains, with the tick kept as an off switch. Ask the owner.
+10. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
 Research and background: `docs/research-events-perks.md` (events, job perks, the console), `docs/review-fable-2026-09-29.md` (the three-pass review, all fixed), `docs/research-learning.md`, `docs/discord-bot-design.md`, `worker/USERSCRIPT-INTERFACE.md`, `docs/ENGINE-SPEC.md`, `docs/DESIGN.md` + `mockups/round3/` (the look every page follows now).
 
 ---
