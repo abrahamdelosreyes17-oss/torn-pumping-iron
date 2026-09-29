@@ -121,7 +121,7 @@ const TABS = {
     home: ['Today', 'Take Xanax #1, then train', 'Refill · 30 points', 'Buy today', 'Heads-up', 'Pick your build type', "You vs Baldr's, STR high", 'Next 7 days', 'This week'],
     plan: ['Most stats in my budget', 'Recommended', 'Steady training', 'Per $1M', 'Other plans', 'Why it isn’t the pick', 'Where your energy comes from', 'Natural energy', 'Build', 'High stat', "Hank's", 'pick yours', 'Ignorance Is Bliss', 'what-if'],
     buy: ['Buy for', 'Your list', 'Xanax', 'Iron_Monk', 'Points market', 'Deals', '7-day prices', 'You hold', 'TornW3B'],
-    progress: ['Total stats against the plan', 'Each stat', 'Gained against plan', 'Last trains', 'This week', 'Budget', 'Force Training'],
+    progress: ['Total stats against the plan', 'Each stat', 'Gained against plan', 'Receipts', 'Energy trained', '$ per 1,000 stats', 'What if you’d done another plan', 'the comparison appears after two days', 'Last trains', 'This week', 'Budget', 'Force Training'],
     eye: ['Targets', 'Chain', 'War', 'How sure', 'FFScouter', 'Gear seen', 'Your side'],
     settings: ['Torn API key', 'How this key is used', 'Discord pings', 'FFScouter', 'data policy', 'TornStats', 'Torn Eye colours', 'On Torn’s pages', 'Developer', 'Export as .zip', 'Your data', 'Diagnostics', 'of 70'],
 };

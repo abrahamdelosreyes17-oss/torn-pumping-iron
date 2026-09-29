@@ -26,6 +26,7 @@ export const K = {
     dayLog: 'dayLog',
     statsHistory: 'statsHistory',
     dayTotals: 'dayTotals',
+    receipts: 'receipts',
     priceHistory: 'priceHistory',
     prices: 'prices',
     recheck: 'recheck',
@@ -154,7 +155,7 @@ export function del(name) {
 export const DATA_GROUPS = {
     keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker, K.fullKey, K.fullKeyState, K.moneyLog],
     plan: [K.plan, K.recheck],
-    progress: [K.statsHistory, K.dayLog, K.dayTotals, K.planLine],
+    progress: [K.statsHistory, K.dayLog, K.dayTotals, K.planLine, K.receipts],
     learning: ['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions],
     prices: [K.priceHistory, K.prices],
     eye: ['eyeTargets', 'myAttacks'],
