@@ -26,7 +26,7 @@ A Tampermonkey script for [Torn](https://www.torn.com) that plans your gym train
 | **Buy** | Today / 3 days / a week: each item, what you hold, the cheapest listings to take from and a 7-day price check. |
 | **Progress** | Your stats over time, what you gained against the plan each day, and the gyms ahead. |
 | **Torn Eye** | Targets (from FFScouter) ranked by our fight estimate, from easiest to most respect; your colour bands; where the numbers come from. |
-| **Settings** | Keys, FFScouter, TornStats, Discord, what shows on Torn, spacing and time, diagnostics, and your stored data with a clear button for each part. |
+| **Settings** | Keys, Discord, FFScouter, TornStats, Torn Eye colours, what shows on Torn, time, Developer (export your learning data as a .zip), diagnostics, and your stored data with a clear button for each part. |
 
 On Torn: a small panel on every page, in the empty margin beside Torn's page (left of it first, so the trading script's NPC Arbitrage keeps the right; drag it by its bar, **Alt+`** collapses or expands it), the gym page marks, outlines on the items page and on the listing the Buy list chose, and Torn Eye chips.
 
@@ -46,13 +46,13 @@ It goes to `api.torn.com` and nowhere else. FFScouter, TornStats, TornW3B and th
 
 **TornStats (optional):** if your faction shares spies there, exact stats beat every estimate. The key on your TornStats account; sent only to tornstats.com.
 
-**The Discord service's key (optional):** a separate **custom** key with only user → bars, cooldowns, refills, travel, stored on your own Cloudflare Worker. See [worker/SETUP.md](worker/SETUP.md).
+**The Discord service's key (optional):** a separate **custom** key (user → basic, bars, cooldowns, refills, travel; faction → members, chain, wars; market → itemmarket), stored encrypted on your own Cloudflare Worker. See [worker/SETUP.md](worker/SETUP.md).
 
 Bazaar prices come from [TornW3B](https://weav3r.dev) (item ids only, never a key).
 
 ## Discord pings
 
-[worker/SETUP.md](worker/SETUP.md) takes about 10 minutes: deploy the Worker to your free Cloudflare account, make a Discord webhook and a small Torn key for it, and connect it in Settings. Pings look like `@you drug cooldown ends in 5 min · Xanax #2, then DEX × 27`. The bot (DMs, /plan, Done and Snooze buttons) is planned: [worker/BOT.md](worker/BOT.md).
+[worker/SETUP.md](worker/SETUP.md) takes about 10 minutes: deploy the Worker to your free Cloudflare account, make a Discord webhook and a small Torn key for it, and connect it in Settings. Pings look like `@you drug cooldown ends in 5 min · Xanax #2, then DEX × 27`. With the optional bot ([worker/BOT.md](worker/BOT.md)) they come as DMs with Done / Snooze / Skip buttons, and `/plan`, `/next`, `/timers`, `/buy`, `/targets`, `/war` answer in Discord. Link it with Settings › Discord › Get a link code, then `/link CODE`. Buttons never act in Torn: Skip only re-times your plan, Done only hides the ping.
 
 ## Rules it keeps
 

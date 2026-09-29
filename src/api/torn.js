@@ -209,7 +209,7 @@ export async function fetchKeyInfo(client) {
     const info = (d && d.info) || {};
     const access = info.access || {};
     const level = Number.isFinite(Number(access.level)) ? Number(access.level) : null;
-    return { level, type: access.type || null, userId: info.user && info.user.id ? Number(info.user.id) : null, selections: info.selections || null };
+    return { level, type: access.type || null, userId: info.user && info.user.id ? Number(info.user.id) : null, factionId: info.user && info.user.faction_id ? Number(info.user.faction_id) : null, selections: info.selections || null };
 }
 
 /**

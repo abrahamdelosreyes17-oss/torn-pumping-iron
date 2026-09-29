@@ -14,7 +14,7 @@ import { W3bClient, fetchW3bListings } from './api/w3b.js';
 import { makeFfsClient, checkFfsKey, fetchFfsTargets } from './api/ffscouter.js';
 import { renderEye } from './ui/app/eye-tab.js';
 import { wantPlayers, eyeView, onEye, gearCount, clearEye } from './eye-service.js';
-import { discordState, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId } from './discord.js';
+import { discordState, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId, linkDiscord, setTargetsForSync } from './discord.js';
 import { WORKER_SETUP_URL } from './api/worker.js';
 import { tabWindow } from './platform/tab-window.js';
 import { listingsFromItemMarket, listingsFromW3b, listingsFromPoints } from './core/market.js';
@@ -218,7 +218,18 @@ async function pollWarTab() {
 function eyeRows() {
     const stored = get('eyeTargets', null);
     if (!stored) return [];
-    return stored.list.map((x) => ({ ...(eyeView(x.playerId, { level: x.level, name: x.name }) || { id: x.playerId, band: 'none' }), name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId }));
+    const rows = stored.list.map((x) => ({ ...(eyeView(x.playerId, { level: x.level, name: x.name }) || { id: x.playerId, band: 'none' }), name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId }));
+    // The bot's /targets and /war read Torn Eye's list and bands (only if you set up Discord; ids and bands only).
+    if (discordState()) {
+        const bands = {};
+        for (const r of rows) if (r.band) bands[r.id] = r.band;
+        for (const mm of war.members || []) {
+            const v = eyeView(Number(mm.id), { level: mm.level, name: mm.name }, { war: true });
+            if (v && v.band) bands[Number(mm.id)] = v.band;
+        }
+        setTargetsForSync(rows.filter((r) => r.band !== 'cant').map((r) => ({ id: r.id, name: r.name || null, level: r.level || null, band: r.band, win: r.forecast ? Math.round(r.forecast.pWin * 100) : null, keep: r.forecast && r.forecast.keep !== null ? Math.round(r.forecast.keep * 100) : null })), bands);
+    }
+    return rows;
 }
 
 function getCtx() {
@@ -275,6 +286,7 @@ function getCtx() {
             test: testDiscord,
             forget: forgetDiscord,
             linkedId: linkedDiscordId,
+            linkCode: linkDiscord,
             setupUrl: WORKER_SETUP_URL,
         },
         dev: {

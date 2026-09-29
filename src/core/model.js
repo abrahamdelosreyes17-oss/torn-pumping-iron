@@ -173,7 +173,16 @@ export function blissWhatIf({ state, pc, shares, settings, prices, special = 0 }
  * @param {object} [o.gymProgress] - {gymId, energy} read from the gym page
  * @param {number} o.now
  */
-export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, now }) {
+/**
+ * A step the player skipped in Discord (the bot's Skip button) is left out:
+ * same kind within 10 minutes of its time, or the same words.
+ */
+export function withoutSkipped(steps, skipped = []) {
+    if (!skipped || !skipped.length) return steps;
+    return steps.filter((s) => !skipped.some((x) => x.kind === s.kind && (Math.abs((x.stepAt || 0) - s.at) <= 10 * 60 * 1000 || (x.label && x.label === s.label))));
+}
+
+export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], now }) {
     if (!state) return { ready: false };
     const pc = playerContext(state, statics, { unlockedKnown, learnedMult });
     const build = buildOf(plan.build);
@@ -212,7 +221,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const events = statics.calendar ? upcomingEvents(statics.calendar.calendar, now, { startTime: statics.calendar.startTime }) : [];
     const hold = holdBoosterFor(events, now);
     if (hold) ctx.holdBooster = hold.id;
-    const steps = dayTimeline({ state, now, strategy: plan.strategy, ctx });
+    const steps = withoutSkipped(dayTimeline({ state, now, strategy: plan.strategy, ctx }), skipped);
     const next = steps[0] || null;
 
     // Status strip

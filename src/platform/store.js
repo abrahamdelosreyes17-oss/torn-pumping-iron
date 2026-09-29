@@ -39,6 +39,7 @@ export const K = {
     fightLog: 'fightLog',
     eyePredictions: 'eyePredictions',
     devUnlocked: 'devUnlocked',
+    skipped: 'skippedSteps',
 };
 
 /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */

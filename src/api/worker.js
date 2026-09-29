@@ -5,8 +5,10 @@
  * (no alerts from a Torn tab); the Worker does, from the API.
  *
  * What goes to the Worker: the plan's next steps, the Discord webhook and
- * user id you enter, and a separate custom Torn key you make for it
- * (bars, cooldowns, refills, travel). Your main Torn key never does.
+ * user id you enter, a separate custom Torn key you make for it, and (for
+ * the bot's /targets and /war) Torn Eye's list and bands, your player and
+ * faction id. Your main Torn key never does, nor your FFScouter or
+ * TornStats keys (worker/USERSCRIPT-INTERFACE.md).
  */
 
 import { gmFetch } from '../platform/gm.js';
@@ -83,13 +85,22 @@ export function workerHealth(base, opts) {
  * Store the plan (and on first connect the key, webhook and Discord id).
  * @param {object} o - {base, secret, invite?, plan, tornKey?, webhookUrl?, discordId?, rules?}
  */
-export function workerSync({ base, secret, invite = null, plan, tornKey, webhookUrl, discordId, rules, fetchImpl }) {
+export function workerSync({ base, secret, invite = null, plan, tornKey, webhookUrl, discordId, rules, ackIds, targets, factionId, playerId, fetchImpl }) {
     const body = { plan };
+    if (ackIds && ackIds.length) body.ackIds = ackIds.slice(0, 50);
+    if (targets !== undefined) body.targets = targets;
+    if (factionId !== undefined) body.factionId = factionId;
+    if (playerId !== undefined) body.playerId = playerId;
     if (tornKey !== undefined) body.tornKey = tornKey;
     if (webhookUrl !== undefined) body.webhookUrl = webhookUrl;
     if (discordId !== undefined) body.discordId = discordId;
     if (rules !== undefined) body.rules = rules;
     return workerCall(base, '/plan', { method: 'PUT', secret, invite, body, fetchImpl });
+}
+
+/** A one-time code to type as /link CODE in Discord (10 min, single use). Only on a click. */
+export function workerLink({ base, secret, fetchImpl }) {
+    return workerCall(base, '/link', { method: 'POST', secret, fetchImpl });
 }
 
 export function workerTest({ base, secret, fetchImpl }) {

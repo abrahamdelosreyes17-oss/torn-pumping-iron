@@ -249,6 +249,7 @@
         fightLog: 'fightLog',
         eyePredictions: 'eyePredictions',
         devUnlocked: 'devUnlocked',
+        skipped: 'skippedSteps',
     };
 
     /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */
@@ -3135,7 +3136,7 @@
         const info = (d && d.info) || {};
         const access = info.access || {};
         const level = Number.isFinite(Number(access.level)) ? Number(access.level) : null;
-        return { level, type: access.type || null, userId: info.user && info.user.id ? Number(info.user.id) : null, selections: info.selections || null };
+        return { level, type: access.type || null, userId: info.user && info.user.id ? Number(info.user.id) : null, factionId: info.user && info.user.faction_id ? Number(info.user.faction_id) : null, selections: info.selections || null };
     }
 
     /**
@@ -4380,7 +4381,16 @@
      * @param {object} [o.gymProgress] - {gymId, energy} read from the gym page
      * @param {number} o.now
      */
-    function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, now }) {
+    /**
+     * A step the player skipped in Discord (the bot's Skip button) is left out:
+     * same kind within 10 minutes of its time, or the same words.
+     */
+    function withoutSkipped(steps, skipped = []) {
+        if (!skipped || !skipped.length) return steps;
+        return steps.filter((s) => !skipped.some((x) => x.kind === s.kind && (Math.abs((x.stepAt || 0) - s.at) <= 10 * 60 * 1000 || (x.label && x.label === s.label))));
+    }
+
+    function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], now }) {
         if (!state) return { ready: false };
         const pc = playerContext(state, statics, { unlockedKnown, learnedMult });
         const build = buildOf(plan.build);
@@ -4419,7 +4429,7 @@
         const events = statics.calendar ? upcomingEvents(statics.calendar.calendar, now, { startTime: statics.calendar.startTime }) : [];
         const hold = holdBoosterFor(events, now);
         if (hold) ctx.holdBooster = hold.id;
-        const steps = dayTimeline({ state, now, strategy: plan.strategy, ctx });
+        const steps = withoutSkipped(dayTimeline({ state, now, strategy: plan.strategy, ctx }), skipped);
         const next = steps[0] || null;
 
         // Status strip
@@ -5203,7 +5213,7 @@
         const plan = getPlan();
         const settings = getSettings();
         const compare = comparisonFor(state, statics, plan, settings);
-        return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: get(K.prices, {}) || {}, compare, whatIf: pi.whatIf || null, learnedMult: learnedNow().mult, gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+        return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: get(K.prices, {}) || {}, compare, whatIf: pi.whatIf || null, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
     }
 
     /**
@@ -5367,8 +5377,10 @@
      * (no alerts from a Torn tab); the Worker does, from the API.
      *
      * What goes to the Worker: the plan's next steps, the Discord webhook and
-     * user id you enter, and a separate custom Torn key you make for it
-     * (bars, cooldowns, refills, travel). Your main Torn key never does.
+     * user id you enter, a separate custom Torn key you make for it, and (for
+     * the bot's /targets and /war) Torn Eye's list and bands, your player and
+     * faction id. Your main Torn key never does, nor your FFScouter or
+     * TornStats keys (worker/USERSCRIPT-INTERFACE.md).
      */
 
 
@@ -5445,13 +5457,22 @@
      * Store the plan (and on first connect the key, webhook and Discord id).
      * @param {object} o - {base, secret, invite?, plan, tornKey?, webhookUrl?, discordId?, rules?}
      */
-    function workerSync({ base, secret, invite = null, plan, tornKey, webhookUrl, discordId, rules, fetchImpl }) {
+    function workerSync({ base, secret, invite = null, plan, tornKey, webhookUrl, discordId, rules, ackIds, targets, factionId, playerId, fetchImpl }) {
         const body = { plan };
+        if (ackIds && ackIds.length) body.ackIds = ackIds.slice(0, 50);
+        if (targets !== undefined) body.targets = targets;
+        if (factionId !== undefined) body.factionId = factionId;
+        if (playerId !== undefined) body.playerId = playerId;
         if (tornKey !== undefined) body.tornKey = tornKey;
         if (webhookUrl !== undefined) body.webhookUrl = webhookUrl;
         if (discordId !== undefined) body.discordId = discordId;
         if (rules !== undefined) body.rules = rules;
         return workerCall(base, '/plan', { method: 'PUT', secret, invite, body, fetchImpl });
+    }
+
+    /** A one-time code to type as /link CODE in Discord (10 min, single use). Only on a click. */
+    function workerLink({ base, secret, fetchImpl }) {
+        return workerCall(base, '/link', { method: 'POST', secret, fetchImpl });
     }
 
     function workerTest({ base, secret, fetchImpl }) {
@@ -5465,8 +5486,11 @@
     /* ===== src/discord.js ===== */
     /*
      * Settings › Discord and the plan sync. The plan's next steps go to the
-     * user's own Worker when they change (at most once a minute, from a
-     * visible tab); the Worker reads Torn and pings Discord.
+     * user's own Worker when they change, and at least every 10 minutes (at
+     * most once a minute, from a visible tab); the Worker reads Torn and pings
+     * Discord. Its answer brings the bot's button presses back ("acks"): a
+     * Skip re-times the plan, a Done is information only (the done log still
+     * comes from Torn's own state).
      */
 
 
@@ -5476,6 +5500,44 @@
 
 
     const SYNC_MIN_MS = 60 * 1000;
+
+    /** Sync at least this often while a tab is visible (a plan not synced for 12 h is "out of date" on the Worker). */
+    const SYNC_EVERY_MS = 10 * 60 * 1000;
+
+    /** Torn Eye's list goes to the Worker at most this often, and only when it changed. */
+    const TARGETS_EVERY_MS = 5 * 60 * 1000;
+
+    /** A skipped step stays skipped this long. */
+    const SKIP_KEEP_MS = 24 * 60 * 60 * 1000;
+
+    const sync = { targets: null, targetsSig: '', targetsSentAt: 0 };
+
+    /** Torn Eye's current list and bands, for the bot's /targets, /target and /war (set by the webpage). */
+    function setTargetsForSync(list, bands) {
+        const t = { list: (list || []).slice(0, 50), bands: Object.fromEntries(Object.entries(bands || {}).slice(0, 500)) };
+        const sig = JSON.stringify(t);
+        if (sig === sync.targetsSig) return;
+        sync.targets = t;
+        sync.targetsSig = sig;
+    }
+
+    /** Steps the player skipped in Discord (the Worker's acks), still in force. */
+    function skippedSteps(now = Date.now()) {
+        return (get(K.skipped, []) || []).filter((x) => now - x.at < SKIP_KEEP_MS);
+    }
+
+    /** Apply acks from the Worker: skips are remembered (the plan drops that step); done is only acknowledged. */
+    function applyAcks(acks, now = Date.now()) {
+        const skipped = skippedSteps(now);
+        const ids = [];
+        for (const a of acks || []) {
+            if (!a || !a.id) continue;
+            ids.push(a.id);
+            if (a.kind === 'skip' && a.step && a.step.kind !== 'test') skipped.push({ at: now, stepAt: Number(a.step.at) * 1000, kind: a.step.kind, label: a.step.label || null });
+        }
+        set(K.skipped, skipped);
+        return ids;
+    }
 
     /** The Worker stopped pinging (Torn refused its key): said in Settings until a new key is sent. */
     function pausedText(r) {
@@ -5508,7 +5570,7 @@
      */
     async function connectDiscord(f, model) {
         const base = workerBase(f.base);
-        if (f.tornKey && f.tornKey.trim() === getKey(K.apiKey)) throw new Error('That is your main key. Make a separate custom key for the Worker (bars, cooldowns, refills, travel).');
+        if (f.tornKey && [getKey(K.apiKey), getKey(K.ffsKey), getKey(K.tsKey)].filter(Boolean).includes(f.tornKey.trim())) throw new Error('That is your main key. Make a separate custom key for the Worker (user: basic, bars, cooldowns, refills, travel · faction: members, chain, wars · market: itemmarket).');
         const prev = discordState();
         const secret = prev && prev.base === base ? prev.secret : newSecret();
         const body = { base, secret, invite: f.invite || null, plan: planPayload(model) };
@@ -5516,8 +5578,16 @@
         if (f.tornKey) body.tornKey = f.tornKey.trim();
         if (f.discordId) body.discordId = String(f.discordId).replace(/\D/g, '');
         const r = await workerSync(body);
-        set(K.worker, { base, secret, discordId: body.discordId || (prev && prev.discordId) || null, connectedAt: Date.now(), lastSync: Date.now(), lastSig: null, ready: Boolean(r.ready) || Boolean(prev && prev.ready), lastError: pausedText(r) });
+        set(K.worker, { base, secret, discordId: body.discordId || (prev && prev.discordId) || null, connectedAt: Date.now(), lastSync: Date.now(), lastSig: null, ready: Boolean(r.ready) || Boolean(prev && prev.ready), linked: Boolean(r.linked), bot: Boolean(r.bot), lastError: pausedText(r) });
         return r;
+    }
+
+    /** Link Discord: a one-time code from your Worker (on a click only; never stored). */
+    async function linkDiscord() {
+        const w = discordState();
+        if (!w) throw new Error('Connect your Worker first.');
+        const r = await workerLink({ base: w.base, secret: w.secret });
+        return { code: String(r.code || ''), expiresAt: Number(r.expiresAt) || Math.floor(Date.now() / 1000) + 600 };
     }
 
     async function testDiscord() {
@@ -5538,7 +5608,11 @@
         set(K.worker, null);
     }
 
-    /** After each model refresh: send the plan if its steps changed (≤ once a minute, visible tab only). */
+    /**
+     * After each model refresh: send the plan when its steps changed, at least
+     * every 10 minutes, and right after an answer that carried acks (never more
+     * than once a minute; visible tab only; not while Torn Trading runs).
+     */
     function maybeSyncPlan(m, now = Date.now()) {
         const w = discordState();
         // While Torn Trading runs the plan is only the last read moving on the clock: don't send it.
@@ -5546,11 +5620,23 @@
         const plan = planPayload(m);
         if (!plan) return false;
         const sig = JSON.stringify(plan.steps.map((s) => [s.kind, s.label, Math.round(s.at / 300)]));
-        if (sig === w.lastSig || now - (w.lastSync || 0) < SYNC_MIN_MS) return false;
-        set(K.worker, { ...w, lastSync: now, lastSig: sig });
-        workerSync({ base: w.base, secret: w.secret, plan })
-            .then((r) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: pausedText(r) }))
-            .catch((e) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e) }));
+        const pendingAcks = w.pendingAcks || [];
+        const targetsDue = sync.targets && sync.targetsSig !== w.targetsSig && now - (w.targetsAt || 0) >= TARGETS_EVERY_MS;
+        const due = sig !== w.lastSig || now - (w.lastSync || 0) >= SYNC_EVERY_MS || pendingAcks.length > 0 || targetsDue;
+        if (!due || now - (w.lastSync || 0) < SYNC_MIN_MS) return false;
+        const statics = get(K.userStatic, {}) || {};
+        const ki = statics.keyInfo || {};
+        const body = { base: w.base, secret: w.secret, plan, ackIds: pendingAcks };
+        if (ki.userId) body.playerId = ki.userId;
+        if (ki.factionId !== undefined) body.factionId = ki.factionId || null;
+        if (targetsDue) body.targets = sync.targets;
+        set(K.worker, { ...w, lastSync: now, lastSig: sig, pendingAcks: [], ...(targetsDue ? { targetsSig: sync.targetsSig, targetsAt: now } : {}) });
+        workerSync(body)
+            .then((r) => {
+                const acked = applyAcks(r.acks, Date.now());
+                set(K.worker, { ...(get(K.worker, {}) || {}), lastError: pausedText(r), ready: Boolean(r.ready), linked: Boolean(r.linked), bot: Boolean(r.bot), pendingAcks: acked });
+            })
+            .catch((e) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks }));
         return true;
     }
 
@@ -10572,7 +10658,18 @@
     function eyeRows() {
         const stored = get('eyeTargets', null);
         if (!stored) return [];
-        return stored.list.map((x) => ({ ...(eyeView(x.playerId, { level: x.level, name: x.name }) || { id: x.playerId, band: 'none' }), name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId }));
+        const rows = stored.list.map((x) => ({ ...(eyeView(x.playerId, { level: x.level, name: x.name }) || { id: x.playerId, band: 'none' }), name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId }));
+        // The bot's /targets and /war read Torn Eye's list and bands (only if you set up Discord; ids and bands only).
+        if (discordState()) {
+            const bands = {};
+            for (const r of rows) if (r.band) bands[r.id] = r.band;
+            for (const mm of war.members || []) {
+                const v = eyeView(Number(mm.id), { level: mm.level, name: mm.name }, { war: true });
+                if (v && v.band) bands[Number(mm.id)] = v.band;
+            }
+            setTargetsForSync(rows.filter((r) => r.band !== 'cant').map((r) => ({ id: r.id, name: r.name || null, level: r.level || null, band: r.band, win: r.forecast ? Math.round(r.forecast.pWin * 100) : null, keep: r.forecast && r.forecast.keep !== null ? Math.round(r.forecast.keep * 100) : null })), bands);
+        }
+        return rows;
     }
 
     function getCtx() {
@@ -10629,6 +10726,7 @@
                 test: testDiscord,
                 forget: forgetDiscord,
                 linkedId: linkedDiscordId,
+                linkCode: linkDiscord,
                 setupUrl: WORKER_SETUP_URL,
             },
             dev: {

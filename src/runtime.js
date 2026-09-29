@@ -93,7 +93,7 @@ export function currentModel(now = Date.now()) {
     const plan = getPlan();
     const settings = getSettings();
     const compare = comparisonFor(state, statics, plan, settings);
-    return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: get(K.prices, {}) || {}, compare, whatIf: pi.whatIf || null, learnedMult: learnedNow().mult, gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+    return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: get(K.prices, {}) || {}, compare, whatIf: pi.whatIf || null, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
 }
 
 /**
