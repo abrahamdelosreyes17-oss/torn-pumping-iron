@@ -20,12 +20,12 @@ import { developerSection, renderDeveloper } from './developer.js';
 
 /** Torn's API ToS disclosure for the userscript's Torn key. */
 export const TOS_TORN = [
-    ['Data storage', 'In this browser. If you log in with Discord, also on the Pumping Iron service (a Cloudflare Worker run by the Pumping Iron owner), the key encrypted (AES-GCM), until you press Disconnect'],
-    ['Data sharing', 'Nobody. (Other data, never this key: player ids you look at go to FFScouter and TornStats if you connect them; item ids go to TornW3B; with Discord pings on, the Pumping Iron service gets your plan\u2019s next steps, your player and faction id, and Torn Eye\u2019s lists: player ids, names, levels, colour bands, win % and watch tags.)'],
-    ['Purpose of use', 'Personal gain: gym planning and fight estimates'],
+    ['Data storage', 'In this browser. If you log in with Discord, also on the Pumping Iron service (a Cloudflare Worker run by the Pumping Iron owner), the key encrypted (AES-GCM) with a key only that service holds, until you press Disconnect (or type /unlink in Discord); rows not synced for 30 days are deleted'],
+    ['Data sharing', 'Nobody. (Other data, never this key: player ids you look at go to FFScouter and TornStats if you connect them; item ids go to TornW3B; with Discord pings on, the Pumping Iron service gets your plan’s next steps, your player and faction id, and Torn Eye’s lists: player ids, names, levels, colour bands, win % and HP kept, watch tags.) The service’s owner runs it and could decrypt stored keys; it only uses yours for your own pings.'],
+    ['Purpose of use', 'Personal gain: gym planning, fight estimates and your gym pings; Competitive advantage: war pings, /war and /chain'],
     ['Key storage & sharing', 'Stored locally / With Discord pings: stored (encrypted) on the Pumping Iron service and used only for your own pings and the bot commands you type; shared with nobody'],
-    ['Key access level', 'Limited (user: bars, cooldowns, refills, battlestats, gym, perks, property, equipment, inventory, attacks, personalstats, discord, profile, job, jobpoints, money; torn: gyms, items, itemdetails, attacklog, logcategories, calendar; market: itemmarket, pointsmarket; faction: members, wars; key: info)'],
-    ['Other services', 'This key goes to api.torn.com, and to the Pumping Iron service only if you log in with Discord. FFScouter and TornStats use the key you give them in their own sections (it may be the same Torn key, which they already hold). TornW3B never receives it. The webpage\u2019s font comes from fonts.googleapis.com (no data of yours).'],
+    ['Key access level', 'Limited (user: basic, bars, cooldowns, refills, travel, battlestats, gym, perks, property, equipment, inventory, attacks, personalstats, discord, profile, job, jobpoints, money; other players: profile; torn: gyms, items, itemdetails, attacklog, logcategories, calendar; market: itemmarket, pointsmarket; faction: members, wars, chain; key: info)'],
+    ['Other services', 'This key goes to api.torn.com, and to the Pumping Iron service only if you log in with Discord. FFScouter and TornStats use the key you give them in their own sections (it may be the same Torn key, which they already hold). TornW3B never receives it. The webpage’s font comes from fonts.googleapis.com (no data of yours).'],
 ];
 
 export const TOS_FFS = [
@@ -202,7 +202,10 @@ function discordSection(ctx) {
     const result = ctx.ui.discordResult ? h('span', { class: 'msg ' + (ctx.ui.discordResult.ok ? 'ok' : 'bad'), text: ctx.ui.discordResult.text }) : null;
     const waiting = Boolean(st && st.login);
     const connected = Boolean(st && st.discordName && !waiting);
-    if (!ctx.ui.discordAdvanced && (!st || !st.base || st.discordName || waiting)) {
+    // Your own service (set up by hand, no Discord login) opens the Advanced form; everyone else sees Log in with Discord.
+    const ownService = Boolean(st && st.connectedAt && !st.discordName);
+    // "Back to Log in with Discord" (discordAdvanced === false) shows the login view even when an own service is set up.
+    if (ctx.ui.discordAdvanced === false || (!ctx.ui.discordAdvanced && !ownService)) {
         if (connected) {
             const test = async () => {
                 say('', 'Sending…');

@@ -171,7 +171,22 @@ test('Log in with Discord: opens Discord, waits, then sends the plan and the mai
         const r2 = await loginDiscord(null, { base: 'https://svc.workers.dev', open: () => {}, sleep: async () => {} });
         assert.equal(r2.ok, false);
         assert.match(r2.text, /not in the Pumping Iron Discord server/);
-        assert.equal(gmGet('worker', null).login, null);
+        const left = gmGet('worker', null);
+        assert.equal(left.login, null);
+        const { discordState } = await import('../src/discord.js');
+        assert.equal(discordState(), null, 'a failed first login connects nothing (no syncing, Settings shows Log in again)');
+        // A second try reuses the same browser secret (one row on the service).
+        const secret1 = left.secret;
+        status = 'open';
+        let k = 0;
+        await loginDiscord(null, { base: 'https://svc.workers.dev', open: () => {}, sleep: async () => { if (++k === 1) status = 'done'; } });
+        assert.equal(gmGet('worker', null).secret, secret1);
+        // A login address that isn't on the service is never opened.
+        gmDel('worker');
+        const f2 = globalThis.fetch;
+        globalThis.fetch = async (url, init) => (new URL(url).pathname === '/login/start' ? { ok: true, status: 200, json: async () => ({ ok: true, id: 'b'.repeat(48), url: 'https://evil.example/login' }) } : f2(url, init));
+        await assert.rejects(loginDiscord(null, { base: 'https://svc.workers.dev', open: () => { throw new Error('opened'); }, sleep: async () => {} }), /unexpected address/);
+        globalThis.fetch = f2;
     } finally {
         globalThis.fetch = realFetch;
         gmDel('worker');

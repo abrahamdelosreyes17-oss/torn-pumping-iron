@@ -16,7 +16,7 @@ import { W3bClient, fetchW3bListings } from './api/w3b.js';
 import { checkFfsKey } from './api/ffscouter.js';
 import { renderEye } from './ui/app/eye-tab.js';
 import { wantPlayers, eyeView, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient, importTargets, TARGETS_KEY, rememberFlights, flightsSeen, getWatch, watchStates, toggleWatch, setWatchTag, dismissWatchOffer, watchOffersNow, pollWatch } from './eye-service.js';
-import { discordState, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId, linkDiscord, setTargetsForSync, setEyeForSync, loginDiscord, cancelLogin } from './discord.js';
+import { discordState, discordRaw, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId, linkDiscord, setTargetsForSync, setEyeForSync, loginDiscord, cancelLogin, resumeLogin } from './discord.js';
 import { saveFullKey, forgetFullKey, refreshMoneyLog } from './income.js';
 import { WORKER_SETUP_URL } from './api/worker.js';
 import { tabWindow } from './platform/tab-window.js';
@@ -394,6 +394,17 @@ function getCtx() {
         saveTsKey,
         revealKey: (name) => getKey(name),
         clearGroup: (g) => {
+            // Forget keys also removes your key, plan and pings from the Pumping Iron service (the ToS promise).
+            if (g === 'keys' && discordRaw()) {
+                forgetDiscord()
+                    .catch(() => {})
+                    .finally(() => {
+                        clearGroup(g);
+                        refresh();
+                        page.app.render(true);
+                    });
+                return;
+            }
             if (g === 'eye') clearEye();
             clearGroup(g);
             refresh();
@@ -401,7 +412,7 @@ function getCtx() {
         },
         diagnostics,
         discord: {
-            state: discordState,
+            state: discordRaw,
             connect: (f) => connectDiscord(f, pi.model),
             test: testDiscord,
             forget: forgetDiscord,
@@ -495,6 +506,11 @@ export function bootAppPage({ renderers = {} } = {}) {
         if (page.app.tab === 'eye' && page.app.ui.eyeMode === 'watched') pollWatch({ members: war.members }).catch(() => {});
         syncEye();
     }, 2000);
+    // A Log in with Discord that was under way when the page reloaded: keep waiting for it.
+    setTimeout(() => {
+        const p = resumeLogin(pi.model);
+        if (p) p.then((r) => { page.app.ui.discordResult = { ok: r.ok, text: r.text }; page.app.render(true); }).catch(() => {});
+    }, 1500);
     // Auto mode's money log (Full key): at most every 6 hours, visible tab only.
     const moneyLog = () => {
         if (isVisible()) refreshMoneyLog().then((r) => { if (r) refresh(); }).catch(() => {});

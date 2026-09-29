@@ -126,3 +126,8 @@ export function workerLoginStart({ base, secret, fetchImpl }) {
 export function workerLoginStatus({ base, secret, id, fetchImpl }) {
     return workerCall(base, '/login/status', { method: 'POST', secret, body: { id }, fetchImpl });
 }
+
+/** Log in with Discord: close an open login (Cancel), so finishing Discord's page afterwards does nothing. */
+export function workerLoginCancel({ base, secret, id, fetchImpl }) {
+    return workerCall(base, '/login/cancel', { method: 'POST', secret, body: { id }, fetchImpl });
+}

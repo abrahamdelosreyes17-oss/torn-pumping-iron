@@ -11,7 +11,7 @@ import { K, get, set, getKey } from './platform/store.js';
 import { tornClient, isVisible } from './runtime.js';
 import { isPaused } from './turns.js';
 import { fetchDiscord } from './api/torn.js';
-import { workerBase, newSecret, stepsForWorker, workerSync, workerTest, workerForget, workerLink, workerLoginStart, workerLoginStatus, DEFAULT_WORKER } from './api/worker.js';
+import { workerBase, newSecret, stepsForWorker, workerSync, workerTest, workerForget, workerLink, workerLoginStart, workerLoginStatus, workerLoginCancel, DEFAULT_WORKER } from './api/worker.js';
 import { gmOpenTab } from './platform/gm.js';
 
 export const SYNC_MIN_MS = 60 * 1000;
@@ -91,9 +91,16 @@ function pausedText(r) {
     return r && r.paused ? 'Your Worker paused pings: ' + (r.lastError || 'Torn refused its key') + '. Paste a new key for it.' : null;
 }
 
-export function discordState() {
+/** What's stored about the service, connected or not (a login may be under way). */
+export function discordRaw() {
     const w = get(K.worker, null);
     return w && w.base && w.secret ? w : null;
+}
+
+/** A connected service (logged in with Discord, or your own service set up): only then is anything synced. */
+export function discordState() {
+    const w = discordRaw();
+    return w && (w.discordName || w.connectedAt) ? w : null;
 }
 
 function planPayload(m) {
@@ -154,41 +161,78 @@ const LOGIN_FAIL = {
     full: 'The Pumping Iron service is full. Ask whoever runs it.',
     failed: 'Discord didn’t finish the login. Try again in a minute.',
     expired: 'The login timed out. Press Log in with Discord again.',
+    elsewhere: 'This Discord account is already connected to Pumping Iron in another browser. Press Disconnect there, or type /unlink in Discord, then log in here again.',
 };
 
 /**
  * Log in with Discord: open Discord's page in a new tab, wait until you've
  * said yes there, then connect this browser: the plan and your Torn key go to
  * the service (encrypted there), and pings start. Being a member of the
- * Pumping Iron Discord server is what lets you in.
+ * Pumping Iron Discord server is what lets you in. The same browser secret is
+ * kept across tries, so a second try (or a login finished after Cancel) lands
+ * on the same row on the service.
  * @param {object} model
  * @param {object} [o] - {onUpdate(text), base (your own service), sleep, open}
  * @returns {Promise<{ok:boolean, name?:string, text:string}>}
  */
-export async function loginDiscord(model, { onUpdate = () => {}, base: baseIn = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), open = gmOpenTab } = {}) {
-    const prev = discordState();
+export async function loginDiscord(model, { onUpdate = () => {}, base: baseIn = null, sleep = defaultSleep, open = gmOpenTab } = {}) {
+    const prev = discordRaw();
     const base = workerBase(baseIn || (prev && prev.base) || DEFAULT_WORKER);
     const secret = prev && prev.base === base ? prev.secret : newSecret();
     const start = await workerLoginStart({ base, secret });
-    open(start.url);
+    // Only an address on the service itself is opened (it sends you on to discord.com).
+    let url = null;
+    try {
+        url = new URL(String(start.url));
+    } catch {
+        url = null;
+    }
+    if (!url || url.origin !== base) throw new Error('The service answered with an unexpected address.');
     set(K.worker, { ...(prev && prev.base === base ? prev : {}), base, secret, login: { id: start.id, at: Date.now() } });
+    open(url.toString());
     onUpdate('Waiting for you on Discord…');
-    const until = Date.now() + LOGIN_WAIT_MS;
+    return pollLogin(model, { sleep });
+}
+
+const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Only one wait loop per tab (a reload resumes it; a second click doesn't start another). */
+let polling = null;
+
+/**
+ * Wait for the login stored in `K.worker.login` (started here, or before a
+ * reload) and finish it.
+ */
+export function pollLogin(model, { sleep = defaultSleep } = {}) {
+    if (polling) return polling;
+    polling = pollLoginOnce(model, { sleep }).finally(() => {
+        polling = null;
+    });
+    return polling;
+}
+
+async function pollLoginOnce(model, { sleep }) {
+    const first = discordRaw();
+    if (!first || !first.login) return { ok: false, text: 'No login to wait for.' };
+    const { base, secret } = first;
+    const id = first.login.id;
+    const until = (first.login.at || Date.now()) + LOGIN_WAIT_MS;
     while (Date.now() < until) {
         await sleep(LOGIN_POLL_MS);
-        const w = discordState();
+        const w = discordRaw();
         // Cancelled here, or another login started meanwhile.
-        if (!w || !w.login || w.login.id !== start.id) return { ok: false, text: 'Login cancelled.' };
+        if (!w || !w.login || w.login.id !== id) return { ok: false, text: 'Login cancelled.' };
         let st;
         try {
-            st = await workerLoginStatus({ base, secret, id: start.id });
+            st = await workerLoginStatus({ base, secret, id });
         } catch (e) {
             if (e && e.http === 404) return finishLogin(false, LOGIN_FAIL.expired);
             continue; // A blip: ask again.
         }
         if (st.state === 'open') continue;
         if (st.state !== 'done') return finishLogin(false, LOGIN_FAIL[st.state] || LOGIN_FAIL.failed);
-        // In: the plan and the key go now, so pings start without waiting for the next sync.
+        // In. Saved first: if the first sync fails, the next minute's sync sends the plan and the key (no keyTag yet).
+        set(K.worker, { ...(discordRaw() || {}), base, secret, login: null, discordName: st.name || null, keyTag: null, connectedAt: Date.now(), lastSync: 0, lastSig: null, lastError: null });
         const key = getKey(K.apiKey);
         const statics = get(K.userStatic, {}) || {};
         const ki = statics.keyInfo || {};
@@ -196,23 +240,44 @@ export async function loginDiscord(model, { onUpdate = () => {}, base: baseIn = 
         if (key) body.tornKey = key;
         if (ki.userId) body.playerId = ki.userId;
         if (ki.factionId !== undefined) body.factionId = ki.factionId || null;
-        const r = await workerSync(body);
-        set(K.worker, { ...(discordState() || {}), base, secret, login: null, discordName: st.name || null, linked: Boolean(r.linked), bot: Boolean(r.bot), ready: Boolean(r.ready), keyTag: keyTag(key), connectedAt: Date.now(), lastSync: Date.now(), lastSig: null, lastError: pausedText(r) });
+        try {
+            const r = await workerSync(body);
+            set(K.worker, { ...(discordRaw() || {}), linked: Boolean(r.linked), bot: Boolean(r.bot), ready: Boolean(r.ready), keyTag: keyTag(key), lastSync: Date.now(), lastError: pausedText(r) });
+        } catch (e) {
+            set(K.worker, { ...(discordRaw() || {}), lastError: 'First sync failed (' + String((e && e.message) || e) + '); it tries again within a minute.' });
+        }
         return { ok: true, name: st.name || null, text: 'Connected as ' + (st.name || 'you') + '. Pings come as DMs from the Pumping Iron bot.' };
     }
     return finishLogin(false, LOGIN_FAIL.expired);
 }
 
-function finishLogin(ok, text) {
-    const w = discordState();
+/** A login that didn't finish: the browser secret stays (the next try reuses it), nothing is connected. */
+function endLogin() {
+    const w = discordRaw();
     if (w) set(K.worker, { ...w, login: null });
+}
+
+function finishLogin(ok, text) {
+    endLogin();
     return { ok, text };
 }
 
-/** Stop waiting for a login (the Cancel button). */
+/** Stop waiting for a login (the Cancel button); the service closes it too, so finishing Discord's page later does nothing. */
 export function cancelLogin() {
-    const w = discordState();
-    if (w && w.login) set(K.worker, { ...w, login: null });
+    const w = discordRaw();
+    if (w && w.login) workerLoginCancel({ base: w.base, secret: w.secret, id: w.login.id }).catch(() => {});
+    endLogin();
+}
+
+/** After a reload in the middle of a login: keep waiting for it (at most until it expires). */
+export function resumeLogin(model) {
+    const w = discordRaw();
+    if (!w || !w.login) return null;
+    if (Date.now() - (w.login.at || 0) >= LOGIN_WAIT_MS) {
+        endLogin();
+        return null;
+    }
+    return pollLogin(model);
 }
 
 /** Link Discord: a one-time code from your Worker (on a click only; never stored). */
@@ -230,7 +295,7 @@ export async function testDiscord() {
 }
 
 export async function forgetDiscord() {
-    const w = discordState();
+    const w = discordRaw();
     if (w) {
         try {
             await workerForget({ base: w.base, secret: w.secret });
