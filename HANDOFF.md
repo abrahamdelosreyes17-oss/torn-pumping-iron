@@ -11,7 +11,7 @@
 - Receipts and the what-if graph; unlock-gym goal; war reserve.
 
 Links:
-- Install (pinned 1.2.0): PINNED_LINK
+- Install (pinned 1.2.0): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/811186b7a5be14d920065e29b93ab8c489f0d96c/torn-pumping-iron.user.js
 - Auto-update URL (`@updateURL`): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/main/torn-pumping-iron.user.js
 - Webpage: https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html (gh-pages branch; unchanged since 1.0.0, `site/` didn't change)
 - Repo: https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron (public; `main` + `gh-pages`)
