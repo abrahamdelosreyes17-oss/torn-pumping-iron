@@ -27,7 +27,7 @@ Read this first. Then `docs/BUILD-PLAN.md` (what to build, in order), `docs/ENGI
 | M4 | Webpage tabs | ☑ 160 tests + ux-check, 2026-09-29 |
 | M5 | Overlay + marks on Torn pages | ☑ 165 tests + torn-check 31/31, 2026-09-29 |
 | M6 | Torn Eye | ☑ 183 tests + torn-check 45/45 + ux-check, 2026-09-29 |
-| M7 | Discord service (Worker) | ☐ |
+| M7 | Discord service (Worker) | ☑ 204 tests (14 Worker), 2026-09-29 |
 | M8 | Hardening, README, release prep → ask the owner | ☐ |
 
 ---
@@ -128,6 +128,8 @@ Research index: `docs/research-gym.md`, `research-builds-gympage.md`, `research-
   - Tests: round-2 H band ordering (Stomp/Good/Tough/Can't win) reproduced; war sort on a canned faction; the hook-identity test; a replay of 10 fights described by FFScouter's published difficulty scale (≥ 8 right). **[calibrate]** No real attack logs were available (torn.com is off limits and there is no owner key here): replace the scale replay with the owner's own attacks after install (the app already stores them as `myAttacks`).
   - The "public stats" layer uses TornTools' rank buckets; an energy→stats model was tried (sim) and dropped: the gain formula compounds, so energy alone can't place a player within 10×.
   - `@run-at document-idle` means the first attackData answer may pass before the hook is in; Torn polls it every ~3 s during a fight, so the next one is read.
+- **M7 ☑** `worker/` (Cloudflare Worker, no dependencies): `src/alerts.js` (pure: drug cooldown ≤ 5 min with the next drug step, energy full unless stacking for a jump, refill unused 2 h before Torn midnight, strict jump steps 5 min before their tick; the mention in `content`, `allowed_mentions` = that user only; Discord webhook URLs only), `src/index.js` (`GET /health`, `PUT /plan` (bearer secret, stored as SHA-256; the first sync needs `X-Invite` = the `INVITE_CODE` secret), `POST /test`, `DELETE /plan`; cron: one Torn read per user with `Authorization: ApiKey`, one ping per alert id (kept 2 days), dead key 2/13/18 pauses the user), `wrangler.toml` (cron every minute, D1 `DB`), `SETUP.md` (10 minutes, with the Worker key's ToS table, one Worker or one each), `BOT.md` (DMs, /plan, /timers, Done/Snooze later). Tests: `worker/test/worker.test.js` with an in-memory D1 (`fake-d1.js`, fails on unknown SQL); `npm run check` now runs them too.
+  - Userscript: `src/api/worker.js` (only `https://*.workers.dev`, bearer secret, invite on first connect), `src/discord.js` (connect keeps only the address, secret and Discord id here: never the webhook or the Worker's key; plan steps synced when they change, ≤ once a minute, visible tab only), Settings › Discord (masked fields, Connect/Send a test ping/Forget, the Worker key's ToS table). `test/worker-client.test.js`: the main Torn key never reaches the Worker.
 
 ### 2026-09-28/29: research, three mockup rounds, specs (no code)
 - The owner asked for a gym planner ("searches market, makes a plan, recalculates daily, happiness, choco/EDVD jumps, pings on Discord") for themselves and a returning friend, plus an FFScouter-like fight helper that's better ("sometimes it says I win but I end at 1 HP").

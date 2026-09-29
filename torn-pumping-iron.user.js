@@ -3422,6 +3422,193 @@
         refresh();
     }
 
+    /* ===== src/api/worker.js ===== */
+    /*
+     * The userscript's side of the Discord service: talks only to the user's
+     * own Cloudflare Worker (https://<name>.<account>.workers.dev), with a
+     * secret this browser made. The userscript never posts to Discord itself
+     * (no alerts from a Torn tab); the Worker does, from the API.
+     *
+     * What goes to the Worker: the plan's next steps, the Discord webhook and
+     * user id you enter, and a separate custom Torn key you make for it
+     * (bars, cooldowns, refills, travel). Your main Torn key never does.
+     */
+
+
+
+
+    const WORKER_SETUP_URL = 'https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron/blob/main/worker/SETUP.md';
+
+    class WorkerError extends Error {
+        constructor(message, { http = null } = {}) {
+            super(message);
+            this.name = 'WorkerError';
+            this.http = http;
+        }
+    }
+
+    /** Only https://*.workers.dev (the script's @connect allows nothing else). */
+    function workerBase(url) {
+        let u;
+        try {
+            u = new URL(String(url || '').trim());
+        } catch {
+            throw new WorkerError('That is not a web address.');
+        }
+        if (u.protocol !== 'https:' || !/\.workers\.dev$/.test(u.hostname)) throw new WorkerError('Use your Worker’s https://….workers.dev address.');
+        return 'https://' + u.hostname;
+    }
+
+    /** A new secret for this browser: 32 random bytes as hex. */
+    function newSecret(rng = null) {
+        const bytes = new Uint8Array(32);
+        if (rng) for (let i = 0; i < 32; i++) bytes[i] = rng() * 256;
+        else crypto.getRandomValues(bytes);
+        return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    /** The plan's steps as the Worker needs them (seconds, words only). */
+    function stepsForWorker(steps, limit = 24) {
+        return (steps || []).slice(0, limit).map((s) => ({
+            at: Math.round(s.at / 1000),
+            kind: s.kind,
+            label: s.label,
+            train: Object.entries(s.trains || {}).filter(([, n]) => n > 0).map(([k, n]) => STAT_LABEL[k] + ' × ' + n).join(' · ') || null,
+            strict: Boolean(s.strict),
+            tick: s.tick ? Math.round(s.tick / 1000) : null,
+        }));
+    }
+
+    async function workerCall(base, path, { method = 'GET', secret = null, invite = null, body = null, fetchImpl = gmFetch } = {}) {
+        const headers = { 'content-type': 'application/json' };
+        if (secret) headers.authorization = 'Bearer ' + secret;
+        if (invite) headers['x-invite'] = invite;
+        let res;
+        try {
+            res = await fetchImpl(workerBase(base) + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+        } catch (e) {
+            if (e instanceof WorkerError) throw e;
+            throw new WorkerError('Could not reach your Worker.');
+        }
+        let data = null;
+        try {
+            data = await res.json();
+        } catch {
+            data = null;
+        }
+        if (!res.ok || !data || data.ok === false) throw new WorkerError((data && data.error) || 'Your Worker answered ' + res.status + '.', { http: res.status });
+        return data;
+    }
+
+    function workerHealth(base, opts) {
+        return workerCall(base, '/health', opts);
+    }
+
+    /**
+     * Store the plan (and on first connect the key, webhook and Discord id).
+     * @param {object} o - {base, secret, invite?, plan, tornKey?, webhookUrl?, discordId?, rules?}
+     */
+    function workerSync({ base, secret, invite = null, plan, tornKey, webhookUrl, discordId, rules, fetchImpl }) {
+        const body = { plan };
+        if (tornKey !== undefined) body.tornKey = tornKey;
+        if (webhookUrl !== undefined) body.webhookUrl = webhookUrl;
+        if (discordId !== undefined) body.discordId = discordId;
+        if (rules !== undefined) body.rules = rules;
+        return workerCall(base, '/plan', { method: 'PUT', secret, invite, body, fetchImpl });
+    }
+
+    function workerTest({ base, secret, fetchImpl }) {
+        return workerCall(base, '/test', { method: 'POST', secret, fetchImpl });
+    }
+
+    function workerForget({ base, secret, fetchImpl }) {
+        return workerCall(base, '/plan', { method: 'DELETE', secret, fetchImpl });
+    }
+
+    /* ===== src/discord.js ===== */
+    /*
+     * Settings › Discord and the plan sync. The plan's next steps go to the
+     * user's own Worker when they change (at most once a minute, from a
+     * visible tab); the Worker reads Torn and pings Discord.
+     */
+
+
+
+
+
+
+    const SYNC_MIN_MS = 60 * 1000;
+
+    function discordState() {
+        const w = get(K.worker, null);
+        return w && w.base && w.secret ? w : null;
+    }
+
+    function planPayload(m) {
+        if (!m || !m.ready) return null;
+        return { type: m.steps.some((s) => s.kind === 'stack' || s.kind === 'jump') ? 'jump' : 'steady', steps: stepsForWorker(m.steps) };
+    }
+
+    /** Your Discord id, if linked in Torn (/user/discord). */
+    async function linkedDiscordId() {
+        try {
+            const d = await fetchDiscord(tornClient());
+            return d && d.discord_id ? String(d.discord_id) : null;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * First connect (or a change of webhook, key or Discord id).
+     * @param {object} f - {base, invite, webhookUrl, tornKey, discordId}
+     */
+    async function connectDiscord(f, model) {
+        const base = workerBase(f.base);
+        const prev = discordState();
+        const secret = prev && prev.base === base ? prev.secret : newSecret();
+        const body = { base, secret, invite: f.invite || null, plan: planPayload(model) };
+        if (f.webhookUrl) body.webhookUrl = f.webhookUrl.trim();
+        if (f.tornKey) body.tornKey = f.tornKey.trim();
+        if (f.discordId) body.discordId = String(f.discordId).replace(/\D/g, '');
+        const r = await workerSync(body);
+        set(K.worker, { base, secret, discordId: body.discordId || (prev && prev.discordId) || null, connectedAt: Date.now(), lastSync: Date.now(), lastSig: null, ready: Boolean(r.ready) || Boolean(prev && prev.ready), lastError: null });
+        return r;
+    }
+
+    async function testDiscord() {
+        const w = discordState();
+        if (!w) throw new Error('Connect your Worker first.');
+        return workerTest({ base: w.base, secret: w.secret });
+    }
+
+    async function forgetDiscord() {
+        const w = discordState();
+        if (w) {
+            try {
+                await workerForget({ base: w.base, secret: w.secret });
+            } catch {
+                // Forget here anyway.
+            }
+        }
+        set(K.worker, null);
+    }
+
+    /** After each model refresh: send the plan if its steps changed (≤ once a minute, visible tab only). */
+    function maybeSyncPlan(m, now = Date.now()) {
+        const w = discordState();
+        if (!w || !isVisible()) return false;
+        const plan = planPayload(m);
+        if (!plan) return false;
+        const sig = JSON.stringify(plan.steps.map((s) => [s.kind, s.label, Math.round(s.at / 300)]));
+        if (sig === w.lastSig || now - (w.lastSync || 0) < SYNC_MIN_MS) return false;
+        set(K.worker, { ...w, lastSync: now, lastSig: sig });
+        workerSync({ base: w.base, secret: w.secret, plan })
+            .then(() => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: null }))
+            .catch((e) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e) }));
+        return true;
+    }
+
     /* ===== src/ui/dom.js ===== */
     /*
      * Building DOM without innerHTML for anything that came from Torn, a third
@@ -3732,6 +3919,7 @@
     .msg { font-size: 12px; }
     .msg.ok { color: var(--good); } .msg.bad { color: var(--bad); }
     .tab { cursor: pointer; }
+    .btn:disabled { opacity: .45; cursor: default; }
     .brow:focus-visible, .tbl tr.click:focus-visible { outline: 2px solid var(--chalk); outline-offset: -2px; }
     .pane .chart { max-width: 100%; }
     .ih { display: flex; align-items: baseline; gap: 12px; }
@@ -5295,6 +5483,15 @@
         ['Key access level', 'The key on your TornStats account; we only read spies'],
     ];
 
+    /** The Worker's own key (a custom key made for it), stored on the user's Cloudflare Worker. */
+    const TOS_WORKER = [
+        ['Data storage', 'On your own Cloudflare Worker (D1 database) until you press Forget'],
+        ['Data sharing', 'Nobody. Only your Worker reads it; pings go to your Discord webhook'],
+        ['Purpose of use', 'Personal: Discord pings for your gym plan'],
+        ['Key storage & sharing', 'Stored / Used only for automation'],
+        ['Key access level', 'Custom (user: bars, cooldowns, refills, travel)'],
+    ];
+
     function tosTable(rows) {
         return h('table', { class: 'tos' }, rows.map(([k, v]) => h('tr', {}, [h('th', { text: k }), h('td', { text: v })])));
     }
@@ -5344,6 +5541,49 @@
         return h('div', { class: 'seg', role: 'group', 'aria-label': aria }, options.map(([v, label]) => h('button', { type: 'button', 'aria-pressed': String(v === value), onclick: () => onpick(v), text: label })));
     }
 
+    function discordSection(ctx) {
+        const d = ctx.discord;
+        const st = d.state();
+        const tag = !st ? stateTag('off', 'Not set up yet') : st.lastError ? stateTag('bad', 'Last sync failed') : st.ready ? stateTag('ok', 'Connected') : stateTag('bad', 'Needs the webhook and key');
+        const f = {};
+        const field = (key, label, attrs) => h('label', { class: 'field', style: 'flex:1;min-width:220px' }, [t('lab', label), (f[key] = h('input', { class: 'inp', ...attrs }))]);
+        const keyAttrs = keyInputAttrs();
+        const secretCls = 'inp' + (keyAttrs.type === 'text' ? ' masked' : '');
+        const msg = h('span', { class: 'msg' });
+        const run = async (fn, okText) => {
+            msg.className = 'msg';
+            msg.textContent = 'Working…';
+            try {
+                await fn();
+                msg.className = 'msg ok';
+                msg.textContent = okText;
+            } catch (e) {
+                msg.className = 'msg bad';
+                msg.textContent = String((e && e.message) || e);
+            }
+        };
+        const connect = () =>
+            run(async () => {
+                let discordId = f.discordId.value.trim();
+                if (!discordId) discordId = (await d.linkedId()) || '';
+                await d.connect({ base: f.base.value, invite: f.invite.value.trim(), webhookUrl: f.hook.value, tornKey: f.key.value, discordId });
+                f.hook.value = '';
+                f.key.value = '';
+                ctx.rerender();
+            }, 'Connected. Your plan syncs by itself when it changes.');
+        const rows = [
+            h('p', { text: 'A small free service on your Cloudflare account checks your timers every minute and tags you, even with your PC off: "Drug cooldown ends in 5 min · Xanax #2, then DEX × 27". Pings never come from a Torn tab.' }),
+            h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('base', 'Service address', { placeholder: 'https://pumping-iron.you.workers.dev', value: st ? st.base : '' }), field('invite', 'Invite code (first time)', { placeholder: 'from SETUP.md', ...keyAttrs, class: secretCls })]),
+            h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('hook', 'Discord webhook', { placeholder: st ? 'Saved on your Worker · paste to change' : 'https://discord.com/api/webhooks/…', ...keyAttrs, class: secretCls }), field('key', 'Torn key for the Worker', { placeholder: st ? 'Saved on your Worker · paste to change' : 'Custom: bars, cooldowns, refills, travel', ...keyAttrs, class: secretCls })]),
+            h('div', { class: 'row', style: 'max-width:760px' }, [field('discordId', 'Your Discord user id', { placeholder: 'Blank: the one linked in Torn', value: st && st.discordId ? st.discordId : '', inputmode: 'numeric' })]),
+            h('div', { class: 'row' }, [h('button', { class: 'btn primary', type: 'button', onclick: connect, text: st ? 'Save' : 'Connect' }), h('button', { class: 'btn', type: 'button', disabled: !st, onclick: () => run(() => d.test(), 'Test ping sent. Check your channel.'), text: 'Send a test ping' }), st ? h('button', { class: 'btn ghost', type: 'button', onclick: () => run(async () => { await d.forget(); ctx.rerender(); }, 'Forgotten here and on your Worker.'), text: 'Forget' }) : null, h('a', { href: d.setupUrl, target: '_blank', rel: 'noopener', text: 'Set it up (10 minutes)' })]),
+            msg,
+            st ? h('p', { class: 'num', text: 'Last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') + (st.lastError ? ' · ' + st.lastError : '') + ' · Later: DMs, /plan, Done and Snooze buttons.' }) : null,
+            h('details', { class: 'dis' }, [h('summary', { text: 'How the Worker’s key is used' }), tosTable(TOS_WORKER), h('p', { style: 'margin-top:6px', text: 'Make a new custom key for the Worker in Torn (API settings). Your main key never goes to the Worker.' })]),
+        ];
+        return settingsSection('Discord pings', tag, rows);
+    }
+
     function renderSettings(m, ctx) {
         const s = ctx.settings;
         const ki = (ctx.statics && ctx.statics.keyInfo) || null;
@@ -5372,7 +5612,7 @@
         const ts = keyRow({ label: 'TornStats key', placeholder: ctx.flags.hasTs ? 'Saved · paste a new one to replace it' : 'Your TornStats key', onSave: ctx.saveTsKey, onReveal: () => ctx.revealKey(K.tsKey), primary: false });
         const tsSec = settingsSection('TornStats spies', ctx.flags.hasTs ? stateTag('ok', 'Saved') : stateTag('off', 'Optional'), [h('p', {}, ['If your faction shares spies on TornStats, exact stats beat every estimate. ', h('a', { href: TS_TOS_URL, target: '_blank', rel: 'noopener', text: 'Their terms' })]), ts.row, ts.msg, h('details', { class: 'dis' }, [h('summary', { text: 'How this key is used' }), tosTable(TOS_TS)])]);
 
-        const discordSec = ctx.renderDiscord ? ctx.renderDiscord() : settingsSection('Discord pings', stateTag('off', 'Not set up yet'), [h('p', { text: 'Coming with the Discord service.' })]);
+        const discordSec = discordSection(ctx);
 
         const overlaySec = settingsSection('Overlay on Torn', null, [
             h('div', { class: 'opts' }, [settingsCheck('Pill on every page', s.pill, (v) => ctx.setSettings({ pill: v })), settingsCheck('Marks on the gym page', s.gymMarks, (v) => ctx.setSettings({ gymMarks: v })), settingsCheck('Marks on items and markets', s.marketMarks, (v) => ctx.setSettings({ marketMarks: v })), settingsCheck('Torn Eye chips', s.eyeChips, (v) => ctx.setSettings({ eyeChips: v }))]),
@@ -6489,6 +6729,8 @@
 
 
 
+
+
     /** How long fetched prices count as fresh. */
     const PRICE_FRESH_MS = 5 * 60 * 1000;
 
@@ -6647,7 +6889,7 @@
             calibration: get('calibration', null),
             flags: { hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)), hasFfs: Boolean(getKey(K.ffsKey)), ffsDead: Boolean(ffsState && ffsState.registered === false), hasTs: Boolean(getKey(K.tsKey)) },
             planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
-            sig: [JSON.stringify(settings), JSON.stringify(plan), Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0].join('|'),
+            sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0].join('|'),
             setSettings: (p) => {
                 setSettings(p);
                 refresh();
@@ -6672,6 +6914,14 @@
                 page.app.render(true);
             },
             diagnostics,
+            discord: {
+                state: discordState,
+                connect: (f) => connectDiscord(f, pi.model),
+                test: testDiscord,
+                forget: forgetDiscord,
+                linkedId: linkedDiscordId,
+                setupUrl: WORKER_SETUP_URL,
+            },
             eye: {
                 rows: eyeRows,
                 load: (params) => loadTargets(params).catch(() => {}),
@@ -8101,6 +8351,7 @@
 
 
 
+
     function menus() {
         gmMenu('Open Pumping Iron', () => gmOpenTab(APP_PAGE_URL));
         gmMenu('Diagnostics', () => gmOpenTab(APP_PAGE_URL + '#settings'));
@@ -8119,6 +8370,8 @@
             bootEyePage();
         }
         startFeed();
+        // The plan's next steps go to your Discord Worker when they change (if you set one up).
+        onModel((m) => maybeSyncPlan(m));
         // Off torn.com (the harness), expose the model for checks. On torn.com the sandbox keeps it private anyway.
         if (!isTornHost(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed };
     }

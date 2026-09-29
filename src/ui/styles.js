@@ -244,6 +244,7 @@ details.dis[open] > summary::before { content: "▾ "; }
 .msg { font-size: 12px; }
 .msg.ok { color: var(--good); } .msg.bad { color: var(--bad); }
 .tab { cursor: pointer; }
+.btn:disabled { opacity: .45; cursor: default; }
 .brow:focus-visible, .tbl tr.click:focus-visible { outline: 2px solid var(--chalk); outline-offset: -2px; }
 .pane .chart { max-width: 100%; }
 .ih { display: flex; align-items: baseline; gap: 12px; }

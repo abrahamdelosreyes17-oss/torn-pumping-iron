@@ -1,0 +1,5 @@
+{
+  "name": "pumping-iron-worker",
+  "private": true,
+  "type": "module"
+}

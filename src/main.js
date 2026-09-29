@@ -11,7 +11,8 @@
 
 import { gmMenu, gmOpenTab } from './platform/gm.js';
 import { set } from './platform/store.js';
-import { pi, startFeed, refresh } from './runtime.js';
+import { pi, startFeed, refresh, onModel } from './runtime.js';
+import { maybeSyncPlan } from './discord.js';
 import { bootAppPage } from './app-page.js';
 import { bootTornPage } from './torn-page.js';
 import { bootEyePage } from './eye-page.js';
@@ -35,6 +36,8 @@ export function boot() {
         bootEyePage();
     }
     startFeed();
+    // The plan's next steps go to your Discord Worker when they change (if you set one up).
+    onModel((m) => maybeSyncPlan(m));
     // Off torn.com (the harness), expose the model for checks. On torn.com the sandbox keeps it private anyway.
     if (!isTornHost(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed };
 }

@@ -1,0 +1,16 @@
+# Pumping Iron's Discord service. See SETUP.md.
+name = "pumping-iron"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# Every minute: read each user's Torn timers and ping what's due.
+[triggers]
+crons = ["* * * * *"]
+
+# Users, their plans and which pings were already sent.
+[[d1_databases]]
+binding = "DB"
+database_name = "pumping-iron"
+database_id = "PASTE-THE-ID-FROM-wrangler-d1-create"
+
+# Secret (not here): INVITE_CODE, set with `npx wrangler secret put INVITE_CODE`.

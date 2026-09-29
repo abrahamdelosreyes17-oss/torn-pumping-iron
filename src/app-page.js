@@ -13,6 +13,8 @@ import { W3bClient, fetchW3bListings } from './api/w3b.js';
 import { makeFfsClient, checkFfsKey, fetchFfsTargets } from './api/ffscouter.js';
 import { renderEye } from './ui/app/eye-tab.js';
 import { wantPlayers, eyeView, onEye, gearCount, clearEye } from './eye-service.js';
+import { discordState, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId } from './discord.js';
+import { WORKER_SETUP_URL } from './api/worker.js';
 import { tabWindow } from './platform/tab-window.js';
 import { listingsFromItemMarket, listingsFromW3b, listingsFromPoints } from './core/market.js';
 import { recordPrice, average7, dailyLows, readPriceHistory } from './core/history.js';
@@ -179,7 +181,7 @@ function getCtx() {
         calibration: get('calibration', null),
         flags: { hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)), hasFfs: Boolean(getKey(K.ffsKey)), ffsDead: Boolean(ffsState && ffsState.registered === false), hasTs: Boolean(getKey(K.tsKey)) },
         planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
-        sig: [JSON.stringify(settings), JSON.stringify(plan), Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0].join('|'),
+        sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0].join('|'),
         setSettings: (p) => {
             setSettings(p);
             refresh();
@@ -204,6 +206,14 @@ function getCtx() {
             page.app.render(true);
         },
         diagnostics,
+        discord: {
+            state: discordState,
+            connect: (f) => connectDiscord(f, pi.model),
+            test: testDiscord,
+            forget: forgetDiscord,
+            linkedId: linkedDiscordId,
+            setupUrl: WORKER_SETUP_URL,
+        },
         eye: {
             rows: eyeRows,
             load: (params) => loadTargets(params).catch(() => {}),

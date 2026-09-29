@@ -39,6 +39,15 @@ export const TOS_TS = [
     ['Key access level', 'The key on your TornStats account; we only read spies'],
 ];
 
+/** The Worker's own key (a custom key made for it), stored on the user's Cloudflare Worker. */
+export const TOS_WORKER = [
+    ['Data storage', 'On your own Cloudflare Worker (D1 database) until you press Forget'],
+    ['Data sharing', 'Nobody. Only your Worker reads it; pings go to your Discord webhook'],
+    ['Purpose of use', 'Personal: Discord pings for your gym plan'],
+    ['Key storage & sharing', 'Stored / Used only for automation'],
+    ['Key access level', 'Custom (user: bars, cooldowns, refills, travel)'],
+];
+
 export function tosTable(rows) {
     return h('table', { class: 'tos' }, rows.map(([k, v]) => h('tr', {}, [h('th', { text: k }), h('td', { text: v })])));
 }
@@ -88,6 +97,49 @@ function segOf(value, options, onpick, aria) {
     return h('div', { class: 'seg', role: 'group', 'aria-label': aria }, options.map(([v, label]) => h('button', { type: 'button', 'aria-pressed': String(v === value), onclick: () => onpick(v), text: label })));
 }
 
+function discordSection(ctx) {
+    const d = ctx.discord;
+    const st = d.state();
+    const tag = !st ? stateTag('off', 'Not set up yet') : st.lastError ? stateTag('bad', 'Last sync failed') : st.ready ? stateTag('ok', 'Connected') : stateTag('bad', 'Needs the webhook and key');
+    const f = {};
+    const field = (key, label, attrs) => h('label', { class: 'field', style: 'flex:1;min-width:220px' }, [t('lab', label), (f[key] = h('input', { class: 'inp', ...attrs }))]);
+    const keyAttrs = keyInputAttrs();
+    const secretCls = 'inp' + (keyAttrs.type === 'text' ? ' masked' : '');
+    const msg = h('span', { class: 'msg' });
+    const run = async (fn, okText) => {
+        msg.className = 'msg';
+        msg.textContent = 'Working…';
+        try {
+            await fn();
+            msg.className = 'msg ok';
+            msg.textContent = okText;
+        } catch (e) {
+            msg.className = 'msg bad';
+            msg.textContent = String((e && e.message) || e);
+        }
+    };
+    const connect = () =>
+        run(async () => {
+            let discordId = f.discordId.value.trim();
+            if (!discordId) discordId = (await d.linkedId()) || '';
+            await d.connect({ base: f.base.value, invite: f.invite.value.trim(), webhookUrl: f.hook.value, tornKey: f.key.value, discordId });
+            f.hook.value = '';
+            f.key.value = '';
+            ctx.rerender();
+        }, 'Connected. Your plan syncs by itself when it changes.');
+    const rows = [
+        h('p', { text: 'A small free service on your Cloudflare account checks your timers every minute and tags you, even with your PC off: "Drug cooldown ends in 5 min · Xanax #2, then DEX × 27". Pings never come from a Torn tab.' }),
+        h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('base', 'Service address', { placeholder: 'https://pumping-iron.you.workers.dev', value: st ? st.base : '' }), field('invite', 'Invite code (first time)', { placeholder: 'from SETUP.md', ...keyAttrs, class: secretCls })]),
+        h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('hook', 'Discord webhook', { placeholder: st ? 'Saved on your Worker · paste to change' : 'https://discord.com/api/webhooks/…', ...keyAttrs, class: secretCls }), field('key', 'Torn key for the Worker', { placeholder: st ? 'Saved on your Worker · paste to change' : 'Custom: bars, cooldowns, refills, travel', ...keyAttrs, class: secretCls })]),
+        h('div', { class: 'row', style: 'max-width:760px' }, [field('discordId', 'Your Discord user id', { placeholder: 'Blank: the one linked in Torn', value: st && st.discordId ? st.discordId : '', inputmode: 'numeric' })]),
+        h('div', { class: 'row' }, [h('button', { class: 'btn primary', type: 'button', onclick: connect, text: st ? 'Save' : 'Connect' }), h('button', { class: 'btn', type: 'button', disabled: !st, onclick: () => run(() => d.test(), 'Test ping sent. Check your channel.'), text: 'Send a test ping' }), st ? h('button', { class: 'btn ghost', type: 'button', onclick: () => run(async () => { await d.forget(); ctx.rerender(); }, 'Forgotten here and on your Worker.'), text: 'Forget' }) : null, h('a', { href: d.setupUrl, target: '_blank', rel: 'noopener', text: 'Set it up (10 minutes)' })]),
+        msg,
+        st ? h('p', { class: 'num', text: 'Last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') + (st.lastError ? ' · ' + st.lastError : '') + ' · Later: DMs, /plan, Done and Snooze buttons.' }) : null,
+        h('details', { class: 'dis' }, [h('summary', { text: 'How the Worker’s key is used' }), tosTable(TOS_WORKER), h('p', { style: 'margin-top:6px', text: 'Make a new custom key for the Worker in Torn (API settings). Your main key never goes to the Worker.' })]),
+    ];
+    return settingsSection('Discord pings', tag, rows);
+}
+
 export function renderSettings(m, ctx) {
     const s = ctx.settings;
     const ki = (ctx.statics && ctx.statics.keyInfo) || null;
@@ -116,7 +168,7 @@ export function renderSettings(m, ctx) {
     const ts = keyRow({ label: 'TornStats key', placeholder: ctx.flags.hasTs ? 'Saved · paste a new one to replace it' : 'Your TornStats key', onSave: ctx.saveTsKey, onReveal: () => ctx.revealKey(K.tsKey), primary: false });
     const tsSec = settingsSection('TornStats spies', ctx.flags.hasTs ? stateTag('ok', 'Saved') : stateTag('off', 'Optional'), [h('p', {}, ['If your faction shares spies on TornStats, exact stats beat every estimate. ', h('a', { href: TS_TOS_URL, target: '_blank', rel: 'noopener', text: 'Their terms' })]), ts.row, ts.msg, h('details', { class: 'dis' }, [h('summary', { text: 'How this key is used' }), tosTable(TOS_TS)])]);
 
-    const discordSec = ctx.renderDiscord ? ctx.renderDiscord() : settingsSection('Discord pings', stateTag('off', 'Not set up yet'), [h('p', { text: 'Coming with the Discord service.' })]);
+    const discordSec = discordSection(ctx);
 
     const overlaySec = settingsSection('Overlay on Torn', null, [
         h('div', { class: 'opts' }, [settingsCheck('Pill on every page', s.pill, (v) => ctx.setSettings({ pill: v })), settingsCheck('Marks on the gym page', s.gymMarks, (v) => ctx.setSettings({ gymMarks: v })), settingsCheck('Marks on items and markets', s.marketMarks, (v) => ctx.setSettings({ marketMarks: v })), settingsCheck('Torn Eye chips', s.eyeChips, (v) => ctx.setSettings({ eyeChips: v }))]),
