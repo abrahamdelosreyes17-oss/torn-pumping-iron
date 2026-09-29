@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Pumping Iron
 // @namespace    torn-pumping-iron
-// @version      1.2.1
+// @version      1.2.2
 // @description  Gym planner and fight scout for Torn: what to take, what to train, what to buy, who you can beat. Reads the API and the page you're on; never acts for you.
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 (function () {
     'use strict';
 
-    const PI_BUILD_VERSION = '1.2.1';
+    const PI_BUILD_VERSION = '1.2.2';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -2522,9 +2522,12 @@
     function fillWords(fill, pickId) {
         if (!fill || !fill.alloc.length) return candyWords({ id: pickId });
         const total = fill.held + fill.buy;
-        if (fill.alloc.length === 1 && !fill.held) return itemName(fill.alloc[0].id) + ' × ' + total;
+        if (fill.alloc.length === 1) {
+            const a = fill.alloc[0];
+            return itemName(a.id) + ' × ' + total + (a.held ? ' (' + (a.held === a.qty ? 'all yours' : a.held + ' yours, buy ' + (a.qty - a.held)) + ')' : '');
+        }
         const noun = isCandy(pickId) ? 'Candy' : 'Energy drinks';
-        const parts = fill.alloc.map((a) => (a.held && a.held < a.qty ? a.held + ' of your ' : a.held ? 'your ' : '') + a.qty + ' ' + itemName(a.id));
+        const parts = fill.alloc.map((a) => (a.held === a.qty ? 'your ' + a.qty + ' ' + itemName(a.id) : a.qty + ' ' + itemName(a.id) + (a.held ? ' (' + a.held + ' yours)' : '')));
         return noun + ' × ' + total + ': ' + parts.join(' + ');
     }
 
@@ -2952,8 +2955,11 @@
                     buy(ECSTASY);
                     drugFree = t + ecsCD;
                     train();
-                    refill(day);
-                    train();
+                    // One refill a Torn day: a day with no room for candy earlier may already have used it.
+                    if (day !== refillDay) {
+                        refill(day);
+                        train();
+                    }
                     spendSpecial(day);
                     phase = 'done';
                     doneDay = day;
@@ -3582,7 +3588,8 @@
         // A new Torn day: its refill (today's, if unused, goes in before midnight), Xanax count, boost and share.
         const rollDay = (at) => {
             while (tornDayStart(at) > curDay) {
-                if (refillLeft && !isJump) {
+                // Not while a Xanax is held for the boost: the refill would train its energy.
+                if (refillLeft && !isJump && !holding) {
                     const last = Math.max(t, curDay + DAY - REFILL_LAST_CALL_MS);
                     advance(last);
                     refill(last, { note: 'Use before 00:00 Torn time' });
@@ -3727,6 +3734,12 @@
             if (daily && !boosted) {
                 const boostAt = nextQuarterTick(drugAt + xanCD - 1) + MIN;
                 if (fitsAt(candyId, boostAt) > 0) {
+                    // The boost lands on a later Torn day: today's refill goes now, before the Xanax is held (a refill
+                    // during the hold would train the held energy).
+                    if (refillLeft && boostAt >= curDay + DAY && drugAt + MIN < Math.min(end, curDay + DAY)) {
+                        refill(drugAt);
+                        refillLeft = false;
+                    }
                     E += ITEMS[XANAX].energy;
                     H += ITEMS[XANAX].happy;
                     steps.push({ id: 'hold-' + ++n, at: drugAt, kind: 'hold', label: 'Xanax #' + xanN++ + ' · keep the energy for the boost', items: [{ id: XANAX, qty: 1 }], trains: {}, gyms: {}, gain: 0, energy: 0, strict: false, warnAt: null, note: 'no boosters until the boost' });
@@ -3742,6 +3755,8 @@
                 const at = tick + MIN;
                 const fits = fitsAt(candyId, at);
                 if (fits > 0) {
+                    // The tick can fall after midnight: the boost (and its refill) then belong to the new Torn day.
+                    rollDay(at);
                     advance(at);
                     E += ITEMS[XANAX].energy;
                     H += ITEMS[XANAX].happy;
@@ -3836,7 +3851,7 @@
             }
         }
         // A refill still unused goes in before midnight.
-        if (refillLeft && curDay + DAY <= end) {
+        if (refillLeft && curDay + DAY <= end && !holding) {
             const at = Math.max(now, curDay + DAY - REFILL_LAST_CALL_MS);
             advance(at);
             refill(at, { note: 'Use before 00:00 Torn time' });
@@ -4499,6 +4514,7 @@
 
 
 
+
     const SOURCE_BAZAAR = 'bazaar';
     const SOURCE_ITEM_MARKET = 'itemmarket';
     const SOURCE_POINTS = 'points';
@@ -4578,7 +4594,7 @@
      */
     function allowanceLeft(cs, now) {
         if (!cs || !(Number.isFinite(cs.start) && Number.isFinite(cs.now))) return null;
-        if (Math.floor(now / 86400e3) * 86400e3 !== cs.day) return CITY_DAILY_ALLOWANCE;
+        if (tornDayStart(now) !== cs.day) return CITY_DAILY_ALLOWANCE;
         return Math.max(0, CITY_DAILY_ALLOWANCE - Math.max(0, cs.now - cs.start));
     }
 
@@ -6093,6 +6109,9 @@
     const XANAX_CD_KEEP = 30;
     const XANAX_CD_MIN_SAMPLES = 3;
 
+    /** A Xanax seen across a longer gap between reads isn't recorded (when it was taken is too uncertain). */
+    const XANAX_CD_MAX_GAP_MS = 10 * 60 * 1000;
+
     /**
      * A Xanax taken between two reads: the cooldown Torn showed, plus half the gap between the reads (it was taken
      * somewhere in between). Only when it's in Xanax's range and the plan's step (when known) was a Xanax.
@@ -6104,6 +6123,7 @@
      */
     function xanaxCdSample(prev, next, diff, hint = null) {
         if (!prev || !next || !diff || !diff.drugTaken) return null;
+        if (next.at - prev.at > XANAX_CD_MAX_GAP_MS) return null;
         if (hint && Array.isArray(hint.items) && hint.items.length && !hint.items.some((it) => it.id === XANAX)) return null;
         const min = Math.round((next.drugCd + Math.max(0, next.at - prev.at) / 2000) / 60);
         if (min < XANAX_CD_RANGE[0] - 5 || min > XANAX_CD_RANGE[1] + 5) return null;
@@ -10538,7 +10558,7 @@
                     rows.map((st) => {
                         const k = Object.keys(st.trains || {});
                         return h('tr', {}, [
-                            h('td', { class: 't', style: 'width:110px', text: day(st.at) + ' ' + clock(st.at, settings) }),
+                            h('td', { class: 't', style: 'width:130px;white-space:nowrap', text: day(st.at) + ' ' + clock(st.at, settings) }),
                             h('td', {}, [h('b', { class: 'w', text: st.label }), st.note ? h('br') : null, st.note ? h('small', { class: 'muted', text: st.note }) : null]),
                             h('td', { style: 'width:150px' }, [h('span', { class: k.length === 1 ? 's-' + k[0] : null, text: trainsText(st.trains) || '—' })]),
                             h('td', { class: 'r', style: 'width:110px', text: st.gain ? fmtSigned(st.gain) : '' }),
@@ -11598,15 +11618,18 @@
         const rest = days - covered;
         const r = compare && compare[plan.strategy];
         if (r && rest > 0) {
+            const add = {};
             for (const [id, n] of Object.entries(r.used || {})) {
                 // Not bought: special refills (and their counters), EDVD the job pays for; the console is bought once.
                 if (id !== POINTS && !/^\d+$/.test(id)) continue;
                 if (Number(id) === GAME_CONSOLE) continue;
-                // Boosters the simulation took from your inventory aren't bought again on the days after.
-                const bought = (n || 0) - ((r.used.held && r.used.held[id]) || 0);
-                const extra = (Math.max(0, bought) / (horizonDays || 30)) * rest;
-                if (extra > 0) out[id] = Math.ceil((out[id] || 0) + extra - 1e-9);
+                // Candy (and cans) the simulation took from your inventory count as the plan's pick on the days after:
+                // Buy's list then takes everything you hold off once (the same id, or the pool).
+                const pool = poolOf(Number(id));
+                const to = pool === 'Candy' && r.candy ? String(r.candy.id) : pool === 'Energy Drink' && r.booster && r.booster.id ? String(r.booster.id) : id;
+                add[to] = (add[to] || 0) + ((n || 0) / (horizonDays || 30)) * rest;
             }
+            for (const [id, extra] of Object.entries(add)) if (extra > 0) out[id] = Math.ceil((out[id] || 0) + extra - 1e-9);
         }
         return out;
     }

@@ -14,7 +14,7 @@ import { tornDayStart, DAY } from '../../core/bars.js';
 import { needList, fillCheapest, whereText, linkFor, WINDOWS, SOURCE_BAZAAR, SOURCE_ITEM_MARKET, SOURCE_NPC, npcListing, candyShopsFrom, shopsAllowed, toggleShop, CITY_DAILY_ALLOWANCE } from '../../core/market.js';
 import { itemContext } from '../../core/model.js';
 import { CANDY_PLANS } from '../../core/strategies.js';
-import { tierWords } from '../../core/candy.js';
+import { tierWords, poolOf } from '../../core/candy.js';
 import { W3B_SITE_URL } from '../../api/w3b.js';
 import { itemMarketUrl, pointsMarketUrl } from '../../sources/route.js';
 import { sectionHead, meta } from './common.js';
@@ -64,15 +64,18 @@ export function needsForWindow(m, compare, plan, windowKey, horizonDays) {
     const rest = days - covered;
     const r = compare && compare[plan.strategy];
     if (r && rest > 0) {
+        const add = {};
         for (const [id, n] of Object.entries(r.used || {})) {
             // Not bought: special refills (and their counters), EDVD the job pays for; the console is bought once.
             if (id !== POINTS && !/^\d+$/.test(id)) continue;
             if (Number(id) === GAME_CONSOLE) continue;
-            // Boosters the simulation took from your inventory aren't bought again on the days after.
-            const bought = (n || 0) - ((r.used.held && r.used.held[id]) || 0);
-            const extra = (Math.max(0, bought) / (horizonDays || 30)) * rest;
-            if (extra > 0) out[id] = Math.ceil((out[id] || 0) + extra - 1e-9);
+            // Candy (and cans) the simulation took from your inventory count as the plan's pick on the days after:
+            // Buy's list then takes everything you hold off once (the same id, or the pool).
+            const pool = poolOf(Number(id));
+            const to = pool === 'Candy' && r.candy ? String(r.candy.id) : pool === 'Energy Drink' && r.booster && r.booster.id ? String(r.booster.id) : id;
+            add[to] = (add[to] || 0) + ((n || 0) / (horizonDays || 30)) * rest;
         }
+        for (const [id, extra] of Object.entries(add)) if (extra > 0) out[id] = Math.ceil((out[id] || 0) + extra - 1e-9);
     }
     return out;
 }

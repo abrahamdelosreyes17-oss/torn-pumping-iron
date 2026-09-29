@@ -1,6 +1,6 @@
 # HANDOFF: Torn Pumping Iron
 
-**Released: 1.2.1 (2026-09-29; 1.2.0 = round 4 earlier the same night).**
+**Released: 1.2.2 (2026-09-29): the owner's reports 7–13 (booster cooldown planned for, candy pool, Sally's, real gains, Xanax cooldowns, candy words, why this mix). Details in the newest session entry.**
 
 1.2.1 fixes and additions:
 - **Gym walk-through actually outlines gyms on live Torn:** the gym-icon class is hashed (`gym-1___Ij5f9`), and buttons carry no state class. Checked with the owner's console output.
@@ -59,83 +59,11 @@ Links:
    - `/link CODE` (own-service path) still moves a link silently.
    - The comparison is ~150 ms of work (run in slices now); a Web Worker would take it off the page entirely if it's still felt.
    - The FFScouter list honouring `minff`/`maxff` is unconfirmed: Torn Eye stores `ffIgnored` when a slice comes back out of range.
-7. **Next build (owner, 2026-09-29):**
-   - **A "why this mix" line** on Home and Plan: work each session out both ways and say e.g. "STR + DEX this session: +X% toward Hank's vs STR only". Today the split picks the mix, but only a single-stat session gets a why line.
-   - **Training the split on real data: not yet** (owner asked; answer "not yet, yes in 1–2 weeks"). Receipts and real sessions only started 2026-09-29. Once the owner and the friend have 1–2 weeks:
-     - compare what `pickStat` chose with the alternatives on their real sessions, using the learner's per-stat numbers;
-     - adjust the weighting (`SPLIT_HAPPY_WEIGHT`, the band) only if it beats the current rule on held-out days, the way `core/learn.js` keeps a change.
-   - The learner already refits per-stat gain multipliers from your trains, and the split uses them; it doesn't learn the split rule itself.
-8. **Candy name flips (owner report, 2026-09-29; owner said leave it, add a note):**
-   - **Symptom:** the step's candy changes between reloads (chocolates, then Lollipop, then Bag of Bon Bons).
-   - **Cause:** every 25-happy candy is interchangeable, and `candy.js bestCandy` picks the cheapest listing each time prices reload (every 30 min).
-   - **Next session:** add a disclaimer line where the candy is named (step label or sub, Plan's "What you do", Buy), e.g. "gives the same happy as Lollipop, Bag of Bon Bons, Chocolate Kisses… (+25 each); any of them works".
-   - **Optionally:** keep the day's pick unless another is ≥ 10% cheaper for the whole boost.
-9. **Sally's Sweet Shop in the computation (owner, 2026-09-29):**
-   - Owner's words: "there is a limit to sally sweet shop, you can look it up" and "sallys sweet shop, if we havent reached the daily limit, should also be part of the computation".
-   - How we calculate it:
-   - **Researched** [wiki Sally's_Sweet_Shop via search, 1 source so far; verify]:
-     - Sally's sells Lollipop $25, Bag of Chocolate Kisses $150 and Box of Sweet Hearts $500 (all +25 happy).
-     - City-shop buys count against Torn's **Daily Items Allowance: 100 items a day from NPC shops**, shared by all city shops.
-   - **Remaining allowance today, from the API:** personal stat `cityitemsbought` now, minus its value at the Torn day's start (`user/personalstats?stat=cityitemsbought&timestamp=<day start>`). Two calls, Public access.
-   - **Build:** the candy choice and Buy use Sally's for up to the remaining allowance (e.g. 49 Lollipops fit in 100), and the market for the rest.
-   - The owner earlier said Sally's is "newbies only" but now treats it as usable. Revisit the default-off "Shops I can buy from" tick: probably count it automatically while allowance remains, with the tick kept as an off switch. Ask the owner.
-10. **Use what you hold first; never tell the owner to buy what's already in the inventory (owner, 2026-09-29):**
-   - **Owner's words:**
-     - "it should NOT tell me to buy stuff … i have lollipop and candy, both same happiness, and booster cooldown … it should exhaust my inventory first";
-     - "lets say i need to take 49 chocolates, i have 29 chocolates and 20 lollipops, it should say take that, it's in inventory".
-   - **Checked 2026-09-29: it does NOT do this today.**
-     - `market.js needList` subtracts only the same item id.
-     - `candy.js bestCandy` values candy you hold at its market price, so held candy isn't preferred.
-     - The step names one candy ("Lollipop × 49").
-   - **Build (design):**
-     1. **Candy is a pool.** Every candy takes the same 30 min of booster cooldown; only its happy differs (25 / 35 / 50 / 75 / 100 / 150 / 250). A boost has N slots (49 on a 24 h cap).
-     2. **Fill the slots from the inventory first.** Held candy costs nothing new: happiest held candy first. Held candy of the same or more happy than the pick always goes in. Held candy with less happy goes in when it's the same tier as the pick, or when the budget can't buy better (let the Plan rule decide).
-     3. **Then Sally's** (and any ticked city shop), up to today's allowance (item 9).
-     4. **Then the market,** cheapest per happy (with item 8's steadiness).
-     5. **Step label and Buy say it plainly,** e.g. "Candy × 49: your 29 Chocolate Kisses + 20 Lollipops (all +25 happy) · buy 0". Buy lists only what's still missing.
-     6. **The simulator/candy choice counts held candy as free** for the first boost, so a plan using what you hold can win.
-     7. **The same pooling for energy drinks** (cans differ in energy but share the 2 h cooldown) and for EDVD/FHC counts already held.
-   - **Tests:** the owner's example (need 49, hold 29 Chocolate Kisses + 20 Lollipops → buy 0), a mixed-tier case, the allowance cap.
-11. **Xanax count per day and uneven cooldowns (owner, 2026-09-29):**
-   - **Owner's words:** "for xanax it says 2 of 2 today, its 9:34pm for me, and xanax isnt the same cooldown each time, does this reset per day? at 00:00 torn time?"
-   - **Answer given:**
-     - Yes, "today" is the Torn day, resetting at 00:00 TCT (UTC), not local midnight.
-     - The next Xanax is timed from Torn's real cooldown (API `cooldowns.drug`); later ones assume a fixed `XANAX_CD_MIN` = 7 h [calibrate], so they drift.
-   - **Build:**
-     1. Record each real Xanax cooldown when Torn shows one: the drug cooldown right after a Xanax is taken (`diffStates` drugTaken + `state.drugCd`).
-     2. Plan later Xanax with the player's own average (the learner or a rolling median); show the range if it varies.
-     3. Verify Torn's Xanax cooldown range (research says about 6–8 h; confirm on the wiki).
-     4. Say on Home when the Torn day resets in the player's local time (e.g. "Xanax 2 of 2 today · Torn day resets at 08:00 your time").
-12. **Booster cooldown not planned for (owner bug report, 2026-09-29; checked, real):**
-   - **Owner's words:** "i used candy cus it told me to use candy, its also in the plan use candy, cant do it once per day BECAUSE OF THE COOLDOWN … its supposed to be smart, and plan everything ahead for me, when not to take xanax, when to take candy, when not to take boosters etc." Screenshot: Home strip "BOOSTER 31h 40m · Not used by this plan" while the plan is Candy + Xanax.
-   - **Findings (code, 2026-09-29):**
-     a. **Simulator** (`strategies.js`): `candyXanax` and `dailyChoco` add candy every day and never check `boosterFree`. 49 candy add about 24.5 h of booster cooldown, so a full load every day is impossible, and their 30-day gains and costs are too optimistic (they can win recommendations wrongly).
-     b. **Day plan** (`plan.js dayTimeline`): the `candyDaily` path and the jump paths (choco/EDVD/console/99k) never read the live booster cooldown (`boosterFreeAt(state)`), and `candyQty()` always assumes an empty cooldown (`boostersThatFit(…, 0)`). They tell you to eat 49 candy with 31 h left on it.
-     c. **Home strip** (`common.js`, `model.js strip.booster.used`): "Not used by this plan" only means no booster in *today's remaining* steps. It says that after the day's candy was already taken.
-     d. **The plan only runs to Torn midnight.** There's no look-ahead across days for cooldowns (booster, drug) or "hold boosters for the jump".
-   - **Build:**
-     1. **Simulator:** every booster use (candy, EDVD, FHC, cans) goes in only while the booster cooldown is under the cap (+ the one overshoot), counting the cuts. Candy boosts then happen when the cooldown allows (about every 24.5 h for a full 49), or with fewer candies if a smaller daily boost wins. Re-check which plans win.
-     2. **Day plan:** read the booster cooldown from the live state.
-        - The candy count is what fits now (`boostersThatFit(id, cap, cdH)`).
-        - If none fits today: no candy step; Xanax sessions run as steady; the plan says "Candy boost tomorrow ~HH:MM (booster cooldown 31h 40m)".
-        - Jumps time their boost for when the cooldown has room, and hold boosters before a planned jump.
-     3. **A 48 h look-ahead timeline** (the plan's steps past Torn midnight) for Home's "next" list and the bot, so "when not to take Xanax / candy / boosters" is planned ahead.
-     4. **Strip:** "Used today · free again in 31h 40m" or "Next candy boost in …" instead of "Not used by this plan".
-     5. **Tests:** the owner's case (Candy + Xanax, booster 31h 40m → no candy step today, the next boost when the cooldown allows); the simulator's candy cadence against the 24 h cap; the jumps with a non-empty cooldown.
-13. **Show real gains plainly (owner, 2026-09-29):**
-   - **Owner's words:** "i do not think this is correct. im pretty sure i got like 300k … the progress also only shows progression not my actual stat increase". Screenshot: Progress › Last trains, 3 rows (STR × 10 The Edge +169,900; DEX × 1 Balboas +27,115; DEX × 4 Balboas +108,108), each "off by 0.0%".
-   - **Checked:**
-     - The rows sum to +305,123, so the owner's ~300k is right.
-     - The 0.0% is genuine, not circular (`calibration.js`: trains from the energy bar's drop, prediction from the formula, actual from Torn's stats). The gain model is accurate for the owner.
-   - **What's wrong is presentation:**
-     - "Last trains" lists only clean reads (one stat, no drug, booster or refill in between) without saying so.
-     - Nothing shows today's or this week's real stat gain plainly.
-   - **Build:**
-     1. Progress and Home: "Today +305,123 (STR +169,900 · DEX +135,223)", plus 7 and 30 days, from real stats (statsHistory / receipts).
-     2. The "Last trains" note: "reads with one stat and nothing taken in between, used to check the gain maths", plus a total row.
-     3. Optionally a per-day "gained" bar next to "planned".
-     4. **Group a session's reads into one row with its total.** The owner meant "300k on the 15 trains": STR × 10 + DEX × 1 + DEX × 4 = 15 trains, +305,123. The table split them into three 30 s reads, which looked like less.
-14. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
+7. **Built in 1.2.2 (owner's items 7–13):** see the newest session entry. Still open from them:
+   - **Training the split on real data: not yet** (answer "not yet, yes in 1–2 weeks"). Receipts and learner samples only started 2026-09-29 and live in the owner's browser. Once the owner and the friend have 1–2 weeks (from ~2026-10-06, better 10-13) and export them: compare what `pickStat` chose with the alternatives on their real sessions; change `SPLIT_HAPPY_WEIGHT`/the band only if it wins on held-out days (the way `core/learn.js` keeps a change).
+   - **Live checks with the owner (read-only, the owner navigates):** the gym page outline and the "open the … gyms" hint; the Sally's link `shops.php?step=candy` (4 sources now) and that `cityitemsbought` moves when the owner buys there; the Buy row caps at what's left of the 100; the rest of item 4's [verify] list.
+   - **Watch:** the first days of "Next 48 h" and the strip's "Next candy boost in …" against what the owner does; the recorded Xanax cooldowns (3 needed before the median is used).
+8. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
 Research and background: `docs/research-events-perks.md` (events, job perks, the console), `docs/review-fable-2026-09-29.md` (the three-pass review, all fixed), `docs/research-learning.md`, `docs/discord-bot-design.md`, `worker/USERSCRIPT-INTERFACE.md`, `docs/ENGINE-SPEC.md`, `docs/DESIGN.md` + `mockups/round3/` (the look every page follows now).
 
 ---
@@ -294,6 +222,26 @@ Done on the owner's yes. For later releases, the same steps minus the one-time r
 ---
 
 ## What each session did (newest first)
+
+### 2026-09-29 (after 1.2.1): the owner's reports 7–13 → 1.2.2
+- **Owner's answers this session:** Sally's Sweet Shop counts **by default** (the Buy tick switches it off; replaces "newbies only"). The booster plan below was approved as asked.
+- **1. Booster cooldown (item 12), built:**
+  - **Simulator** (`strategies.js`): `fitsAt`/`addBooster`; every candy, EDVD, FHC and can goes in only while the cooldown is under the cap (the last overshoots). Daily candy (candyXanax, dailyChoco) eats what fits; none fits → a plain Xanax day, and the refill isn't held back for a boost that can't come. Jumps wait until the whole boost fits. Starts from the live cooldown (`boosterCdMin`, in the compare key by the hour).
+  - **Day plan** (`plan.js dayTimeline`): the same rules against `boosterFreeAt(state)`. A Xanax with no room says "the booster cooldown is full; candy fits again at HH:MM TCT"; a short boost says "room for N of 49"; jumps say "no other boosters before it" and when they wait for the cap. Steady with Bliss now takes 5 EDVD on an empty cooldown (was 4; the last one may overshoot, research-confirmed).
+  - **48 h look-ahead:** `dayTimeline({until})` past midnight rolls the days (refill, boost, Xanax #1 again). Model: `lookAhead`, `later` (Home's new "Next 48 h" card, natural energy left out), `upcoming` (today + later, sent to the bot, 24 steps max).
+  - **Strip:** "Next candy boost in 19h 20m" / "Used · room again in 7h 40m" / "Not used by this plan"; the bar shows the cooldown against the cap. Heads-up: "No candy today · booster cooldown 31h 40m · next candy boost tomorrow 06:16 TCT", or "No boosters before …" ahead of a boost or jump.
+  - **What changed in the recommendations** (scratch `cmp.mjs`, sample prices, $150M, 30 days): the same plans win. Owner (Hank's STR high): Candy + Xanax in budget (+78.46M, was +78.48M), Steady + FHC max with no budget. Friend (example stats): Candy + Xanax, and the EDVD jump with no budget. Candy plans now eat 1,358 (candyXanax) / 1,418 (dailyChoco) candy a month instead of an impossible 1,470; gains move under 1.5%, costs drop with the candy. Jumps were already on a ≥ 28 h cycle, so they didn't move. With 31h 40m on the cooldown at the start, candyXanax loses ~60 more candy and still wins.
+- **2. Use what you hold first (item 10):** `candy.js fillFromPool` (candy by happy, energy drinks by energy; happiest first; only ≥ the pick's happy), `takeFromHeld`, `fillWords` ("Candy × 49: your 29 Chocolate Kisses + your 20 Lollipop"), `heldWords` ("from your items: … · buy 0"). Day plan steps carry the held items (so `needList` buys 0); `needList` also lets spare held candy/cans cover later needs (`fromPool`); the simulator counts held boosters as free (`o.held`, `used.held`; Buy's later-days average leaves them out). Drugs are not pooled.
+- **3. Sally's (item 9):** research in `docs/research-sallys-xanax.md` (100 items a day across all city shops, reset 00:00 TCT, 4 sources; Lollipop $25, Chocolate Kisses $150, Sweet Hearts $500; URL `shops.php?step=candy` confirmed by 4+ sources). `market.js`: `SALLYS`, `shopsAllowed`/`toggleShop` (`npcShopsOff`), `allowanceLeft`, `npcListing(npc, qty, left)`. Feed job `cityShop` every 10 min: `cityitemsbought` now + once a day at `dayStart − 1 s` (Torn's daily snapshot, Sidekick's method). Buy, Home and the market outlines share today's allowance; Buy's controls say "N of 100 city-shop items left today".
+- **4. Real gains (item 13):** `core/gains.js` (`gainOver`, `realGains`, `sessionsOf`); `recordDaily` keeps each day's opening stats (`open`). "Your gains" card on Home and Progress: Today / 7 days / 30 days with the per-stat split (today from the day log until a day has its opening read). Last trains: one row a session (reads within 10 min), a Total row, and the note that it only lists clean reads.
+- **5. Xanax (item 11):** `core/drugcd.js`: a Xanax is recorded from Torn's drug cooldown right after it (plus half the read gap), only in Torn's 360–480 min range and when the step was a Xanax; the median plans later Xanax once 3 are seen (`ctx.xanaxCdMin`, simulator too). Home's foot: "Torn day resets at 08:00 your time · Xanax cooldown ~6h 52m (your last 5: 6h 10m–7h 40m)". Research: Xanax 6–8 h random, nothing shortens it [unverified that nothing exists].
+- **6. Candy disclaimer (item 8):** `tierWords` on the boost step's note, Plan's Recommended card and table tooltip, Buy rows. The day's pick is stored (`candyPick`) and kept unless another +same-happy candy is ≥ 10% cheaper for the boost (`bestCandy({prefer})`).
+- **7. Why this mix (item 7):** `gympage.js whyMix`: "STR + DEX this session: +20% toward Hank's vs STR only" on Home (build foot) and Plan; "toward the build" = stat points that close a gap to the build's shares, the same energy either way (tooltip gives both numbers). Shown only when the mix is ahead by ≥ 0.5%.
+- **9. Training the split on real data:** not yet. Receipts and learner samples only started 2026-09-29 (they live in the owner's browser; the Worker has no copy), so there's under a day. Earliest check ~2026-10-06, better 10-13, after the owner's and the friend's exports.
+- **Review (read-only agent, 13,824 day-plan runs swept):** 4 bugs + 1 risk, all fixed with regression tests: a look-ahead boost after midnight counted on the old day (2 refills and 2 boosts on one day); a before-midnight refill trained a held Xanax (now the refill goes before the hold when the boost lands on a later day); the simulator's dailyChoco could refill twice a day; Buy took held boosters off twice for 3-day/week windows (now gross usage, pooled onto the pick, inventory taken off once in `needList`); Xanax samples across a read gap over 10 min are skipped.
+- **Checks:** `npm run check` 547 tests (404 userscript + Worker), ux-check and torn-check ALL PASSED; new `test/r5.test.js` (the owner's cases: 31h 40m cooldown, 29 + 20 held → buy 0, mixed tiers, allowance, sessions, Xanax median, the 10% rule, whyMix, the review's findings).
+- **Known gaps:** a boost or FHC within ~2 min of midnight isn't rolled to the new day; `planWhat` leaves candy out when all of it is held of another id; the Worker doesn't get the steps' notes (only labels).
+
 
 ### 2026-09-29 (end of night): 1.2.1 (live fixes after the owner used 1.2.0)
 - **Owner live reports and fixes:**

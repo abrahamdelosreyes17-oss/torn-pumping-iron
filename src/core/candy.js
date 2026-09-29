@@ -183,9 +183,12 @@ export function takeFromHeld(held, fill) {
 export function fillWords(fill, pickId) {
     if (!fill || !fill.alloc.length) return candyWords({ id: pickId });
     const total = fill.held + fill.buy;
-    if (fill.alloc.length === 1 && !fill.held) return itemName(fill.alloc[0].id) + ' × ' + total;
+    if (fill.alloc.length === 1) {
+        const a = fill.alloc[0];
+        return itemName(a.id) + ' × ' + total + (a.held ? ' (' + (a.held === a.qty ? 'all yours' : a.held + ' yours, buy ' + (a.qty - a.held)) + ')' : '');
+    }
     const noun = isCandy(pickId) ? 'Candy' : 'Energy drinks';
-    const parts = fill.alloc.map((a) => (a.held && a.held < a.qty ? a.held + ' of your ' : a.held ? 'your ' : '') + a.qty + ' ' + itemName(a.id));
+    const parts = fill.alloc.map((a) => (a.held === a.qty ? 'your ' + a.qty + ' ' + itemName(a.id) : a.qty + ' ' + itemName(a.id) + (a.held ? ' (' + a.held + ' yours)' : '')));
     return noun + ' × ' + total + ': ' + parts.join(' + ');
 }
 

@@ -307,7 +307,8 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     // A new Torn day: its refill (today's, if unused, goes in before midnight), Xanax count, boost and share.
     const rollDay = (at) => {
         while (tornDayStart(at) > curDay) {
-            if (refillLeft && !isJump) {
+            // Not while a Xanax is held for the boost: the refill would train its energy.
+            if (refillLeft && !isJump && !holding) {
                 const last = Math.max(t, curDay + DAY - REFILL_LAST_CALL_MS);
                 advance(last);
                 refill(last, { note: 'Use before 00:00 Torn time' });
@@ -452,6 +453,12 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         if (daily && !boosted) {
             const boostAt = nextQuarterTick(drugAt + xanCD - 1) + MIN;
             if (fitsAt(candyId, boostAt) > 0) {
+                // The boost lands on a later Torn day: today's refill goes now, before the Xanax is held (a refill
+                // during the hold would train the held energy).
+                if (refillLeft && boostAt >= curDay + DAY && drugAt + MIN < Math.min(end, curDay + DAY)) {
+                    refill(drugAt);
+                    refillLeft = false;
+                }
                 E += ITEMS[XANAX].energy;
                 H += ITEMS[XANAX].happy;
                 steps.push({ id: 'hold-' + ++n, at: drugAt, kind: 'hold', label: 'Xanax #' + xanN++ + ' · keep the energy for the boost', items: [{ id: XANAX, qty: 1 }], trains: {}, gyms: {}, gain: 0, energy: 0, strict: false, warnAt: null, note: 'no boosters until the boost' });
@@ -467,6 +474,8 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             const at = tick + MIN;
             const fits = fitsAt(candyId, at);
             if (fits > 0) {
+                // The tick can fall after midnight: the boost (and its refill) then belong to the new Torn day.
+                rollDay(at);
                 advance(at);
                 E += ITEMS[XANAX].energy;
                 H += ITEMS[XANAX].happy;
@@ -561,7 +570,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         }
     }
     // A refill still unused goes in before midnight.
-    if (refillLeft && curDay + DAY <= end) {
+    if (refillLeft && curDay + DAY <= end && !holding) {
         const at = Math.max(now, curDay + DAY - REFILL_LAST_CALL_MS);
         advance(at);
         refill(at, { note: 'Use before 00:00 Torn time' });

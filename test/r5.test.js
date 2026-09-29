@@ -135,6 +135,8 @@ test('owner’s example: need 49, hold 29 Chocolate Kisses + 20 Lollipops → bu
     assert.equal(f.value, 49 * 25);
     assert.equal(fillWords(f, LOLLIPOP), 'Candy × 49: your 29 Chocolate Kisses + your 20 Lollipop');
     assert.equal(heldWords(f), 'from your items: 29 Chocolate Kisses + 20 Lollipop · buy 0');
+    assert.equal(fillWords(fillFromPool(49, LOLLIPOP, { [LOLLIPOP]: 30 }), LOLLIPOP), 'Lollipop × 49 (30 yours, buy 19)');
+    assert.equal(fillWords(fillFromPool(49, LOLLIPOP, { [CHOC_KISSES]: 10 }), LOLLIPOP), 'Candy × 49: your 10 Chocolate Kisses + 39 Lollipop');
     const steps = dayTimeline({ state: player({ drug: 0 }), now: T0, strategy: 'candyXanax', ctx: { ...CTX, held } });
     const boost = steps.find((s) => s.kind === 'boost');
     assert.match(boost.label, /^Candy × 49: your 29 Chocolate Kisses \+ your 20 Lollipop \+ Xanax/);
@@ -298,4 +300,51 @@ test('why this mix: a two-stat session says how much more it moves you toward th
     // A stat already at its share: its trains count nothing toward the build.
     assert.equal(whyMix({ ...m, shares: { str: 0.45, spd: 0.1, def: 0.35, dex: 0.1 } }), null);
     assert.equal(whyMix({ ...m, steps: [{ parts: [m.steps[0].parts[0]] }] }), null, 'one stat: the one-stat line instead');
+});
+
+/* The review's findings (2026-09-29): one refill and one boost a Torn day; no refill trains a held Xanax. */
+
+test('look-ahead: a boost after midnight belongs to the new day; one refill a Torn day; the refill comes before a held Xanax', () => {
+    for (const [strategy, drugH, h0] of [['candyXanax', 7.9, 16], ['dailyChoco', 7.9, 9], ['candyXanax', 5, 20], ['dailyChoco', 3, 21]]) {
+        const now = Date.UTC(2026, 8, 29, h0, 17);
+        const steps = dayTimeline({ state: player({ drug: Math.round(drugH * 3600), at: now }), now, strategy, ctx: CTX, until: now + 48 * HOUR });
+        const per = {};
+        for (const s of steps) {
+            const d = tornDayStart(s.at);
+            per[d] = per[d] || { refill: 0, boost: 0 };
+            if (s.kind === 'refill') per[d].refill++;
+            if (s.kind === 'boost') per[d].boost++;
+        }
+        for (const [d, c] of Object.entries(per)) {
+            assert.ok(c.refill <= 1, strategy + ' ' + new Date(Number(d)).toISOString() + ': ' + c.refill + ' refills');
+            assert.ok(c.boost <= 1, strategy + ': ' + c.boost + ' boosts');
+        }
+        const hold = steps.find((s) => s.kind === 'hold');
+        if (hold) {
+            const boost = steps.find((s) => s.kind === 'boost' && s.at > hold.at);
+            assert.ok(!steps.some((s) => s.kind === 'refill' && s.at > hold.at && s.at < boost.at), 'no refill while a Xanax is held');
+        }
+    }
+});
+
+test('simulator: one refill a day even when the candy boost comes later in the day', () => {
+    const o = { stats: { str: 118400, spd: 0, def: 0, dex: 0 }, target: 'str', gyms: { str: { dots: 6.5, energy: 10 } }, happyMax: 5025, prices: SAMPLE_PRICES, candyId: LOLLIPOP, days: 30 };
+    for (const candyCount of [49, 10]) for (const xanaxCdMin of [360, 420]) {
+        const r = simulateStrategy('dailyChoco', { ...o, candyCount, xanaxCdMin, boosterCdMin: 1900 });
+        assert.ok(r.used[POINTS] <= 30 * 30, 'at most 30 refills in 30 days (' + r.used[POINTS] / 30 + ')');
+    }
+});
+
+test('Buy over a week: what you hold is taken off once (100 held, 48 a day → buy 236)', async () => {
+    const { needsForWindow } = await import('../src/ui/app/buy.js');
+    const m = { now: T0, steps: [{ at: T0 + HOUR, kind: 'boost', items: [{ id: LOLLIPOP, qty: 48 }] }], ahead: null };
+    const compare = { candyXanax: { used: { [LOLLIPOP]: 48 * 30, held: { [LOLLIPOP]: 100 } }, candy: { id: LOLLIPOP } } };
+    const need = needsForWindow(m, compare, { strategy: 'candyXanax' }, 'week', 30);
+    assert.equal(needList(need, { [LOLLIPOP]: 100 })[0].buy, 7 * 48 - 100);
+    // Held Chocolate Kisses: the days after count as the pick, the pool takes the held ones off.
+    const m2 = { now: T0, steps: [{ at: T0 + HOUR, kind: 'boost', items: [{ id: CHOC_KISSES, qty: 48 }] }], ahead: null };
+    const c2 = { candyXanax: { used: { [CHOC_KISSES]: 60, [LOLLIPOP]: 48 * 30 - 60, held: { [CHOC_KISSES]: 60 } }, candy: { id: LOLLIPOP } } };
+    const rows = needList(needsForWindow(m2, c2, { strategy: 'candyXanax' }, 'week', 30), { [CHOC_KISSES]: 60 });
+    assert.equal(rows.find((r) => r.id === CHOC_KISSES).buy, 0, 'never buy the candy you hold');
+    assert.equal(rows.find((r) => r.id === LOLLIPOP).buy, 6 * 48 - 12);
 });

@@ -401,8 +401,11 @@ export function simulateStrategy(id, o) {
                 buy(ECSTASY);
                 drugFree = t + ecsCD;
                 train();
-                refill(day);
-                train();
+                // One refill a Torn day: a day with no room for candy earlier may already have used it.
+                if (day !== refillDay) {
+                    refill(day);
+                    train();
+                }
                 spendSpecial(day);
                 phase = 'done';
                 doneDay = day;

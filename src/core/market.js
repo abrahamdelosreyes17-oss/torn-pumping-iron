@@ -7,6 +7,7 @@
 import { POINTS, ITEMS, itemName, isCandy } from './items.js';
 import { bazaarUrl, itemMarketUrl, pointsMarketUrl, shopUrl } from '../sources/route.js';
 import { poolOf, fillFromPool, takeFromHeld } from './candy.js';
+import { tornDayStart } from './bars.js';
 
 export const SOURCE_BAZAAR = 'bazaar';
 export const SOURCE_ITEM_MARKET = 'itemmarket';
@@ -87,7 +88,7 @@ export function toggleShop(settings = {}, shop) {
  */
 export function allowanceLeft(cs, now) {
     if (!cs || !(Number.isFinite(cs.start) && Number.isFinite(cs.now))) return null;
-    if (Math.floor(now / 86400e3) * 86400e3 !== cs.day) return CITY_DAILY_ALLOWANCE;
+    if (tornDayStart(now) !== cs.day) return CITY_DAILY_ALLOWANCE;
     return Math.max(0, CITY_DAILY_ALLOWANCE - Math.max(0, cs.now - cs.start));
 }
 

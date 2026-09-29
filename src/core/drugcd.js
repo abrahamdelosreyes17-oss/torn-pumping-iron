@@ -14,6 +14,9 @@ export const XANAX_CD_RANGE = [360, 480];
 export const XANAX_CD_KEEP = 30;
 export const XANAX_CD_MIN_SAMPLES = 3;
 
+/** A Xanax seen across a longer gap between reads isn't recorded (when it was taken is too uncertain). */
+export const XANAX_CD_MAX_GAP_MS = 10 * 60 * 1000;
+
 /**
  * A Xanax taken between two reads: the cooldown Torn showed, plus half the gap between the reads (it was taken
  * somewhere in between). Only when it's in Xanax's range and the plan's step (when known) was a Xanax.
@@ -25,6 +28,7 @@ export const XANAX_CD_MIN_SAMPLES = 3;
  */
 export function xanaxCdSample(prev, next, diff, hint = null) {
     if (!prev || !next || !diff || !diff.drugTaken) return null;
+    if (next.at - prev.at > XANAX_CD_MAX_GAP_MS) return null;
     if (hint && Array.isArray(hint.items) && hint.items.length && !hint.items.some((it) => it.id === XANAX)) return null;
     const min = Math.round((next.drugCd + Math.max(0, next.at - prev.at) / 2000) / 60);
     if (min < XANAX_CD_RANGE[0] - 5 || min > XANAX_CD_RANGE[1] + 5) return null;
