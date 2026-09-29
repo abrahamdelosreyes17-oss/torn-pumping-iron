@@ -65,7 +65,12 @@ Links:
      - compare what `pickStat` chose with the alternatives on their real sessions, using the learner's per-stat numbers;
      - adjust the weighting (`SPLIT_HAPPY_WEIGHT`, the band) only if it beats the current rule on held-out days, the way `core/learn.js` keeps a change.
    - The learner already refits per-stat gain multipliers from your trains, and the split uses them; it doesn't learn the split rule itself.
-8. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
+8. **Candy name flips (owner report, 2026-09-29; owner said leave it, add a note):**
+   - **Symptom:** the step's candy changes between reloads (chocolates, then Lollipop, then Bag of Bon Bons).
+   - **Cause:** every 25-happy candy is interchangeable, and `candy.js bestCandy` picks the cheapest listing each time prices reload (every 30 min).
+   - **Next session:** add a disclaimer line where the candy is named (step label or sub, Plan's "What you do", Buy), e.g. "gives the same happy as Lollipop, Bag of Bon Bons, Chocolate Kisses… (+25 each); any of them works".
+   - **Optionally:** keep the day's pick unless another is ≥ 10% cheaper for the whole boost.
+9. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
 Research and background: `docs/research-events-perks.md` (events, job perks, the console), `docs/review-fable-2026-09-29.md` (the three-pass review, all fixed), `docs/research-learning.md`, `docs/discord-bot-design.md`, `worker/USERSCRIPT-INTERFACE.md`, `docs/ENGINE-SPEC.md`, `docs/DESIGN.md` + `mockups/round3/` (the look every page follows now).
 
 ---
