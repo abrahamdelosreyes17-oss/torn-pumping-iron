@@ -1,12 +1,26 @@
 # HANDOFF: Torn Pumping Iron
 
-**Released: 1.1.0 (2026-09-29; before it 1.0.1 and 1.0.0 the same day).** Round 3: the redesign, energy ladder + Plan dropdown, taking turns with Torn Trading, learning from your own trains, the Discord bot, and every fix from the three-pass review.
-- Install (pinned 1.1.0): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/b7c9a6a591b3549cb3798c908b9dbd5789ea2f64/torn-pumping-iron.user.js
+**Released: 1.1.1 (2026-09-29; 1.1.0 earlier the same night, 1.0.1 / 1.0.0 that day).** 1.1.0 = round 3 (the redesign, energy ladder + Plan dropdown, taking turns with Torn Trading, learning from your own trains, the Discord bot, every fix from the three-pass review). 1.1.1 = Plan › Train toward is a real build dropdown; Torn Eye asks FFScouter for fair fight 1.3–2.6 (without a range it sent Torn's strongest players, ~20B stats, all "Can't win") and refreshes an old list once.
+- Install (pinned 1.1.1): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/7cfbcb04352d5b6270598a11e706f144e6e81845/torn-pumping-iron.user.js
 - Auto-update URL (`@updateURL`): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/main/torn-pumping-iron.user.js
-- Webpage: https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html (gh-pages branch; without the script it shows the placeholder)
+- Webpage: https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html (gh-pages branch; unchanged since 1.0.0, `site/` didn't change)
 - Repo: https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron (public; `main` + `gh-pages`)
 
-**Next session, start here:** the owner answered every round-3 decision, so build (R1 → R7; the Discord bot in parallel by an agent). Read this file, then **`docs/ROUND3-PLAN.md`**: every request from the owner's live check (and their friend's), what is built / mockup only / designed / not started, the open decisions, and the build order R0–R7. Then `docs/bugs-after-1.0.1.md`, `docs/discord-bot-design.md`, the round-3 mockups (`mockups/round3/index.html`, served by the `harness` launch config at http://127.0.0.1:8785/mockups/round3/index.html). Background: `docs/BUILD-PLAN.md` (history), `docs/ENGINE-SPEC.md` (maths), `docs/DESIGN.md` (look; round 3 adds cards + more room, see `mockups/round3/r3.css`), `docs/audit-1.0.md`.
+**Next session, start here:**
+1. Read this file (§2 how the owner works, §3 settled decisions, the newest session entry at the bottom), then **`docs/ROUND3-PLAN.md` §5 "Auto mode"**: the owner's next feature (plan the days around events, faction wars, chains and income; the player just follows). No machine learning needed: a schedule search on the existing simulator. **Ask the owner first** (not answered yet):
+   - how much energy and Xanax to keep for a war day;
+   - whether saving days may stop natural-energy training;
+   - how many days the spend must stay sustainable.
+   Plus the income key choice (§5: a log-only custom key if Torn allows it, else an optional Full key; wars need no new key, they're Public).
+2. Owner to-dos still open (ROUND3-PLAN §3b):
+   - O2: does a special refill go past max energy?
+   - O3: Game Console, "Hardcore Game" 5 E for 80–120 happy, doubled by the 5★ Toy/Game Shop perk.
+   - O4: are CaffeineCon and World Diabetes Day the events that matter?
+   - O5: read Torn's rules.php.
+   - B0 + B10: Discord bot setup and live test (steps in `worker/SETUP.md` parts 1–4; the owner has a Discord channel).
+   - The learner's real-data check: the owner and the friend export their data (Settings › Developer › Export as .zip) after a week or two.
+3. Ideas already recorded: the Worker's one-message war pings, the learned HP-kept model (no data source yet: the attack page's final `attackData` could feed it), timing habits, happy loss per train.
+Research and background: `docs/research-events-perks.md` (events, job perks, the console), `docs/review-fable-2026-09-29.md` (the three-pass review, all fixed), `docs/research-learning.md`, `docs/discord-bot-design.md`, `worker/USERSCRIPT-INTERFACE.md`, `docs/ENGINE-SPEC.md`, `docs/DESIGN.md` + `mockups/round3/` (the look every page follows now).
 
 ---
 
@@ -164,6 +178,14 @@ Done on the owner's yes. For later releases, the same steps minus the one-time r
 ---
 
 ## What each session did (newest first)
+
+### 2026-09-29 (late night): releases 1.1.0 and 1.1.1
+- **1.1.0** on "all, then commit and push to main": b7c9a6a (handoff f5ad677). Pinned file checked at `@version 1.1.0`.
+- **1.1.1** on "release": 7cfbcb0. Owner's live notes after 1.1.0:
+  - "for train toward i cant change the build": the "Build · …" box was styled like a dropdown but was plain text. It's now a `<select>` of all 11 builds (`buildOptions()` in `src/ui/app/plan.js`).
+  - "check torn eye": the owner's list was all "Can't win". Read (our github.io page, read-only) the Torn Eye cache: FFScouter's get-targets had returned fair fight 31–40, bs_estimate ~20B. The live API doesn't apply the documented 1–3 default. Fix: `TARGET_FF` 1.3–2.6 always sent; an old list without it reloads once; a note when a whole list is far stronger than you. The fight maths was right.
+  - Owner asked about Auto mode: not built; recorded with the income-key idea in ROUND3-PLAN §5.
+- Checks: 388 tests (106 Worker), ux-check, torn-check (1.1.0); 1.1.1 re-ran the tests and ux-check.
 
 ### 2026-09-29 (night): round-3 build (R1 → R6) and release 1.1.0
 - Owner: build R1 → R5 without waiting between milestones; Discord bot (R6 B1–B9) by a background agent in a worktree (only `worker/`; the userscript side after the interface is agreed); research on events/job perks by a read-only agent (`docs/research-events-perks.md`).
