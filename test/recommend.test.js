@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { recommend, pickWarning, recheckTriggers, dailyCheckDue, WARN_STATS_PCT } from '../src/core/recommend.js';
+import { recommend, pickWarning, recheckTriggers, dailyCheckDue, whyNot, WARN_STATS_PCT } from '../src/core/recommend.js';
 import { simulateStrategy } from '../src/core/strategies.js';
 import { SAMPLE_PRICES } from '../src/core/items.js';
 
@@ -96,4 +96,17 @@ test('the daily re-check is due once per Torn day from 06:00', () => {
     assert.equal(dailyCheckDue(d - 3600e3, d + 6 * 3600e3), true);
     assert.equal(dailyCheckDue(d + 6.5 * 3600e3, d + 9 * 3600e3), false);
     assert.equal(dailyCheckDue(d - 30 * 3600e3, d + 3600e3), true, 'missed yesterday\'s');
+});
+
+test('each other plan says why it is not the pick', () => {
+    const best = { id: 'steady', gained: 39.7e6, cost: 0 };
+    const choco = { id: 'dailyChoco', gained: 27.2e6, cost: 47e6, deltaStatsPct: -31.5, deltaCost: 47e6, overBudget: false, verdict: 'worse' };
+    const why = whyNot(best, choco, { bliss: false, budget: 150e6 });
+    assert.match(why, /^−31% stats and \$47M more/);
+    assert.match(why, /candy lifts happy for one session a day/);
+    assert.match(why, /without Ignorance Is Bliss/);
+    assert.doesNotMatch(whyNot(best, choco, { bliss: true, budget: 150e6 }), /Ignorance/);
+    assert.match(whyNot(best, { ...choco, gained: 50e6, deltaStatsPct: 26, overBudget: true }, { budget: 150e6 }), /^Over your \$150/);
+    const r = recommend({ steady: best, dailyChoco: { id: 'dailyChoco', gained: 27.2e6, cost: 47e6 } }, { budget: 150e6 });
+    assert.ok(r.alternatives[0].why.length > 10);
 });

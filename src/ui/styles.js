@@ -152,6 +152,7 @@ a:hover { text-decoration: underline; }
 .pill-tag.chalk { background: var(--chalk); color: var(--on-chalk); }
 
 /* warning block */
+.why { font-size: 12px; color: var(--warn); margin-top: 2px; }
 .warnb { border-left: 3px solid var(--warn); background: #231d12; padding: 10px 14px; border-radius: 0 8px 8px 0; display: flex; flex-direction: column; gap: 6px; }
 .warnb b { color: #ffd79a; font-size: 14px; }
 .warnb p { margin: 0; color: var(--text); max-width: 90ch; }

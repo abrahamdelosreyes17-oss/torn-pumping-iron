@@ -119,6 +119,13 @@ export function refresh() {
     }
 }
 
+/** Ask the feed now (a new key was saved): no waiting for the next heartbeat. */
+export function nudgeFeed() {
+    if (!pi.feed) return;
+    pi.feed.tick().catch(() => {});
+    setTimeout(() => pi.feed.tick().catch(() => {}), 500);
+}
+
 export function onModel(fn) {
     pi.listeners.push(fn);
     if (pi.model) fn(pi.model);
@@ -146,6 +153,14 @@ export function startFeed() {
     const tick = () => pi.feed.tick().catch(() => {});
     tick();
     setInterval(tick, LEADER_HEARTBEAT_MS);
+    // The first heartbeat only claims the lead; confirm it half a second later instead of a whole heartbeat.
+    setTimeout(tick, 500);
+    // Coming back to a tab: take the lead and read at once, not at the next heartbeat.
+    document.addEventListener('visibilitychange', () => {
+        if (!isVisible()) return;
+        tick();
+        setTimeout(tick, 500);
+    });
     // Follower tabs redraw when the leader stores a new state; everyone redraws each second for countdowns.
     gmOnChange(K.userState, refresh);
     gmOnChange(K.userStatic, refresh);

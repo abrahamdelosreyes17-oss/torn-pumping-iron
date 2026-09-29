@@ -6,7 +6,7 @@
 
 import { gmOnChange } from './platform/gm.js';
 import { K, get, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup } from './platform/store.js';
-import { pi, tornClient, refresh, onModel, isVisible, TORN_PER_MINUTE } from './runtime.js';
+import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE } from './runtime.js';
 import { PiApp } from './ui/app/app.js';
 import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, keyIsEnough } from './api/torn.js';
 import { W3bClient, fetchW3bListings } from './api/w3b.js';
@@ -98,6 +98,7 @@ async function saveTornKey(v) {
         const s = { ...(get(K.userStatic, {}) || {}), keyInfo: info, keyInfoAt: Date.now() };
         set(K.userStatic, s);
         const enough = keyIsEnough(info);
+        nudgeFeed();
         if (enough === false) {
             const p = keyProblem({ hasKey: true, dead: false, keyInfo: info });
             return { ok: false, text: 'Saved, but this ' + (info.type || '') + ' key won’t work. ' + (p ? p.text : 'Make a Limited key.') };

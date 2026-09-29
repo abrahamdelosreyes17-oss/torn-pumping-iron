@@ -160,7 +160,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.known ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost) });
     let rec = null;
     if (compare) {
-        const r = recommend(compare, { budget: settings.budget || Infinity });
+        const r = recommend(compare, { budget: settings.budget || Infinity, bliss: pc.perks.bliss });
         rec = r;
         const mine = compare[plan.strategy];
         if (r.recommended === plan.strategy) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is still best' });

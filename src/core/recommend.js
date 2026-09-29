@@ -27,7 +27,7 @@ const HAPPY_BOUGHT = new Set(['dailyChoco', 'chocoJump', 'edvdJump', 'happy99k']
  * @param {number} [o.budget] - money for the horizon; Infinity when unset
  * @returns {{recommended:string, alternatives:object[], reasons:string[]}}
  */
-export function recommend(results, { budget = Infinity } = {}) {
+export function recommend(results, { budget = Infinity, bliss = false } = {}) {
     const list = Object.values(results).filter(Boolean);
     if (!list.length) return { recommended: null, alternatives: [], reasons: [] };
     const inBudget = list.filter((r) => r.cost <= budget);
@@ -45,7 +45,8 @@ export function recommend(results, { budget = Infinity } = {}) {
             if (overBudget && r.gained > best.gained) verdict = 'overBudget';
             else if (Math.abs(deltaStatsPct) < 1 && Math.abs(deltaCost) < 1e6) verdict = 'same';
             else if (deltaStatsPct > 0 && !overBudget) verdict = 'better';
-            return { id: r.id, gained: r.gained, cost: r.cost, deltaStatsPct, deltaCost, overBudget, verdict };
+            const alt = { id: r.id, gained: r.gained, cost: r.cost, deltaStatsPct, deltaCost, overBudget, verdict };
+            return { ...alt, why: whyNot(best, alt, { bliss, budget }) };
         })
         .sort((a, b) => b.gained - a.gained);
     return { recommended: best.id, alternatives, reasons: whyRecommended(best, results, { budget }) };
@@ -60,6 +61,27 @@ function whyRecommended(best, results, { budget }) {
     if (best.id === 'blissSteady') out.push('Ignorance Is Bliss lets happy climb above your maximum, so boosters keep paying off.');
     if (JUMP_LIKE.has(best.id)) out.push('At your stats a bigger happy multiplies each train more than the energy you lose while stacking.');
     return out;
+}
+
+/**
+ * One line on why an alternative is not the recommendation (Plan › Other
+ * plans): the number that decides it first, then the mechanism.
+ * @param {object} best - the recommended result {id, gained, cost}
+ * @param {object} alt - an alternatives[] row
+ */
+export function whyNot(best, alt, { bliss = false, budget = Infinity } = {}) {
+    if (!best || !alt) return '';
+    const pct = Math.round(alt.deltaStatsPct);
+    if (alt.overBudget) return 'Over your ' + fmtMoney(budget) + ' budget' + (alt.gained > best.gained ? ' (it would gain ' + (pct > 0 ? '+' : '') + pct + '% more).' : '.');
+    if (alt.verdict === 'same') return 'The same stats for the same money: nothing to gain by switching.';
+    const why = [];
+    if (JUMP_LIKE.has(alt.id)) why.push('holding four Xanax stops natural energy');
+    if (HAPPY_BOUGHT.has(alt.id)) why.push('the Ecstasy takes a drug cooldown a Xanax would fill');
+    if (alt.id === 'dailyChoco') why.push('the candy lifts happy for one session a day');
+    if (HAPPY_BOUGHT.has(alt.id) && !bliss) why.push('without Ignorance Is Bliss the extra happy resets');
+    const head = pct < 0 ? '−' + -pct + '% stats' : pct > 0 ? '+' + pct + '% stats for ' + fmtMoney(alt.deltaCost) + ' more' : 'No more stats';
+    const cost = pct < 0 && alt.deltaCost > 0 ? ' and ' + fmtMoney(alt.deltaCost) + ' more' : '';
+    return head + cost + (why.length ? ': ' + why.join('; ') + '.' : '.');
 }
 
 /**

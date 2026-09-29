@@ -119,13 +119,13 @@ export function renderPlan(m, ctx) {
             h('tr', { class: 'click' + (sel ? ' sel' : ''), tabindex: '0', onclick: () => { const w = pickWarning(best, compare[a.id], { bliss: m.pc.perks.bliss, days }); if (w.warn) { ctx.ui.planPick = a.id; ctx.rerender(); } else { ctx.ui.planPick = null; ctx.setPlan({ strategy: a.id, strategyPicked: true }); } } }, [
                 h('td', {}, [h('small', { text: KIND_TAG[st.kind] })]),
                 h('td', {}, [h('b', { class: 'w', text: st.name })]),
-                h('td', { class: 'muted', text: st.what + (a.overBudget ? ' · over budget' : '') }),
+                h('td', { class: 'muted' }, [st.what, a.why ? h('div', { class: 'why', text: 'Why not: ' + a.why }) : null]),
                 h('td', { class: 'r ' + (a.deltaStatsPct >= 0 ? 'c-good' : 'c-bad'), text: fmtPct(a.deltaStatsPct) }),
                 h('td', { class: 'r ' + (a.deltaCost > 0 ? 'c-bad' : 'c-good'), text: (a.deltaCost >= 0 ? '+' : '−') + fmtMoney(Math.abs(a.deltaCost)) }),
             ]),
         );
     }
-    const altTable = h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:70px', text: 'Kind' }), h('th', { style: 'width:170px', text: 'Plan' }), h('th', { text: 'What you do' }), h('th', { class: 'r', style: 'width:90px', text: 'Stats' }), h('th', { class: 'r', style: 'width:90px', text: 'Cost' })])]), h('tbody', {}, altRows)]);
+    const altTable = h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:70px', text: 'Kind' }), h('th', { style: 'width:170px', text: 'Plan' }), h('th', { text: 'What you do · why it isn’t the pick' }), h('th', { class: 'r', style: 'width:90px', text: 'Stats' }), h('th', { class: 'r', style: 'width:90px', text: 'Cost' })])]), h('tbody', {}, altRows)]);
 
     const blocks = [sectionHead('Other plans', meta(['compared with ' + S.short.toLowerCase() + ' · click a row to pick it'])), altTable];
     if (ctx.ui.goalForm) {

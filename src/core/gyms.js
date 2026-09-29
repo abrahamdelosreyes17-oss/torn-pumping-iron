@@ -76,8 +76,48 @@ function rowToGym([id, name, energy, cost, str, spd, def, dex]) {
 
 export const GYMS = GYM_ROWS.map(rowToGym);
 
+/*
+ * Lookups are hot: a 30-day comparison asks for the best gym once per stat
+ * per train (tens of thousands of times). Tables and unlocked lists are never
+ * changed after they are made, so each gets an index once (keyed by the
+ * object itself; a new table or list gets a new index).
+ */
+const BY_ID = new WeakMap();
+const BY_DOTS = new WeakMap();
+
+function idIndex(table) {
+    let m = BY_ID.get(table);
+    if (!m) {
+        m = new Map();
+        for (const g of table) if (!m.has(g.id)) m.set(g.id, g);
+        BY_ID.set(table, m);
+    }
+    return m;
+}
+
 export function gymById(id, table = GYMS) {
-    return table.find((g) => g.id === Number(id)) || null;
+    return idIndex(table).get(Number(id)) || null;
+}
+
+/** The unlocked gyms that train `stat`, grouped by dots, best first (each group in unlocked order). */
+function dotGroups(stat, unlockedIds, table) {
+    let perTable = BY_DOTS.get(table);
+    if (!perTable) BY_DOTS.set(table, (perTable = new WeakMap()));
+    let perList = perTable.get(unlockedIds);
+    if (!perList) perTable.set(unlockedIds, (perList = new Map()));
+    let groups = perList.get(stat);
+    if (!groups) {
+        const byDots = new Map();
+        for (const id of unlockedIds) {
+            const g = gymById(id, table);
+            if (!g || !(g.dots[stat] > 0)) continue;
+            if (!byDots.has(g.dots[stat])) byDots.set(g.dots[stat], []);
+            byDots.get(g.dots[stat]).push(g);
+        }
+        groups = [...byDots.entries()].sort((a, b) => b[0] - a[0]).map(([, list]) => list);
+        perList.set(stat, groups);
+    }
+    return groups;
 }
 
 /**
@@ -168,18 +208,18 @@ export function gymAccess(gym, stats, { drugsTaken = null } = {}) {
  * highest dots wins; on a tie, the cheaper train (less leftover energy).
  */
 export function bestGymFor(stat, stats, unlockedIds, { table = GYMS, drugsTaken = null, active = null } = {}) {
-    let best = null;
-    for (const id of unlockedIds || []) {
-        const g = gymById(id, table);
-        if (!g || !(g.dots[stat] > 0)) continue;
-        if (!gymAccess(g, stats, { drugsTaken }).ok) continue;
-        if (!best || g.dots[stat] > best.dots[stat]) best = g;
-        else if (g.dots[stat] === best.dots[stat]) {
+    if (!unlockedIds || !unlockedIds.length) return null;
+    // Highest dots first; the first group with a gym you can use wins.
+    for (const group of dotGroups(stat, unlockedIds, table)) {
+        let best = null;
+        for (const g of group) {
+            if (!gymAccess(g, stats, { drugsTaken }).ok) continue;
             // A tie: stay in the gym you're in (no switch for nothing), else the cheaper train.
-            if (g.id === Number(active) || (best.id !== Number(active) && g.energy < best.energy)) best = g;
+            if (!best || g.id === Number(active) || (best.id !== Number(active) && g.energy < best.energy)) best = g;
         }
+        if (best) return best;
     }
-    return best;
+    return null;
 }
 
 /**

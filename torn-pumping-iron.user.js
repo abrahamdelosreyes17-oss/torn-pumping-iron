@@ -1299,8 +1299,48 @@
 
     const GYMS = GYM_ROWS.map(rowToGym);
 
+    /*
+     * Lookups are hot: a 30-day comparison asks for the best gym once per stat
+     * per train (tens of thousands of times). Tables and unlocked lists are never
+     * changed after they are made, so each gets an index once (keyed by the
+     * object itself; a new table or list gets a new index).
+     */
+    const BY_ID = new WeakMap();
+    const BY_DOTS = new WeakMap();
+
+    function idIndex(table) {
+        let m = BY_ID.get(table);
+        if (!m) {
+            m = new Map();
+            for (const g of table) if (!m.has(g.id)) m.set(g.id, g);
+            BY_ID.set(table, m);
+        }
+        return m;
+    }
+
     function gymById(id, table = GYMS) {
-        return table.find((g) => g.id === Number(id)) || null;
+        return idIndex(table).get(Number(id)) || null;
+    }
+
+    /** The unlocked gyms that train `stat`, grouped by dots, best first (each group in unlocked order). */
+    function dotGroups(stat, unlockedIds, table) {
+        let perTable = BY_DOTS.get(table);
+        if (!perTable) BY_DOTS.set(table, (perTable = new WeakMap()));
+        let perList = perTable.get(unlockedIds);
+        if (!perList) perTable.set(unlockedIds, (perList = new Map()));
+        let groups = perList.get(stat);
+        if (!groups) {
+            const byDots = new Map();
+            for (const id of unlockedIds) {
+                const g = gymById(id, table);
+                if (!g || !(g.dots[stat] > 0)) continue;
+                if (!byDots.has(g.dots[stat])) byDots.set(g.dots[stat], []);
+                byDots.get(g.dots[stat]).push(g);
+            }
+            groups = [...byDots.entries()].sort((a, b) => b[0] - a[0]).map(([, list]) => list);
+            perList.set(stat, groups);
+        }
+        return groups;
     }
 
     /**
@@ -1391,18 +1431,18 @@
      * highest dots wins; on a tie, the cheaper train (less leftover energy).
      */
     function bestGymFor(stat, stats, unlockedIds, { table = GYMS, drugsTaken = null, active = null } = {}) {
-        let best = null;
-        for (const id of unlockedIds || []) {
-            const g = gymById(id, table);
-            if (!g || !(g.dots[stat] > 0)) continue;
-            if (!gymAccess(g, stats, { drugsTaken }).ok) continue;
-            if (!best || g.dots[stat] > best.dots[stat]) best = g;
-            else if (g.dots[stat] === best.dots[stat]) {
+        if (!unlockedIds || !unlockedIds.length) return null;
+        // Highest dots first; the first group with a gym you can use wins.
+        for (const group of dotGroups(stat, unlockedIds, table)) {
+            let best = null;
+            for (const g of group) {
+                if (!gymAccess(g, stats, { drugsTaken }).ok) continue;
                 // A tie: stay in the gym you're in (no switch for nothing), else the cheaper train.
-                if (g.id === Number(active) || (best.id !== Number(active) && g.energy < best.energy)) best = g;
+                if (!best || g.id === Number(active) || (best.id !== Number(active) && g.energy < best.energy)) best = g;
             }
+            if (best) return best;
         }
-        return best;
+        return null;
     }
 
     /**
@@ -2888,7 +2928,7 @@
      * @param {number} [o.budget] - money for the horizon; Infinity when unset
      * @returns {{recommended:string, alternatives:object[], reasons:string[]}}
      */
-    function recommend(results, { budget = Infinity } = {}) {
+    function recommend(results, { budget = Infinity, bliss = false } = {}) {
         const list = Object.values(results).filter(Boolean);
         if (!list.length) return { recommended: null, alternatives: [], reasons: [] };
         const inBudget = list.filter((r) => r.cost <= budget);
@@ -2906,7 +2946,8 @@
                 if (overBudget && r.gained > best.gained) verdict = 'overBudget';
                 else if (Math.abs(deltaStatsPct) < 1 && Math.abs(deltaCost) < 1e6) verdict = 'same';
                 else if (deltaStatsPct > 0 && !overBudget) verdict = 'better';
-                return { id: r.id, gained: r.gained, cost: r.cost, deltaStatsPct, deltaCost, overBudget, verdict };
+                const alt = { id: r.id, gained: r.gained, cost: r.cost, deltaStatsPct, deltaCost, overBudget, verdict };
+                return { ...alt, why: whyNot(best, alt, { bliss, budget }) };
             })
             .sort((a, b) => b.gained - a.gained);
         return { recommended: best.id, alternatives, reasons: whyRecommended(best, results, { budget }) };
@@ -2921,6 +2962,27 @@
         if (best.id === 'blissSteady') out.push('Ignorance Is Bliss lets happy climb above your maximum, so boosters keep paying off.');
         if (JUMP_LIKE.has(best.id)) out.push('At your stats a bigger happy multiplies each train more than the energy you lose while stacking.');
         return out;
+    }
+
+    /**
+     * One line on why an alternative is not the recommendation (Plan › Other
+     * plans): the number that decides it first, then the mechanism.
+     * @param {object} best - the recommended result {id, gained, cost}
+     * @param {object} alt - an alternatives[] row
+     */
+    function whyNot(best, alt, { bliss = false, budget = Infinity } = {}) {
+        if (!best || !alt) return '';
+        const pct = Math.round(alt.deltaStatsPct);
+        if (alt.overBudget) return 'Over your ' + fmtMoney(budget) + ' budget' + (alt.gained > best.gained ? ' (it would gain ' + (pct > 0 ? '+' : '') + pct + '% more).' : '.');
+        if (alt.verdict === 'same') return 'The same stats for the same money: nothing to gain by switching.';
+        const why = [];
+        if (JUMP_LIKE.has(alt.id)) why.push('holding four Xanax stops natural energy');
+        if (HAPPY_BOUGHT.has(alt.id)) why.push('the Ecstasy takes a drug cooldown a Xanax would fill');
+        if (alt.id === 'dailyChoco') why.push('the candy lifts happy for one session a day');
+        if (HAPPY_BOUGHT.has(alt.id) && !bliss) why.push('without Ignorance Is Bliss the extra happy resets');
+        const head = pct < 0 ? '−' + -pct + '% stats' : pct > 0 ? '+' + pct + '% stats for ' + fmtMoney(alt.deltaCost) + ' more' : 'No more stats';
+        const cost = pct < 0 && alt.deltaCost > 0 ? ' and ' + fmtMoney(alt.deltaCost) + ' more' : '';
+        return head + cost + (why.length ? ': ' + why.join('; ') + '.' : '.');
     }
 
     /**
@@ -3427,7 +3489,7 @@
         if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.known ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost) });
         let rec = null;
         if (compare) {
-            const r = recommend(compare, { budget: settings.budget || Infinity });
+            const r = recommend(compare, { budget: settings.budget || Infinity, bliss: pc.perks.bliss });
             rec = r;
             const mine = compare[plan.strategy];
             if (r.recommended === plan.strategy) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is still best' });
@@ -3588,6 +3650,13 @@
         }
     }
 
+    /** Ask the feed now (a new key was saved): no waiting for the next heartbeat. */
+    function nudgeFeed() {
+        if (!pi.feed) return;
+        pi.feed.tick().catch(() => {});
+        setTimeout(() => pi.feed.tick().catch(() => {}), 500);
+    }
+
     function onModel(fn) {
         pi.listeners.push(fn);
         if (pi.model) fn(pi.model);
@@ -3615,6 +3684,14 @@
         const tick = () => pi.feed.tick().catch(() => {});
         tick();
         setInterval(tick, LEADER_HEARTBEAT_MS);
+        // The first heartbeat only claims the lead; confirm it half a second later instead of a whole heartbeat.
+        setTimeout(tick, 500);
+        // Coming back to a tab: take the lead and read at once, not at the next heartbeat.
+        document.addEventListener('visibilitychange', () => {
+            if (!isVisible()) return;
+            tick();
+            setTimeout(tick, 500);
+        });
         // Follower tabs redraw when the leader stores a new state; everyone redraws each second for countdowns.
         gmOnChange(K.userState, refresh);
         gmOnChange(K.userStatic, refresh);
@@ -4038,6 +4115,7 @@
     .pill-tag.chalk { background: var(--chalk); color: var(--on-chalk); }
 
     /* warning block */
+    .why { font-size: 12px; color: var(--warn); margin-top: 2px; }
     .warnb { border-left: 3px solid var(--warn); background: #231d12; padding: 10px 14px; border-radius: 0 8px 8px 0; display: flex; flex-direction: column; gap: 6px; }
     .warnb b { color: #ffd79a; font-size: 14px; }
     .warnb p { margin: 0; color: var(--text); max-width: 90ch; }
@@ -4579,13 +4657,13 @@
                 h('tr', { class: 'click' + (sel ? ' sel' : ''), tabindex: '0', onclick: () => { const w = pickWarning(best, compare[a.id], { bliss: m.pc.perks.bliss, days }); if (w.warn) { ctx.ui.planPick = a.id; ctx.rerender(); } else { ctx.ui.planPick = null; ctx.setPlan({ strategy: a.id, strategyPicked: true }); } } }, [
                     h('td', {}, [h('small', { text: KIND_TAG[st.kind] })]),
                     h('td', {}, [h('b', { class: 'w', text: st.name })]),
-                    h('td', { class: 'muted', text: st.what + (a.overBudget ? ' · over budget' : '') }),
+                    h('td', { class: 'muted' }, [st.what, a.why ? h('div', { class: 'why', text: 'Why not: ' + a.why }) : null]),
                     h('td', { class: 'r ' + (a.deltaStatsPct >= 0 ? 'c-good' : 'c-bad'), text: fmtPct(a.deltaStatsPct) }),
                     h('td', { class: 'r ' + (a.deltaCost > 0 ? 'c-bad' : 'c-good'), text: (a.deltaCost >= 0 ? '+' : '−') + fmtMoney(Math.abs(a.deltaCost)) }),
                 ]),
             );
         }
-        const altTable = h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:70px', text: 'Kind' }), h('th', { style: 'width:170px', text: 'Plan' }), h('th', { text: 'What you do' }), h('th', { class: 'r', style: 'width:90px', text: 'Stats' }), h('th', { class: 'r', style: 'width:90px', text: 'Cost' })])]), h('tbody', {}, altRows)]);
+        const altTable = h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:70px', text: 'Kind' }), h('th', { style: 'width:170px', text: 'Plan' }), h('th', { text: 'What you do · why it isn’t the pick' }), h('th', { class: 'r', style: 'width:90px', text: 'Stats' }), h('th', { class: 'r', style: 'width:90px', text: 'Cost' })])]), h('tbody', {}, altRows)]);
 
         const blocks = [sectionHead('Other plans', meta(['compared with ' + S.short.toLowerCase() + ' · click a row to pick it'])), altTable];
         if (ctx.ui.goalForm) {
@@ -7078,6 +7156,7 @@
             const s = { ...(get(K.userStatic, {}) || {}), keyInfo: info, keyInfoAt: Date.now() };
             set(K.userStatic, s);
             const enough = keyIsEnough(info);
+            nudgeFeed();
             if (enough === false) {
                 const p = keyProblem({ hasKey: true, dead: false, keyInfo: info });
                 return { ok: false, text: 'Saved, but this ' + (info.type || '') + ' key won’t work. ' + (p ? p.text : 'Make a Limited key.') };
