@@ -33,7 +33,44 @@ export const EYE_CSS = `
 .pi-warlist { display: flex !important; flex-direction: column; }
 .pi-warsum a { color: #8fb8e8; }
 .pi-earlytag { color: #9bdc8a; font-weight: bold; font-size: 11px; margin-left: 6px; }
+.pi-landtag { color: #8fb8e8; font-weight: bold; font-size: 11px; margin-left: 6px; }
+.pi-edge-stomp { box-shadow: inset 3px 0 0 #3fbf5a !important; }
+.pi-edge-good { box-shadow: inset 3px 0 0 #a6e08a !important; }
+.pi-edge-tough { box-shadow: inset 3px 0 0 #f0a040 !important; }
+.pi-edge-cant { box-shadow: inset 3px 0 0 #ff5a4e !important; }
+.pi-watch { display: inline-flex; align-items: center; gap: 6px; margin: 6px 0 6px 8px; vertical-align: middle; font: 12px Arial, sans-serif; }
+.pi-watch button, .pi-watch select, .pi-watch input { height: 24px; border-radius: 12px; border: 1px solid #3a4046; background: #1e2124; color: #e3e5e8; font: bold 11px Arial, sans-serif; padding: 0 10px; cursor: pointer; }
+.pi-watch input { cursor: text; width: 130px; border-radius: 5px; font-weight: normal; }
+.pi-watch select { border-radius: 5px; padding: 0 6px; }
+.pi-watch button[aria-pressed="true"] { color: #efebe2; border-color: #efebe2; }
+.pi-watch .pi-full { color: #e8a33d; font-size: 11px; }
 `;
+
+/** The watch reasons offered on Torn's pages (the webpage offers the same, plus your own words there). */
+export const WATCH_TAG_WORDS = ['hospitalize', 'mug', 'revenge', 'bounty'];
+
+/**
+ * "☆ Watch" / "★ Watching" with the reason picker when watched.
+ * @param {object} s - {watching, tag, full}
+ * @param {object} on - {toggle(), tag(value)}
+ */
+export function watchControl(s, on) {
+    const kids = [h('button', { type: 'button', 'aria-pressed': String(Boolean(s.watching)), title: s.watching ? 'Torn Eye is watching this player · click to stop' : 'Watch this player in Torn Eye (status, hospital, flights)', onclick: (e) => { e.preventDefault(); e.stopPropagation(); on.toggle(); }, text: s.watching ? '★ Watching' : '☆ Watch' })];
+    if (s.watching) {
+        const tag = s.tag || '';
+        const custom = tag && !WATCH_TAG_WORDS.includes(tag);
+        const sel = h('select', { 'aria-label': 'Why you watch them', onchange: (e) => { if (e.target.value === '__custom') { const inp = h('input', { maxlength: '24', placeholder: 'your reason', 'aria-label': 'Your reason', onkeydown: (ev) => { if (ev.key === 'Enter') on.tag(ev.target.value); } }); inp.addEventListener('blur', () => on.tag(inp.value)); sel.replaceWith(inp); inp.focus(); } else on.tag(e.target.value || null); } }, [
+            h('option', { value: '', text: 'no reason' }),
+            ...WATCH_TAG_WORDS.map((x) => h('option', { value: x, text: x })),
+            custom ? h('option', { value: tag, text: tag }) : null,
+            h('option', { value: '__custom', text: 'your own…' }),
+        ]);
+        sel.value = tag;
+        kids.push(sel);
+    }
+    if (s.full) kids.push(h('span', { class: 'pi-full', text: 'Watch list full (20)' }));
+    return h('span', { class: 'pi-mark pi-watch', 'data-pi-watch': [s.watching ? 1 : 0, s.tag || '', s.full ? 1 : 0].join('|') }, kids);
+}
 
 export function ensureEyeCss(doc = document) {
     if (doc.getElementById('pi-eye-css')) return;
@@ -145,6 +182,7 @@ export function attackPanelContent(v, s) {
     const kids = [h('span', { class: 'row' }, [h('span', { class: 'plate' }, [h('i')]), h('b', { class: 'white', text: 'Torn Eye' })])];
     if (!v) {
         kids.push(h('span', { class: 'muted', text: 'Reading this player… (your fights, FFScouter, public stats)' }));
+        if (s.watch) kids.push(h('button', { class: 'watch', type: 'button', 'aria-pressed': String(Boolean(s.watch.watching)), onclick: () => s.watch.toggle(), text: s.watch.watching ? '★ Watching' : '☆ Watch' }));
         return kids;
     }
     const f = v.forecast;
@@ -154,6 +192,7 @@ export function attackPanelContent(v, s) {
     else if (!s.gearVisible) kids.push(h('span', { class: 'muted', text: 'Their gear isn’t shown yet. Torn shows it after Start Fight (earlier with the Gun Shop job perk). We’ll save it for next time.' }));
     if (v.gear) kids.push(h('span', { class: 'muted', text: 'Last seen: ' + (v.gear.text || 'gear') + ' · ' + Math.max(0, Math.round((Date.now() - v.gear.seenAt) / 86400000)) + ' days ago' }));
     if (v.source) kids.push(v.est && v.est.source === 'ffscouter' ? h('span', { class: 'muted' }, ['Stats: ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }), ', ' + (v.est.ageDays ?? '?') + ' days old']) : h('span', { class: 'muted', text: 'Stats: ' + v.source }));
+    if (s.watch) kids.push(h('button', { class: 'watch', type: 'button', 'aria-pressed': String(Boolean(s.watch.watching)), onclick: () => s.watch.toggle(), text: s.watch.watching ? '★ Watching' + (s.watch.tag ? ' · ' + s.watch.tag : '') : s.watch.full ? 'Watch list full (20)' : '☆ Watch' }));
     return kids;
 }
 
@@ -169,6 +208,8 @@ export const ATTACK_PANEL_CSS = `
 .muted { color: #939aa1; }
 .good { color: #9bdc8a; font-weight: bold; }
 a { color: #8fb8e8; pointer-events: auto; }
+button.watch { pointer-events: auto; align-self: flex-start; height: 24px; padding: 0 10px; border-radius: 12px; border: 1px solid #3a4046; background: #1e2124; color: #e3e5e8; font: bold 11px Arial, sans-serif; cursor: pointer; }
+button.watch[aria-pressed="true"] { color: #efebe2; border-color: #efebe2; }
 `;
 
 export function attackPanel(doc = document) {

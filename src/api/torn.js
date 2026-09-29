@@ -233,3 +233,12 @@ export function keyIsEnough(info) {
     const missing = missingSelections(info);
     return missing === null ? null : missing.length === 0;
 }
+
+/**
+ * A faction's current wars (Public): {pacts, wars: {ranked, raids, territory}}.
+ * Without an id, your own faction's.
+ */
+export async function fetchFactionWars(client, factionId = null) {
+    const d = await client.get(factionId ? 'v2/faction/' + ids(factionId)[0] + '/wars' : 'v2/faction/wars');
+    return { pacts: (d && d.pacts) || [], wars: (d && d.wars) || {} };
+}

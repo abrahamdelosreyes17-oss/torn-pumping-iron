@@ -8,13 +8,15 @@ import { gmOnChange } from './platform/gm.js';
 import { K, get, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup, getPrices, PRICE_LISTINGS_KEPT } from './platform/store.js';
 import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE } from './runtime.js';
 import { PiApp } from './ui/app/app.js';
-import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, fetchFactionMembers, keyIsEnough } from './api/torn.js';
-import { outEarly, memberState } from './core/eye/war.js';
+import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, fetchFactionMembers, fetchFactionWars, keyIsEnough } from './api/torn.js';
+import { outEarly, enemiesFromWars } from './core/eye/war.js';
+import { isBeatable } from './core/eye/targets.js';
+import { isWatched } from './core/eye/watch.js';
 import { W3bClient, fetchW3bListings } from './api/w3b.js';
-import { makeFfsClient, checkFfsKey, fetchFfsTargets } from './api/ffscouter.js';
+import { checkFfsKey } from './api/ffscouter.js';
 import { renderEye } from './ui/app/eye-tab.js';
-import { wantPlayers, eyeView, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient } from './eye-service.js';
-import { discordState, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId, linkDiscord, setTargetsForSync } from './discord.js';
+import { wantPlayers, eyeView, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient, importTargets, TARGETS_KEY, rememberFlights, flightsSeen, getWatch, watchStates, toggleWatch, setWatchTag, dismissWatchOffer, watchOffersNow, pollWatch } from './eye-service.js';
+import { discordState, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId, linkDiscord, setTargetsForSync, setEyeForSync } from './discord.js';
 import { WORKER_SETUP_URL } from './api/worker.js';
 import { tabWindow } from './platform/tab-window.js';
 import { listingsFromItemMarket, listingsFromW3b, listingsFromPoints } from './core/market.js';
@@ -177,77 +179,138 @@ function diagnostics() {
     };
 }
 
-/** Targets for the Torn Eye tab: FFScouter's list, estimated against you. */
+/**
+ * Targets for the Torn Eye tab: FFScouter asked in slices, each player
+ * judged by the fight model, only the ones you beat stored (eye-service).
+ */
 async function loadTargets(params) {
-    if (!getKey(K.ffsKey) || isPaused()) return;
+    if (!getKey(K.ffsKey) || isPaused() || page.eye.loading) return;
     page.eye.loading = true;
     page.eye.error = null;
     page.app.render(true);
     try {
-        const list = await fetchFfsTargets(ffsClient(), { ...params, limit: 50 });
-        set('eyeTargets', { at: Date.now(), params, list });
-        wantPlayers(list.map((x) => x.playerId));
+        await importTargets(params, { client: ffsClient() });
     } catch (error) {
-        page.eye.error = String((error && error.message) || error);
+        const msg = redactKey(String((error && error.message) || error), getKey(K.ffsKey));
+        page.eye.error = { message: msg, deadKey: Boolean(error && error.deadKey), paused: Boolean(error && error.paused), retryAfterS: (error && error.retryAfterS) || null, takingTurns: Boolean(error && error.takingTurns) };
     }
     page.eye.loading = false;
     page.app.render(true);
 }
 
-/* War mode on the webpage: the enemy faction read every 10 s while the Torn Eye tab shows War. */
-const war = { fid: null, name: null, members: [], prev: null, early: new Set(), seen: new Map(), at: 0, loading: false, error: null, timer: null };
+/*
+ * War mode on the webpage: the enemy is found by itself from your own
+ * faction's wars (every 5 min while the page is open), or picked by id.
+ * Its members are read every 10 s while the War view shows, and every
+ * 5 min otherwise when Discord is set up (the bot's war pings need the bands).
+ */
+const war = { manual: null, pick: null, members: [], membersFid: null, name: null, early: new Set(), at: 0, loading: false, error: null, enemies: [], warsAt: 0, warsLoading: false, myFaction: undefined };
 
 export const WAR_TAB_POLL_MS = 10000;
+export const WAR_BACKGROUND_POLL_MS = 5 * 60 * 1000;
+export const OWN_WARS_POLL_MS = 5 * 60 * 1000;
+
+/** The faction War mode watches: yours picked by id, else the war you chose, else the first of your faction's wars. */
+function warFid() {
+    if (war.manual) return war.manual;
+    if (war.pick && war.enemies.some((x) => x.id === war.pick)) return war.pick;
+    return war.enemies.length ? war.enemies[0].id : null;
+}
+
+function myFactionId() {
+    const ki = (get(K.userStatic, {}) || {}).keyInfo;
+    if (!ki) return undefined;
+    return ki.factionId || null;
+}
+
+async function pollOwnWars(force = false) {
+    if (war.warsLoading || !isVisible() || isPaused() || !getKey(K.apiKey) || get(K.apiKeyDead, false)) return;
+    const mine = myFactionId();
+    war.myFaction = mine;
+    if (!mine) return;
+    if (!force && Date.now() - war.warsAt < OWN_WARS_POLL_MS) return;
+    war.warsLoading = true;
+    try {
+        const resp = await fetchFactionWars(tornClient(), mine);
+        war.enemies = enemiesFromWars(resp, mine);
+        set('eyeWarAuto', { at: Date.now(), myFaction: mine, enemies: war.enemies });
+    } catch {
+        // Keep the last answer; asked again in 5 min.
+    } finally {
+        war.warsLoading = false;
+        war.warsAt = Date.now();
+    }
+    if (page.app) page.app.render(true);
+}
 
 async function pollWarTab() {
-    if (!war.fid || war.loading || !isVisible() || isPaused()) return;
-    if (!page.app || page.app.tab !== 'eye' || (page.app.ui.eyeMode || 'targets') !== 'war') return;
-    if (Date.now() - war.at < WAR_TAB_POLL_MS) return;
+    const fid = warFid();
+    if (!fid || war.loading || !isVisible() || isPaused()) return;
+    const viewing = page.app && page.app.tab === 'eye' && (page.app.ui.eyeMode || 'targets') === 'war';
+    const every = viewing ? WAR_TAB_POLL_MS : discordState() ? WAR_BACKGROUND_POLL_MS : null;
+    if (!every || (war.membersFid === fid && Date.now() - war.at < every)) return;
     war.loading = true;
-    const fid = war.fid;
     try {
         const members = await fetchFactionMembers(tornClient(), fid);
-        if (war.fid !== fid) return;
+        if (warFid() !== fid) return;
         const nowMs = Date.now();
-        war.early = outEarly(war.members, members, Math.floor(nowMs / 1000));
-        // When each flight was first seen: the landing estimate counts from it.
-        for (const m of members) {
-            const id = Number(m.id);
-            const st = memberState(m);
-            const desc = (m.status && m.status.description) || '';
-            const cur = war.seen.get(id);
-            if (st === 'traveling' || st === 'abroad') {
-                if (!cur || cur.desc !== desc) war.seen.set(id, { desc, at: nowMs });
-            } else war.seen.delete(id);
-        }
-        war.prev = war.members;
+        war.early = war.membersFid === fid ? outEarly(war.members, members, Math.floor(nowMs / 1000)) : new Set();
+        // When each flight was first seen (kept across reloads): the landing estimate counts from it.
+        rememberFlights(members, nowMs);
         war.members = members;
+        war.membersFid = fid;
         war.error = null;
         wantPlayers(members.map((m) => Number(m.id)));
     } catch (error) {
         war.error = String((error && error.message) || error);
     } finally {
         war.loading = false;
+        war.at = Date.now();
     }
-    war.at = Date.now();
     if (page.app) page.app.render(true);
 }
 
+function warName(fid) {
+    const e = war.enemies.find((x) => x.id === fid);
+    return e && e.name ? e.name : null;
+}
+
+/** Stored targets, judged again now: only players you still beat show (your stats or colours may have changed). */
 function eyeRows() {
-    const stored = get('eyeTargets', null);
-    if (!stored) return [];
-    const rows = stored.list.map((x) => ({ ...(eyeView(x.playerId, { level: x.level, name: x.name }) || { id: x.playerId, band: 'none' }), name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId }));
-    // The bot's /targets and /war read Torn Eye's list (ids, names, levels, bands; disclosed in Settings), only if you set up Discord.
-    if (discordState()) {
-        const bands = {};
-        for (const r of rows) if (r.band) bands[r.id] = r.band;
-        for (const mm of war.members || []) {
-            const v = eyeView(Number(mm.id), { level: mm.level, name: mm.name }, { war: true });
-            if (v && v.band) bands[Number(mm.id)] = v.band;
-        }
-        setTargetsForSync(rows.filter((r) => r.band !== 'cant').map((r) => ({ id: r.id, name: r.name || null, level: r.level || null, band: r.band, win: r.forecast ? Math.round(r.forecast.pWin * 100) : null, keep: r.forecast && r.forecast.keep !== null ? Math.round(r.forecast.keep * 100) : null })), bands);
-    }
-    return rows;
+    const stored = get(TARGETS_KEY, null);
+    if (!stored || !Array.isArray(stored.list)) return [];
+    const rows = stored.list.map((x) => {
+        const v = eyeView(x.playerId, { level: x.level, name: x.name });
+        const base = v || { id: x.playerId, band: x.band || 'none', forecast: Number.isFinite(x.win) ? { pWin: x.win / 100, keep: Number.isFinite(x.keep) ? x.keep / 100 : null } : null, respect: x.respect || null };
+        return { ...base, name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId, stored: x };
+    });
+    return rows.filter((r) => isBeatable(r.band));
+}
+
+/* The bot's /targets, /war and watch pings read Torn Eye (ids, names, levels, bands, win, HP kept; disclosed in Settings), only if you set up Discord. */
+let eyeSyncAt = 0;
+export const EYE_SYNC_EVERY_MS = 30 * 1000;
+
+function syncEye(force = false) {
+    if (!discordState() || !isVisible()) return;
+    if (!force && Date.now() - eyeSyncAt < EYE_SYNC_EVERY_MS) return;
+    eyeSyncAt = Date.now();
+    const row = (id, name, level, v, extra = {}) => ({ id, name: name || (v && v.name) || null, level: level || (v && v.level) || null, band: v ? v.band : 'none', win: v && v.forecast ? Math.round(v.forecast.pWin * 100) : null, keep: v && v.forecast && v.forecast.keep !== null && v.forecast.keep !== undefined ? Math.round(v.forecast.keep * 100) : null, ...extra });
+    const rows = eyeRows();
+    const bands = {};
+    for (const r of rows) if (r.band) bands[r.id] = r.band;
+    const fid = warFid();
+    const members = war.membersFid === fid ? war.members || [] : [];
+    const warRows = members.map((mm) => row(Number(mm.id), mm.name, mm.level, eyeView(Number(mm.id), { level: mm.level, name: mm.name }, { war: true })));
+    for (const r of warRows) bands[r.id] = r.band;
+    setTargetsForSync(rows.map((r) => row(r.id, r.name, r.level, r)), bands);
+    const w = getWatch();
+    const st = watchStates().players;
+    const watchRows = w.list.map((x) => {
+        const s = st[x.id] || {};
+        return row(Number(x.id), x.name || s.name, x.level || s.level, eyeView(Number(x.id), { level: x.level || s.level, name: x.name || s.name, life: s.life || null }), { tag: x.tag || null });
+    });
+    setEyeForSync({ war: fid && warRows.length ? { factionId: fid, members: warRows } : null, watch: watchRows });
 }
 
 function getCtx() {
@@ -318,24 +381,50 @@ function getCtx() {
         },
         eye: {
             rows: eyeRows,
+            stored: () => get(TARGETS_KEY, null),
             load: (params) => loadTargets(params).catch(() => {}),
             loading: () => page.eye.loading,
             error: () => page.eye.error,
             sources: () => ({ fights: ((get('myAttacks', null) || {}).list || []).length, ffsFree: page.ffs ? page.ffs.stats().remaining : 60, gear: page.eye.gear }),
             view: (id, extra, o) => eyeView(id, extra, o),
             attacks: () => (get('myAttacks', null) || {}).list || [],
-            updatedAt: () => (get('eyeTargets', null) || {}).at || null,
-            params: () => (get('eyeTargets', null) || {}).params || null,
+            updatedAt: () => (get(TARGETS_KEY, null) || {}).at || null,
+            params: () => (get(TARGETS_KEY, null) || {}).params || null,
             war: {
-                state: () => ({ fid: war.fid, name: war.name, members: war.members, early: war.early, seen: new Map([...war.seen].map(([k, v]) => [k, v.at])), loading: war.loading, error: war.error }),
+                state: () => {
+                    const fid = warFid();
+                    return { fid, manual: war.manual, name: warName(fid), enemies: war.enemies, myFaction: war.myFaction === undefined ? myFactionId() : war.myFaction, warsLoading: war.warsLoading, members: war.membersFid === fid ? war.members : [], early: war.membersFid === fid ? war.early : new Set(), loading: war.loading, error: war.error };
+                },
+                /** Another faction by id (kept until "Back to our war"). */
                 watch: (fid) => {
-                    war.fid = fid;
-                    war.members = [];
-                    war.seen.clear();
+                    war.manual = fid;
                     war.at = 0;
                     setSettings({ warFaction: fid });
                     pollWarTab();
+                    page.app.render(true);
                 },
+                /** One of your faction's wars, when there are several. */
+                pick: (fid) => {
+                    war.pick = fid;
+                    war.at = 0;
+                    pollWarTab();
+                    page.app.render(true);
+                },
+                auto: () => {
+                    war.manual = null;
+                    war.at = 0;
+                    setSettings({ warFaction: null });
+                    pollWarTab();
+                    page.app.render(true);
+                },
+            },
+            watch: {
+                state: () => ({ list: getWatch().list, states: watchStates().players, flights: flightsSeen(), offers: watchOffersNow() }),
+                isWatched: (id) => isWatched(getWatch(), id),
+                toggle: (p) => toggleWatch({ id: Number(p.id), name: p.name || null, level: p.level || null, tag: p.tag }),
+                tag: (id, tag) => setWatchTag(id, tag),
+                remove: (id) => (isWatched(getWatch(), id) ? toggleWatch({ id }) : null),
+                dismiss: (id) => dismissWatchOffer(id),
             },
         },
     };
@@ -348,15 +437,25 @@ export function bootAppPage({ renderers = {} } = {}) {
         page.app.render(true);
     });
     gearCount().then((n) => (page.eye.gear = n));
-    const stored = get('eyeTargets', null);
-    if (stored) setTimeout(() => wantPlayers(stored.list.map((x) => x.playerId)), 500);
+    const stored = get(TARGETS_KEY, null);
+    if (stored && Array.isArray(stored.list)) setTimeout(() => wantPlayers(stored.list.map((x) => x.playerId)), 500);
     page.app.mount();
     onModel(() => page.app.render());
     for (const k of [K.prices, K.settings, K.plan, K.userStatic, K.stateError, K.apiKeyDead]) gmOnChange(k, () => page.app.render());
+    // The watch list is changed from Torn's pages too (☆ on a profile or the attack page) and read there.
+    for (const k of ['eyeWatch', 'eyeWatchState']) gmOnChange(k, () => page.app.tab === 'eye' && page.app.render(true));
     onPauseChange(() => page.app.render(true));
-    // War mode: the faction you last watched, read every 10 s while that view is open.
-    war.fid = getSettings().warFaction || null;
-    setInterval(() => pollWarTab().catch(() => {}), 2000);
+    // War mode: a faction picked by id stays until "Back to our war"; otherwise your faction's war, found by itself.
+    war.manual = getSettings().warFaction || null;
+    const auto = get('eyeWarAuto', null);
+    if (auto && Array.isArray(auto.enemies) && auto.myFaction === myFactionId()) war.enemies = auto.enemies;
+    setInterval(() => {
+        pollOwnWars().catch(() => {});
+        pollWarTab().catch(() => {});
+        // The Watched view reads its players every 60 s while it shows (the war list just read costs nothing).
+        if (page.app.tab === 'eye' && page.app.ui.eyeMode === 'watched') pollWatch({ members: war.members }).catch(() => {});
+        syncEye();
+    }, 2000);
     page.app.render(true);
     return page.app;
 }
