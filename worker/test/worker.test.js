@@ -92,7 +92,7 @@ test('PUT /plan: the first sync needs the invite code; the secret is stored hash
     assert.equal(r.status, 403);
     r = await handle(req('PUT', '/plan', { invite: 'letmein', body: { tornKey: KEY, webhookUrl: HOOK, discordId: DISCORD, plan } }), env);
     assert.equal(r.status, 200);
-    assert.deepEqual(await r.json(), { ok: true, created: true, ready: true, paused: false, lastError: null, linked: false, bot: false });
+    assert.deepEqual(await r.json(), { ok: true, created: true, acks: [], ready: true, paused: false, lastError: null, linked: false, bot: false });
     const [id] = env.DB.users.keys();
     assert.notEqual(id, SECRET);
     assert.equal(id.length, 64, 'sha-256 hex');

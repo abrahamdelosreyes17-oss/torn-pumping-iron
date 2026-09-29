@@ -11,6 +11,7 @@
 import { T, R, json, reply, verifyDiscord, interactionUser } from './discord.js';
 import { ensureSchema } from './db.js';
 import { HELP } from './commands.js';
+import { BUTTON_HANDLERS } from './buttons.js';
 import { needsLink, statusCmd, planCmd, nextCmd, linkCmd, unlinkCmd } from './cmd-core.js';
 
 const COMMANDS = {
@@ -22,7 +23,7 @@ const COMMANDS = {
     unlink: unlinkCmd,
 };
 
-const BUTTONS = {};
+const BUTTONS = { ...BUTTON_HANDLERS };
 
 /** Options of a slash command as {name: value} (sub-commands are not used). */
 export function options(i) {

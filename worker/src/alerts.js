@@ -72,6 +72,23 @@ export function dueAlerts(state, plan, nowS, rules = {}) {
     return out;
 }
 
+/**
+ * Has Torn's state closed this ping? (The user did the thing: a new drug
+ * started, a booster used, energy trained, the refill used; or a jump step
+ * is long past.) Used to close a ping by itself and to drop a snoozed one.
+ */
+export function resolvedBy(kind, state, nowS, body = {}) {
+    const cd = (state && state.cooldowns) || {};
+    const bars = (state && state.bars) || {};
+    const e = bars.energy || {};
+    if (kind === 'drug' || kind === 'drugready') return Number(cd.drug) > DRUG_LEAD_S;
+    if (kind === 'booster') return Number(cd.booster) > 0;
+    if (kind === 'energy') return Number(e.maximum) > 0 && Number(e.current) < Number(e.maximum);
+    if (kind === 'refill') return Boolean(state && state.refills && state.refills.energy === true);
+    if (kind === 'jump' || kind === 'step' || kind === 'landed') return Boolean(body.step && nowS > Number(body.step.at) + 15 * 60);
+    return false;
+}
+
 /** Discord's webhook body: the mention in `content` (embeds don't ping), only that user allowed. */
 export function webhookBody(alert, discordId) {
     const id = String(discordId || '').replace(/\D/g, '');

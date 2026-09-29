@@ -18,6 +18,7 @@
 import { isDiscordWebhook, LINKS } from './alerts.js';
 import { runCron, sendAlerts } from './cron.js';
 import { canDeliver } from './deliver.js';
+import { pendingAcks } from './buttons.js';
 import { Q, SCHEMA, ensureSchema } from './db.js';
 import { guard } from './net.js';
 import { interactionsRoute } from './interactions.js';
@@ -89,7 +90,10 @@ async function putPlan(req, env) {
     const playerId = row ? row.player_id || null : null;
     if (row) await env.DB.prepare(Q.userSync).bind(tornKey, discordId, webhook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId, id).run();
     else await env.DB.prepare(Q.userInsert).bind(id, tornKey, discordId, webhook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId).run();
-    return json({ ok: true, created: !row, ready: Boolean(tornKey && (webhook || (linked && env.BOT_TOKEN))), paused: Boolean(paused), lastError, linked, bot: Boolean(env.BOT_TOKEN && env.DISCORD_PUBLIC_KEY) });
+    // Acks (Done / Skip in Discord): the userscript says which it applied; the rest go back to it.
+    if (Array.isArray(body.ackIds)) for (const a of body.ackIds.slice(0, 50)) if (typeof a === 'string' && a.length <= 120) await env.DB.prepare(Q.ackDelete).bind(id, a).run();
+    const acks = await pendingAcks(env.DB, id);
+    return json({ ok: true, created: !row, acks, ready: Boolean(tornKey && (webhook || (linked && env.BOT_TOKEN))), paused: Boolean(paused), lastError, linked, bot: Boolean(env.BOT_TOKEN && env.DISCORD_PUBLIC_KEY) });
 }
 
 async function linkCode(req, env) {
