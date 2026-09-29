@@ -24,7 +24,7 @@ export const TOS_TORN = [
     ['Data sharing', 'Nobody. (Other data, never this key: player ids you look at go to FFScouter and TornStats if you connect them; item ids go to TornW3B; with Discord pings on, the Pumping Iron service gets your plan\u2019s next steps, your player and faction id, and Torn Eye\u2019s lists: player ids, names, levels, colour bands, win % and watch tags.)'],
     ['Purpose of use', 'Personal gain: gym planning and fight estimates'],
     ['Key storage & sharing', 'Stored locally / With Discord pings: stored (encrypted) on the Pumping Iron service and used only for your own pings and the bot commands you type; shared with nobody'],
-    ['Key access level', 'Limited (user: bars, cooldowns, refills, battlestats, gym, perks, property, equipment, inventory, attacks, personalstats, discord, profile; torn: gyms, items, itemdetails, attacklog; market: itemmarket, pointsmarket; faction: members; key: info)'],
+    ['Key access level', 'Limited (user: bars, cooldowns, refills, battlestats, gym, perks, property, equipment, inventory, attacks, personalstats, discord, profile, job, jobpoints, money; torn: gyms, items, itemdetails, attacklog, logcategories, calendar; market: itemmarket, pointsmarket; faction: members, wars; key: info)'],
     ['Other services', 'This key goes to api.torn.com, and to the Pumping Iron service only if you log in with Discord. FFScouter and TornStats use the key you give them in their own sections (it may be the same Torn key, which they already hold). TornW3B never receives it. The webpage\u2019s font comes from fonts.googleapis.com (no data of yours).'],
 ];
 
