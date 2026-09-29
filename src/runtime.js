@@ -132,7 +132,7 @@ export function warOnNow(now = Date.now(), statics = null) {
 }
 
 /** The comparison over a coming event's days, with and without its multiplier (cached per event and inputs). */
-function eventComparisonFor(event, state, pc, shares, settings, budgetPerDay) {
+function eventComparisonFor(event, state, pc, shares, settings, budgetPerDay, statics = {}) {
     const days = Math.max(1, Math.round((event.end - event.start) / (24 * 3600e3)));
     const key = [event.id, event.start, pi.compareKey, days, Math.round(budgetPerDay || 0)].join('|');
     if (pi.eventCompare && pi.eventCompare.key === key) return pi.eventCompare;
@@ -140,7 +140,8 @@ function eventComparisonFor(event, state, pc, shares, settings, budgetPerDay) {
     const prices = getPrices();
     const special = 0;
     const boosted = { ...pc, perks: { ...pc.perks, candyMult: (pc.perks.candyMult || 1) * (event.candyMult || 1), canMult: (pc.perks.canMult || 1) * (event.canMult || 1) } };
-    pi.eventCompare = { key, eventCompare: compareStrategies({ state, pc: boosted, shares, settings: es, prices, special }), normalCompare: compareStrategies({ state, pc, shares, settings: es, prices, special }) };
+    // Same inputs as the plan's own comparison (shops, console held, job), with the event's multiplier on one side.
+    pi.eventCompare = { key, eventCompare: compareStrategies({ state, pc: boosted, shares, settings: es, prices, special, statics, pickBy: 'most' }), normalCompare: compareStrategies({ state, pc, shares, settings: es, prices, special, statics, pickBy: 'most' }) };
     return pi.eventCompare;
 }
 
@@ -202,7 +203,7 @@ export function currentModel(now = Date.now()) {
         const ev = eventToPlan(events, now);
         if (ev) {
             const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
-            const ec = eventComparisonFor(ev, state, pc, shares, settings, auto.budgetPerDay);
+            const ec = eventComparisonFor(ev, state, pc, shares, settings, auto.budgetPerDay, statics);
             autoSwitch = eventSwitch({ event: ev, eventCompare: ec.eventCompare, normalCompare: ec.normalCompare, budgetPerDay: auto.budgetPerDay, now });
             if (autoSwitch && autoSwitch.active) strategy = autoSwitch.id;
         }

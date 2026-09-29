@@ -343,7 +343,7 @@ export function simulateStrategy(id, o) {
             // Once a day the Xanax waits for a tick, then candy + Xanax and train it (no Ecstasy: the candy happy lasts one session).
             if (t >= drugFree && doneDay !== day) {
                 if (t % 15 === TICK_OFFSET_MIN) {
-                    H += candyN * candyHappy + jobHappy(day);
+                    H = Math.min(HAPPY_CAP, H + candyN * candyHappy + jobHappy(day));
                     buy(candyId, candyN);
                     boosterFree = Math.max(boosterFree, t) + candyN * boosterHours(candyId, cdMult) * 60;
                     xanax(t);
@@ -363,7 +363,7 @@ export function simulateStrategy(id, o) {
         } else if (id === 'dailyChoco') {
             // Hold one Xanax's worth of cooldown, then candy + Ecstasy in its place.
             if (phase === 'hold' && t >= drugFree && t % 15 === TICK_OFFSET_MIN) {
-                H = (H + candyN * candyHappy + jobHappy(day)) * 2;
+                H = Math.min(HAPPY_CAP, (H + candyN * candyHappy + jobHappy(day)) * 2);
                 buy(candyId, candyN);
                 buy(ECSTASY);
                 drugFree = t + ecsCD;
