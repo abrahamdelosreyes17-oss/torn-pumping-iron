@@ -16,6 +16,7 @@
  *   POST /link            (Authorization: Bearer <secret>) a one-time code for /link in Discord (10 min)
  *   POST /login/start     (Authorization: Bearer <secret>) → {id, url, expiresAt}: "Log in with Discord" (login.js)
  *   POST /login/status    (Authorization: Bearer <secret>) {id} → {state, name}
+ *   POST /login/cancel    (Authorization: Bearer <secret>) {id}: that login is dropped (Discord's page then does nothing)
  *   GET  /login?id=…      → Discord's authorize page; GET /login/callback: Discord sends the browser back here
  *   POST /interactions    Discord's slash commands and buttons (Ed25519-signed)
  */
@@ -26,15 +27,15 @@ import { canDeliver, hookUrl } from './deliver.js';
 import { pendingAcks } from './buttons.js';
 import { sealKey, openKey, isSealed } from './keys.js';
 import { cleanTargets, cleanWarList, cleanWatch } from './cmd-torn.js';
-import { loginStart, loginStatus, loginGo, loginCallback } from './login.js';
+import { loginStart, loginStatus, loginCancel, loginGo, loginCallback } from './login.js';
 
 /** A 24-step plan + 50 targets + 500 bands + a 100-member war list + 25 watched players is under 40 kB. */
 export const MAX_BODY = 64000;
 
 /** People one Worker serves (a leaked invite can't fill it); MAX_USERS in wrangler.toml [vars] changes it. */
 export const DEFAULT_MAX_USERS = 10;
-import { Q, SCHEMA, ensureSchema, ackDeleteMany, MAX_ACK_IDS } from './db.js';
-import { guard } from './net.js';
+import { Q, SCHEMA, ensureSchema, ackDeleteMany, forgetUser, MAX_ACK_IDS } from './db.js';
+import { guard, readLimited } from './net.js';
 import { interactionsRoute } from './interactions.js';
 import { newLinkCode } from './cmd-core.js';
 
@@ -88,8 +89,9 @@ async function putPlan(req, env) {
         if (Number(n && n.n) >= max) return json({ ok: false, error: 'This Worker is full (' + max + ' people). Ask its owner, or deploy your own (SETUP.md).' }, 403);
     }
     let body;
-    const text = await req.text();
-    if (text.length > MAX_BODY) return json({ ok: false, error: 'Too much data in one sync' }, 413);
+    // Bytes, not characters; a declared length over the limit is refused unread.
+    const text = await readLimited(req, MAX_BODY);
+    if (text === null) return json({ ok: false, error: 'Too much data in one sync' }, 413);
     try {
         body = JSON.parse(text);
         if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('not an object');
@@ -173,7 +175,7 @@ async function testPing(req, env, fetchImpl) {
 async function forget(req, env) {
     const { id, error } = await userFor(req, env);
     if (error) return error;
-    for (const sql of [Q.userDelete, Q.sentDeleteUser, Q.ackDeleteUser, Q.watchDeleteUser, Q.linkDeleteUser, Q.priceDeleteUser, Q.loginDeleteUser]) await env.DB.prepare(sql).bind(id).run();
+    await forgetUser(env.DB, id);
     return json({ ok: true });
 }
 
@@ -197,6 +199,7 @@ export async function handle(req, env, fetchImpl = fetch, ctx = NO_CTX) {
     if (url.pathname === '/link' && req.method === 'POST') return linkCode(req, env);
     if (url.pathname === '/login/start' && req.method === 'POST') return withUser(req, env, loginStart);
     if (url.pathname === '/login/status' && req.method === 'POST') return withUser(req, env, loginStatus);
+    if (url.pathname === '/login/cancel' && req.method === 'POST') return withUser(req, env, loginCancel);
     if (url.pathname === '/login' && req.method === 'GET') return loginGo(req, env);
     if (url.pathname === '/login/callback' && req.method === 'GET') return loginCallback(req, env, guard(fetchImpl), { maxUsers: maxUsers(env) });
     return json({ ok: false, error: 'Not found' }, 404);

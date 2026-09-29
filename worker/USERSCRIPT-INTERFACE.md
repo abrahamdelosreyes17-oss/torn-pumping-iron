@@ -16,13 +16,13 @@ The owner's service address is built in (`https://pumping-iron.pumping-iron-work
    200 {"ok": true, "id": "<48 hex>", "url": "https://…workers.dev/login?id=<48 hex>", "expiresAt": 1790680900}
    401 {"ok": false, "error": "Missing or malformed secret"}
    501 {"ok": false, "error": "Log in with Discord isn’t set up on this service yet (…)"}   show as is
-   429 {"ok": false, "error": "Too many logins at once. Try again in a few minutes."}
+   429 {"ok": false, "error": "Too many logins from this network at once. Try again in a few minutes."}   show as is (5 open per address)
    ```
 
-   A new start replaces the browser's previous one. Open `url` in a new tab (`GM_openInTab`); the user allows Pumping Iron on Discord (scope `identify` only) and lands on a plain page on the Worker ("Connected as …", "Not in the server", …) they can close.
-2. While that tab is open, every 3 seconds (visible tab, stop at `expiresAt`, 15 minutes):
+   A new start replaces the browser's previous one. A flood of logins from elsewhere never blocks a start (the oldest open login makes room). Open `url` in a new tab (`GM_openInTab`); the user allows Pumping Iron on Discord (scope `identify` only) and lands on a plain page on the Worker ("Connected as …", "Not in the server", …) they can close.
+2. While waiting, every 3 seconds, **whether the Pumping Iron tab is visible or not** (the user is on Discord's tab, so the Torn tab is hidden while they finish there); stop at `expiresAt` (15 minutes) or on any state but `open`:
 
-   `POST /login/status` (same bearer secret) `{"id": "<48 hex>"}`
+   `POST /login/status` (same bearer secret) `{"id": "<48 hex>"}` (body at most 1 kB, else 413)
 
    ```json
    200 {"ok": true, "state": "open", "name": null}
@@ -30,7 +30,9 @@ The owner's service address is built in (`https://pumping-iron.pumping-iron-work
    404 {"ok": false, "error": "That login is gone. Start again."}   another secret, or an unknown id
    ```
 
-   `state`: `open` (waiting), `done` (connected: show "Connected as @name"), `not_member` ("Join the Pumping Iron Discord server first, then log in again"), `denied` (cancelled on Discord), `full` (the service serves its maximum), `failed` (Discord or the bot had a problem: try again), `expired` (over 15 minutes).
+   `state`: `open` (waiting), `done` (connected: show "Connected as @name"), `not_member` ("Join the Pumping Iron Discord server first, then log in again"), `denied` (cancelled on Discord), `full` (the service serves its maximum), `failed` (Discord or the bot had a problem: try again), `elsewhere` (this Discord account is connected to Pumping Iron in another browser that synced within the last 7 days: show "This Discord account is already connected to Pumping Iron in another browser. Press Disconnect there (Settings › Discord), or type /unlink in Discord, then log in here again."; nothing was stored for this browser), `expired` (over 15 minutes).
+
+   Gave up waiting (the user pressed Cancel, or started over)? `POST /login/cancel` (same bearer secret) `{"id": "<48 hex>"}` → `200 {"ok": true}` (404 for a malformed id, 413 over 1 kB). The login is deleted: finishing Discord's page afterwards shows "This login has expired" and links nothing.
 3. On `done`: store `{base, secret, linked: true, name}` and send the first `PUT /plan` (§2) **with `tornKey` = the main Pumping Iron key** (Limited; owner's decision), no `X-Invite` (the row exists: the login made it). The answer has `linked: true` and `ready: true` (key + linked + bot).
 4. The connected view: "Connected as @name" · **Send a test ping** (`POST /test`) · **Disconnect** (`DELETE /plan`, which also deletes the logins).
 
@@ -47,7 +49,7 @@ The main key is now stored on the owner's Worker: the ToS table in Settings › 
 ```
 
 - Settings › Discord, after Connect, while `linked` is false: a **Get a link code** button. Show the code big, "Type `/link ABCD2345` in your Discord server within 10 minutes", and a countdown to `expiresAt` (unix seconds). The code works once; a new press replaces it. Only on a click.
-- Once linked, the next `PUT /plan` answers `linked: true`: show "Linked" and "To stop DMs, type /unlink in Discord". The Discord id field becomes optional (the Worker ignores a typed id once linked; the linked id comes from Discord's signed interaction).
+- Once linked, the next `PUT /plan` answers `linked: true`: show "Linked" and "`/unlink` in Discord disconnects and forgets you (like Disconnect here)". The Discord id field becomes optional (the Worker ignores a typed id once linked; the linked id comes from Discord's signed interaction).
 - The webhook becomes optional when the bot is set up (`bot: true` in the answer): the bot DMs, and the webhook is only the fallback.
 
 ## 2. `PUT /plan`: new optional request fields
@@ -76,7 +78,7 @@ The main key is now stored on the owner's Worker: the ToS table in Settings › 
 - `war` (1.2.0): the enemy faction as Torn Eye's War mode sees it, so the bot's war pings and `/war` know who you can beat. `{factionId: int, members: [{id: int, name: str|null, level: int|null, band, win: int|null, keep: int|null}]}`, at most 100 members (the rest are dropped), `band` one of `stomp`, `good`, `tough`, `cant`, `none` (anything else becomes `none`), `win`/`keep` percents 0–100. `factionId` is the enemy faction the list is for (the Worker uses it only when it matches the war it finds). Send it when War mode's estimates change, at most every 5 minutes; `war: null` clears; left out keeps.
 - `watch` (1.2.0): Torn Eye's watch list: `[{id, name, level, band, win, keep, tag: str|null}]`, at most 25 (the rest are dropped), `tag` the reason (at most 24 characters). The bot reads at most 5 of them a minute and pings "out of hospital soon", "lands soon" and "came online" for the ones you can beat, and for those with `band: "none"` (saying "No estimate"); never `cant`. Send it when the list changes; `watch: null` clears; left out keeps.
 - **Beatable** everywhere = band `stomp`, `good` or `tough`. The Worker runs no fight simulation: it only uses these bands.
-- The whole body must stay under 64 kB (413 otherwise).
+- The whole body must stay under 64,000 bytes (UTF-8; 413 otherwise).
 
 ## 3. `PUT /plan`: new response fields
 
@@ -118,7 +120,9 @@ The Worker key now needs (user `profile` is new in 1.2.0, for the watch list): u
 ## 5. Unchanged routes, new behaviour
 
 - `POST /test`: when linked, the test ping is a DM with Done / Snooze / Skip / Open in Torn (otherwise the webhook, as before).
-- `DELETE /plan` (Forget): also deletes link codes, acks, price watches and cached prices.
+- `DELETE /plan` (Forget): also deletes link codes, acks, price watches, cached prices and logins.
+- `/unlink` in Discord now forgets the user too (the same deletes as Forget), and a user not synced for 30 days is forgotten by the Worker. Either way the next `PUT /plan` answers `403` "Unknown secret…": show Settings › Discord as disconnected (Log in with Discord again); never retry in a loop.
+- `PUT /plan` bodies are limited to 64,000 **bytes** (UTF-8), not characters; a `content-length` over it is refused (413) before the body is read.
 - `PUT /plan` with a key on a Worker without `KEY_ENC`: `500 {"error": "The Worker has no KEY_ENC secret: see SETUP.md"}`. Show it as is (`workerCall` already does).
 - A key stored by 1.0 is encrypted in place the first time the Worker reads it: nothing to resend.
 
@@ -127,4 +131,4 @@ The Worker key now needs (user `profile` is new in 1.2.0, for the watch list): u
 - `POST /link` only on a click, never from a hidden tab; the code shown, never stored.
 - `ackIds` sent back after a sync that returned acks; a skip ack re-times the plan; a done ack never marks a step done.
 - `targets`, `war` and `watch` sent at most every 5 minutes and only when changed; never the FFScouter key or the TornStats key in any Worker body; the main Torn key only in the `PUT /plan` right after a Discord login (and when it changes), never on the manual form (extend `test/worker-client.test.js`).
-- Log in with Discord: `/login/start` only on a click; `/login/status` polled only while the login tab is open and the page is visible, stopping at `expiresAt` or any state but `open`.
+- Log in with Discord: `/login/start` only on a click; `/login/status` polled every 3 s while waiting, visible or not, stopping at `expiresAt` or any state but `open`; `elsewhere` shown with its text; Cancel calls `/login/cancel`.

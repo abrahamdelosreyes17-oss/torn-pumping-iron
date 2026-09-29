@@ -5,22 +5,35 @@
  * Discord's OAuth page says who you are (scope `identify` only); the bot
  * checks you're a member of the owner's server (GUILD_ID), which replaces
  * the invite code; then this browser's user row is created and linked to
- * your Discord account, exactly as /link would. Nothing to type.
+ * your Discord account. Nothing to type. A Discord account already
+ * linked in another browser is refused ('elsewhere') unless that row has
+ * not synced for a week (then it is forgotten and this login takes over).
  *
  * Needs: DISCORD_APP_ID, DISCORD_CLIENT_SECRET, BOT_TOKEN (secrets),
  * GUILD_ID ([vars]), and <address>/login/callback as a redirect on the
  * Discord application's OAuth2 page.
  */
 
-import { Q } from './db.js';
+import { Q, forgetUser } from './db.js';
 import { DISCORD_API } from './discord.js';
+import { readLimited } from './net.js';
 
 /** A login waits this long for you to finish on Discord. */
 export const LOGIN_TTL_S = 15 * 60;
-/** Open logins at once (a flood of starts can't grow the table). */
+/** Open logins at once: past it the oldest open one makes room (a flood of starts can't grow the table, or lock people out). */
 export const MAX_OPEN_LOGINS = 50;
+/** Open logins from one address (CF-Connecting-IP) at once. */
+export const MAX_LOGINS_PER_IP = 5;
+/** /login/status and /login/cancel bodies: {id} only. */
+export const MAX_LOGIN_BODY = 1024;
+/**
+ * A Discord account linked to another browser's row: that row is taken
+ * over (deleted) only when nobody has synced it for this long; otherwise
+ * the login is refused ('elsewhere').
+ */
+export const LINK_ABANDONED_S = 7 * 86400;
 
-const STATES = ['open', 'done', 'not_member', 'denied', 'full', 'failed'];
+const STATES = ['open', 'done', 'not_member', 'denied', 'full', 'failed', 'elsewhere'];
 
 function json(body, status = 200) {
     return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -37,6 +50,29 @@ function newLoginId() {
     return [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
 }
 
+async function sha256(text) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** The caller's address, hashed with the day (never stored as is); null without CF-Connecting-IP. */
+async function ipTag(req, nowS) {
+    const ip = String(req.headers.get('cf-connecting-ip') || '').trim();
+    return ip ? sha256('login-ip:' + ip + ':' + Math.floor(nowS / 86400)) : null;
+}
+
+/** The {id} of /login/status and /login/cancel: a 48-hex id, '' when missing or bad, null when the body is too big. */
+async function bodyId(req) {
+    const text = await readLimited(req, MAX_LOGIN_BODY);
+    if (text === null) return null;
+    try {
+        const id = String(JSON.parse(text).id || '');
+        return /^[0-9a-f]{48}$/.test(id) ? id : '';
+    } catch {
+        return '';
+    }
+}
+
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
 /** The page you land on after Discord: plain, in Pumping Iron's colours, no scripts. */
@@ -50,6 +86,7 @@ h1{margin:0 0 8px;font-size:18px;color:#fff}p{margin:0}small{display:block;margi
 }
 
 const NOT_READY = 'Log in with Discord isn’t set up on this service yet (it needs DISCORD_CLIENT_SECRET and GUILD_ID).';
+const ELSEWHERE = 'This Discord account is already connected to Pumping Iron in another browser. Press Disconnect there (Settings › Discord), or type /unlink in Discord, then log in here again.';
 const EXPIRED = ['This login has expired', 'Go back to Pumping Iron → Settings → Discord and press Log in with Discord again.'];
 
 /**
@@ -70,26 +107,34 @@ export async function loginStart(req, env, userId) {
     const nowS = Math.floor(Date.now() / 1000);
     await env.DB.prepare(Q.loginClean).bind(nowS - LOGIN_TTL_S).run();
     await env.DB.prepare(Q.loginDeleteUser).bind(userId).run();
-    const n = await env.DB.prepare(Q.loginsCount).first();
-    if (Number(n && n.n) >= MAX_OPEN_LOGINS) return json({ ok: false, error: 'Too many logins at once. Try again in a few minutes.' }, 429);
+    const ip = await ipTag(req, nowS);
+    const n = await env.DB.prepare(Q.loginsOpen).bind(ip).first();
+    if (ip && Number(n && n.mine) >= MAX_LOGINS_PER_IP) return json({ ok: false, error: 'Too many logins from this network at once. Try again in a few minutes.' }, 429);
+    // A flood from many addresses: the oldest open login goes, so a real login always gets in.
+    if (Number(n && n.n) >= MAX_OPEN_LOGINS) await env.DB.prepare(Q.loginEvictOldest).run();
     const id = newLoginId();
-    await env.DB.prepare(Q.loginPut).bind(id, userId, nowS, 'open').run();
+    await env.DB.prepare(Q.loginPut).bind(id, userId, nowS, 'open', ip).run();
     return json({ ok: true, id, url: new URL(req.url).origin + '/login?id=' + id, expiresAt: nowS + LOGIN_TTL_S });
 }
 
 /** POST /login/status {id} (same secret) → {state, name}. */
 export async function loginStatus(req, env, userId) {
-    let id = '';
-    try {
-        id = String((await req.json()).id || '');
-    } catch {
-        id = '';
-    }
-    const row = /^[0-9a-f]{48}$/.test(id) ? await env.DB.prepare(Q.loginGet).bind(id).first() : null;
+    const id = await bodyId(req);
+    if (id === null) return json({ ok: false, error: 'Too much data' }, 413);
+    const row = id ? await env.DB.prepare(Q.loginGet).bind(id).first() : null;
     if (!row || row.user !== userId) return json({ ok: false, error: 'That login is gone. Start again.' }, 404);
     const nowS = Math.floor(Date.now() / 1000);
     const state = row.state === 'open' && Number(row.at) < nowS - LOGIN_TTL_S ? 'expired' : row.state;
     return json({ ok: true, state, name: row.name || null });
+}
+
+/** POST /login/cancel {id} (same secret): the login is dropped; finishing Discord's page afterwards does nothing. */
+export async function loginCancel(req, env, userId) {
+    const id = await bodyId(req);
+    if (id === null) return json({ ok: false, error: 'Too much data' }, 413);
+    if (!id) return json({ ok: false, error: 'That login is gone. Start again.' }, 404);
+    await env.DB.prepare(Q.loginCancel).bind(id, userId).run();
+    return json({ ok: true });
 }
 
 /** GET /login?id=… → Discord's "allow Pumping Iron?" page. */
@@ -164,8 +209,9 @@ export async function loginCallback(req, env, f, { maxUsers }) {
             await finish(env, id, 'denied');
             return page('Not connected', 'You cancelled on Discord. Press Log in with Discord again whenever you like.', false);
         }
+        // Fixed words: the query text is never shown back.
         await finish(env, id, 'failed');
-        return page('Not connected', 'Discord said: ' + err.slice(0, 60) + '. Try again in a minute.', false);
+        return page('Not connected', 'Discord didn’t finish the login. Try again in a minute.', false);
     }
     const code = String(url.searchParams.get('code') || '');
     if (!code) {
@@ -183,6 +229,14 @@ export async function loginCallback(req, env, f, { maxUsers }) {
         await finish(env, id, 'failed');
         return page('Not connected', String((e && e.message) || e) + '. Try again in a minute.', false);
     }
+    // One Discord account ↔ one Pumping Iron user, and never moved silently: a row in another
+    // browser is taken over only when nobody has synced it for a week (then it is forgotten).
+    const { results: others } = await env.DB.prepare(Q.usersLinkedElsewhere).bind(who.id, row.user).all();
+    if ((others || []).some((o) => Number(o.updated) >= nowS - LINK_ABANDONED_S)) {
+        await finish(env, id, 'elsewhere', who.id, who.name);
+        return page('Connected in another browser', ELSEWHERE, false);
+    }
+    for (const o of others || []) await forgetUser(env.DB, o.id);
     const user = await env.DB.prepare(Q.userGet).bind(row.user).first();
     if (!user) {
         const n = await env.DB.prepare(Q.usersCount).first();
@@ -192,8 +246,6 @@ export async function loginCallback(req, env, f, { maxUsers }) {
         }
         await env.DB.prepare(Q.userInsert).bind(row.user, '', who.id, '', 'null', '{}', 0, null, nowS, null, null, null, null, null, null).run();
     }
-    // One Discord account ↔ one Pumping Iron user: a login elsewhere moves here (as /link does).
-    await env.DB.prepare(Q.userUnlink).bind(who.id).run();
     await env.DB.prepare(Q.userLink).bind(who.id, row.user).run();
     await finish(env, id, 'done', who.id, who.name);
     return page('Connected as ' + who.name, 'Go back to Pumping Iron: pings start by themselves. They come as DMs from the Pumping Iron bot.', true);

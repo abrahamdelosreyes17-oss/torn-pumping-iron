@@ -8,7 +8,7 @@
 
 import { BudgetError } from './net.js';
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /** Free plan: 50 D1 queries per invocation. Keep a few spare. */
 export const QUERY_BUDGET = 45;
@@ -36,6 +36,9 @@ export const Q = {
     userSettings: 'UPDATE users SET settings = ? WHERE id = ?',
     userDm: 'UPDATE users SET dm_channel = ?, dm_fail = ? WHERE id = ?',
     userCmd: 'UPDATE users SET cmd_at = ? WHERE id = ?',
+    // Other rows this Discord account is linked to (a login in a second browser), and rows nobody has synced for long.
+    usersLinkedElsewhere: 'SELECT id, updated FROM users WHERE discord_id = ? AND linked = 1 AND id != ? LIMIT 5',
+    usersStale: 'SELECT id FROM users WHERE COALESCE(updated, 0) < ? LIMIT ?',
 
     sentList: 'SELECT * FROM sent WHERE user = ?',
     sentOne: 'SELECT * FROM sent WHERE user = ? AND alert = ?',
@@ -55,10 +58,14 @@ export const Q = {
     linkClean: 'DELETE FROM link_codes WHERE expires < ?',
 
     // "Log in with Discord": one open login per browser secret, 15 minutes.
-    loginPut: 'INSERT OR REPLACE INTO logins (id, user, at, discord_id, name, state) VALUES (?, ?, ?, NULL, NULL, ?)',
+    // `ip`: a sha256 of the caller's address and the day (never the address itself), for a per-address cap.
+    loginPut: 'INSERT OR REPLACE INTO logins (id, user, at, discord_id, name, state, ip) VALUES (?, ?, ?, NULL, NULL, ?, ?)',
     loginGet: 'SELECT * FROM logins WHERE id = ?',
     loginSet: 'UPDATE logins SET discord_id = ?, name = ?, state = ? WHERE id = ?',
-    loginsCount: 'SELECT COUNT(*) AS n FROM logins',
+    // Open logins in all, and from this address (one query).
+    loginsOpen: "SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN ip = ? THEN 1 ELSE 0 END), 0) AS mine FROM logins WHERE state = 'open'",
+    loginEvictOldest: "DELETE FROM logins WHERE id = (SELECT id FROM logins WHERE state = 'open' ORDER BY at ASC LIMIT 1)",
+    loginCancel: 'DELETE FROM logins WHERE id = ? AND user = ?',
     loginDeleteUser: 'DELETE FROM logins WHERE user = ?',
     loginClean: 'DELETE FROM logins WHERE at < ?',
 
@@ -79,6 +86,13 @@ export const Q = {
 
     outboxPut: 'INSERT INTO outbox (at, route, body) VALUES (?, ?, ?)',
 };
+
+/** Everything the service keeps about one user (Forget, /unlink, a stale row); the row itself last, so a run cut short tries again. */
+export const FORGET = [Q.sentDeleteUser, Q.ackDeleteUser, Q.watchDeleteUser, Q.linkDeleteUser, Q.priceDeleteUser, Q.loginDeleteUser, Q.userDelete];
+
+export async function forgetUser(db, id) {
+    for (const sql of FORGET) await db.prepare(sql).bind(id).run();
+}
 
 /** Acks the userscript applied, in one statement (at most MAX_ACK_IDS ids). */
 export const MAX_ACK_IDS = 50;
@@ -110,6 +124,7 @@ export const SCHEMA = [
     'ALTER TABLE users ADD COLUMN war_list TEXT',
     'ALTER TABLE users ADD COLUMN watch_list TEXT',
     'ALTER TABLE users ADD COLUMN watch_state TEXT',
+    'ALTER TABLE logins ADD COLUMN ip TEXT',
     "ALTER TABLE sent ADD COLUMN state TEXT DEFAULT 'sent'",
     'ALTER TABLE sent ADD COLUMN until INTEGER',
     'ALTER TABLE sent ADD COLUMN channel TEXT',

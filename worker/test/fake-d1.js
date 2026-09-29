@@ -56,6 +56,8 @@ export function fakeD1() {
         [Q.userSettings]: ([settings, id]) => patch(users, id, { settings }),
         [Q.userDm]: ([dm_channel, dm_fail, id]) => patch(users, id, { dm_channel, dm_fail }),
         [Q.userCmd]: ([cmd_at, id]) => patch(users, id, { cmd_at }),
+        [Q.usersLinkedElsewhere]: ([d, id]) => ({ all: [...users.values()].filter((u) => u.discord_id === d && Number(u.linked) === 1 && u.id !== id).slice(0, 5).map((u) => ({ id: u.id, updated: u.updated })) }),
+        [Q.usersStale]: ([t, limit]) => ({ all: [...users.values()].filter((u) => (Number(u.updated) || 0) < t).slice(0, limit).map((u) => ({ id: u.id })) }),
 
         [Q.sentList]: ([u]) => ({ all: byUser(sent, u) }),
         [Q.sentOne]: ([u, a]) => ({ first: sent.get(u + '|' + a) || null }),
@@ -85,10 +87,22 @@ export function fakeD1() {
             return {};
         },
 
-        [Q.loginPut]: ([id, user, at, state]) => (logins.set(id, { id, user, at, discord_id: null, name: null, state }), {}),
+        [Q.loginPut]: ([id, user, at, state, ip]) => (logins.set(id, { id, user, at, discord_id: null, name: null, state, ip }), {}),
         [Q.loginGet]: ([id]) => ({ first: logins.get(id) || null }),
         [Q.loginSet]: ([discord_id, name, state, id]) => patch(logins, id, { discord_id, name, state }),
-        [Q.loginsCount]: () => ({ first: { n: logins.size } }),
+        [Q.loginsOpen]: ([ip]) => {
+            const open = [...logins.values()].filter((r) => r.state === 'open');
+            return { first: { n: open.length, mine: open.filter((r) => ip !== null && r.ip === ip).length } };
+        },
+        [Q.loginEvictOldest]: () => {
+            const oldest = [...logins.values()].filter((r) => r.state === 'open').sort((a, b) => a.at - b.at)[0];
+            if (oldest) logins.delete(oldest.id);
+            return {};
+        },
+        [Q.loginCancel]: ([id, u]) => {
+            if (logins.get(id)?.user === u) logins.delete(id);
+            return {};
+        },
         [Q.loginDeleteUser]: ([u]) => {
             for (const [k, r] of [...logins]) if (r.user === u) logins.delete(k);
             return {};
@@ -123,7 +137,7 @@ export function fakeD1() {
     };
     const patterns = [
         [/^CREATE (TABLE|INDEX) IF NOT EXISTS /, () => ({})],
-        [/^ALTER TABLE (users|sent) ADD COLUMN \w+ \w+( DEFAULT .+)?$/, () => ({})],
+        [/^ALTER TABLE (users|sent|logins) ADD COLUMN \w+ \w+( DEFAULT .+)?$/, () => ({})],
         [
             /^DELETE FROM acks WHERE user = \? AND id IN \(\?(, \?)*\)$/,
             ([u, ...ids]) => {

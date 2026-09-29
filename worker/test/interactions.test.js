@@ -80,6 +80,8 @@ test('the schema is checked once per Worker instance, not on every request', asy
     const first = env.DB.log.length;
     assert.ok(env.DB.log.some((s) => s.startsWith('ALTER TABLE users ADD COLUMN')), 'a 1.0 database gets the new columns');
     assert.equal(env.DB.meta.get('schema'), String(SCHEMA_VERSION));
+    assert.equal(SCHEMA_VERSION, 5);
+    assert.ok(env.DB.log.includes('ALTER TABLE logins ADD COLUMN ip TEXT'), 'schema 5: logins get an ip column');
     await handle(req('PUT', '/plan', { body: { plan: null } }), env, noFetch, ctx());
     const again = env.DB.log.slice(first);
     assert.ok(!again.some((s) => /^(CREATE|ALTER)|FROM meta/.test(s)), 'no schema work on the second request');
