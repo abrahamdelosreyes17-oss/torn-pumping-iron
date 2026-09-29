@@ -112,3 +112,145 @@ export function landingAt(travel, seenAt, now) {
     if (travel.kind === 'abroad') return now + travel.minutes * 60000;
     return Math.max(now, (seenAt || now) + travel.minutes * 60000);
 }
+
+/* ------------------------------------------------ round 4: war mode (ROUND4-PLAN §B) */
+
+/**
+ * The enemy from your own faction's current wars (/faction/wars: ranked,
+ * raids, territory). Ranked first, then territory, then raids; wars that
+ * ended are skipped.
+ * @returns {{id, name, kind:'ranked'|'territory'|'raid', warId, start, end}[]}
+ */
+export function enemiesFromWars(resp, myFactionId, nowS = Math.floor(Date.now() / 1000)) {
+    const w = (resp && (resp.wars || resp)) || {};
+    const mine = Number(myFactionId) || 0;
+    const out = [];
+    const add = (war, kind) => {
+        if (!war || typeof war !== 'object') return;
+        if (war.end && Number(war.end) < nowS) return;
+        if (war.winner) return;
+        const facs = Array.isArray(war.factions) ? war.factions : [];
+        // Your side is found by id; without one, a war is read only when it's two-sided.
+        const other = facs.filter((f) => f && Number(f.id) && Number(f.id) !== mine);
+        if (!mine && other.length !== 1) return;
+        for (const f of other) {
+            if (out.some((x) => x.id === Number(f.id))) continue;
+            out.push({ id: Number(f.id), name: f.name ? String(f.name) : null, kind, warId: Number(war.war_id || war.id) || null, start: Number(war.start) || null, end: Number(war.end) || null });
+        }
+    };
+    add(w.ranked, 'ranked');
+    for (const t of Array.isArray(w.territory) ? w.territory : []) add(t, 'territory');
+    for (const r of Array.isArray(w.raids) ? w.raids : []) add(r, 'raid');
+    return out;
+}
+
+export const WAR_KIND_WORDS = { ranked: 'ranked war', territory: 'territory war', raid: 'raid' };
+
+/** "5 min ago", "3 h ago", "2 d ago". */
+export function agoText(ms, now = Date.now()) {
+    const s = Math.max(0, Math.round((now - ms) / 1000));
+    if (s < 60) return 'just now';
+    if (s < 3600) return Math.round(s / 60) + ' min ago';
+    if (s < 86400 * 2) return Math.round(s / 3600) + ' h ago';
+    return Math.round(s / 86400) + ' d ago';
+}
+
+/** Online / Idle / Offline from Torn's last_action, with "last active". */
+export function activityOf(m, now = Date.now()) {
+    const la = (m && m.last_action) || null;
+    if (!la) return { kind: null, at: null, text: '—' };
+    const s = String(la.status || '').toLowerCase();
+    const kind = s === 'online' ? 'online' : s === 'idle' ? 'idle' : 'offline';
+    const at = Number(la.timestamp) ? Number(la.timestamp) * 1000 : null;
+    const text = kind === 'online' ? 'Online' : at ? (kind === 'idle' ? 'Idle · ' : '') + agoText(at, now) : la.relative || (kind === 'idle' ? 'Idle' : 'Offline');
+    return { kind, at, text };
+}
+
+export const ACTIVITY_COLORS = { online: '#9bdc8a', idle: '#e8a33d', offline: '#6c737a' };
+export const ACTIVITY_WORDS = { online: 'Online', idle: 'Idle', offline: 'Offline' };
+
+/** Flights are kept this long after first seen (the longest standard flight is under 5 h). */
+export const FLIGHT_KEEP_MS = 12 * 60 * 60 * 1000;
+export const FLIGHTS_KEPT = 400;
+
+/**
+ * When each flight was first seen, kept across reloads: {id: {desc, at}}.
+ * A new status line is a new flight; someone no longer flying is dropped.
+ * @returns {{seen: object, changed: boolean}}
+ */
+export function trackFlights(seen, members, now = Date.now()) {
+    const next = { ...(seen || {}) };
+    let changed = false;
+    for (const m of members || []) {
+        const n = Number(m && m.id);
+        if (!(n > 0)) continue;
+        const id = String(n);
+        const st = memberState(m);
+        const desc = String((m.status && m.status.description) || '');
+        if (st === 'traveling' || st === 'abroad') {
+            if (!next[id] || next[id].desc !== desc) {
+                next[id] = { desc, at: now };
+                changed = true;
+            }
+        } else if (next[id]) {
+            delete next[id];
+            changed = true;
+        }
+    }
+    for (const id of Object.keys(next)) {
+        if (now - (next[id].at || 0) > FLIGHT_KEEP_MS) {
+            delete next[id];
+            changed = true;
+        }
+    }
+    const left = Object.keys(next);
+    if (left.length > FLIGHTS_KEPT) {
+        left.sort((a, b) => next[a].at - next[b].at);
+        for (const id of left.slice(0, left.length - FLIGHTS_KEPT)) delete next[id];
+        changed = true;
+    }
+    return { seen: next, changed };
+}
+
+/**
+ * The status cell, in parts so the page can keep the countdown ticking:
+ * text = pre + clock(at) [+ " TCT" (m:ss) when cd] + post.
+ * @param {object} m - faction member or profile {status, has_early_discharge, is_revivable}
+ * @param {object} o - {now (ms), seenAt (ms, first seen flying), early (left hospital early)}
+ * @returns {{kind, pre, at, cd, post, cls, soonAt}}
+ */
+export function statusParts(m, { now = Date.now(), seenAt = null, early = false } = {}) {
+    const st = memberState(m);
+    const s = (m && m.status) || {};
+    const until = Number(s.until) > 0 ? Number(s.until) * 1000 : null;
+    if (early) return { kind: 'early', pre: 'Out early · attack now', at: null, cd: false, post: '', cls: 'c-good', soonAt: null };
+    if (st === 'okay') return { kind: 'okay', pre: 'Okay · attack now', at: null, cd: false, post: '', cls: 'c-good', soonAt: null };
+    if (st === 'hospital') {
+        const flags = [m && m.has_early_discharge ? 'may leave early' : null, m && m.is_revivable ? 'revivable' : null].filter(Boolean);
+        return { kind: 'hospital', pre: until ? 'Hospital · out ' : 'Hospital', at: until, cd: true, post: flags.length ? ' · ' + flags.join(' · ') : '', cls: 'cdn', soonAt: until };
+    }
+    if (st === 'jail') {
+        const fed = /federal/i.test(String(s.state || s.description || ''));
+        return { kind: 'jail', pre: fed ? 'Federal jail' : until ? 'Jail · out ' : 'Jail', at: fed ? null : until, cd: true, post: '', cls: 'muted', soonAt: fed ? null : until };
+    }
+    if (st === 'traveling' || st === 'abroad') {
+        const tr = travelOf(m);
+        if (!tr) return { kind: st, pre: s.description || 'Traveling', at: null, cd: false, post: '', cls: null, soonAt: null };
+        if (tr.kind === 'abroad') {
+            const back = landingAt(tr, null, now);
+            return { kind: 'abroad', pre: 'In ' + tr.place + (back ? ' · back ~' : ''), at: back, cd: false, post: back ? ' at the earliest (est.)' : '', cls: null, soonAt: null };
+        }
+        const land = landingAt(tr, seenAt, now);
+        const pre = (tr.kind === 'back' ? '← from ' : '→ ') + tr.place + (land ? ', lands ~' : '');
+        return { kind: 'traveling', pre, at: land, cd: false, post: land ? ' (est.)' : '', cls: null, soonAt: land };
+    }
+    if (st === 'fallen') return { kind: 'fallen', pre: 'Fallen', at: null, cd: false, post: '', cls: 'muted', soonAt: null };
+    return { kind: st, pre: s.description || st, at: null, cd: false, post: '', cls: null, soonAt: null };
+}
+
+/** The status cell as one line: "Hospital · out 14:32 TCT (3:10)", "→ Mexico, lands ~15:05 (est.)". */
+export function statusText(parts, { now = Date.now(), clockFn, tct = true, countdownFn } = {}) {
+    if (!parts.at) return parts.pre + parts.post;
+    const c = parts.cd ? (tct ? ' TCT' : '') + ' (' + countdownFn(parts.at - now) + ')' : '';
+    return parts.pre + clockFn(parts.at) + c + parts.post;
+}

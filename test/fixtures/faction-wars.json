@@ -1,0 +1,50 @@
+{
+  "pacts": [],
+  "wars": {
+    "ranked": {
+      "war_id": 25000,
+      "start": 1789990000,
+      "end": null,
+      "target": 6000,
+      "winner": null,
+      "factions": [
+        { "id": 9001, "name": "Iron Lungs", "score": 1200, "chain": 45 },
+        { "id": 7777, "name": "Rival Syndicate", "score": 980, "chain": 12 }
+      ]
+    },
+    "raids": [
+      {
+        "war_id": 51,
+        "start": 1789900000,
+        "end": 1789950000,
+        "factions": [
+          { "id": 9001, "name": "Iron Lungs", "score": 10, "chain": 0, "is_aggressor": true },
+          { "id": 4444, "name": "Old Raiders", "score": 3, "chain": 0, "is_aggressor": false }
+        ]
+      },
+      {
+        "war_id": 52,
+        "start": 1789995000,
+        "end": null,
+        "factions": [
+          { "id": 5555, "name": "Night Shift", "score": 30, "chain": 0, "is_aggressor": true },
+          { "id": 9001, "name": "Iron Lungs", "score": 2, "chain": 0, "is_aggressor": false }
+        ]
+      }
+    ],
+    "territory": [
+      {
+        "war_id": 7,
+        "territory": "ABC",
+        "start": 1789980000,
+        "end": null,
+        "target": 0,
+        "winner": null,
+        "factions": [
+          { "id": 6666, "name": "Turf Kings", "score": 0, "chain": 0, "is_aggressor": true, "playerIds": [1, 2] },
+          { "id": 9001, "name": "Iron Lungs", "score": 0, "chain": 0, "is_aggressor": false, "playerIds": [3] }
+        ]
+      }
+    ]
+  }
+}

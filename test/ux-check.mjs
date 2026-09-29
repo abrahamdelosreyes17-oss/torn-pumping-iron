@@ -196,7 +196,7 @@ if (!only.length || only.includes('plan')) {
 
 ok(tornHits() === 0, 'nothing loaded from torn.com');
 
-// Torn Eye tab with FFScouter: Refresh lists targets ranked by our estimate.
+// Torn Eye tab with FFScouter: targets load by themselves, judged by our fight model; only players you beat are kept.
 {
     const o = await openApp('&ffs=1&who=owner');
     await o.page.evaluate(() => (location.hash = 'eye'));
@@ -205,7 +205,20 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     const m = await checkTab(o.page, 'eye', o.errors, ['Targets', 'Stomp', 'Attack', 'win and HP kept from your stats']);
     const rows = await o.page.evaluate(() => document.getElementById('pi-app').shadowRoot.querySelectorAll('.tbl tbody tr').length);
     ok(rows >= 5, 'eye: targets load by themselves the first time (' + rows + ')');
-    ok(/\d+ can.t-win players? hidden/.test(m.text), "eye: can't-win targets hidden by default");
+    ok(/\d+ can.t-win players? dropped/.test(m.text), "eye: can't-win targets dropped before they're stored");
+    ok(!/Hide can.t win/.test(m.text), "eye: no 'Hide can't win' tick on Targets");
+    const bands = await o.page.evaluate(() => [...document.getElementById('pi-app').shadowRoot.querySelectorAll('.tbl tbody tr')].map((tr) => tr.cells[0].textContent.trim()));
+    ok(bands.every((b) => b === 'Stomp' || b === 'Good' || b === 'Tough'), 'eye: every target is one you beat (' + bands.join(',') + ')');
+    // A row opens its details (both fair fights, the estimate's age and source), and closes again.
+    await o.page.locator('#pi-app .tbl tbody tr.click').first().click();
+    await o.page.waitForTimeout(300);
+    const det = await measure(o.page);
+    ok(/ours · .*FFScouter’s list/.test(det.text), 'eye: row details show our and FFScouter’s figures');
+    await o.page.locator('#pi-app .tbl tbody tr.click').first().click();
+    await o.page.waitForTimeout(300);
+    // ☆ on the first row: it shows on Watched (checked below).
+    await o.page.locator('#pi-app .tbl tbody button[data-act="star"]').first().click();
+    await o.page.waitForTimeout(300);
     // Chain: only Stomp and Good, most respect first.
     await o.page.locator('#pi-app .modes button', { hasText: 'Chain' }).click();
     await o.page.waitForTimeout(400);
@@ -216,11 +229,12 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     await o.page.locator('#pi-app .modes button', { hasText: 'War' }).click();
     await o.page.waitForTimeout(300);
     await o.page.locator('#pi-app input[placeholder="faction id"]').fill('7777');
-    await o.page.locator('#pi-app button', { hasText: 'Watch' }).click();
+    await o.page.locator('#pi-app button[data-act="war-watch"]').click();
     await o.page.waitForTimeout(3000);
     const war = await measure(o.page);
     ok(/attack now/.test(war.text) && /Next out of hospital/.test(war.text), 'eye war: members listed with who to hit now');
-    ok(/Traveling|In |Returning/.test(war.text), 'eye war: travellers shown');
+    ok(/→ Mexico|← from|In /.test(war.text), 'eye war: travellers shown with where they fly');
+    ok(/Hospital · out \d\d:\d\d TCT \(\d+:\d\d\)/.test(war.text), 'eye war: hospital out-time in Torn time with a countdown');
     await o.page.screenshot({ path: resolve(shots, 'app-eye-war.png'), fullPage: true });
     // Typing survives the 10 s war read (a forced redraw used to wipe it).
     await o.page.locator('#pi-app input[placeholder="faction id"]').fill('88');
@@ -229,6 +243,11 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     await o.page.waitForTimeout(12000);
     const kept = await o.page.evaluate(() => { const sr = document.getElementById('pi-app').shadowRoot; const el = sr.querySelector('input[placeholder="faction id"]'); return { value: el.value, focused: sr.activeElement === el }; });
     ok(kept.value === '888' && kept.focused, 'typing survives a background redraw (' + JSON.stringify(kept) + ')');
+    // Watched: the player starred on Targets, with a reason box and Remove.
+    await o.page.locator('#pi-app .modes button', { hasText: 'Watched' }).click();
+    await o.page.waitForTimeout(400);
+    const watched = await measure(o.page);
+    ok(/Remove/.test(watched.text) && /no reason/.test(watched.text), 'eye watched: the starred player listed with a reason and Remove');
     await o.page.close();
 }
 

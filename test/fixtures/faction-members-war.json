@@ -1,0 +1,22 @@
+{
+  "members": [
+    { "id": 424242, "name": "Rival", "position": "Member", "level": 64, "days_in_faction": 400, "is_revivable": false, "is_on_wall": false, "is_in_oc": false, "has_early_discharge": false,
+      "last_action": { "status": "Online", "timestamp": 1789999990, "relative": "10 seconds ago" },
+      "status": { "description": "Okay", "details": null, "state": "Okay", "color": "green", "until": null }, "revive_setting": "Unknown" },
+    { "id": 777001, "name": "Brix", "position": "Member", "level": 67, "days_in_faction": 100, "is_revivable": true, "is_on_wall": false, "is_in_oc": false, "has_early_discharge": true,
+      "last_action": { "status": "Idle", "timestamp": 1789999040, "relative": "16 minutes ago" },
+      "status": { "description": "In hospital for 3 mins", "details": "Hospitalized by X", "state": "Hospital", "color": "red", "until": 1790000190 }, "revive_setting": "Unknown" },
+    { "id": 515151, "name": "Flyer", "position": "Member", "level": 40, "days_in_faction": 50, "is_revivable": false, "is_on_wall": false, "is_in_oc": false, "has_early_discharge": false,
+      "last_action": { "status": "Offline", "timestamp": 1789989200, "relative": "3 hours ago" },
+      "status": { "description": "Traveling to Mexico", "details": null, "state": "Traveling", "color": "blue", "until": null }, "revive_setting": "Unknown" },
+    { "id": 515152, "name": "Homer", "position": "Member", "level": 44, "days_in_faction": 50, "is_revivable": false, "is_on_wall": false, "is_in_oc": false, "has_early_discharge": false,
+      "last_action": { "status": "Offline", "timestamp": 1789989200, "relative": "3 hours ago" },
+      "status": { "description": "Returning to Torn from Mexico", "details": null, "state": "Traveling", "color": "blue", "until": null }, "revive_setting": "Unknown" },
+    { "id": 616161, "name": "Jailbird", "position": "Member", "level": 52, "days_in_faction": 20, "is_revivable": false, "is_on_wall": false, "is_in_oc": false, "has_early_discharge": false,
+      "last_action": { "status": "Offline", "timestamp": 1789900000, "relative": "1 day ago" },
+      "status": { "description": "In jail for 12 mins", "details": "Busted", "state": "Jail", "color": "red", "until": 1790000720 }, "revive_setting": "Unknown" },
+    { "id": 818181, "name": "Ghost", "position": "Member", "level": 88, "days_in_faction": 900, "is_revivable": false, "is_on_wall": false, "is_in_oc": false, "has_early_discharge": false,
+      "last_action": { "status": "Offline", "timestamp": 1780000000, "relative": "115 days ago" },
+      "status": { "description": "Fallen", "details": null, "state": "Fallen", "color": "red", "until": null }, "revive_setting": "Unknown" }
+  ]
+}

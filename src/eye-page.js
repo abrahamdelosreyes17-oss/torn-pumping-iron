@@ -10,12 +10,14 @@ import { addPrediction } from './core/learndata.js';
 import { onModel, tornClient, isVisible } from './runtime.js';
 import { isPaused, onPauseChange } from './turns.js';
 import { installAttackHook } from './platform/page-hook.js';
-import { wantPlayers, eyeView, onEye, saveGear } from './eye-service.js';
+import { wantPlayers, eyeView, onEye, saveGear, rememberFlights, flightsSeen, getWatch, toggleWatch, setWatchTag, pollWatch } from './eye-service.js';
+import { WATCH_MAX } from './core/eye/watch.js';
 import { fetchFactionMembers } from './api/torn.js';
 import { parseAttackData } from './core/eye/gear.js';
-import { sortWar, warSummary, outEarly } from './core/eye/war.js';
+import { sortWar, warSummary, outEarly, statusParts } from './core/eye/war.js';
 import { profileLevel, profileAnchor, readFactionRows, readWarRows, enemyFactionId, miniProfileId } from './sources/dom/eye.js';
-import { ensureEyeCss, chipEl, bindCard, warSummaryEl, attackPanel, attackPanelContent } from './ui/eye/eye-ui.js';
+import { ensureEyeCss, chipEl, bindCard, warSummaryEl, attackPanel, attackPanelContent, watchControl } from './ui/eye/eye-ui.js';
+import { tornClock } from './core/bars.js';
 import { ensureMarkCss } from './ui/marks/marks.js';
 import { fill } from './ui/dom.js';
 import { detectPage, profileIdOf, attackTargetOf, PAGE_PROFILE, PAGE_FACTION, PAGE_ATTACK } from './sources/route.js';
@@ -29,9 +31,34 @@ function view(id) {
     return eyeView(id, ep.extras.get(id) || {}, { war: Boolean(ep.war.members) });
 }
 
-function removeChips(scope) {
-    for (const el of scope.querySelectorAll('.pi-chip, .pi-warsum, .pi-earlytag')) el.remove();
+const EDGES = ['pi-edge-stomp', 'pi-edge-good', 'pi-edge-tough', 'pi-edge-cant'];
+
+function removeChips(scope, { watch = true } = {}) {
+    for (const el of scope.querySelectorAll('.pi-chip, .pi-warsum, .pi-earlytag, .pi-landtag' + (watch ? ', .pi-watch' : ''))) el.remove();
     for (const el of scope.querySelectorAll('.pi-early')) el.classList.remove('pi-early');
+    for (const el of scope.querySelectorAll('.' + EDGES.join(', .'))) el.classList.remove(...EDGES);
+}
+
+/* ------------------------------------------------------------- watch */
+
+const watchUi = { full: null };
+
+function watchState(id) {
+    const w = getWatch();
+    const e = w.list.find((x) => Number(x.id) === Number(id));
+    return { watching: Boolean(e), tag: e ? e.tag : null, full: watchUi.full === Number(id) && !e && w.list.length >= WATCH_MAX };
+}
+
+function toggleFor(id) {
+    const v = view(id) || {};
+    const x = ep.extras.get(id) || {};
+    const r = toggleWatch({ id, name: v.name || x.name || null, level: v.level || x.level || null });
+    watchUi.full = r.ok ? null : id;
+    drawAll();
+}
+
+function watchHandlers(id) {
+    return { toggle: () => toggleFor(id), tag: (t) => { setWatchTag(id, t); drawAll(); } };
 }
 
 /* ------------------------------------------------------------ profile */
@@ -41,9 +68,20 @@ function drawProfile() {
     const anchor = profileAnchor();
     if (!id || !anchor) return;
     ep.extras.set(id, { ...(ep.extras.get(id) || {}), level: profileLevel() });
-    removeChips(anchor.parentNode);
+    // The watch button stays while you use it (a redraw would close its picker); it's replaced when it changed.
+    const ws = watchState(id);
+    const sig = [ws.watching ? 1 : 0, ws.tag || '', ws.full ? 1 : 0].join('|');
+    const old = anchor.parentNode.querySelector('.pi-watch');
+    const keepWatch = old && old.getAttribute('data-pi-watch') === sig && old.getAttribute('data-pi-player') === String(id);
+    removeChips(anchor.parentNode, { watch: !keepWatch });
     const chip = chipEl(view(id), { id });
     anchor.parentNode.insertBefore(chip, anchor.nextSibling);
+    if (keepWatch) chip.after(old);
+    else {
+        const wc = watchControl(ws, watchHandlers(id));
+        wc.setAttribute('data-pi-player', String(id));
+        chip.after(wc);
+    }
 }
 
 function drawMini() {
@@ -78,8 +116,11 @@ async function pollWar() {
         ep.war.factionId = fid;
         ep.war.at = Date.now();
         for (const m of members) ep.extras.set(Number(m.id), { level: m.level, name: m.name });
+        // When each flight was first seen, shared with the webpage: landings survive a reload.
+        rememberFlights(members);
         wantPlayers(members.map((m) => Number(m.id)));
         drawWar();
+        pollWatch({ members }).catch(() => {});
     } catch {
         ep.war.at = Date.now();
     } finally {
@@ -114,10 +155,19 @@ function drawWar() {
             const r = byId.get(s.id);
             if (r) r.el.style.order = String(i);
         });
+        const flights = flightsSeen();
+        const nowMs = Date.now();
         for (const s of sorted) {
             const r = byId.get(s.id);
             if (!r) continue;
             r.cell.appendChild(chipEl(view(s.id), { mini: true, id: s.id }));
+            // The row's edge in its band colour; a traveller's estimated landing next to Torn's status.
+            if (EDGES.includes('pi-edge-' + s.band)) r.el.classList.add('pi-edge-' + s.band);
+            if (s.state === 'traveling' && ep.war.members) {
+                const parts = statusParts(s.m, { now: nowMs, seenAt: flights[s.id] ? flights[s.id].at : null });
+                const st = r.el.querySelector('.status');
+                if (st && parts.at) st.appendChild(Object.assign(document.createElement('span'), { className: 'pi-mark pi-landtag', textContent: 'lands ~' + tornClock(parts.at) }));
+            }
             if (s.state === 'early') {
                 r.el.classList.add('pi-early');
                 const st = r.el.querySelector('.status');
@@ -146,7 +196,8 @@ function drawAttack() {
     panel.style.left = Math.max(8, x) + 'px';
     panel.style.top = (r ? Math.max(8, r.top) : 110) + 'px';
     const v = view(id);
-    fill(panel, attackPanelContent(v, ep.attack));
+    const ws = watchState(id);
+    fill(panel, attackPanelContent(v, { ...ep.attack, watch: { ...ws, full: getWatch().list.length >= WATCH_MAX && !ws.watching, toggle: () => toggleFor(id) } }));
     // What Torn Eye said before this fight: the fight learner compares it with how the fight went.
     if (v && v.forecast && Number.isFinite(v.forecast.pWin)) {
         const list = get(K.eyePredictions, []) || [];
@@ -226,9 +277,10 @@ export function bootEyePage() {
             drawAll();
         }
     });
-    // War mode: every 10 s while visible.
+    // War mode: every 10 s while visible. The watch list: read every 60 s while a Torn tab is visible (each player when due).
     setInterval(() => {
         if (!isPaused() && detectPage(location.href) === PAGE_FACTION && document.getElementById('faction_war_list_id')) pollWar();
+        if (!isPaused() && isVisible() && getSettings().eyeChips && getWatch().list.length) pollWatch().catch(() => {});
     }, 2000);
     onPauseChange(() => {
         lastSig = '';

@@ -3418,6 +3418,15 @@
         return 0;
     }
 
+    /**
+     * A faction's current wars (Public): {pacts, wars: {ranked, raids, territory}}.
+     * Without an id, your own faction's.
+     */
+    async function fetchFactionWars(client, factionId = null) {
+        const d = await client.get(factionId ? 'v2/faction/' + ids(factionId)[0] + '/wars' : 'v2/faction/wars');
+        return { pacts: (d && d.pacts) || [], wars: (d && d.wars) || {} };
+    }
+
     /* ===== src/core/auto.js ===== */
     /*
      * Auto mode (the Plan dropdown's default): the plan picks itself from what
@@ -6647,6 +6656,38 @@
         if (sig === sync.targetsSig) return;
         sync.targets = t;
         sync.targetsSig = sig;
+    }
+
+    /* Torn Eye's war and watch list for the Worker (ROUND4-PLAN §B8, §I): the lead sends them with the plan. */
+    const EYE_SYNC_WAR_MAX = 100;
+    const EYE_SYNC_WATCH_MAX = 25;
+    const EYE_BANDS = ['stomp', 'good', 'tough', 'cant', 'none'];
+
+    function eyeSyncRow(r, withTag = false) {
+        const id = Number(r && r.id);
+        if (!(id > 0)) return null;
+        const pct = (x) => (x === null || x === undefined || !Number.isFinite(Number(x)) ? null : Math.max(0, Math.min(100, Math.round(Number(x)))));
+        const row = { id, name: r.name ? String(r.name).slice(0, 40) : null, level: Number(r.level) > 0 ? Math.round(Number(r.level)) : null, band: EYE_BANDS.includes(r.band) ? r.band : 'none', win: pct(r.win), keep: pct(r.keep) };
+        if (withTag) row.tag = r.tag ? String(r.tag).slice(0, 24) : null;
+        return row;
+    }
+
+    /**
+     * The enemy faction and the watch list, for the bot's war and watch pings (set by the webpage).
+     * @param {object} o - {war: {factionId, members:[{id,name,level,band,win,keep}]} | null, watch: [{id,name,level,band,win,keep,tag}] | null}
+     */
+    function setEyeForSync({ war = null, watch = null } = {}) {
+        const w = war && Number(war.factionId) > 0 ? { factionId: Number(war.factionId), members: (war.members || []).map((r) => eyeSyncRow(r)).filter(Boolean).slice(0, EYE_SYNC_WAR_MAX) } : null;
+        const list = (watch || []).map((r) => eyeSyncRow(r, true)).filter(Boolean).slice(0, EYE_SYNC_WATCH_MAX);
+        const sig = JSON.stringify([w, list]);
+        if (sig === sync.eyeSig) return;
+        sync.eye = { war: w, watch: list };
+        sync.eyeSig = sig;
+    }
+
+    /** What the plan sync can add to its body: {war, watch, sig} (sig changes when either does). */
+    function eyeSyncPayload() {
+        return { war: sync.eye ? sync.eye.war : null, watch: sync.eye ? sync.eye.watch : [], sig: sync.eyeSig || '' };
     }
 
     /** Steps the player skipped in Discord (the Worker's acks), still in force. */
@@ -10990,401 +11031,146 @@
         return Math.max(now, (seenAt || now) + travel.minutes * 60000);
     }
 
-    /* ===== src/ui/app/eye-tab.js ===== */
-    /*
-     * Torn Eye tab (mockups/round3/W-eye.html): one question, "who can I hit?".
-     * Three modes: Targets (FFScouter's list ranked by our own fight estimate),
-     * Chain (only Stomp and Good, most respect first, always) and War (everyone
-     * in the enemy faction, coloured by risk: attackable now first, then who's
-     * out of hospital soonest; travellers with where they're going and an
-     * estimated landing). Sorts and tick filters in every mode; the colour
-     * bands live in Settings.
-     */
-
-
-
-
-
-
-
-
-
+    /* ------------------------------------------------ round 4: war mode (ROUND4-PLAN §B) */
 
     /**
-     * The fair-fight range asked from FFScouter's target finder. Sent every time:
-     * without it FFScouter answered with Torn's strongest players (fair fight
-     * 30+, billions of stats). 1.3–2.6 is Stomp to Good at your own stats (the
-     * fight model: 2.5 ≈ Good, 3 ≈ Tough); a higher fair fight gives more respect.
+     * The enemy from your own faction's current wars (/faction/wars: ranked,
+     * raids, territory). Ranked first, then territory, then raids; wars that
+     * ended are skipped.
+     * @returns {{id, name, kind:'ranked'|'territory'|'raid', warId, start, end}[]}
      */
-    const TARGET_FF = { min: 1.3, max: 2.6 };
-
-    const EYE_SORTS = [
-        ['easy', 'Easiest'],
-        ['respect', 'Most respect'],
-        ['keep', 'HP kept'],
-        ['level', 'Level'],
-        ['active', 'Last active'],
-    ];
-
-    const EYE_TICKS = [
-        ['hideCant', 'Hide can’t win'],
-        ['stompOnly', 'Stomp only'],
-        ['keep50', 'Keep over 50% HP'],
-        ['hideHosp', 'Hide hospital'],
-        ['hideTravel', 'Hide traveling'],
-        ['inactive', 'Inactive 14+ days'],
-        ['factionless', 'No faction'],
-        ['notToday', 'Not attacked by me today'],
-        // War shows everyone by default (owner): its own ticks, all off.
-        ['warHideCant', 'Hide can’t win'],
-        ['warHideHosp', 'Hide hospital'],
-        ['warHideTravel', 'Hide traveling'],
-    ];
-
-    /** Rank targets: 0 = easiest first (win × HP kept), 1 = most respect you can still win. */
-    function rankTargets(rows, slider) {
-        const s = Math.max(0, Math.min(1, slider));
-        const maxR = Math.max(1e-9, ...rows.map((r) => r.respect || 0));
-        const score = (r) => {
-            if (!r.forecast) return -1;
-            const easy = r.forecast.pWin * (r.forecast.keep || 0);
-            const resp = ((r.respect || 0) / maxR) * r.forecast.pWin;
-            return (1 - s) * easy + s * resp;
-        };
-        return [...rows].sort((a, b) => score(b) - score(a));
-    }
-
-    /** Sort by the chosen key (unknown estimates last). */
-    function sortTargets(rows, key) {
-        const val = {
-            easy: (r) => (r.forecast ? r.forecast.pWin * (r.forecast.keep || 0) : -1),
-            respect: (r) => (r.forecast && r.forecast.pWin >= 0.5 ? r.respect || 0 : -1),
-            keep: (r) => (r.forecast ? r.forecast.keep || 0 : -1),
-            level: (r) => -(r.level || 999),
-            active: (r) => -(r.lastAction || Infinity),
-        }[key] || ((r) => (r.forecast ? r.forecast.pWin : -1));
-        return [...rows].sort((a, b) => val(b) - val(a));
-    }
-
-    function stateOf(r, now) {
-        const st = r.status || {};
-        const s = String(st.state || st.description || '').toLowerCase();
-        if ((r.hospitalUntil && r.hospitalUntil > now) || s.includes('hospital')) return 'hospital';
-        if (s.includes('travel') || s.includes('abroad') || s.startsWith('in ')) return 'travel';
-        return 'okay';
-    }
-
-    /** Apply the ticks. */
-    function filterTargets(rows, f, { now, attackedToday = new Set() } = {}) {
-        return rows.filter((r) => {
-            if (f.hideCant && r.band === 'cant') return false;
-            if (f.stompOnly && r.band !== 'stomp') return false;
-            if (f.keep50 && !(r.forecast && r.forecast.keep > 0.5)) return false;
-            const st = stateOf(r, now);
-            if (f.hideHosp && st === 'hospital') return false;
-            if (f.hideTravel && st === 'travel') return false;
-            if (f.notToday && attackedToday.has(Number(r.id))) return false;
-            return true;
-        });
-    }
-
-    function bandCell(band) {
-        return h('span', { class: 'band2' }, [h('i', { style: 'background:' + BAND_COLORS[band] }), BAND_WORDS[band]]);
-    }
-
-    function ago(ts, now) {
-        if (!ts) return '—';
-        const d = Math.round((now - ts) / 86400000);
-        return d < 1 ? 'today' : d + ' d';
-    }
-
-    function statusCell(r, now) {
-        if (r.hospitalUntil && r.hospitalUntil > now) return h('td', { class: 'cdn', text: 'Hospital ' + countdown(r.hospitalUntil - now) });
-        const st = r.status || {};
-        const d = st.description || st.state;
-        if (d && !/^okay$/i.test(d)) return h('td', { class: /hospital/i.test(d) ? 'cdn' : null, text: d });
-        return h('td', { text: 'Okay' });
-    }
-
-    function pct(x) {
-        return x === null || x === undefined ? '—' : Math.round(x * 100) + '%';
-    }
-
-    function attackBtn(id, primary, ghost) {
-        return h('a', { class: 'btn sm' + (primary ? ' primary' : ghost ? ' ghost' : ''), href: attackUrl(id), target: '_blank', rel: 'noopener', text: 'Attack' });
-    }
-
-    function sourceShort(r, now) {
-        const e = r.est;
-        if (!e) return 'no estimate yet';
-        const s = String(e.sourceText || e.source || '');
-        const when = e.at ? ' · ' + ago(e.at, now) : '';
-        if (/spy/i.test(s)) return 'spy' + when;
-        if (/fight/i.test(s)) return 'your fight' + when;
-        if (/ffscouter/i.test(s)) return 'FFScouter' + when;
-        if (/public|rank/i.test(s)) return 'public stats · rough';
-        return s.slice(0, 30);
-    }
-
-    function targetsTable(rows, { now, chain = false }) {
-        const head = chain
-            ? ['Band', 'Player', 'Lvl', 'Respect', 'Win', 'HP kept', 'Status', 'Active', '']
-            : ['Band', 'Player', 'Lvl', 'Win', 'HP kept', 'Respect', 'Status', 'Active', 'Estimate from', ''];
-        const right = chain ? [2, 3, 4, 5, 7] : [2, 3, 4, 5, 7];
-        const body = rows.map((r, i) => {
-            const win = h('td', { class: 'r', text: r.forecast ? pct(r.forecast.pWin) : '—' });
-            const keep = h('td', { class: 'r', text: r.forecast && r.forecast.keep !== null ? (r.est && r.est.confidence === 'exact' ? '' : '~') + pct(r.forecast.keep) : '—' });
-            const resp = h('td', { class: 'r' }, [chain ? h('b', { class: 'white', text: r.respect ? r.respect.toFixed(2) : '—' }) : r.respect ? r.respect.toFixed(2) : '—']);
-            const cells = [h('td', {}, [bandCell(r.band)]), h('td', {}, [h('a', { href: profileUrl(r.id), target: '_blank', rel: 'noopener' }, [h('b', { class: 'w', text: r.name || String(r.id) })])]), h('td', { class: 'r', text: r.level ? String(r.level) : '—' })];
-            if (chain) cells.push(resp, win, keep);
-            else cells.push(win, keep, resp);
-            cells.push(statusCell(r, now), h('td', { class: 'r muted', text: ago(r.lastAction, now) }));
-            if (!chain) cells.push(h('td', { class: 'muted', text: sourceShort(r, now) }));
-            cells.push(h('td', { class: 'r' }, [attackBtn(r.id, i === 0, r.band === 'cant')]));
-            return h('tr', {}, cells);
-        });
-        return h('table', { class: 'tbl num' }, [
-            h('thead', {}, [h('tr', {}, head.map((x, i) => h('th', { class: right.includes(i) ? 'r' : null, style: i === 0 ? 'width:110px' : null, text: x })))]),
-            h('tbody', {}, body),
-        ]);
-    }
-
-    function warTable(rows, { now, seen }) {
-        const nowS = Math.floor(now / 1000);
-        const body = rows.map((w, i) => {
-            const r = w.view || { band: 'none' };
-            const m = w.m;
-            let status;
-            if (w.state === 'okay' || w.state === 'early') status = h('td', { class: 'c-good', text: w.state === 'early' ? 'Out early · attack now' : 'Okay · attack now' });
-            else if (w.state === 'hospital') status = h('td', { class: 'cdn', text: 'Hospital · out in ' + countdown(Math.max(0, (w.until - nowS) * 1000)) });
-            else if (w.state === 'traveling' || w.state === 'abroad') {
-                const tr = travelOf(m);
-                const land = landingAt(tr, seen.get(w.id), now);
-                status = h('td', {}, [
-                    tr ? (tr.kind === 'abroad' ? 'In ' + tr.place + (land ? ' · back ~' + clock(land) + ' if they fly now' : '') : (tr.kind === 'back' ? 'Returning from ' + tr.place : 'Traveling → ' + tr.place) + (land ? ' · lands ~' + clock(land) : '')) : (m.status && m.status.description) || 'Traveling',
-                    land ? h('span', { class: 'muted', text: ' (estimate)' }) : null,
-                ]);
-            } else status = h('td', { class: 'muted', text: (m.status && m.status.description) || w.state });
-            const attackable = w.state === 'okay' || w.state === 'early';
-            return h('tr', {}, [
-                h('td', {}, [bandCell(r.band || 'none')]),
-                h('td', {}, [h('a', { href: profileUrl(w.id), target: '_blank', rel: 'noopener' }, [h('b', { class: 'w', text: m.name || String(w.id) })])]),
-                h('td', { class: 'r', text: m.level ? String(m.level) : '—' }),
-                h('td', { class: 'r', text: r.forecast ? pct(r.forecast.pWin) : '—' }),
-                h('td', { class: 'r', text: r.forecast && r.forecast.keep !== null ? pct(r.forecast.keep) : '—' }),
-                h('td', { class: 'r', text: r.respect ? r.respect.toFixed(2) : '—' }),
-                status,
-                h('td', { class: 'r' }, [attackable || w.state === 'hospital' ? attackBtn(w.id, i === 0 && attackable, r.band === 'cant') : null]),
-            ]);
-        });
-        return h('table', { class: 'tbl num' }, [
-            h('thead', {}, [h('tr', {}, ['Band', 'Player', 'Lvl', 'Win', 'HP kept', 'Respect', 'Status', ''].map((x, i) => h('th', { class: [2, 3, 4, 5].includes(i) ? 'r' : null, style: i === 0 ? 'width:110px' : i === 6 ? 'width:300px' : null, text: x })))]),
-            h('tbody', {}, body),
-        ]);
-    }
-
-    function renderEye(m, ctx) {
-        const e = ctx.eye;
-        const now = Date.now();
-        const ui = ctx.ui;
-        const mode = ui.eyeMode || 'targets';
-        const f = ui.eyeFilters || (ui.eyeFilters = { minLevel: 1, maxLevel: 100, inactive: true, factionless: false, hideCant: true, stompOnly: false, keep50: false, hideHosp: false, hideTravel: false, notToday: false, sort: 'easy' });
-        const inputs = {};
-        const reload = () => {
-            f.minLevel = Math.max(1, Math.min(100, Number(inputs.min && inputs.min.value) || f.minLevel || 1));
-            f.maxLevel = Math.max(f.minLevel, Math.min(100, Number(inputs.max && inputs.max.value) || f.maxLevel || 100));
-            e.load({ minLevel: f.minLevel, maxLevel: f.maxLevel, inactiveOnly: f.inactive ? 1 : 0, factionless: f.factionless ? 1 : null, minFf: TARGET_FF.min, maxFf: TARGET_FF.max });
-        };
-        const attacks = e.attacks ? e.attacks() : [];
-        const today = tornDayStart(now);
-        const attackedToday = new Set(attacks.filter((a) => (a.ended || 0) * 1000 >= today).map((a) => Number(a.def)));
-
-        // Controls
-        const modeSeg = h('div', { class: 'seg modes', role: 'group', 'aria-label': 'Mode' }, [['targets', 'Targets'], ['chain', 'Chain'], ['war', 'War']].map(([k, label]) => h('button', { type: 'button', 'aria-pressed': String(k === mode), onclick: () => { ui.eyeMode = k; ctx.rerender(); }, text: label })));
-        const bar1 = [modeSeg];
-        if (mode === 'war') {
-            const w = e.war ? e.war.state() : {};
-            let fidIn;
-            bar1.push(
-                t('lab', 'Enemy faction'),
-                (fidIn = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:90px', placeholder: 'faction id', 'aria-label': 'Enemy faction id', value: w.fid ? String(w.fid) : '' })),
-                h('button', { class: 'btn sm', type: 'button', onclick: () => { const v = Number(String(fidIn.value).replace(/\D/g, '')); if (v && e.war) e.war.watch(v); }, text: w.fid ? 'Watch this one' : 'Watch' }),
-                w.fid ? h('span', { class: 'muted', text: 'Watching ' + (w.name || 'faction ' + w.fid) + ' · read every 10 s while open' }) : null,
-            );
-        }
-        bar1.push(h('span', { class: 'sep' }), t('lab', 'Sort'));
-        if (mode === 'chain') bar1.push(h('span', { class: 'muted', text: 'most respect first, always' }));
-        else if (mode === 'war') bar1.push(h('span', { class: 'muted', text: 'attackable now first, then out of hospital soonest' }));
-        else bar1.push(h('div', { class: 'seg', role: 'group', 'aria-label': 'Sort' }, EYE_SORTS.map(([k, label]) => h('button', { type: 'button', 'aria-pressed': String(k === f.sort), onclick: () => { f.sort = k; ctx.rerender(); }, text: label }))));
-        if (mode !== 'war') {
-            bar1.push(h('span', { class: 'sep' }), t('lab', 'Level'), (inputs.min = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:44px', 'aria-label': 'Lowest level', value: String(f.minLevel), onchange: reload })), '–', (inputs.max = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:50px', 'aria-label': 'Highest level', value: String(f.maxLevel), onchange: reload })));
-            if (ctx.flags.hasFfs) bar1.push(h('button', { class: 'btn sm', type: 'button', onclick: reload, text: e.loading() ? 'Loading…' : 'Refresh' }));
-        }
-        const tickKeys = mode === 'war' ? ['warHideCant', 'warHideHosp', 'warHideTravel'] : mode === 'chain' ? ['stompOnly', 'keep50', 'hideHosp', 'hideTravel', 'inactive', 'factionless', 'notToday'] : EYE_TICKS.map(([k]) => k).filter((k) => !k.startsWith('war'));
-        const refetch = new Set(['inactive', 'factionless']);
-        const bar2 = [
-            t('lab', 'Show'),
-            h('div', { class: 'ticks', role: 'group', 'aria-label': 'Show' }, EYE_TICKS.filter(([k]) => tickKeys.includes(k)).map(([k, label]) => h('button', { type: 'button', class: 'tk', 'aria-pressed': String(Boolean(f[k])), onclick: () => { f[k] = !f[k]; if (refetch.has(k) && ctx.flags.hasFfs) reload(); else ctx.rerender(); } }, [h('i'), label]))),
-        ];
-
-        const main = [];
-        const pane = [];
-        const rowsAll = e.rows();
-        // First visit with FFScouter connected: load the targets without a click.
-        // Also once when the stored list was asked without a fair-fight range (1.1.0: it held Torn's strongest players).
-        const oldList = rowsAll.length && e.params && !(e.params() && e.params().maxFf);
-        if (mode !== 'war' && ctx.flags.hasFfs && (!rowsAll.length || oldList) && !e.loading() && !e.error() && !ui.eyeAutoLoaded) {
-            ui.eyeAutoLoaded = true;
-            setTimeout(reload, 0);
-        }
-
-        if (mode === 'war') {
-            const w = e.war ? e.war.state() : { members: [] };
-            const views = new Map((w.members || []).map((mm) => [Number(mm.id), e.view(Number(mm.id), { level: mm.level, name: mm.name }, { war: true })]));
-            const bands = {};
-            const respect = {};
-            for (const [id, v] of views) {
-                if (v) {
-                    bands[id] = v.band;
-                    respect[id] = v.respect || 0;
-                }
+    function enemiesFromWars(resp, myFactionId, nowS = Math.floor(Date.now() / 1000)) {
+        const w = (resp && (resp.wars || resp)) || {};
+        const mine = Number(myFactionId) || 0;
+        const out = [];
+        const add = (war, kind) => {
+            if (!war || typeof war !== 'object') return;
+            if (war.end && Number(war.end) < nowS) return;
+            if (war.winner) return;
+            const facs = Array.isArray(war.factions) ? war.factions : [];
+            // Your side is found by id; without one, a war is read only when it's two-sided.
+            const other = facs.filter((f) => f && Number(f.id) && Number(f.id) !== mine);
+            if (!mine && other.length !== 1) return;
+            for (const f of other) {
+                if (out.some((x) => x.id === Number(f.id))) continue;
+                out.push({ id: Number(f.id), name: f.name ? String(f.name) : null, kind, warId: Number(war.war_id || war.id) || null, start: Number(war.start) || null, end: Number(war.end) || null });
             }
-            let rows = sortWar(w.members || [], { bands, respect, early: w.early || new Set(), nowS: Math.floor(now / 1000) }).map((r) => ({ ...r, view: views.get(r.id) }));
-            rows = rows.filter((r) => r.state !== 'fallen' && !(f.warHideCant && r.band === 'cant') && !(f.warHideHosp && r.state === 'hospital') && !(f.warHideTravel && (r.state === 'traveling' || r.state === 'abroad')));
-            const sum = warSummary(rows, Math.floor(now / 1000));
-            main.push(
-                h('div', { class: 'lead', 'data-mode': 'war' }, [
-                    sectionHead('War' + (w.name ? ' · ' + w.name : ''), meta(['everyone, coloured by how the fight goes for you · attackable now first, then who’s out soonest'])),
-                    w.fid ? (rows.length ? warTable(rows, { now, seen: w.seen || new Map() }) : h('p', { class: 'muted', style: 'margin:0', text: w.loading ? 'Reading the faction…' : w.error || 'No members to show.' })) : h('p', { class: 'muted', style: 'margin:0', text: 'Type the enemy faction’s id and press Watch. On Torn’s own war page the chips and the order show by themselves.' }),
-                    h('div', { class: 'note2', text: 'War shows everyone, even barely beatable: the colour tells you the risk. Landing times are estimated from when we saw them leave and the standard flight time.' }),
-                ]),
-            );
-            const outs = rows.filter((r) => r.state === 'hospital').slice(0, 5);
-            pane.push(
-                h('div', {}, [
-                    sectionHead('Next out of hospital', null, null, 'h3'),
-                    outs.length ? h('dl', { class: 'facts num' }, outs.flatMap((r) => [h('dt', { text: countdown(Math.max(0, r.until * 1000 - now)) }), h('dd', { text: (r.m.name || r.id) + ' · ' + BAND_WORDS[r.band || 'none'] })])) : h('p', { class: 'muted', style: 'margin:0', text: 'Nobody in hospital.' }),
-                    h('div', { class: 'note2', text: sum.attackable + ' attackable now · ' + rows.filter((r) => r.state === 'hospital' && r.until * 1000 - now < 5 * 60000).length + ' out within 5 min · ' + (sum.traveling + rows.filter((r) => r.state === 'abroad').length) + ' traveling or abroad' }),
-                ]),
-            );
-        } else {
-            let rows = filterTargets(rowsAll, f, { now, attackedToday });
-            const hiddenCant = f.hideCant ? rowsAll.filter((r) => r.band === 'cant').length : 0;
-            const hiddenKeep = f.keep50 ? rowsAll.filter((r) => r.band !== 'cant' && !(r.forecast && r.forecast.keep > 0.5)).length : 0;
-            if (mode === 'chain') {
-                rows = rows.filter((r) => r.band === 'stomp' || r.band === 'good').sort((a, b) => (b.respect || 0) - (a.respect || 0));
-            } else rows = sortTargets(rows, f.sort);
-            let body;
-            if (!ctx.flags.hasFfs) body = h('p', { class: 'muted', style: 'margin:0' }, ['Targets come from FFScouter. ', h('a', { href: '#settings', onclick: (ev) => { ev.preventDefault(); ctx.go('settings'); }, text: 'Connect it in Settings' }), '; chips on Torn’s pages work without it (your fights and public stats).']);
-            else if (!rows.length) body = h('p', { class: 'muted', style: 'margin:0', text: e.loading() ? 'Asking FFScouter for targets…' : e.error() || (rowsAll.length ? 'Nobody passes your ticks.' : 'No targets yet: press Refresh.') });
-            else body = targetsTable(rows, { now, chain: mode === 'chain' });
-            const notes = [];
-            if (hiddenCant && mode === 'targets') notes.push(hiddenCant + ' can’t-win player' + (hiddenCant === 1 ? '' : 's') + ' hidden');
-            if (rowsAll.length && hiddenCant === rowsAll.length) notes.push('every player in this list is far stronger than you: Refresh asks FFScouter for fair fight ' + TARGET_FF.min + '–' + TARGET_FF.max + ' (Stomp to Good)');
-            if (hiddenKeep) notes.push(hiddenKeep + ' hidden because you’d keep under 50% HP');
-            main.push(
-                h('div', { class: 'lead', 'data-mode': mode }, [
-                    sectionHead(mode === 'chain' ? 'Chain' : 'Targets', meta([mode === 'chain' ? 'only Stomp and Good · most respect first · ' + rows.length + ' players' : rowsAll.length + ' players · win and HP kept from your stats against theirs · ' + (EYE_SORTS.find(([k]) => k === f.sort) || [0, ''])[1].toLowerCase() + ' first'])),
-                    body,
-                    notes.length ? h('div', { class: 'note2', text: notes.join(' · ') + '.' }) : null,
-                    mode === 'chain' ? h('div', { class: 'note2', text: 'Chains only list players you’ll beat (green and light green); Tough and Can’t win never show here.' }) : null,
-                ]),
-            );
-        }
-
-        const src = e.sources();
-        pane.push(
-            h('div', {}, [
-                sectionHead('How sure', meta(['best source first']), null, 'h3'),
-                h('dl', { class: 'facts num' }, [
-                    h('dt', { text: 'Faction spies (TornStats)' }),
-                    h('dd', { text: ctx.flags.hasTs ? 'connected' : 'add a key in Settings' }),
-                    h('dt', { text: 'Your own fights' }),
-                    h('dd', { text: fmtInt(src.fights) + ' attacks read' }),
-                    h('dt', { text: 'FFScouter estimates' }),
-                    h('dd', { text: ctx.flags.hasFfs ? src.ffsFree + ' of 60 left this min' : 'not connected' }),
-                    h('dt', { text: 'Public stats (rough)' }),
-                    h('dd', { text: 'always on' }),
-                    h('dt', { text: 'Gear seen' }),
-                    h('dd', { text: fmtInt(src.gear) + ' players · this computer only' }),
-                ]),
-                h('div', { class: 'note2' }, ['Estimates by ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }), '. Colours: Settings › Torn Eye colours.']),
-            ]),
-        );
-        if (m && m.ready) {
-            const mods = m.state.statMods || {};
-            const eff = Object.entries(m.pc.stats).reduce((a, [k, v]) => a + v * (1 + (mods[k] || 0) / 100), 0);
-            pane.push(h('div', {}, [sectionHead('Your side', meta(['what the fight uses']), null, 'h3'), h('dl', { class: 'facts num' }, [h('dt', { text: 'Stats as they fight' }), h('dd', { text: fmtShort(eff) + ' (merits and passives in)' }), h('dt', { text: 'Life' }), h('dd', { text: m.state.life ? fmtInt(m.state.life.maximum) : '—' })])]));
-        }
-        const upd = e.updatedAt && e.updatedAt() ? 'targets ' + Math.max(0, Math.round((now - e.updatedAt()) / 60000)) + ' min ago' : null;
-        return { ctl: [bar1, bar2], main, pane, upd };
+        };
+        add(w.ranked, 'ranked');
+        for (const t of Array.isArray(w.territory) ? w.territory : []) add(t, 'territory');
+        for (const r of Array.isArray(w.raids) ? w.raids : []) add(r, 'raid');
+        return out;
     }
 
-    void BAND_ORDER;
-    void memberState;
+    const WAR_KIND_WORDS = { ranked: 'ranked war', territory: 'territory war', raid: 'raid' };
 
-    /* ===== src/platform/idb.js ===== */
-    /*
-     * A small key-value store in the page's own IndexedDB, for data only ONE page
-     * needs. Tampermonkey hands every stored GM value to the script before it
-     * starts, on every page it runs on - so the Torn Ledger's rows (which only
-     * Torn Bids reads, and which grow with every trade) slowed every Torn page
-     * they were never shown on. Here they cost Torn pages nothing.
-     *
-     * Every call rejects where IndexedDB is missing or refused (some private
-     * windows); the caller then keeps the GM store.
+    /** "5 min ago", "3 h ago", "2 d ago". */
+    function agoText(ms, now = Date.now()) {
+        const s = Math.max(0, Math.round((now - ms) / 1000));
+        if (s < 60) return 'just now';
+        if (s < 3600) return Math.round(s / 60) + ' min ago';
+        if (s < 86400 * 2) return Math.round(s / 3600) + ' h ago';
+        return Math.round(s / 86400) + ' d ago';
+    }
+
+    /** Online / Idle / Offline from Torn's last_action, with "last active". */
+    function activityOf(m, now = Date.now()) {
+        const la = (m && m.last_action) || null;
+        if (!la) return { kind: null, at: null, text: '—' };
+        const s = String(la.status || '').toLowerCase();
+        const kind = s === 'online' ? 'online' : s === 'idle' ? 'idle' : 'offline';
+        const at = Number(la.timestamp) ? Number(la.timestamp) * 1000 : null;
+        const text = kind === 'online' ? 'Online' : at ? (kind === 'idle' ? 'Idle · ' : '') + agoText(at, now) : la.relative || (kind === 'idle' ? 'Idle' : 'Offline');
+        return { kind, at, text };
+    }
+
+    const ACTIVITY_COLORS = { online: '#9bdc8a', idle: '#e8a33d', offline: '#6c737a' };
+    const ACTIVITY_WORDS = { online: 'Online', idle: 'Idle', offline: 'Offline' };
+
+    /** Flights are kept this long after first seen (the longest standard flight is under 5 h). */
+    const FLIGHT_KEEP_MS = 12 * 60 * 60 * 1000;
+    const FLIGHTS_KEPT = 400;
+
+    /**
+     * When each flight was first seen, kept across reloads: {id: {desc, at}}.
+     * A new status line is a new flight; someone no longer flying is dropped.
+     * @returns {{seen: object, changed: boolean}}
      */
-
-    const IDB_NAME = 'pumpingIron';
-    const IDB_STORE = 'kv';
-
-    let idbOpening = null;
-
-    function idbOpen() {
-        if (!idbOpening) {
-            idbOpening = new Promise((resolve, reject) => {
-                if (typeof indexedDB === 'undefined' || !indexedDB) {
-                    reject(new Error('No IndexedDB.'));
-                    return;
+    function trackFlights(seen, members, now = Date.now()) {
+        const next = { ...(seen || {}) };
+        let changed = false;
+        for (const m of members || []) {
+            const n = Number(m && m.id);
+            if (!(n > 0)) continue;
+            const id = String(n);
+            const st = memberState(m);
+            const desc = String((m.status && m.status.description) || '');
+            if (st === 'traveling' || st === 'abroad') {
+                if (!next[id] || next[id].desc !== desc) {
+                    next[id] = { desc, at: now };
+                    changed = true;
                 }
-                const req = indexedDB.open(IDB_NAME, 1);
-                req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
-                req.onsuccess = () => resolve(req.result);
-                req.onerror = () => reject(req.error || new Error('IndexedDB refused.'));
-                req.onblocked = () => reject(new Error('IndexedDB blocked.'));
-            });
-            // A failed open is tried again next time rather than remembered.
-            idbOpening.catch(() => {
-                idbOpening = null;
-            });
+            } else if (next[id]) {
+                delete next[id];
+                changed = true;
+            }
         }
-        return idbOpening;
+        for (const id of Object.keys(next)) {
+            if (now - (next[id].at || 0) > FLIGHT_KEEP_MS) {
+                delete next[id];
+                changed = true;
+            }
+        }
+        const left = Object.keys(next);
+        if (left.length > FLIGHTS_KEPT) {
+            left.sort((a, b) => next[a].at - next[b].at);
+            for (const id of left.slice(0, left.length - FLIGHTS_KEPT)) delete next[id];
+            changed = true;
+        }
+        return { seen: next, changed };
     }
 
-    function idbRun(mode, fn) {
-        return idbOpen().then(
-            (db) =>
-                new Promise((resolve, reject) => {
-                    const tx = db.transaction(IDB_STORE, mode);
-                    const req = fn(tx.objectStore(IDB_STORE));
-                    tx.oncomplete = () => resolve(req ? req.result : undefined);
-                    tx.onerror = () => reject(tx.error || new Error('IndexedDB error.'));
-                    tx.onabort = () => reject(tx.error || new Error('IndexedDB aborted.'));
-                }),
-        );
+    /**
+     * The status cell, in parts so the page can keep the countdown ticking:
+     * text = pre + clock(at) [+ " TCT" (m:ss) when cd] + post.
+     * @param {object} m - faction member or profile {status, has_early_discharge, is_revivable}
+     * @param {object} o - {now (ms), seenAt (ms, first seen flying), early (left hospital early)}
+     * @returns {{kind, pre, at, cd, post, cls, soonAt}}
+     */
+    function statusParts(m, { now = Date.now(), seenAt = null, early = false } = {}) {
+        const st = memberState(m);
+        const s = (m && m.status) || {};
+        const until = Number(s.until) > 0 ? Number(s.until) * 1000 : null;
+        if (early) return { kind: 'early', pre: 'Out early · attack now', at: null, cd: false, post: '', cls: 'c-good', soonAt: null };
+        if (st === 'okay') return { kind: 'okay', pre: 'Okay · attack now', at: null, cd: false, post: '', cls: 'c-good', soonAt: null };
+        if (st === 'hospital') {
+            const flags = [m && m.has_early_discharge ? 'may leave early' : null, m && m.is_revivable ? 'revivable' : null].filter(Boolean);
+            return { kind: 'hospital', pre: until ? 'Hospital · out ' : 'Hospital', at: until, cd: true, post: flags.length ? ' · ' + flags.join(' · ') : '', cls: 'cdn', soonAt: until };
+        }
+        if (st === 'jail') {
+            const fed = /federal/i.test(String(s.state || s.description || ''));
+            return { kind: 'jail', pre: fed ? 'Federal jail' : until ? 'Jail · out ' : 'Jail', at: fed ? null : until, cd: true, post: '', cls: 'muted', soonAt: fed ? null : until };
+        }
+        if (st === 'traveling' || st === 'abroad') {
+            const tr = travelOf(m);
+            if (!tr) return { kind: st, pre: s.description || 'Traveling', at: null, cd: false, post: '', cls: null, soonAt: null };
+            if (tr.kind === 'abroad') {
+                const back = landingAt(tr, null, now);
+                return { kind: 'abroad', pre: 'In ' + tr.place + (back ? ' · back ~' : ''), at: back, cd: false, post: back ? ' at the earliest (est.)' : '', cls: null, soonAt: null };
+            }
+            const land = landingAt(tr, seenAt, now);
+            const pre = (tr.kind === 'back' ? '← from ' : '→ ') + tr.place + (land ? ', lands ~' : '');
+            return { kind: 'traveling', pre, at: land, cd: false, post: land ? ' (est.)' : '', cls: null, soonAt: land };
+        }
+        if (st === 'fallen') return { kind: 'fallen', pre: 'Fallen', at: null, cd: false, post: '', cls: 'muted', soonAt: null };
+        return { kind: st, pre: s.description || st, at: null, cd: false, post: '', cls: null, soonAt: null };
     }
 
-    /** @returns {Promise<any|null>} */
-    function idbGet(key) {
-        return idbRun('readonly', (s) => s.get(key)).then((v) => (v === undefined ? null : v));
-    }
-
-    function idbSet(key, value) {
-        return idbRun('readwrite', (s) => s.put(value, key));
-    }
-
-    function idbDel(key) {
-        return idbRun('readwrite', (s) => s.delete(key));
+    /** The status cell as one line: "Hospital · out 14:32 TCT (3:10)", "→ Mexico, lands ~15:05 (est.)". */
+    function statusText(parts, { now = Date.now(), clockFn, tct = true, countdownFn } = {}) {
+        if (!parts.at) return parts.pre + parts.post;
+        const c = parts.cd ? (tct ? ' TCT' : '') + ' (' + countdownFn(parts.at - now) + ')' : '';
+        return parts.pre + clockFn(parts.at) + c + parts.post;
     }
 
     /* ===== src/core/eye/fight.js ===== */
@@ -11684,6 +11470,1018 @@
         return null;
     }
 
+    /* ===== src/core/eye/targets.js ===== */
+    /*
+     * Torn Eye's target list (ROUND4-PLAN §A). FFScouter's finder answers the
+     * strongest accounts first, 50 at most, so one ask with no slices gave the
+     * owner 50 level-100 players he can't beat. We ask in slices instead:
+     *
+     *   - fair fight 1.0–1.5, 1.5–2.0, 2.0–2.5 and 2.5–3.0 (FFScouter's own
+     *     figure against you). Strongest-first inside a slice is the top of that
+     *     slice, so every difficulty shows up, from sure wins to the most respect;
+     *   - the level range cut in up to 3 bands, so it isn't only level 100.
+     *
+     * 4 × 3 = 12 asks at most (FFScouter allows 25 a minute on its target
+     * finder; we pace to 20), then the estimates (≤ 205 per ask). If FFScouter
+     * ignores the fair-fight range (a slice answers far outside itself), the
+     * other slices of that level band are skipped: they'd be the same list.
+     *
+     * Then the owner's hard rule: every candidate goes through our fight model
+     * and only players you beat (Stomp, Good or Tough) are ever stored. The
+     * list is sorted by the most respect you can win.
+     */
+
+
+
+
+
+    /** The full range: no respect cap (owner). Torn caps fair fight at 3. */
+    const TARGET_FF = { min: 1.0, max: 3.0 };
+
+    /** Bumped when the way lists are asked changes: an older stored list is asked again once. */
+    const TARGETS_VERSION = 2;
+
+    const FF_SLICES = [
+        [1.0, 1.5],
+        [1.5, 2.0],
+        [2.0, 2.5],
+        [2.5, 3.0],
+    ];
+
+    /** FFScouter's target finder: 25 a minute per IP; we keep to 20. */
+    const TARGETS_PER_MINUTE = 20;
+
+    /** An estimate older than this is marked "old". */
+    const OLD_ESTIMATE_DAYS = 180;
+
+    const BEATABLE = ['stomp', 'good', 'tough'];
+
+    function isBeatable(band) {
+        return BEATABLE.includes(band);
+    }
+
+    /** [calibrate] Max life from level when no profile was read: Torn's base plus typical merits and perks. */
+    function lifeFromLevel(level) {
+        return Math.round((100 + 50 * Math.max(0, (Number(level) || 1) - 1)) * 1.25);
+    }
+
+    /** The level range in up to 3 bands (a narrow range stays one band). */
+    function levelBands(minLevel = 1, maxLevel = 100) {
+        const lo = Math.max(1, Math.min(100, Math.round(Number(minLevel) || 1)));
+        const hi = Math.max(lo, Math.min(100, Math.round(Number(maxLevel) || 100)));
+        const span = hi - lo + 1;
+        const n = span >= 60 ? 3 : span >= 30 ? 2 : 1;
+        const out = [];
+        for (let i = 0; i < n; i++) {
+            const a = lo + Math.round((i * span) / n);
+            const b = i === n - 1 ? hi : lo + Math.round(((i + 1) * span) / n) - 1;
+            out.push([a, b]);
+        }
+        return out;
+    }
+
+    /** The asks for one load: each level band (highest first: more respect) × each fair-fight slice. */
+    function targetQueries({ minLevel = 1, maxLevel = 100, inactiveOnly = 1, factionless = null } = {}) {
+        const out = [];
+        for (const [a, b] of levelBands(minLevel, maxLevel).reverse()) {
+            for (const [f0, f1] of FF_SLICES) out.push({ minLevel: a, maxLevel: b, minFf: f0, maxFf: f1, inactiveOnly, factionless });
+        }
+        return out;
+    }
+
+    /** The params stored with a list; a list stored without this version is asked again once. */
+    function targetParams({ minLevel = 1, maxLevel = 100, inactiveOnly = 1, factionless = null } = {}) {
+        return { v: TARGETS_VERSION, minLevel, maxLevel, inactiveOnly, factionless, minFf: TARGET_FF.min, maxFf: TARGET_FF.max };
+    }
+
+    function needsRefetch(params) {
+        return !params || params.v !== TARGETS_VERSION;
+    }
+
+    /** Did FFScouter ignore the fair-fight range of this ask? (most rows with a figure fall outside it) */
+    function listIgnoresFf(rows, q) {
+        const known = (rows || []).filter((r) => r && Number.isFinite(r.fairFight));
+        if (known.length < 3) return false;
+        const out = known.filter((r) => r.fairFight < q.minFf - 0.05 || r.fairFight > q.maxFf + 0.05).length;
+        return out / known.length > 0.5;
+    }
+
+    /** One list from many asks, each player once (the first answer wins). */
+    function mergeTargetLists(lists) {
+        const seen = new Map();
+        for (const list of lists || []) for (const r of list || []) if (r && r.playerId > 0 && !seen.has(r.playerId)) seen.set(r.playerId, r);
+        return [...seen.values()];
+    }
+
+    /** FFScouter's own fair fight from the list: outside 1.0–3.0 it isn't a player we asked for. Unknown stays. */
+    function inFfRange(row) {
+        const ff = row ? row.fairFight : null;
+        return !Number.isFinite(ff) || (ff >= TARGET_FF.min && ff <= TARGET_FF.max);
+    }
+
+    /** Most respect first; then the surer win. */
+    function byRespect(a, b) {
+        return (b.respect || 0) - (a.respect || 0) || (b.win ?? -1) - (a.win ?? -1);
+    }
+
+    /**
+     * The hard rule: judge every candidate, keep only the ones you beat.
+     * @param {object[]} rows - merged list rows
+     * @param {function} judge - row => {band, win (0–100), keep (0–100|null), respect, ours (fair fight), source, ageDays} | null
+     * @returns {{kept: object[], dropped: {cant, none, range}}}
+     */
+    function selectTargets(rows, judge) {
+        const kept = [];
+        const dropped = { cant: 0, none: 0, range: 0 };
+        for (const r of rows || []) {
+            if (!inFfRange(r)) {
+                dropped.range++;
+                continue;
+            }
+            const j = judge(r);
+            if (!j || !j.band || j.band === 'none') dropped.none++;
+            else if (!isBeatable(j.band)) dropped.cant++;
+            else kept.push({ ...r, ...j });
+        }
+        kept.sort(byRespect);
+        return { kept, dropped };
+    }
+
+    /** The FFScouter row our estimator reads, from the list itself (when get-stats had nothing). */
+    function listRowAsFfs(row, now = Date.now()) {
+        return {
+            playerId: row.playerId,
+            bsEstimate: row.bsEstimate || null,
+            bssPublic: row.bssPublic || null,
+            fairFight: row.fairFight || null,
+            // The list carries no date: counted as today's.
+            updatedAt: row.bsEstimate || row.fairFight ? now : null,
+            source: 'list',
+            distribution: null,
+        };
+    }
+
+    /**
+     * A plain judge (no cache, no gear, no learner): the tests' and a fallback.
+     * @param {object} o - {me: {str,spd,def,dex}, myLife, row, ffs (normalizeFfsRow), limits, now}
+     */
+    function judgeTarget({ me, myLife = 7500, row, ffs = null, limits = undefined, now = Date.now() }) {
+        const est = estimatePlayer({ me, ffs: ffs || listRowAsFfs(row, now), now });
+        if (!est) return null;
+        const f = forecast({ me: { ...me, life: myLife }, target: { id: row.playerId, life: lifeFromLevel(row.level), bss: est.bss } });
+        const ours = fairFight(est.bss, bssOf(me));
+        return {
+            band: bandOf(f, limits),
+            win: Math.round(f.pWin * 100),
+            keep: f.keep === null ? null : Math.round(f.keep * 100),
+            respect: row.level ? respectFor(row.level, ours) : null,
+            ours,
+            source: est.source,
+            ageDays: est.ageDays,
+        };
+    }
+
+    /**
+     * The row's details: our fair fight, FFScouter's from its list, how old
+     * the estimate is and where it came from.
+     */
+    function targetDetails(row, view = null) {
+        const est = view && view.est;
+        const ours = Number.isFinite(row.ours) ? row.ours : null;
+        const ageDays = est ? est.ageDays : row.ageDays ?? null;
+        return {
+            ours: view && Number.isFinite(view.ours) ? view.ours : ours,
+            list: Number.isFinite(row.fairFight) ? row.fairFight : null,
+            ageDays,
+            old: ageDays !== null && ageDays !== undefined && ageDays > OLD_ESTIMATE_DAYS,
+            source: est ? est.sourceText : row.source || null,
+        };
+    }
+
+    /**
+     * What to say instead of an empty table ("press Refresh" said nothing).
+     * @returns {{kind:'paused'|'dead'|'wait'|'error'|'loading'|'empty'|'none', text}}
+     */
+    function targetsMessage({ paused = false, error = null, loading = false, stored = null } = {}) {
+        if (paused) return { kind: 'paused', text: 'Paused · Torn Trading is on' };
+        if (error && error.deadKey) return { kind: 'dead', text: 'FFScouter refused the key' };
+        if (loading) return { kind: 'loading', text: 'Asking FFScouter for targets…' };
+        if (error && error.paused) return { kind: 'wait', text: 'FFScouter asked us to wait' + (error.retryAfterS ? ' ' + error.retryAfterS + ' s' : '') };
+        if (error) return { kind: 'error', text: 'Couldn’t load targets: ' + (error.message || String(error)) };
+        if (stored && !(stored.list || []).length) {
+            const d = stored.dropped || {};
+            const parts = [];
+            if (d.cant) parts.push(d.cant + ' can’t-win dropped');
+            if (d.none) parts.push(d.none + ' with no estimate');
+            return { kind: 'empty', text: 'FFScouter found nobody you can beat in range' + (parts.length ? ' · ' + parts.join(' · ') : '') };
+        }
+        return { kind: 'none', text: stored ? '' : 'No targets yet.' };
+    }
+
+    /* ===== src/core/eye/watch.js ===== */
+    /*
+     * Torn Eye's watch list (ROUND4-PLAN §I, the owner's idea). Up to 20
+     * players you want to keep an eye on, each with an optional short reason
+     * (hospitalize, mug, revenge, bounty or your own words). Their status is
+     * read every 60 s while the Watched view or a Torn tab is open; someone
+     * in hospital for a long while, or on a long flight, every 5 min. A
+     * heads-up shows in the app when a watched player is out of hospital or
+     * lands within 3 minutes, or comes online. People who attacked or mugged
+     * you in the last hour are offered, never added by themselves. A player
+     * stays until you remove them.
+     */
+
+
+
+    const WATCH_MAX = 20;
+    const WATCH_TAGS = ['hospitalize', 'mug', 'revenge', 'bounty'];
+    const TAG_MAX = 24;
+    const WATCH_POLL_MS = 60 * 1000;
+    const WATCH_SLOW_MS = 5 * 60 * 1000;
+    /** Someone out of hospital (or landing) further away than this is read on the slow clock. */
+    const WATCH_FAR_MS = 10 * 60 * 1000;
+    const HEADS_UP_MS = 3 * 60 * 1000;
+    /** A "came online" heads-up shows this long. */
+    const EVENT_KEEP_MS = 10 * 60 * 1000;
+    const OFFER_WINDOW_MS = 60 * 60 * 1000;
+    const OFFERS_SHOWN = 5;
+
+    function emptyWatch() {
+        return { list: [], dismissed: {} };
+    }
+
+    function watchOf(stored) {
+        const s = stored && typeof stored === 'object' ? stored : {};
+        return { list: Array.isArray(s.list) ? s.list.filter((x) => x && Number(x.id) > 0) : [], dismissed: s.dismissed && typeof s.dismissed === 'object' ? s.dismissed : {} };
+    }
+
+    /** A reason tag: trimmed, one line, 24 characters at most; empty = none. */
+    function normTag(tag) {
+        const t = String(tag === null || tag === undefined ? '' : tag)
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, TAG_MAX);
+        return t || null;
+    }
+
+    function isWatched(state, id) {
+        return watchOf(state).list.some((x) => Number(x.id) === Number(id));
+    }
+
+    /**
+     * Add a player (or refresh their name and level if already there).
+     * @returns {{state, ok:boolean, reason?:'full'|'bad'}}
+     */
+    function addWatch(state, player, now = Date.now()) {
+        const s = watchOf(state);
+        const id = Number(player && player.id);
+        if (!(id > 0)) return { state: s, ok: false, reason: 'bad' };
+        const i = s.list.findIndex((x) => Number(x.id) === id);
+        if (i >= 0) {
+            const cur = s.list[i];
+            const list = s.list.slice();
+            list[i] = { ...cur, name: player.name || cur.name || null, level: player.level || cur.level || null, ...(player.tag !== undefined ? { tag: normTag(player.tag) } : {}) };
+            return { state: { ...s, list }, ok: true };
+        }
+        if (s.list.length >= WATCH_MAX) return { state: s, ok: false, reason: 'full' };
+        const dismissed = { ...s.dismissed };
+        delete dismissed[id];
+        return { state: { list: [...s.list, { id, name: player.name || null, level: player.level || null, tag: normTag(player.tag), addedAt: now }], dismissed }, ok: true };
+    }
+
+    function removeWatch(state, id) {
+        const s = watchOf(state);
+        return { ...s, list: s.list.filter((x) => Number(x.id) !== Number(id)) };
+    }
+
+    function tagWatch(state, id, tag) {
+        const s = watchOf(state);
+        return { ...s, list: s.list.map((x) => (Number(x.id) === Number(id) ? { ...x, tag: normTag(tag) } : x)) };
+    }
+
+    /** "Not now" on an offer: that attack isn't offered again (a newer one is). */
+    function dismissOffer(state, id, now = Date.now()) {
+        const s = watchOf(state);
+        const dismissed = { ...s.dismissed, [Number(id)]: now };
+        // Old dismissals go (a day is plenty: offers look back one hour).
+        for (const k of Object.keys(dismissed)) if (now - dismissed[k] > 86400000) delete dismissed[k];
+        return { ...s, dismissed };
+    }
+
+    /**
+     * Is this watched player's status due a read? Every 60 s; every 5 min
+     * when their hospital or jail time or their landing is more than 10 min off.
+     * @param {object|null} rec - last read {status, readAt}
+     */
+    function dueForRead(rec, now = Date.now(), seenAt = null) {
+        if (!rec || !rec.readAt) return true;
+        const age = now - rec.readAt;
+        if (age >= WATCH_SLOW_MS) return true;
+        if (age < WATCH_POLL_MS) return false;
+        const st = memberState(rec);
+        const until = Number(rec.status && rec.status.until) * 1000 || 0;
+        if ((st === 'hospital' || st === 'jail') && until - now > WATCH_FAR_MS) return false;
+        if (st === 'traveling') {
+            const land = landingAt(travelOf(rec), seenAt, now);
+            if (land && land - now > WATCH_FAR_MS) return false;
+        }
+        return true;
+    }
+
+    /** What changed between two reads that's worth a heads-up later: came online, left hospital. */
+    function readEvents(prev, rec, now = Date.now()) {
+        const out = [];
+        if (!prev || !rec) return out;
+        const was = String((prev.last_action && prev.last_action.status) || '').toLowerCase();
+        const is = String((rec.last_action && rec.last_action.status) || '').toLowerCase();
+        if (is === 'online' && was && was !== 'online') out.push({ kind: 'online', at: now });
+        if (memberState(prev) === 'hospital' && memberState(rec) === 'okay') out.push({ kind: 'out', at: now });
+        return out;
+    }
+
+    /**
+     * The heads-ups for the watch list, now: out of hospital within 3 min,
+     * landing within 3 min (estimate), came online or left hospital lately.
+     * @param {object[]} list - watch entries
+     * @param {object} states - {id: {status, last_action, readAt, events:[{kind, at}]}}
+     * @param {object} flights - {id: {desc, at}} first seen flying
+     * @returns {{id, name, kind, at, text}[]} soonest first
+     */
+    function headsUps(list, states, flights, now = Date.now()) {
+        const out = [];
+        for (const w of list || []) {
+            const rec = (states || {})[w.id];
+            if (!rec) continue;
+            const name = w.name || rec.name || 'Player ' + w.id;
+            const st = memberState(rec);
+            const until = Number(rec.status && rec.status.until) * 1000 || 0;
+            if (st === 'hospital' && until > now && until - now <= HEADS_UP_MS) out.push({ id: w.id, name, kind: 'hospital', at: until, text: name + ' is out of hospital in ' + mmss(until - now) });
+            if (st === 'traveling') {
+                const tr = travelOf(rec);
+                const land = landingAt(tr, flights && flights[w.id] ? flights[w.id].at : null, now);
+                // Only when we saw them leave: a landing counted from "now" would always look far off.
+                if (land && flights && flights[w.id] && land > now && land - now <= HEADS_UP_MS) out.push({ id: w.id, name, kind: 'lands', at: land, text: name + ' lands' + (tr.kind === 'back' ? ' in Torn' : ' in ' + tr.place) + ' in about ' + mmss(land - now) });
+            }
+            for (const e of rec.events || []) {
+                if (now - e.at > EVENT_KEEP_MS) continue;
+                if (e.kind === 'online') out.push({ id: w.id, name, kind: 'online', at: e.at, text: name + ' came online' });
+                if (e.kind === 'out' && st === 'okay') out.push({ id: w.id, name, kind: 'out', at: e.at, text: name + ' is out of hospital' });
+            }
+        }
+        return out.sort((a, b) => a.at - b.at);
+    }
+
+    function mmss(ms) {
+        const s = Math.max(0, Math.ceil(ms / 1000));
+        return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    }
+
+    /**
+     * "Watch?" offers: players who attacked or mugged you in the last hour,
+     * not watched, not dismissed since. Newest first, one per player.
+     * @param {object[]} incoming - [{att, name, level, ended (s), result}]
+     */
+    function watchOffers(incoming, state, now = Date.now()) {
+        const s = watchOf(state);
+        const watched = new Set(s.list.map((x) => Number(x.id)));
+        const seen = new Set();
+        const out = [];
+        for (const a of [...(incoming || [])].sort((x, y) => (y.ended || 0) - (x.ended || 0))) {
+            const id = Number(a && a.att);
+            if (!(id > 0) || seen.has(id) || watched.has(id)) continue;
+            const at = (Number(a.ended) || 0) * 1000;
+            if (now - at > OFFER_WINDOW_MS) continue;
+            if (s.dismissed[id] && s.dismissed[id] >= at) continue;
+            seen.add(id);
+            out.push({ id, name: a.name || null, level: a.level || null, at, mugged: /mug/i.test(String(a.result || '')), result: a.result || null });
+        }
+        return out.slice(0, OFFERS_SHOWN);
+    }
+
+    /* ===== src/ui/app/eye-tab.js ===== */
+    /*
+     * Torn Eye tab (mockups/round3/W-eye.html): one question, "who can I hit?".
+     * Four modes: Targets (FFScouter's list judged by our own fight model:
+     * only players you beat are ever kept, most respect first), Chain (only
+     * Stomp and Good, most respect first, always), War (everyone in the enemy
+     * faction, found by itself from your faction's wars, coloured by risk:
+     * online status, hospital out-times, landings, jail) and Watched (the
+     * players you chose to keep an eye on). Sorts and tick filters per mode;
+     * the colour bands live in Settings.
+     */
+
+
+
+
+
+
+
+
+
+
+
+
+    const EYE_MODES = [
+        ['targets', 'Targets'],
+        ['chain', 'Chain'],
+        ['war', 'War'],
+        ['watched', 'Watched'],
+    ];
+
+    const EYE_SORTS = [
+        ['respect', 'Most respect'],
+        ['easy', 'Easiest'],
+        ['keep', 'HP kept'],
+        ['level', 'Level'],
+        ['active', 'Last active'],
+    ];
+
+    /** Targets and Chain hold only players you beat (owner's hard rule), so there is no "Hide can't win" there. */
+    const EYE_TICKS = [
+        ['stompOnly', 'Stomp only'],
+        ['keep50', 'Keep over 50% HP'],
+        ['hideHosp', 'Hide hospital'],
+        ['hideTravel', 'Hide traveling'],
+        ['inactive', 'Inactive 14+ days'],
+        ['factionless', 'No faction'],
+        ['notToday', 'Not attacked by me today'],
+        // War shows everyone by default (owner): its own ticks, all off.
+        ['warHideCant', 'Hide can’t win'],
+        ['warHideHosp', 'Hide hospital'],
+        ['warHideTravel', 'Hide traveling'],
+    ];
+
+    const DEFAULT_EYE_FILTERS = { minLevel: 1, maxLevel: 100, inactive: true, factionless: false, stompOnly: false, keep50: false, hideHosp: false, hideTravel: false, notToday: false, sort: 'respect' };
+
+    /**
+     * Load the targets without a click: the first visit with FFScouter connected,
+     * and once for a list asked the old way (1.1.x: one ask, strongest first,
+     * can't-win players kept; 1.1.0 even without a fair-fight range).
+     */
+    function shouldAutoLoad({ mode, hasFfs, paused, stored, loading, error, autoLoaded, ready = true }) {
+        return ready && (mode === 'targets' || mode === 'chain') && Boolean(hasFfs) && !paused && (!stored || needsRefetch(stored.params)) && !loading && !error && !autoLoaded;
+    }
+
+    /** Rank targets: 0 = easiest first (win × HP kept), 1 = most respect you can still win. */
+    function rankTargets(rows, slider) {
+        const s = Math.max(0, Math.min(1, slider));
+        const maxR = Math.max(1e-9, ...rows.map((r) => r.respect || 0));
+        const score = (r) => {
+            if (!r.forecast) return -1;
+            const easy = r.forecast.pWin * (r.forecast.keep || 0);
+            const resp = ((r.respect || 0) / maxR) * r.forecast.pWin;
+            return (1 - s) * easy + s * resp;
+        };
+        return [...rows].sort((a, b) => score(b) - score(a));
+    }
+
+    /** Sort by the chosen key (unknown estimates last). */
+    function sortTargets(rows, key) {
+        const val = {
+            easy: (r) => (r.forecast ? r.forecast.pWin * (r.forecast.keep || 0) : -1),
+            respect: (r) => (r.forecast && r.forecast.pWin >= 0.5 ? r.respect || 0 : -1),
+            keep: (r) => (r.forecast ? r.forecast.keep || 0 : -1),
+            level: (r) => -(r.level || 999),
+            active: (r) => -(r.lastAction || Infinity),
+        }[key] || ((r) => (r.forecast ? r.forecast.pWin : -1));
+        return [...rows].sort((a, b) => val(b) - val(a));
+    }
+
+    function stateOf(r, now) {
+        const st = r.status || {};
+        const s = String(st.state || st.description || '').toLowerCase();
+        if ((r.hospitalUntil && r.hospitalUntil > now) || s.includes('hospital')) return 'hospital';
+        if (s.includes('travel') || s.includes('abroad') || s.startsWith('in ')) return 'travel';
+        return 'okay';
+    }
+
+    /** Apply the ticks (and, whatever the ticks, the hard rule: only players you beat). */
+    function filterTargets(rows, f, { now, attackedToday = new Set() } = {}) {
+        return rows.filter((r) => {
+            if (!isBeatable(r.band)) return false;
+            if (f.stompOnly && r.band !== 'stomp') return false;
+            if (f.keep50 && !(r.forecast && r.forecast.keep > 0.5)) return false;
+            const st = stateOf(r, now);
+            if (f.hideHosp && st === 'hospital') return false;
+            if (f.hideTravel && st === 'travel') return false;
+            if (f.notToday && attackedToday.has(Number(r.id))) return false;
+            return true;
+        });
+    }
+
+    /** "Fair fight ×2.41 ours · ×2.60 FFScouter’s list · estimate 12 days old · FFScouter 12 d" */
+    function detailsText(d) {
+        const x = (v) => (Number.isFinite(v) ? '×' + v.toFixed(2) : '—');
+        const parts = ['Fair fight ' + x(d.ours) + ' ours · ' + x(d.list) + ' FFScouter’s list'];
+        if (d.ageDays !== null && d.ageDays !== undefined) parts.push('estimate ' + (d.ageDays < 1 ? 'from today' : d.ageDays + ' days old') + (d.old ? ' (old: past ' + OLD_ESTIMATE_DAYS + ' days)' : ''));
+        if (d.source) parts.push('from ' + d.source);
+        return parts.join(' · ');
+    }
+
+    function bandCell(band) {
+        return h('span', { class: 'band2' }, [h('i', { style: 'background:' + BAND_COLORS[band] }), BAND_WORDS[band]]);
+    }
+
+    /** The first cell of a row, with the band colour on the row's edge. */
+    function edgeTd(band, kids) {
+        return h('td', { style: 'box-shadow:inset 3px 0 0 ' + BAND_COLORS[band || 'none'] }, kids);
+    }
+
+    function ago(ts, now) {
+        if (!ts) return '—';
+        const d = Math.round((now - ts) / 86400000);
+        return d < 1 ? 'today' : d + ' d';
+    }
+
+    function statusCell(r, now) {
+        if (r.hospitalUntil && r.hospitalUntil > now) return h('td', { class: 'cdn', text: 'Hospital ' + countdown(r.hospitalUntil - now) });
+        const st = r.status || {};
+        const d = st.description || st.state;
+        if (d && !/^okay$/i.test(d)) return h('td', { class: /hospital/i.test(d) ? 'cdn' : null, text: d });
+        return h('td', { text: 'Okay' });
+    }
+
+    /** A war-style status cell: "Hospital · out 14:32 TCT (3:10)", "→ Mexico, lands ~15:05 (est.)". */
+    function statusTd(parts, now, settings) {
+        const local = settings && settings.timeFormat === 'local';
+        const kids = [parts.pre];
+        if (parts.at) {
+            kids.push(clock(parts.at, settings));
+            if (parts.cd) kids.push((local ? '' : ' TCT') + ' (', cd(parts.at, now), ')');
+        }
+        if (parts.post) kids.push(parts.post);
+        return h('td', { class: parts.cls || null }, kids);
+    }
+
+    function dot(kind) {
+        return kind ? h('i', { title: ACTIVITY_WORDS[kind], 'aria-label': ACTIVITY_WORDS[kind], style: 'display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:7px;vertical-align:1px;background:' + ACTIVITY_COLORS[kind] }) : null;
+    }
+
+    function pct(x) {
+        return x === null || x === undefined ? '—' : Math.round(x * 100) + '%';
+    }
+
+    function attackBtn(id, primary, ghost) {
+        return h('a', { class: 'btn sm' + (primary ? ' primary' : ghost ? ' ghost' : ''), href: attackUrl(id), target: '_blank', rel: 'noopener', text: 'Attack' });
+    }
+
+    function sourceShort(r, now) {
+        const e = r.est;
+        if (!e) return r.stored && r.stored.source ? r.stored.source : 'no estimate yet';
+        const s = String(e.sourceText || e.source || '');
+        const when = e.at ? ' · ' + ago(e.at, now) : '';
+        const old = e.ageDays > OLD_ESTIMATE_DAYS ? ' · old' : '';
+        if (/spy/i.test(s)) return 'spy' + when;
+        if (/fight/i.test(s)) return 'your fight' + when;
+        if (/ffscouter/i.test(s)) return s + old;
+        if (/public|rank/i.test(s)) return 'public stats · rough';
+        return s.slice(0, 30);
+    }
+
+    /** ☆ / ★ on a row: watch this player (the row's own click is left alone). */
+    function starBtn(ctx, p) {
+        const w = ctx.eye.watch;
+        if (!w) return null;
+        const on = w.isWatched(p.id);
+        return h('button', {
+            class: 'btn sm ghost',
+            type: 'button',
+            'data-act': 'star',
+            'aria-pressed': String(on),
+            'aria-label': (on ? 'Stop watching ' : 'Watch ') + (p.name || p.id),
+            title: on ? 'Watching · click to stop' : 'Watch this player',
+            onclick: (ev) => {
+                ev.stopPropagation();
+                const r = w.toggle(p);
+                ctx.ui.eyeNote = r && !r.ok && r.reason === 'full' ? 'Your watch list is full (' + WATCH_MAX + ' players): remove someone first.' : null;
+                ctx.rerender();
+            },
+            text: on ? '★' : '☆',
+        });
+    }
+
+    function targetsTable(rows, { now, chain = false, ctx }) {
+        const head = chain
+            ? ['Band', 'Player', 'Lvl', 'Respect', 'Win', 'HP kept', 'Status', 'Active', '', '']
+            : ['Band', 'Player', 'Lvl', 'Win', 'HP kept', 'Respect', 'Status', 'Active', 'Estimate from', '', ''];
+        const right = [2, 3, 4, 5, 7];
+        const open = ctx.ui.eyeOpen;
+        const body = [];
+        rows.forEach((r, i) => {
+            const win = h('td', { class: 'r', text: r.forecast ? pct(r.forecast.pWin) : '—' });
+            const keep = h('td', { class: 'r', text: r.forecast && r.forecast.keep !== null ? (r.est && r.est.confidence === 'exact' ? '' : '~') + pct(r.forecast.keep) : '—' });
+            const resp = h('td', { class: 'r' }, [chain ? h('b', { class: 'white', text: r.respect ? r.respect.toFixed(2) : '—' }) : r.respect ? r.respect.toFixed(2) : '—']);
+            const cells = [edgeTd(r.band, [bandCell(r.band)]), h('td', {}, [h('a', { href: profileUrl(r.id), target: '_blank', rel: 'noopener', onclick: (ev) => ev.stopPropagation() }, [h('b', { class: 'w', text: r.name || String(r.id) })])]), h('td', { class: 'r', text: r.level ? String(r.level) : '—' })];
+            if (chain) cells.push(resp, win, keep);
+            else cells.push(win, keep, resp);
+            cells.push(statusCell(r, now), h('td', { class: 'r muted', text: ago(r.lastAction, now) }));
+            if (!chain) cells.push(h('td', { class: 'muted', text: sourceShort(r, now) }));
+            cells.push(h('td', { class: 'r', style: 'width:40px' }, [starBtn(ctx, r)]));
+            cells.push(h('td', { class: 'r' }, [attackBtn(r.id, i === 0, false)]));
+            const d = detailsText(targetDetails(r.stored || {}, r));
+            const isOpen = open === r.id;
+            body.push(h('tr', { class: 'click' + (isOpen ? ' sel' : ''), tabindex: '0', title: d, 'aria-expanded': String(isOpen), onclick: () => { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); }, onkeydown: (ev) => { if (ev.key === 'Enter') { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); } } }, cells));
+            if (isOpen) body.push(h('tr', { class: 'sub' }, [h('td', { colspan: String(head.length), class: 'muted', style: 'font-size:12px' }, [d])]));
+        });
+        return h('table', { class: 'tbl num' }, [
+            h('thead', {}, [h('tr', {}, head.map((x, i) => h('th', { class: right.includes(i) ? 'r' : null, style: i === 0 ? 'width:110px' : null, text: x })))]),
+            h('tbody', {}, body),
+        ]);
+    }
+
+    /** War and Watched rows share one layout: band edge, online dot, status with out-times and landings, win and HP kept. */
+    function memberRow(w, { now, ctx, first, extra = [], respect = true }) {
+        const r = w.view || { band: 'none' };
+        const m = w.m;
+        const act = activityOf(m, now);
+        const attackable = w.state === 'okay' || w.state === 'early';
+        const cells = [
+            edgeTd(r.band || 'none', [bandCell(r.band || 'none')]),
+            h('td', {}, [dot(act.kind), h('a', { href: profileUrl(w.id), target: '_blank', rel: 'noopener' }, [h('b', { class: 'w', text: m.name || String(w.id) })])]),
+            h('td', { class: 'r', text: m.level ? String(m.level) : '—' }),
+            h('td', { class: 'r', text: r.forecast ? pct(r.forecast.pWin) : '—' }),
+            h('td', { class: 'r', text: r.forecast && r.forecast.keep !== null ? pct(r.forecast.keep) : '—' }),
+        ];
+        if (respect) cells.push(h('td', { class: 'r', text: r.respect ? r.respect.toFixed(2) : '—' }));
+        cells.push(statusTd(w.parts, now, ctx.settings), h('td', { class: 'muted', text: act.text }));
+        cells.push(...extra);
+        cells.push(h('td', { class: 'r' }, [attackable || w.state === 'hospital' ? attackBtn(w.id, first && attackable, r.band === 'cant') : null]));
+        return h('tr', { class: w.state === 'fallen' ? 'whatif' : null }, cells);
+    }
+
+    function memberHead(cols, widths = {}) {
+        const right = new Set(['Lvl', 'Win', 'HP kept', 'Respect']);
+        return h('thead', {}, [h('tr', {}, cols.map((x, i) => h('th', { class: right.has(x) ? 'r' : null, style: i === 0 ? 'width:110px' : widths[x] || null, text: x })))]);
+    }
+
+    function warTable(rows, { now, ctx }) {
+        let first = true;
+        const body = rows.map((w) => {
+            const tr = memberRow(w, { now, ctx, first, extra: [h('td', { class: 'r', style: 'width:40px' }, [starBtn(ctx, { id: w.id, name: w.m.name, level: w.m.level })])] });
+            if (w.state === 'okay' || w.state === 'early') first = false;
+            return tr;
+        });
+        return h('table', { class: 'tbl num' }, [memberHead(['Band', 'Player', 'Lvl', 'Win', 'HP kept', 'Respect', 'Status', 'Active', '', ''], { Status: 'width:300px' }), h('tbody', {}, body)]);
+    }
+
+    /** The reason box on a watched row: the four words, or your own (≤ 24 characters). */
+    function tagCell(ctx, entry) {
+        const w = ctx.eye.watch;
+        const tag = entry.tag || '';
+        const custom = tag && !WATCH_TAGS.includes(tag);
+        const editing = ctx.ui.eyeTagEdit === entry.id;
+        const sel = h(
+            'select',
+            {
+                class: 'inp',
+                style: 'height:26px;padding:0 6px;font-size:12px',
+                'aria-label': 'Reason for ' + (entry.name || entry.id),
+                onchange: (ev) => {
+                    const v = ev.target.value;
+                    if (v === '__custom') {
+                        ctx.ui.eyeTagEdit = entry.id;
+                        ctx.rerender();
+                        return;
+                    }
+                    ctx.ui.eyeTagEdit = null;
+                    w.tag(entry.id, v || null);
+                },
+            },
+            [h('option', { value: '', text: 'no reason' }), ...WATCH_TAGS.map((x) => h('option', { value: x, text: x })), custom ? h('option', { value: tag, text: tag }) : null, h('option', { value: '__custom', text: 'your own…' })],
+        );
+        sel.value = editing ? '__custom' : tag;
+        const kids = [sel];
+        if (editing) {
+            const inp = h('input', { class: 'inp', style: 'height:26px;width:130px;margin-left:6px', maxlength: String(TAG_MAX), placeholder: 'your reason', 'aria-label': 'Your reason for ' + (entry.name || entry.id), value: custom ? tag : '' });
+            const save = () => {
+                ctx.ui.eyeTagEdit = null;
+                w.tag(entry.id, inp.value);
+            };
+            inp.addEventListener('keydown', (ev) => {
+                if (ev.key === 'Enter') save();
+                if (ev.key === 'Escape') {
+                    ctx.ui.eyeTagEdit = null;
+                    ctx.rerender();
+                }
+            });
+            kids.push(inp, h('button', { class: 'btn sm', type: 'button', style: 'margin-left:6px', onclick: save, text: 'Save' }));
+        }
+        return h('td', {}, kids);
+    }
+
+    function watchedTable(rows, { now, ctx }) {
+        const w = ctx.eye.watch;
+        let first = true;
+        const body = rows.map((row) => {
+            const extra = [tagCell(ctx, row.entry), h('td', { class: 'r' }, [h('button', { class: 'btn sm ghost', type: 'button', 'aria-label': 'Remove ' + (row.entry.name || row.id), onclick: () => { w.remove(row.id); ctx.rerender(); }, text: 'Remove' })])];
+            const tr = memberRow(row, { now, ctx, first, extra, respect: false });
+            if (row.state === 'okay' || row.state === 'early') first = false;
+            return tr;
+        });
+        return h('table', { class: 'tbl num' }, [memberHead(['Band', 'Player', 'Lvl', 'Win', 'HP kept', 'Status', 'Active', 'Reason', '', ''], { Status: 'width:280px', Reason: 'width:150px' }), h('tbody', {}, body)]);
+    }
+
+    /** Members (war or watched) with their view, state and status parts. */
+    function memberRows(members, e, { now, early = new Set(), flights = {}, war = false }) {
+        const views = new Map((members || []).map((mm) => [Number(mm.id), e.view(Number(mm.id), { level: mm.level, name: mm.name, life: mm.life || null }, { war })]));
+        const bands = {};
+        const respect = {};
+        for (const [id, v] of views) {
+            if (v) {
+                bands[id] = v.band;
+                respect[id] = v.respect || 0;
+            }
+        }
+        return sortWar(members || [], { bands, respect, early, nowS: Math.floor(now / 1000) }).map((r) => ({ ...r, view: views.get(r.id), parts: statusParts(r.m, { now, seenAt: flights[r.id] ? flights[r.id].at : null, early: r.state === 'early' }) }));
+    }
+
+    function warControls(ctx, e) {
+        const w = e.war.state();
+        const kids = [];
+        const cur = w.enemies.find((x) => x.id === w.fid);
+        if (w.fid) kids.push(h('span', { class: 'sel', text: 'vs ' + (w.name || (cur && cur.name) || 'faction') + ' [' + w.fid + ']' + (cur ? ' · ' + WAR_KIND_WORDS[cur.kind] : w.manual ? ' · picked by you' : '') }));
+        // More than one war: pick which (ranked first).
+        if (w.enemies.length > 1 && !w.manual) {
+            kids.push(h('div', { class: 'seg', role: 'group', 'aria-label': 'Which war' }, w.enemies.slice(0, 4).map((x) => h('button', { type: 'button', 'aria-pressed': String(x.id === w.fid), onclick: () => e.war.pick(x.id), text: (x.name || x.id) + ' · ' + WAR_KIND_WORDS[x.kind] }))));
+        }
+        if (w.manual && w.enemies.length) kids.push(h('button', { class: 'btn sm', type: 'button', onclick: () => e.war.auto(), text: 'Back to our war' }));
+        let fidIn;
+        kids.push(
+            h('span', { class: 'sep' }),
+            t('lab', w.enemies.length ? 'Other faction' : 'Enemy faction'),
+            (fidIn = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:90px', placeholder: 'faction id', 'aria-label': 'Enemy faction id', value: w.manual ? String(w.manual) : '' })),
+            h('button', { class: 'btn sm', type: 'button', 'data-act': 'war-watch', onclick: () => { const v = Number(String(fidIn.value).replace(/\D/g, '')); if (v) e.war.watch(v); }, text: 'Show this faction' }),
+        );
+        return kids;
+    }
+
+    function headsUpBlock(list, now, settings) {
+        return h('div', {}, [
+            sectionHead('Heads-up', meta(['watched players']), null, 'h3'),
+            h(
+                'ul',
+                { class: 'heads' },
+                list.slice(0, 6).map((x) => h('li', { class: x.kind === 'online' ? 'g' : 'w' }, [h('i'), h('div', {}, [x.text, h('span', { text: ' · ' + (x.at > now ? 'at ' + clock(x.at, settings) : Math.max(1, Math.round((now - x.at) / 60000)) + ' min ago') })])])),
+            ),
+        ]);
+    }
+
+    function renderEye(m, ctx) {
+        const e = ctx.eye;
+        const now = Date.now();
+        const ui = ctx.ui;
+        const mode = EYE_MODES.some(([k]) => k === ui.eyeMode) ? ui.eyeMode : 'targets';
+        const f = ui.eyeFilters || (ui.eyeFilters = { ...DEFAULT_EYE_FILTERS });
+        const inputs = {};
+        const reload = () => {
+            f.minLevel = Math.max(1, Math.min(100, Number(inputs.min && inputs.min.value) || f.minLevel || 1));
+            f.maxLevel = Math.max(f.minLevel, Math.min(100, Number(inputs.max && inputs.max.value) || f.maxLevel || 100));
+            e.load({ minLevel: f.minLevel, maxLevel: f.maxLevel, inactiveOnly: f.inactive ? 1 : 0, factionless: f.factionless ? 1 : null });
+        };
+        const attacks = e.attacks ? e.attacks() : [];
+        const today = tornDayStart(now);
+        const attackedToday = new Set(attacks.filter((a) => (a.ended || 0) * 1000 >= today).map((a) => Number(a.def)));
+        const watch = e.watch ? e.watch.state() : { list: [], states: {}, flights: {}, offers: [] };
+
+        // Controls
+        const modeSeg = h('div', { class: 'seg modes', role: 'group', 'aria-label': 'Mode' }, EYE_MODES.map(([k, label]) => h('button', { type: 'button', 'aria-pressed': String(k === mode), onclick: () => { ui.eyeMode = k; ctx.rerender(); }, text: k === 'watched' && watch.list.length ? label + ' ' + watch.list.length : label })));
+        const bar1 = [modeSeg];
+        if (mode === 'war' && e.war) bar1.push(...warControls(ctx, e));
+        if (mode === 'targets' || mode === 'chain') {
+            bar1.push(h('span', { class: 'sep' }), t('lab', 'Sort'));
+            if (mode === 'chain') bar1.push(h('span', { class: 'muted', text: 'most respect first, always' }));
+            else bar1.push(h('div', { class: 'seg', role: 'group', 'aria-label': 'Sort' }, EYE_SORTS.map(([k, label]) => h('button', { type: 'button', 'aria-pressed': String(k === f.sort), onclick: () => { f.sort = k; ctx.rerender(); }, text: label }))));
+            bar1.push(h('span', { class: 'sep' }), t('lab', 'Level'), (inputs.min = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:44px', 'aria-label': 'Lowest level', value: String(f.minLevel), onchange: reload })), '–', (inputs.max = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:50px', 'aria-label': 'Highest level', value: String(f.maxLevel), onchange: reload })));
+            if (ctx.flags.hasFfs) bar1.push(h('button', { class: 'btn sm', type: 'button', onclick: reload, disabled: e.loading() || ctx.paused, text: e.loading() ? 'Loading…' : 'Refresh' }));
+        } else if (mode === 'war') {
+            bar1.push(h('span', { class: 'muted', text: 'attackable now first, then out of hospital soonest' }));
+        } else {
+            bar1.push(h('span', { class: 'sep' }), h('span', { class: 'muted', text: watch.list.length + ' of ' + WATCH_MAX + ' · read every 60 s while this is open' }));
+        }
+        const tickKeys = mode === 'war' ? ['warHideCant', 'warHideHosp', 'warHideTravel'] : mode === 'chain' ? ['stompOnly', 'keep50', 'hideHosp', 'hideTravel', 'inactive', 'factionless', 'notToday'] : mode === 'targets' ? EYE_TICKS.map(([k]) => k).filter((k) => !k.startsWith('war')) : [];
+        const refetch = new Set(['inactive', 'factionless']);
+        const bar2 = tickKeys.length
+            ? [
+                  t('lab', 'Show'),
+                  h('div', { class: 'ticks', role: 'group', 'aria-label': 'Show' }, EYE_TICKS.filter(([k]) => tickKeys.includes(k)).map(([k, label]) => h('button', { type: 'button', class: 'tk', 'aria-pressed': String(Boolean(f[k])), onclick: () => { f[k] = !f[k]; if (refetch.has(k) && ctx.flags.hasFfs) reload(); else ctx.rerender(); } }, [h('i'), label]))),
+              ]
+            : [];
+
+        const main = [];
+        const pane = [];
+        const stored = e.stored ? e.stored() : null;
+        const rowsAll = e.rows();
+        // First visit with FFScouter connected: load the targets without a click; also once for a list asked the old way
+        // (1.1.x: one ask, strongest first, can't-win players kept).
+        if (shouldAutoLoad({ mode, hasFfs: ctx.flags.hasFfs, paused: ctx.paused, stored, loading: e.loading(), error: e.error(), autoLoaded: ui.eyeAutoLoaded, ready: Boolean(m && m.ready) })) {
+            ui.eyeAutoLoaded = true;
+            setTimeout(reload, 0);
+        }
+
+        // Heads-ups for the watch list show in every mode.
+        const heads = headsUps(watch.list, watch.states, watch.flights, now);
+
+        if (mode === 'war') {
+            const w = e.war ? e.war.state() : { members: [], enemies: [] };
+            let rows = memberRows(w.members || [], e, { now, early: w.early || new Set(), flights: watch.flights, war: true });
+            rows = rows.filter((r) => !(f.warHideCant && r.band === 'cant') && !(f.warHideHosp && r.state === 'hospital') && !(f.warHideTravel && (r.state === 'traveling' || r.state === 'abroad')));
+            const sum = warSummary(rows, Math.floor(now / 1000));
+            const fallen = rows.filter((r) => r.state === 'fallen').length;
+            const empty = w.fid
+                ? w.loading && !rows.length
+                    ? 'Reading the faction…'
+                    : w.error || 'No members to show.'
+                : w.myFaction === null
+                  ? 'You’re not in a faction, or your key can’t tell: type the enemy faction’s id. On Torn’s own war page the chips and the order show by themselves.'
+                  : w.warsLoading
+                    ? 'Looking for your faction’s wars…'
+                    : 'Your faction isn’t at war right now. Type a faction’s id to watch it anyway.';
+            main.push(
+                h('div', { class: 'lead', 'data-mode': 'war' }, [
+                    sectionHead('War' + (w.name ? ' · ' + w.name : ''), meta(['everyone, coloured by how the fight goes for you · attackable now first, then who’s out soonest' + (w.fid ? ' · read every 10 s while open' : '')])),
+                    w.error && rows.length ? h('div', { class: 'why', style: 'margin-bottom:8px', text: 'Couldn’t read the faction just now: ' + w.error }) : null,
+                    rows.length ? warTable(rows, { now, ctx }) : h('p', { class: 'muted', style: 'margin:0', text: empty }),
+                    h('div', { class: 'note2', text: 'War shows everyone, even Can’t win (the colour tells you the risk) and the fallen (greyed, at the bottom). Landing times are estimated from when we first saw them fly and the standard flight time.' }),
+                ]),
+            );
+            const outs = rows.filter((r) => r.state === 'hospital').slice(0, 5);
+            const lands = rows.filter((r) => r.state === 'traveling' && r.parts.at).sort((a, b) => a.parts.at - b.parts.at).slice(0, 3);
+            pane.push(
+                h('div', {}, [
+                    sectionHead('Next out of hospital', null, null, 'h3'),
+                    outs.length || lands.length
+                        ? h('dl', { class: 'facts num' }, [
+                              ...outs.flatMap((r) => [h('dt', { text: countdown(Math.max(0, r.until * 1000 - now)) }), h('dd', { text: (r.m.name || r.id) + ' · ' + BAND_WORDS[r.band || 'none'] })]),
+                              ...lands.flatMap((r) => [h('dt', { text: '~' + clock(r.parts.at, ctx.settings) }), h('dd', { text: (r.m.name || r.id) + ' lands' })]),
+                          ])
+                        : h('p', { class: 'muted', style: 'margin:0', text: 'Nobody in hospital.' }),
+                    h('div', { class: 'note2', text: sum.attackable + ' attackable now · ' + rows.filter((r) => r.state === 'hospital' && r.until * 1000 - now < 5 * 60000).length + ' out within 5 min · ' + (sum.traveling + rows.filter((r) => r.state === 'abroad').length) + ' traveling or abroad · ' + rows.filter((r) => r.band === 'cant').length + ' can’t win' + (fallen ? ' · ' + fallen + ' fallen' : '') }),
+                ]),
+            );
+            if (heads.length) pane.push(headsUpBlock(heads, now, ctx.settings));
+        } else if (mode === 'watched') {
+            const members = watch.list.map((x) => {
+                const s = watch.states[x.id] || {};
+                return { id: x.id, name: x.name || s.name || null, level: x.level || s.level || null, life: s.life || null, status: s.status || null, last_action: s.last_action || null, has_early_discharge: s.has_early_discharge, is_revivable: s.is_revivable };
+            });
+            const byId = new Map(watch.list.map((x) => [Number(x.id), x]));
+            const rows = memberRows(members, e, { now, flights: watch.flights }).map((r) => ({ ...r, entry: byId.get(r.id) }));
+            const offers = watch.offers || [];
+            const kids = [sectionHead('Watched', meta([watch.list.length + ' of ' + WATCH_MAX + ' players · online status, hospital, flights · stays until you remove them']))];
+            if (offers.length) {
+                kids.push(
+                    h('div', { style: 'margin-bottom:12px' }, [
+                        h('div', { class: 'lab', style: 'margin-bottom:6px', text: 'Watch? They attacked you in the last hour' }),
+                        h(
+                            'div',
+                            { class: 'data' },
+                            offers.map((o) =>
+                                h('div', { class: 'dr' }, [
+                                    h('div', {}, [h('a', { href: profileUrl(o.id), target: '_blank', rel: 'noopener' }, [h('b', { text: o.name || String(o.id) })]), h('small', { text: (o.level ? ' [' + o.level + ']' : '') + ' · ' + (o.mugged ? 'mugged you' : 'attacked you') + ' ' + Math.max(1, Math.round((now - o.at) / 60000)) + ' min ago' })]),
+                                    h('div', { class: 'acts' }, [
+                                        h('button', { class: 'btn sm primary', type: 'button', onclick: () => { const r = e.watch.toggle({ id: o.id, name: o.name, level: o.level, tag: o.mugged ? 'mug' : 'revenge' }); if (r && !r.ok && r.reason === 'full') ui.eyeNote = 'Your watch list is full (' + WATCH_MAX + ' players): remove someone first.'; ctx.rerender(); }, text: 'Watch' }),
+                                        h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { e.watch.dismiss(o.id); ctx.rerender(); }, text: 'Not now' }),
+                                    ]),
+                                ]),
+                            ),
+                        ),
+                    ]),
+                );
+            }
+            if (ui.eyeNote) kids.push(h('div', { class: 'why', style: 'margin-bottom:8px', text: ui.eyeNote }));
+            kids.push(rows.length ? watchedTable(rows, { now, ctx }) : h('p', { class: 'muted', style: 'margin:0', text: 'Nobody watched yet. Press ☆ on a Targets or War row, on a player’s profile on Torn, or on the attack page.' }));
+            kids.push(h('div', { class: 'note2', text: 'Read every 60 s while this view or a Torn tab is open (someone in hospital or flying for a long while, every 5 min). Heads-ups show here when a watched player is out of hospital or lands within 3 minutes, or comes online.' }));
+            main.push(h('div', { class: 'lead', 'data-mode': 'watched' }, kids));
+            pane.push(heads.length ? headsUpBlock(heads, now, ctx.settings) : h('div', {}, [sectionHead('Heads-up', meta(['watched players']), null, 'h3'), h('p', { class: 'muted', style: 'margin:0', text: 'Nothing coming up in the next 3 minutes.' })]));
+        } else {
+            let rows = filterTargets(rowsAll, f, { now, attackedToday });
+            const hiddenKeep = f.keep50 ? rowsAll.filter((r) => !(r.forecast && r.forecast.keep > 0.5)).length : 0;
+            if (mode === 'chain') rows = rows.filter((r) => r.band === 'stomp' || r.band === 'good').sort((a, b) => (b.respect || 0) - (a.respect || 0));
+            else rows = sortTargets(rows, f.sort);
+            const msg = targetsMessage({ paused: ctx.paused, error: e.error(), loading: e.loading(), stored });
+            let body;
+            if (!ctx.flags.hasFfs) body = h('p', { class: 'muted', style: 'margin:0' }, ['Targets come from FFScouter. ', h('a', { href: '#settings', onclick: (ev) => { ev.preventDefault(); ctx.go('settings'); }, text: 'Connect it in Settings' }), '; chips on Torn’s pages work without it (your fights and public stats).']);
+            else if (!rows.length) {
+                const text = msg.kind !== 'none' ? msg.text : rowsAll.length ? 'Nobody passes your ticks.' : 'No targets yet.';
+                body = h('p', { class: msg.kind === 'dead' || msg.kind === 'error' ? 'c-bad' : 'muted', style: 'margin:0' }, [text, msg.kind === 'dead' ? h('span', {}, [' · ', h('a', { href: '#settings', onclick: (ev) => { ev.preventDefault(); ctx.go('settings'); }, text: 'check it in Settings' })]) : null]);
+            } else body = targetsTable(rows, { now, chain: mode === 'chain', ctx });
+            const notes = [];
+            const d = (stored && stored.dropped) || {};
+            if (mode === 'targets' && stored && stored.list && stored.list.length) {
+                if (d.cant) notes.push(d.cant + ' can’t-win player' + (d.cant === 1 ? '' : 's') + ' dropped (never kept)');
+                if (d.none) notes.push(d.none + ' with no estimate dropped');
+                if (stored.ffIgnored) notes.push('FFScouter’s list ignored the fair-fight range this time; our own fight check still decided');
+            }
+            if (hiddenKeep) notes.push(hiddenKeep + ' hidden because you’d keep under 50% HP');
+            // A load that failed still says so above an older list.
+            const warnLine = rows.length && (msg.kind === 'error' || msg.kind === 'dead' || msg.kind === 'wait' || msg.kind === 'paused') ? h('div', { class: 'why', style: 'margin-bottom:8px', text: msg.text + (stored && stored.at ? ' · showing the list from ' + clock(stored.at, ctx.settings) : '') }) : null;
+            main.push(
+                h('div', { class: 'lead', 'data-mode': mode }, [
+                    sectionHead(mode === 'chain' ? 'Chain' : 'Targets', meta([mode === 'chain' ? 'only Stomp and Good · most respect first · ' + rows.length + ' players' : rowsAll.length + ' players you beat · win and HP kept from your stats against theirs · ' + (EYE_SORTS.find(([k]) => k === f.sort) || [0, ''])[1].toLowerCase() + ' first'])),
+                    warnLine,
+                    ui.eyeNote ? h('div', { class: 'why', style: 'margin-bottom:8px', text: ui.eyeNote }) : null,
+                    body,
+                    notes.length ? h('div', { class: 'note2', text: notes.join(' · ') + '.' }) : null,
+                    mode === 'chain'
+                        ? h('div', { class: 'note2', text: 'Chains only list players you’ll beat (green and light green); Tough never shows here, and Can’t win is never kept.' })
+                        : h('div', { class: 'note2', text: 'Only players you beat are kept: FFScouter is asked for fair fight ' + TARGET_FF.min.toFixed(1) + '–' + TARGET_FF.max.toFixed(1) + ' in slices and levels, then each one is checked with the fight model. Click a row for its details.' }),
+                ]),
+            );
+            if (heads.length) pane.push(headsUpBlock(heads, now, ctx.settings));
+        }
+
+        const src = e.sources();
+        pane.push(
+            h('div', {}, [
+                sectionHead('How sure', meta(['best source first']), null, 'h3'),
+                h('dl', { class: 'facts num' }, [
+                    h('dt', { text: 'Faction spies (TornStats)' }),
+                    h('dd', { text: ctx.flags.hasTs ? 'connected' : 'add a key in Settings' }),
+                    h('dt', { text: 'Your own fights' }),
+                    h('dd', { text: fmtInt(src.fights) + ' attacks read' }),
+                    h('dt', { text: 'FFScouter estimates' }),
+                    h('dd', { text: ctx.flags.hasFfs ? src.ffsFree + ' of 60 left this min' : 'not connected' }),
+                    h('dt', { text: 'Public stats (rough)' }),
+                    h('dd', { text: 'always on' }),
+                    h('dt', { text: 'Gear seen' }),
+                    h('dd', { text: fmtInt(src.gear) + ' players · this computer only' }),
+                ]),
+                h('div', { class: 'note2' }, ['Estimates by ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }), '. Colours: Settings › Torn Eye colours.']),
+            ]),
+        );
+        if (m && m.ready) {
+            const mods = m.state.statMods || {};
+            const eff = Object.entries(m.pc.stats).reduce((a, [k, v]) => a + v * (1 + (mods[k] || 0) / 100), 0);
+            pane.push(h('div', {}, [sectionHead('Your side', meta(['what the fight uses']), null, 'h3'), h('dl', { class: 'facts num' }, [h('dt', { text: 'Stats as they fight' }), h('dd', { text: fmtShort(eff) + ' (merits and passives in)' }), h('dt', { text: 'Life' }), h('dd', { text: m.state.life ? fmtInt(m.state.life.maximum) : '—' })])]));
+        }
+        const upd = e.updatedAt && e.updatedAt() ? 'targets ' + Math.max(0, Math.round((now - e.updatedAt()) / 60000)) + ' min ago' : null;
+        return { ctl: [bar1, bar2], main, pane, upd };
+    }
+
+    /* ===== src/platform/idb.js ===== */
+    /*
+     * A small key-value store in the page's own IndexedDB, for data only ONE page
+     * needs. Tampermonkey hands every stored GM value to the script before it
+     * starts, on every page it runs on - so the Torn Ledger's rows (which only
+     * Torn Bids reads, and which grow with every trade) slowed every Torn page
+     * they were never shown on. Here they cost Torn pages nothing.
+     *
+     * Every call rejects where IndexedDB is missing or refused (some private
+     * windows); the caller then keeps the GM store.
+     */
+
+    const IDB_NAME = 'pumpingIron';
+    const IDB_STORE = 'kv';
+
+    let idbOpening = null;
+
+    function idbOpen() {
+        if (!idbOpening) {
+            idbOpening = new Promise((resolve, reject) => {
+                if (typeof indexedDB === 'undefined' || !indexedDB) {
+                    reject(new Error('No IndexedDB.'));
+                    return;
+                }
+                const req = indexedDB.open(IDB_NAME, 1);
+                req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error || new Error('IndexedDB refused.'));
+                req.onblocked = () => reject(new Error('IndexedDB blocked.'));
+            });
+            // A failed open is tried again next time rather than remembered.
+            idbOpening.catch(() => {
+                idbOpening = null;
+            });
+        }
+        return idbOpening;
+    }
+
+    function idbRun(mode, fn) {
+        return idbOpen().then(
+            (db) =>
+                new Promise((resolve, reject) => {
+                    const tx = db.transaction(IDB_STORE, mode);
+                    const req = fn(tx.objectStore(IDB_STORE));
+                    tx.oncomplete = () => resolve(req ? req.result : undefined);
+                    tx.onerror = () => reject(tx.error || new Error('IndexedDB error.'));
+                    tx.onabort = () => reject(tx.error || new Error('IndexedDB aborted.'));
+                }),
+        );
+    }
+
+    /** @returns {Promise<any|null>} */
+    function idbGet(key) {
+        return idbRun('readonly', (s) => s.get(key)).then((v) => (v === undefined ? null : v));
+    }
+
+    function idbSet(key, value) {
+        return idbRun('readwrite', (s) => s.put(value, key));
+    }
+
+    function idbDel(key) {
+        return idbRun('readwrite', (s) => s.delete(key));
+    }
+
     /* ===== src/core/eye/gear.js ===== */
     /*
      * Gear (ENGINE-SPEC §11): the defender's items from the attack page's
@@ -11791,16 +12589,21 @@
 
 
 
+
+
+
+
     const PROFILE_FRESH_MS = 10 * 60 * 1000;
     const PUBLIC_FRESH_MS = 24 * 60 * 60 * 1000;
     const SPY_FRESH_MS = 60 * 60 * 1000;
     const ATTACKS_FRESH_MS = 60 * 60 * 1000;
     const EQUIPMENT_FRESH_MS = 6 * 60 * 60 * 1000;
 
-    /** [calibrate] Max life from level when no profile was read: Torn's base plus typical merits and perks. */
-    function lifeFromLevel(level) {
-        return Math.round((100 + 50 * Math.max(0, (Number(level) || 1) - 1)) * 1.25);
-    }
+    /** GM storage (every tab and the webpage see it): the target list, the watch list and its reads, flights first seen. */
+    const TARGETS_KEY = 'eyeTargets';
+    const WATCH_KEY = 'eyeWatch';
+    const WATCH_STATE_KEY = 'eyeWatchState';
+    const FLIGHTS_KEY = 'eyeFlights';
 
     const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(), timer: null, listeners: [], mem: new Map(), fc: new Map(), flushing: null, again: false };
 
@@ -11888,7 +12691,28 @@
         set('eyeGearCount', 0);
         await idbSet('eye', eye.cache).catch(() => {});
         set('myAttacks', null);
+        for (const k of [TARGETS_KEY, WATCH_KEY, WATCH_STATE_KEY, FLIGHTS_KEY, 'eyeWarAuto']) set(k, null);
         notify();
+    }
+
+    /** Attacks on you kept for the watch list's "Watch?" offers (it looks back one hour). */
+    const INCOMING_KEEP_S = 24 * 60 * 60;
+
+    /**
+     * Your attacks and the attacks on you, from one read of /user/attacks.
+     * @returns {{list: object[], incoming: object[]}}
+     */
+    function slimAttacks(list, myId, nowS = Math.floor(Date.now() / 1000)) {
+        const out = (list || [])
+            .filter((a) => a && a.defender && (!myId || (a.attacker && a.attacker.id === myId)))
+            .map((a) => ({ def: a.defender.id, ended: a.ended, ff: a.modifiers ? Number(a.modifiers.fair_fight) : null, result: a.result, respect: a.respect_gain, level: a.defender.level }));
+        // Attacks on you (stealthed ones name nobody): offered on the watch list.
+        const incoming = myId
+            ? (list || [])
+                  .filter((a) => a && a.attacker && a.attacker.id && a.attacker.id !== myId && a.defender && a.defender.id === myId && nowS - (Number(a.ended) || 0) < INCOMING_KEEP_S)
+                  .map((a) => ({ att: a.attacker.id, name: a.attacker.name || null, level: a.attacker.level || null, ended: a.ended, result: a.result }))
+            : [];
+        return { list: out, incoming };
     }
 
     /** Your attacks (for the "your fight" layer), refreshed hourly by whichever tab needs them. */
@@ -11899,12 +12723,9 @@
         try {
             const list = await fetchAttacks(tornClient(), { limit: 100 });
             const me = (get(K.userStatic, {}) || {}).keyInfo;
-            const myId = me && me.userId;
-            const slim = list
-                .filter((a) => a && a.defender && (!myId || (a.attacker && a.attacker.id === myId)))
-                .map((a) => ({ def: a.defender.id, ended: a.ended, ff: a.modifiers ? Number(a.modifiers.fair_fight) : null, result: a.result, respect: a.respect_gain, level: a.defender.level }));
-            set('myAttacks', { at: Date.now(), list: slim });
-            return slim;
+            const slim = slimAttacks(list, me && me.userId);
+            set('myAttacks', { at: Date.now(), list: slim.list, incoming: slim.incoming });
+            return slim.list;
         } catch {
             return stored ? stored.list : [];
         }
@@ -12089,6 +12910,7 @@
             gear: gearRec ? { text: gThem ? gThem.text : '', seenAt: gearRec.seenAt } : null,
             band,
             respect,
+            ours: ff,
             figures: chipFigures(main, est, respect),
             source: est ? est.sourceText : null,
             status: prof.status || null,
@@ -12097,6 +12919,256 @@
 
     function eyeReady() {
         return Boolean(eye.cache);
+    }
+
+    /* ------------------------------------------------------ targets (ROUND4-PLAN §A) */
+
+    const targetCalls = [];
+
+    /** FFScouter's target finder allows 25 a minute: we wait for a slot past 20. */
+    async function paceTargets(sleep, now) {
+        for (;;) {
+            const t = now();
+            while (targetCalls.length && t - targetCalls[0] >= 60000) targetCalls.shift();
+            if (targetCalls.length < TARGETS_PER_MINUTE) {
+                targetCalls.push(t);
+                return;
+            }
+            await sleep(60000 - (t - targetCalls[0]) + 25);
+        }
+    }
+
+    function takingTurnsError() {
+        const e = new Error('Paused while Torn Trading runs.');
+        e.takingTurns = true;
+        return e;
+    }
+
+    /**
+     * FFScouter's estimates for these list rows, awaited (the list is judged
+     * right after). A row get-stats knows nothing about keeps the list's own
+     * figures (its estimate and fair fight).
+     */
+    async function ensureFfsStats(rows, client = sharedFfsClient()) {
+        const c = await cache();
+        const now = Date.now();
+        const rec = (id) => (c.players[id] = c.players[id] || {});
+        const known = (r) => r && r.ffs && (r.ffs.bsEstimate || r.ffs.fairFight || r.ffs.bssPublic);
+        const need = rows.map((r) => r.playerId).filter((id) => !(c.players[id] && c.players[id].ffsAt && now - c.players[id].ffsAt < FFS_STORED_MS && known(c.players[id])));
+        if (need.length) {
+            try {
+                const got = await fetchFfsStats(client, need);
+                for (const [id, row] of got) {
+                    rec(id).ffs = row;
+                    rec(id).ffsAt = Date.now();
+                    eye.mem.set(id, Date.now());
+                }
+            } catch (error) {
+                // A refused key is said as such; anything else falls back to the list's own figures.
+                if (error && error.deadKey) throw error;
+            }
+        }
+        for (const r of rows) {
+            const p = rec(r.playerId);
+            if (!known(p)) p.ffs = listRowAsFfs(r, now);
+            p.seen = now;
+        }
+        saveSoon();
+    }
+
+    /** The judge the webpage uses: the full Torn Eye view (spy, your fights, FFScouter, gear, what it learned). */
+    function viewJudge(r) {
+        const v = eyeView(r.playerId, { level: r.level, name: r.name });
+        if (!v) return null;
+        const f = v.forecast;
+        return {
+            band: v.band,
+            win: f ? Math.round(f.pWin * 100) : null,
+            keep: f && f.keep !== null && f.keep !== undefined ? Math.round(f.keep * 100) : null,
+            respect: v.respect,
+            ours: Number.isFinite(v.ours) ? v.ours : null,
+            source: v.est ? v.est.sourceText : null,
+            ageDays: v.est ? v.est.ageDays : null,
+        };
+    }
+
+    /**
+     * Load Torn Eye's targets: FFScouter asked in slices, merged, the fair
+     * fight range checked, every player judged by the fight model, and only
+     * the ones you beat stored (most respect first). Throws on a refused key,
+     * a pause or an FFScouter error; the stored list is then left as it was.
+     * @param {object} input - {minLevel, maxLevel, inactiveOnly, factionless}
+     * @param {object} [deps] - {client, judge, store, sleep, now} (tests)
+     */
+    async function importTargets(input = {}, { client = null, judge = null, store = (v) => set(TARGETS_KEY, v), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() } = {}) {
+        const ffs = client || sharedFfsClient();
+        if (!judge && !(pi.model && pi.model.ready)) throw new Error('Waiting for your stats from Torn.');
+        const params = targetParams(input);
+        const lists = [];
+        const skip = new Set();
+        let asked = 0;
+        let ffIgnored = false;
+        for (const q of targetQueries(params)) {
+            const band = q.minLevel + '-' + q.maxLevel;
+            if (skip.has(band)) continue;
+            if (isPaused()) throw takingTurnsError();
+            await paceTargets(sleep, now);
+            const rows = await fetchFfsTargets(ffs, { ...q, limit: 50 });
+            asked++;
+            lists.push(rows);
+            // FFScouter ignored the range: the other slices of this level band would be the same list.
+            if (listIgnoresFf(rows, q)) {
+                ffIgnored = true;
+                skip.add(band);
+            }
+        }
+        const merged = mergeTargetLists(lists);
+        await ensureFfsStats(merged.filter(inFfRange), ffs);
+        const { kept, dropped } = selectTargets(merged, judge || viewJudge);
+        const list = kept.map((r) => ({
+            playerId: r.playerId,
+            name: r.name,
+            level: r.level,
+            fairFight: r.fairFight,
+            bsEstimate: r.bsEstimate,
+            lastAction: r.lastAction,
+            hospitalUntil: r.hospitalUntil,
+            band: r.band,
+            win: r.win,
+            keep: r.keep,
+            respect: r.respect,
+            ours: r.ours,
+            source: r.source,
+            ageDays: r.ageDays,
+        }));
+        const out = { at: now(), params, list, dropped, asked, found: merged.length, ffIgnored };
+        store(out);
+        notify();
+        return out;
+    }
+
+    /* ------------------------------------------------------ flights (war and watch) */
+
+    /** When each flight was first seen, kept across reloads (GM storage, so every tab agrees). */
+    function flightsSeen() {
+        return get(FLIGHTS_KEY, {}) || {};
+    }
+
+    function rememberFlights(members, now = Date.now()) {
+        const { seen, changed } = trackFlights(flightsSeen(), members, now);
+        if (changed) set(FLIGHTS_KEY, seen);
+        return seen;
+    }
+
+    /* ------------------------------------------------------ watch list (ROUND4-PLAN §I) */
+
+    function getWatch() {
+        return watchOf(get(WATCH_KEY, null));
+    }
+
+    function watchStates() {
+        const s = get(WATCH_STATE_KEY, null) || {};
+        return { at: s.at || 0, players: s.players || {} };
+    }
+
+    /**
+     * Watch or stop watching a player.
+     * @returns {{ok, watching, reason?}} reason 'full' at 20 players
+     */
+    function toggleWatch(player) {
+        const cur = getWatch();
+        if (isWatched(cur, player.id)) {
+            set(WATCH_KEY, removeWatch(cur, player.id));
+            notify();
+            return { ok: true, watching: false };
+        }
+        const r = addWatch(cur, player);
+        if (r.ok) {
+            set(WATCH_KEY, r.state);
+            notify();
+        }
+        return { ok: r.ok, watching: r.ok, reason: r.reason };
+    }
+
+    function setWatchTag(id, tag) {
+        set(WATCH_KEY, tagWatch(getWatch(), id, tag));
+        notify();
+    }
+
+    function dismissWatchOffer(id) {
+        set(WATCH_KEY, dismissOffer(getWatch(), id));
+        notify();
+    }
+
+    /** "Watch?" offers: who attacked or mugged you in the last hour (from your attacks, read hourly). */
+    function watchOffersNow(now = Date.now()) {
+        return watchOffers((get('myAttacks', null) || {}).incoming || [], getWatch(), now);
+    }
+
+
+    const watchRun = { busy: false };
+
+    /**
+     * Read the watched players that are due (60 s; 5 min for a long hospital
+     * stay or flight). One profile each, through the shared Torn client; a
+     * player in the faction list just read (war) costs nothing. Only from a
+     * visible tab, never while Torn Trading runs; two tabs don't both read.
+     * @param {object} [o] - {members: faction members already read}
+     * @returns {Promise<boolean>} whether anything was read
+     */
+    async function pollWatch({ members = null } = {}) {
+        if (watchRun.busy || !isVisible() || isPaused() || !getKey(K.apiKey) || get(K.apiKeyDead, false)) return false;
+        const w = getWatch();
+        if (!w.list.length) return false;
+        const now = Date.now();
+        const st = get(WATCH_STATE_KEY, null) || {};
+        if (st.lockAt && now - st.lockAt < 20000 && st.lockTab !== pi.tabId) return false;
+        const flights = flightsSeen();
+        const fromList = new Map((members || []).map((m) => [Number(m.id), m]));
+        const players = { ...(st.players || {}) };
+        const due = w.list.filter((x) => fromList.has(Number(x.id)) || dueForRead(players[x.id], now, flights[x.id] ? flights[x.id].at : null));
+        if (!due.length) return false;
+        set(WATCH_STATE_KEY, { ...st, lockAt: now, lockTab: pi.tabId });
+        watchRun.busy = true;
+        const read = [];
+        try {
+            for (const x of due) {
+                if (isPaused() || !isVisible()) break;
+                let rec = null;
+                const m = fromList.get(Number(x.id));
+                if (m) rec = { name: m.name || null, level: m.level || null, status: m.status || null, last_action: m.last_action || null, has_early_discharge: Boolean(m.has_early_discharge), is_revivable: Boolean(m.is_revivable) };
+                else {
+                    try {
+                        const p = await fetchProfile(tornClient(), x.id);
+                        if (p) rec = { name: p.name || null, level: p.level || null, status: p.status || null, last_action: p.last_action || null, life: (p.life && p.life.maximum) || null, faction: p.faction_id || null, is_revivable: Boolean(p.revivable) };
+                    } catch (error) {
+                        if (error && error.takingTurns) break;
+                        continue;
+                    }
+                }
+                if (!rec) continue;
+                const prev = players[x.id];
+                const t = Date.now();
+                const events = [...((prev && prev.events) || []).filter((e) => t - e.at < EVENT_KEEP_MS), ...readEvents(prev, rec, t)];
+                players[x.id] = { ...rec, readAt: t, events };
+                read.push({ id: x.id, ...rec });
+            }
+        } finally {
+            watchRun.busy = false;
+        }
+        const ids = new Set(getWatch().list.map((x) => String(x.id)));
+        for (const k of Object.keys(players)) if (!ids.has(k)) delete players[k];
+        set(WATCH_STATE_KEY, { at: Date.now(), players });
+        rememberFlights(read);
+        // Life and level for the fight model (this page's own cache).
+        const c = await cache();
+        for (const r of read) {
+            const p = (c.players[r.id] = c.players[r.id] || {});
+            if (r.life || r.level) p.profile = { ...(p.profile || {}), level: r.level || (p.profile && p.profile.level) || null, life: r.life || (p.profile && p.profile.life) || null, name: r.name, status: r.status };
+        }
+        if (read.length) wantPlayers(read.map((r) => r.id));
+        notify();
+        return read.length > 0;
     }
 
     /* ===== src/income.js ===== */
@@ -12202,6 +13274,8 @@
      * only for items the Buy list needs (plus a few tracked ones), at most once
      * every 5 minutes, and only while this tab is visible.
      */
+
+
 
 
 
@@ -12384,77 +13458,138 @@
         };
     }
 
-    /** Targets for the Torn Eye tab: FFScouter's list, estimated against you. */
+    /**
+     * Targets for the Torn Eye tab: FFScouter asked in slices, each player
+     * judged by the fight model, only the ones you beat stored (eye-service).
+     */
     async function loadTargets(params) {
-        if (!getKey(K.ffsKey) || isPaused()) return;
+        if (!getKey(K.ffsKey) || isPaused() || page.eye.loading) return;
         page.eye.loading = true;
         page.eye.error = null;
         page.app.render(true);
         try {
-            const list = await fetchFfsTargets(ffsClient(), { ...params, limit: 50 });
-            set('eyeTargets', { at: Date.now(), params, list });
-            wantPlayers(list.map((x) => x.playerId));
+            await importTargets(params, { client: ffsClient() });
         } catch (error) {
-            page.eye.error = String((error && error.message) || error);
+            const msg = redactKey(String((error && error.message) || error), getKey(K.ffsKey));
+            page.eye.error = { message: msg, deadKey: Boolean(error && error.deadKey), paused: Boolean(error && error.paused), retryAfterS: (error && error.retryAfterS) || null, takingTurns: Boolean(error && error.takingTurns) };
         }
         page.eye.loading = false;
         page.app.render(true);
     }
 
-    /* War mode on the webpage: the enemy faction read every 10 s while the Torn Eye tab shows War. */
-    const war = { fid: null, name: null, members: [], prev: null, early: new Set(), seen: new Map(), at: 0, loading: false, error: null, timer: null };
+    /*
+     * War mode on the webpage: the enemy is found by itself from your own
+     * faction's wars (every 5 min while the page is open), or picked by id.
+     * Its members are read every 10 s while the War view shows, and every
+     * 5 min otherwise when Discord is set up (the bot's war pings need the bands).
+     */
+    const war = { manual: null, pick: null, members: [], membersFid: null, name: null, early: new Set(), at: 0, loading: false, error: null, enemies: [], warsAt: 0, warsLoading: false, myFaction: undefined };
 
     const WAR_TAB_POLL_MS = 10000;
+    const WAR_BACKGROUND_POLL_MS = 5 * 60 * 1000;
+    const OWN_WARS_POLL_MS = 5 * 60 * 1000;
+
+    /** The faction War mode watches: yours picked by id, else the war you chose, else the first of your faction's wars. */
+    function warFid() {
+        if (war.manual) return war.manual;
+        if (war.pick && war.enemies.some((x) => x.id === war.pick)) return war.pick;
+        return war.enemies.length ? war.enemies[0].id : null;
+    }
+
+    function myFactionId() {
+        const ki = (get(K.userStatic, {}) || {}).keyInfo;
+        if (!ki) return undefined;
+        return ki.factionId || null;
+    }
+
+    async function pollOwnWars(force = false) {
+        if (war.warsLoading || !isVisible() || isPaused() || !getKey(K.apiKey) || get(K.apiKeyDead, false)) return;
+        const mine = myFactionId();
+        war.myFaction = mine;
+        if (!mine) return;
+        if (!force && Date.now() - war.warsAt < OWN_WARS_POLL_MS) return;
+        war.warsLoading = true;
+        try {
+            const resp = await fetchFactionWars(tornClient(), mine);
+            war.enemies = enemiesFromWars(resp, mine);
+            set('eyeWarAuto', { at: Date.now(), myFaction: mine, enemies: war.enemies });
+        } catch {
+            // Keep the last answer; asked again in 5 min.
+        } finally {
+            war.warsLoading = false;
+            war.warsAt = Date.now();
+        }
+        if (page.app) page.app.render(true);
+    }
 
     async function pollWarTab() {
-        if (!war.fid || war.loading || !isVisible() || isPaused()) return;
-        if (!page.app || page.app.tab !== 'eye' || (page.app.ui.eyeMode || 'targets') !== 'war') return;
-        if (Date.now() - war.at < WAR_TAB_POLL_MS) return;
+        const fid = warFid();
+        if (!fid || war.loading || !isVisible() || isPaused()) return;
+        const viewing = page.app && page.app.tab === 'eye' && (page.app.ui.eyeMode || 'targets') === 'war';
+        const every = viewing ? WAR_TAB_POLL_MS : discordState() ? WAR_BACKGROUND_POLL_MS : null;
+        if (!every || (war.membersFid === fid && Date.now() - war.at < every)) return;
         war.loading = true;
-        const fid = war.fid;
         try {
             const members = await fetchFactionMembers(tornClient(), fid);
-            if (war.fid !== fid) return;
+            if (warFid() !== fid) return;
             const nowMs = Date.now();
-            war.early = outEarly(war.members, members, Math.floor(nowMs / 1000));
-            // When each flight was first seen: the landing estimate counts from it.
-            for (const m of members) {
-                const id = Number(m.id);
-                const st = memberState(m);
-                const desc = (m.status && m.status.description) || '';
-                const cur = war.seen.get(id);
-                if (st === 'traveling' || st === 'abroad') {
-                    if (!cur || cur.desc !== desc) war.seen.set(id, { desc, at: nowMs });
-                } else war.seen.delete(id);
-            }
-            war.prev = war.members;
+            war.early = war.membersFid === fid ? outEarly(war.members, members, Math.floor(nowMs / 1000)) : new Set();
+            // When each flight was first seen (kept across reloads): the landing estimate counts from it.
+            rememberFlights(members, nowMs);
             war.members = members;
+            war.membersFid = fid;
             war.error = null;
             wantPlayers(members.map((m) => Number(m.id)));
         } catch (error) {
             war.error = String((error && error.message) || error);
         } finally {
             war.loading = false;
+            war.at = Date.now();
         }
-        war.at = Date.now();
         if (page.app) page.app.render(true);
     }
 
+    function warName(fid) {
+        const e = war.enemies.find((x) => x.id === fid);
+        return e && e.name ? e.name : null;
+    }
+
+    /** Stored targets, judged again now: only players you still beat show (your stats or colours may have changed). */
     function eyeRows() {
-        const stored = get('eyeTargets', null);
-        if (!stored) return [];
-        const rows = stored.list.map((x) => ({ ...(eyeView(x.playerId, { level: x.level, name: x.name }) || { id: x.playerId, band: 'none' }), name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId }));
-        // The bot's /targets and /war read Torn Eye's list (ids, names, levels, bands; disclosed in Settings), only if you set up Discord.
-        if (discordState()) {
-            const bands = {};
-            for (const r of rows) if (r.band) bands[r.id] = r.band;
-            for (const mm of war.members || []) {
-                const v = eyeView(Number(mm.id), { level: mm.level, name: mm.name }, { war: true });
-                if (v && v.band) bands[Number(mm.id)] = v.band;
-            }
-            setTargetsForSync(rows.filter((r) => r.band !== 'cant').map((r) => ({ id: r.id, name: r.name || null, level: r.level || null, band: r.band, win: r.forecast ? Math.round(r.forecast.pWin * 100) : null, keep: r.forecast && r.forecast.keep !== null ? Math.round(r.forecast.keep * 100) : null })), bands);
-        }
-        return rows;
+        const stored = get(TARGETS_KEY, null);
+        if (!stored || !Array.isArray(stored.list)) return [];
+        const rows = stored.list.map((x) => {
+            const v = eyeView(x.playerId, { level: x.level, name: x.name });
+            const base = v || { id: x.playerId, band: x.band || 'none', forecast: Number.isFinite(x.win) ? { pWin: x.win / 100, keep: Number.isFinite(x.keep) ? x.keep / 100 : null } : null, respect: x.respect || null };
+            return { ...base, name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId, stored: x };
+        });
+        return rows.filter((r) => isBeatable(r.band));
+    }
+
+    /* The bot's /targets, /war and watch pings read Torn Eye (ids, names, levels, bands, win, HP kept; disclosed in Settings), only if you set up Discord. */
+    let eyeSyncAt = 0;
+    const EYE_SYNC_EVERY_MS = 30 * 1000;
+
+    function syncEye(force = false) {
+        if (!discordState() || !isVisible()) return;
+        if (!force && Date.now() - eyeSyncAt < EYE_SYNC_EVERY_MS) return;
+        eyeSyncAt = Date.now();
+        const row = (id, name, level, v, extra = {}) => ({ id, name: name || (v && v.name) || null, level: level || (v && v.level) || null, band: v ? v.band : 'none', win: v && v.forecast ? Math.round(v.forecast.pWin * 100) : null, keep: v && v.forecast && v.forecast.keep !== null && v.forecast.keep !== undefined ? Math.round(v.forecast.keep * 100) : null, ...extra });
+        const rows = eyeRows();
+        const bands = {};
+        for (const r of rows) if (r.band) bands[r.id] = r.band;
+        const fid = warFid();
+        const members = war.membersFid === fid ? war.members || [] : [];
+        const warRows = members.map((mm) => row(Number(mm.id), mm.name, mm.level, eyeView(Number(mm.id), { level: mm.level, name: mm.name }, { war: true })));
+        for (const r of warRows) bands[r.id] = r.band;
+        setTargetsForSync(rows.map((r) => row(r.id, r.name, r.level, r)), bands);
+        const w = getWatch();
+        const st = watchStates().players;
+        const watchRows = w.list.map((x) => {
+            const s = st[x.id] || {};
+            return row(Number(x.id), x.name || s.name, x.level || s.level, eyeView(Number(x.id), { level: x.level || s.level, name: x.name || s.name, life: s.life || null }), { tag: x.tag || null });
+        });
+        setEyeForSync({ war: fid && warRows.length ? { factionId: fid, members: warRows } : null, watch: watchRows });
     }
 
     function getCtx() {
@@ -12541,24 +13676,50 @@
             },
             eye: {
                 rows: eyeRows,
+                stored: () => get(TARGETS_KEY, null),
                 load: (params) => loadTargets(params).catch(() => {}),
                 loading: () => page.eye.loading,
                 error: () => page.eye.error,
                 sources: () => ({ fights: ((get('myAttacks', null) || {}).list || []).length, ffsFree: page.ffs ? page.ffs.stats().remaining : 60, gear: page.eye.gear }),
                 view: (id, extra, o) => eyeView(id, extra, o),
                 attacks: () => (get('myAttacks', null) || {}).list || [],
-                updatedAt: () => (get('eyeTargets', null) || {}).at || null,
-                params: () => (get('eyeTargets', null) || {}).params || null,
+                updatedAt: () => (get(TARGETS_KEY, null) || {}).at || null,
+                params: () => (get(TARGETS_KEY, null) || {}).params || null,
                 war: {
-                    state: () => ({ fid: war.fid, name: war.name, members: war.members, early: war.early, seen: new Map([...war.seen].map(([k, v]) => [k, v.at])), loading: war.loading, error: war.error }),
+                    state: () => {
+                        const fid = warFid();
+                        return { fid, manual: war.manual, name: warName(fid), enemies: war.enemies, myFaction: war.myFaction === undefined ? myFactionId() : war.myFaction, warsLoading: war.warsLoading, members: war.membersFid === fid ? war.members : [], early: war.membersFid === fid ? war.early : new Set(), loading: war.loading, error: war.error };
+                    },
+                    /** Another faction by id (kept until "Back to our war"). */
                     watch: (fid) => {
-                        war.fid = fid;
-                        war.members = [];
-                        war.seen.clear();
+                        war.manual = fid;
                         war.at = 0;
                         setSettings({ warFaction: fid });
                         pollWarTab();
+                        page.app.render(true);
                     },
+                    /** One of your faction's wars, when there are several. */
+                    pick: (fid) => {
+                        war.pick = fid;
+                        war.at = 0;
+                        pollWarTab();
+                        page.app.render(true);
+                    },
+                    auto: () => {
+                        war.manual = null;
+                        war.at = 0;
+                        setSettings({ warFaction: null });
+                        pollWarTab();
+                        page.app.render(true);
+                    },
+                },
+                watch: {
+                    state: () => ({ list: getWatch().list, states: watchStates().players, flights: flightsSeen(), offers: watchOffersNow() }),
+                    isWatched: (id) => isWatched(getWatch(), id),
+                    toggle: (p) => toggleWatch({ id: Number(p.id), name: p.name || null, level: p.level || null, tag: p.tag }),
+                    tag: (id, tag) => setWatchTag(id, tag),
+                    remove: (id) => (isWatched(getWatch(), id) ? toggleWatch({ id }) : null),
+                    dismiss: (id) => dismissWatchOffer(id),
                 },
             },
         };
@@ -12571,15 +13732,25 @@
             page.app.render(true);
         });
         gearCount().then((n) => (page.eye.gear = n));
-        const stored = get('eyeTargets', null);
-        if (stored) setTimeout(() => wantPlayers(stored.list.map((x) => x.playerId)), 500);
+        const stored = get(TARGETS_KEY, null);
+        if (stored && Array.isArray(stored.list)) setTimeout(() => wantPlayers(stored.list.map((x) => x.playerId)), 500);
         page.app.mount();
         onModel(() => page.app.render());
         for (const k of [K.prices, K.settings, K.plan, K.userStatic, K.stateError, K.apiKeyDead]) gmOnChange(k, () => page.app.render());
+        // The watch list is changed from Torn's pages too (☆ on a profile or the attack page) and read there.
+        for (const k of ['eyeWatch', 'eyeWatchState']) gmOnChange(k, () => page.app.tab === 'eye' && page.app.render(true));
         onPauseChange(() => page.app.render(true));
-        // War mode: the faction you last watched, read every 10 s while that view is open.
-        war.fid = getSettings().warFaction || null;
-        setInterval(() => pollWarTab().catch(() => {}), 2000);
+        // War mode: a faction picked by id stays until "Back to our war"; otherwise your faction's war, found by itself.
+        war.manual = getSettings().warFaction || null;
+        const auto = get('eyeWarAuto', null);
+        if (auto && Array.isArray(auto.enemies) && auto.myFaction === myFactionId()) war.enemies = auto.enemies;
+        setInterval(() => {
+            pollOwnWars().catch(() => {});
+            pollWarTab().catch(() => {});
+            // The Watched view reads its players every 60 s while it shows (the war list just read costs nothing).
+            if (page.app.tab === 'eye' && page.app.ui.eyeMode === 'watched') pollWatch({ members: war.members }).catch(() => {});
+            syncEye();
+        }, 2000);
         // Auto mode's money log (Full key): at most every 6 hours, visible tab only.
         const moneyLog = () => {
             if (isVisible()) refreshMoneyLog().then((r) => { if (r) refresh(); }).catch(() => {});
@@ -13689,7 +14860,44 @@
     .pi-warlist { display: flex !important; flex-direction: column; }
     .pi-warsum a { color: #8fb8e8; }
     .pi-earlytag { color: #9bdc8a; font-weight: bold; font-size: 11px; margin-left: 6px; }
+    .pi-landtag { color: #8fb8e8; font-weight: bold; font-size: 11px; margin-left: 6px; }
+    .pi-edge-stomp { box-shadow: inset 3px 0 0 #3fbf5a !important; }
+    .pi-edge-good { box-shadow: inset 3px 0 0 #a6e08a !important; }
+    .pi-edge-tough { box-shadow: inset 3px 0 0 #f0a040 !important; }
+    .pi-edge-cant { box-shadow: inset 3px 0 0 #ff5a4e !important; }
+    .pi-watch { display: inline-flex; align-items: center; gap: 6px; margin: 6px 0 6px 8px; vertical-align: middle; font: 12px Arial, sans-serif; }
+    .pi-watch button, .pi-watch select, .pi-watch input { height: 24px; border-radius: 12px; border: 1px solid #3a4046; background: #1e2124; color: #e3e5e8; font: bold 11px Arial, sans-serif; padding: 0 10px; cursor: pointer; }
+    .pi-watch input { cursor: text; width: 130px; border-radius: 5px; font-weight: normal; }
+    .pi-watch select { border-radius: 5px; padding: 0 6px; }
+    .pi-watch button[aria-pressed="true"] { color: #efebe2; border-color: #efebe2; }
+    .pi-watch .pi-full { color: #e8a33d; font-size: 11px; }
     `;
+
+    /** The watch reasons offered on Torn's pages (the webpage offers the same, plus your own words there). */
+    const WATCH_TAG_WORDS = ['hospitalize', 'mug', 'revenge', 'bounty'];
+
+    /**
+     * "☆ Watch" / "★ Watching" with the reason picker when watched.
+     * @param {object} s - {watching, tag, full}
+     * @param {object} on - {toggle(), tag(value)}
+     */
+    function watchControl(s, on) {
+        const kids = [h('button', { type: 'button', 'aria-pressed': String(Boolean(s.watching)), title: s.watching ? 'Torn Eye is watching this player · click to stop' : 'Watch this player in Torn Eye (status, hospital, flights)', onclick: (e) => { e.preventDefault(); e.stopPropagation(); on.toggle(); }, text: s.watching ? '★ Watching' : '☆ Watch' })];
+        if (s.watching) {
+            const tag = s.tag || '';
+            const custom = tag && !WATCH_TAG_WORDS.includes(tag);
+            const sel = h('select', { 'aria-label': 'Why you watch them', onchange: (e) => { if (e.target.value === '__custom') { const inp = h('input', { maxlength: '24', placeholder: 'your reason', 'aria-label': 'Your reason', onkeydown: (ev) => { if (ev.key === 'Enter') on.tag(ev.target.value); } }); inp.addEventListener('blur', () => on.tag(inp.value)); sel.replaceWith(inp); inp.focus(); } else on.tag(e.target.value || null); } }, [
+                h('option', { value: '', text: 'no reason' }),
+                ...WATCH_TAG_WORDS.map((x) => h('option', { value: x, text: x })),
+                custom ? h('option', { value: tag, text: tag }) : null,
+                h('option', { value: '__custom', text: 'your own…' }),
+            ]);
+            sel.value = tag;
+            kids.push(sel);
+        }
+        if (s.full) kids.push(h('span', { class: 'pi-full', text: 'Watch list full (20)' }));
+        return h('span', { class: 'pi-mark pi-watch', 'data-pi-watch': [s.watching ? 1 : 0, s.tag || '', s.full ? 1 : 0].join('|') }, kids);
+    }
 
     function ensureEyeCss(doc = document) {
         if (doc.getElementById('pi-eye-css')) return;
@@ -13801,6 +15009,7 @@
         const kids = [h('span', { class: 'row' }, [h('span', { class: 'plate' }, [h('i')]), h('b', { class: 'white', text: 'Torn Eye' })])];
         if (!v) {
             kids.push(h('span', { class: 'muted', text: 'Reading this player… (your fights, FFScouter, public stats)' }));
+            if (s.watch) kids.push(h('button', { class: 'watch', type: 'button', 'aria-pressed': String(Boolean(s.watch.watching)), onclick: () => s.watch.toggle(), text: s.watch.watching ? '★ Watching' : '☆ Watch' }));
             return kids;
         }
         const f = v.forecast;
@@ -13810,6 +15019,7 @@
         else if (!s.gearVisible) kids.push(h('span', { class: 'muted', text: 'Their gear isn’t shown yet. Torn shows it after Start Fight (earlier with the Gun Shop job perk). We’ll save it for next time.' }));
         if (v.gear) kids.push(h('span', { class: 'muted', text: 'Last seen: ' + (v.gear.text || 'gear') + ' · ' + Math.max(0, Math.round((Date.now() - v.gear.seenAt) / 86400000)) + ' days ago' }));
         if (v.source) kids.push(v.est && v.est.source === 'ffscouter' ? h('span', { class: 'muted' }, ['Stats: ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }), ', ' + (v.est.ageDays ?? '?') + ' days old']) : h('span', { class: 'muted', text: 'Stats: ' + v.source }));
+        if (s.watch) kids.push(h('button', { class: 'watch', type: 'button', 'aria-pressed': String(Boolean(s.watch.watching)), onclick: () => s.watch.toggle(), text: s.watch.watching ? '★ Watching' + (s.watch.tag ? ' · ' + s.watch.tag : '') : s.watch.full ? 'Watch list full (20)' : '☆ Watch' }));
         return kids;
     }
 
@@ -13825,6 +15035,8 @@
     .muted { color: #939aa1; }
     .good { color: #9bdc8a; font-weight: bold; }
     a { color: #8fb8e8; pointer-events: auto; }
+    button.watch { pointer-events: auto; align-self: flex-start; height: 24px; padding: 0 10px; border-radius: 12px; border: 1px solid #3a4046; background: #1e2124; color: #e3e5e8; font: bold 11px Arial, sans-serif; cursor: pointer; }
+    button.watch[aria-pressed="true"] { color: #efebe2; border-color: #efebe2; }
     `;
 
     function attackPanel(doc = document) {
@@ -13861,6 +15073,8 @@
 
 
 
+
+
     /** War mode asks for the enemy faction this often, and only from a visible tab. */
     const WAR_POLL_MS = 10000;
 
@@ -13870,9 +15084,34 @@
         return eyeView(id, ep.extras.get(id) || {}, { war: Boolean(ep.war.members) });
     }
 
-    function removeChips(scope) {
-        for (const el of scope.querySelectorAll('.pi-chip, .pi-warsum, .pi-earlytag')) el.remove();
+    const EDGES = ['pi-edge-stomp', 'pi-edge-good', 'pi-edge-tough', 'pi-edge-cant'];
+
+    function removeChips(scope, { watch = true } = {}) {
+        for (const el of scope.querySelectorAll('.pi-chip, .pi-warsum, .pi-earlytag, .pi-landtag' + (watch ? ', .pi-watch' : ''))) el.remove();
         for (const el of scope.querySelectorAll('.pi-early')) el.classList.remove('pi-early');
+        for (const el of scope.querySelectorAll('.' + EDGES.join(', .'))) el.classList.remove(...EDGES);
+    }
+
+    /* ------------------------------------------------------------- watch */
+
+    const watchUi = { full: null };
+
+    function watchState(id) {
+        const w = getWatch();
+        const e = w.list.find((x) => Number(x.id) === Number(id));
+        return { watching: Boolean(e), tag: e ? e.tag : null, full: watchUi.full === Number(id) && !e && w.list.length >= WATCH_MAX };
+    }
+
+    function toggleFor(id) {
+        const v = view(id) || {};
+        const x = ep.extras.get(id) || {};
+        const r = toggleWatch({ id, name: v.name || x.name || null, level: v.level || x.level || null });
+        watchUi.full = r.ok ? null : id;
+        drawAll();
+    }
+
+    function watchHandlers(id) {
+        return { toggle: () => toggleFor(id), tag: (t) => { setWatchTag(id, t); drawAll(); } };
     }
 
     /* ------------------------------------------------------------ profile */
@@ -13882,9 +15121,20 @@
         const anchor = profileAnchor();
         if (!id || !anchor) return;
         ep.extras.set(id, { ...(ep.extras.get(id) || {}), level: profileLevel() });
-        removeChips(anchor.parentNode);
+        // The watch button stays while you use it (a redraw would close its picker); it's replaced when it changed.
+        const ws = watchState(id);
+        const sig = [ws.watching ? 1 : 0, ws.tag || '', ws.full ? 1 : 0].join('|');
+        const old = anchor.parentNode.querySelector('.pi-watch');
+        const keepWatch = old && old.getAttribute('data-pi-watch') === sig && old.getAttribute('data-pi-player') === String(id);
+        removeChips(anchor.parentNode, { watch: !keepWatch });
         const chip = chipEl(view(id), { id });
         anchor.parentNode.insertBefore(chip, anchor.nextSibling);
+        if (keepWatch) chip.after(old);
+        else {
+            const wc = watchControl(ws, watchHandlers(id));
+            wc.setAttribute('data-pi-player', String(id));
+            chip.after(wc);
+        }
     }
 
     function drawMini() {
@@ -13919,8 +15169,11 @@
             ep.war.factionId = fid;
             ep.war.at = Date.now();
             for (const m of members) ep.extras.set(Number(m.id), { level: m.level, name: m.name });
+            // When each flight was first seen, shared with the webpage: landings survive a reload.
+            rememberFlights(members);
             wantPlayers(members.map((m) => Number(m.id)));
             drawWar();
+            pollWatch({ members }).catch(() => {});
         } catch {
             ep.war.at = Date.now();
         } finally {
@@ -13955,10 +15208,19 @@
                 const r = byId.get(s.id);
                 if (r) r.el.style.order = String(i);
             });
+            const flights = flightsSeen();
+            const nowMs = Date.now();
             for (const s of sorted) {
                 const r = byId.get(s.id);
                 if (!r) continue;
                 r.cell.appendChild(chipEl(view(s.id), { mini: true, id: s.id }));
+                // The row's edge in its band colour; a traveller's estimated landing next to Torn's status.
+                if (EDGES.includes('pi-edge-' + s.band)) r.el.classList.add('pi-edge-' + s.band);
+                if (s.state === 'traveling' && ep.war.members) {
+                    const parts = statusParts(s.m, { now: nowMs, seenAt: flights[s.id] ? flights[s.id].at : null });
+                    const st = r.el.querySelector('.status');
+                    if (st && parts.at) st.appendChild(Object.assign(document.createElement('span'), { className: 'pi-mark pi-landtag', textContent: 'lands ~' + tornClock(parts.at) }));
+                }
                 if (s.state === 'early') {
                     r.el.classList.add('pi-early');
                     const st = r.el.querySelector('.status');
@@ -13987,7 +15249,8 @@
         panel.style.left = Math.max(8, x) + 'px';
         panel.style.top = (r ? Math.max(8, r.top) : 110) + 'px';
         const v = view(id);
-        fill(panel, attackPanelContent(v, ep.attack));
+        const ws = watchState(id);
+        fill(panel, attackPanelContent(v, { ...ep.attack, watch: { ...ws, full: getWatch().list.length >= WATCH_MAX && !ws.watching, toggle: () => toggleFor(id) } }));
         // What Torn Eye said before this fight: the fight learner compares it with how the fight went.
         if (v && v.forecast && Number.isFinite(v.forecast.pWin)) {
             const list = get(K.eyePredictions, []) || [];
@@ -14067,9 +15330,10 @@
                 drawAll();
             }
         });
-        // War mode: every 10 s while visible.
+        // War mode: every 10 s while visible. The watch list: read every 60 s while a Torn tab is visible (each player when due).
         setInterval(() => {
             if (!isPaused() && detectPage(location.href) === PAGE_FACTION && document.getElementById('faction_war_list_id')) pollWar();
+            if (!isPaused() && isVisible() && getSettings().eyeChips && getWatch().list.length) pollWatch().catch(() => {});
         }, 2000);
         onPauseChange(() => {
             lastSig = '';

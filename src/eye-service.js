@@ -13,12 +13,16 @@ import { idbGet, idbSet } from './platform/idb.js';
 import { pi, tornClient, isVisible } from './runtime.js';
 import { isPaused } from './turns.js';
 import { fetchProfile, fetchPersonalStats, fetchAttacks, fetchEquipment } from './api/torn.js';
-import { makeFfsClient, fetchFfsStats, FFS_MEMORY_MS, FFS_STORED_MS } from './api/ffscouter.js';
+import { makeFfsClient, fetchFfsStats, fetchFfsTargets, FFS_MEMORY_MS, FFS_STORED_MS } from './api/ffscouter.js';
 import { makeTsClient, fetchSpyUser } from './api/tornstats.js';
 import { estimatePlayer } from './core/eye/estimate.js';
 import { forecast, respectFor, fairFight, bssOf, DEFAULT_GEAR } from './core/eye/fight.js';
 import { bandOf, chipFigures } from './core/eye/bands.js';
 import { gearSummary, myGear } from './core/eye/gear.js';
+import { lifeFromLevel, targetParams, targetQueries, listIgnoresFf, mergeTargetLists, inFfRange, selectTargets, listRowAsFfs, TARGETS_PER_MINUTE } from './core/eye/targets.js';
+import { trackFlights } from './core/eye/war.js';
+import { watchOf, addWatch, removeWatch, tagWatch, dismissOffer, isWatched, dueForRead, readEvents, watchOffers, EVENT_KEEP_MS } from './core/eye/watch.js';
+
 
 export const PROFILE_FRESH_MS = 10 * 60 * 1000;
 export const PUBLIC_FRESH_MS = 24 * 60 * 60 * 1000;
@@ -26,10 +30,11 @@ export const SPY_FRESH_MS = 60 * 60 * 1000;
 export const ATTACKS_FRESH_MS = 60 * 60 * 1000;
 export const EQUIPMENT_FRESH_MS = 6 * 60 * 60 * 1000;
 
-/** [calibrate] Max life from level when no profile was read: Torn's base plus typical merits and perks. */
-export function lifeFromLevel(level) {
-    return Math.round((100 + 50 * Math.max(0, (Number(level) || 1) - 1)) * 1.25);
-}
+/** GM storage (every tab and the webpage see it): the target list, the watch list and its reads, flights first seen. */
+export const TARGETS_KEY = 'eyeTargets';
+export const WATCH_KEY = 'eyeWatch';
+export const WATCH_STATE_KEY = 'eyeWatchState';
+export const FLIGHTS_KEY = 'eyeFlights';
 
 const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(), timer: null, listeners: [], mem: new Map(), fc: new Map(), flushing: null, again: false };
 
@@ -117,7 +122,28 @@ export async function clearEye() {
     set('eyeGearCount', 0);
     await idbSet('eye', eye.cache).catch(() => {});
     set('myAttacks', null);
+    for (const k of [TARGETS_KEY, WATCH_KEY, WATCH_STATE_KEY, FLIGHTS_KEY, 'eyeWarAuto']) set(k, null);
     notify();
+}
+
+/** Attacks on you kept for the watch list's "Watch?" offers (it looks back one hour). */
+export const INCOMING_KEEP_S = 24 * 60 * 60;
+
+/**
+ * Your attacks and the attacks on you, from one read of /user/attacks.
+ * @returns {{list: object[], incoming: object[]}}
+ */
+export function slimAttacks(list, myId, nowS = Math.floor(Date.now() / 1000)) {
+    const out = (list || [])
+        .filter((a) => a && a.defender && (!myId || (a.attacker && a.attacker.id === myId)))
+        .map((a) => ({ def: a.defender.id, ended: a.ended, ff: a.modifiers ? Number(a.modifiers.fair_fight) : null, result: a.result, respect: a.respect_gain, level: a.defender.level }));
+    // Attacks on you (stealthed ones name nobody): offered on the watch list.
+    const incoming = myId
+        ? (list || [])
+              .filter((a) => a && a.attacker && a.attacker.id && a.attacker.id !== myId && a.defender && a.defender.id === myId && nowS - (Number(a.ended) || 0) < INCOMING_KEEP_S)
+              .map((a) => ({ att: a.attacker.id, name: a.attacker.name || null, level: a.attacker.level || null, ended: a.ended, result: a.result }))
+        : [];
+    return { list: out, incoming };
 }
 
 /** Your attacks (for the "your fight" layer), refreshed hourly by whichever tab needs them. */
@@ -128,12 +154,9 @@ async function myAttacks() {
     try {
         const list = await fetchAttacks(tornClient(), { limit: 100 });
         const me = (get(K.userStatic, {}) || {}).keyInfo;
-        const myId = me && me.userId;
-        const slim = list
-            .filter((a) => a && a.defender && (!myId || (a.attacker && a.attacker.id === myId)))
-            .map((a) => ({ def: a.defender.id, ended: a.ended, ff: a.modifiers ? Number(a.modifiers.fair_fight) : null, result: a.result, respect: a.respect_gain, level: a.defender.level }));
-        set('myAttacks', { at: Date.now(), list: slim });
-        return slim;
+        const slim = slimAttacks(list, me && me.userId);
+        set('myAttacks', { at: Date.now(), list: slim.list, incoming: slim.incoming });
+        return slim.list;
     } catch {
         return stored ? stored.list : [];
     }
@@ -318,6 +341,7 @@ export function eyeView(id, extra = {}, { war = false } = {}) {
         gear: gearRec ? { text: gThem ? gThem.text : '', seenAt: gearRec.seenAt } : null,
         band,
         respect,
+        ours: ff,
         figures: chipFigures(main, est, respect),
         source: est ? est.sourceText : null,
         status: prof.status || null,
@@ -326,5 +350,255 @@ export function eyeView(id, extra = {}, { war = false } = {}) {
 
 export function eyeReady() {
     return Boolean(eye.cache);
+}
+
+/* ------------------------------------------------------ targets (ROUND4-PLAN §A) */
+
+const targetCalls = [];
+
+/** FFScouter's target finder allows 25 a minute: we wait for a slot past 20. */
+async function paceTargets(sleep, now) {
+    for (;;) {
+        const t = now();
+        while (targetCalls.length && t - targetCalls[0] >= 60000) targetCalls.shift();
+        if (targetCalls.length < TARGETS_PER_MINUTE) {
+            targetCalls.push(t);
+            return;
+        }
+        await sleep(60000 - (t - targetCalls[0]) + 25);
+    }
+}
+
+function takingTurnsError() {
+    const e = new Error('Paused while Torn Trading runs.');
+    e.takingTurns = true;
+    return e;
+}
+
+/**
+ * FFScouter's estimates for these list rows, awaited (the list is judged
+ * right after). A row get-stats knows nothing about keeps the list's own
+ * figures (its estimate and fair fight).
+ */
+export async function ensureFfsStats(rows, client = sharedFfsClient()) {
+    const c = await cache();
+    const now = Date.now();
+    const rec = (id) => (c.players[id] = c.players[id] || {});
+    const known = (r) => r && r.ffs && (r.ffs.bsEstimate || r.ffs.fairFight || r.ffs.bssPublic);
+    const need = rows.map((r) => r.playerId).filter((id) => !(c.players[id] && c.players[id].ffsAt && now - c.players[id].ffsAt < FFS_STORED_MS && known(c.players[id])));
+    if (need.length) {
+        try {
+            const got = await fetchFfsStats(client, need);
+            for (const [id, row] of got) {
+                rec(id).ffs = row;
+                rec(id).ffsAt = Date.now();
+                eye.mem.set(id, Date.now());
+            }
+        } catch (error) {
+            // A refused key is said as such; anything else falls back to the list's own figures.
+            if (error && error.deadKey) throw error;
+        }
+    }
+    for (const r of rows) {
+        const p = rec(r.playerId);
+        if (!known(p)) p.ffs = listRowAsFfs(r, now);
+        p.seen = now;
+    }
+    saveSoon();
+}
+
+/** The judge the webpage uses: the full Torn Eye view (spy, your fights, FFScouter, gear, what it learned). */
+function viewJudge(r) {
+    const v = eyeView(r.playerId, { level: r.level, name: r.name });
+    if (!v) return null;
+    const f = v.forecast;
+    return {
+        band: v.band,
+        win: f ? Math.round(f.pWin * 100) : null,
+        keep: f && f.keep !== null && f.keep !== undefined ? Math.round(f.keep * 100) : null,
+        respect: v.respect,
+        ours: Number.isFinite(v.ours) ? v.ours : null,
+        source: v.est ? v.est.sourceText : null,
+        ageDays: v.est ? v.est.ageDays : null,
+    };
+}
+
+/**
+ * Load Torn Eye's targets: FFScouter asked in slices, merged, the fair
+ * fight range checked, every player judged by the fight model, and only
+ * the ones you beat stored (most respect first). Throws on a refused key,
+ * a pause or an FFScouter error; the stored list is then left as it was.
+ * @param {object} input - {minLevel, maxLevel, inactiveOnly, factionless}
+ * @param {object} [deps] - {client, judge, store, sleep, now} (tests)
+ */
+export async function importTargets(input = {}, { client = null, judge = null, store = (v) => set(TARGETS_KEY, v), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() } = {}) {
+    const ffs = client || sharedFfsClient();
+    if (!judge && !(pi.model && pi.model.ready)) throw new Error('Waiting for your stats from Torn.');
+    const params = targetParams(input);
+    const lists = [];
+    const skip = new Set();
+    let asked = 0;
+    let ffIgnored = false;
+    for (const q of targetQueries(params)) {
+        const band = q.minLevel + '-' + q.maxLevel;
+        if (skip.has(band)) continue;
+        if (isPaused()) throw takingTurnsError();
+        await paceTargets(sleep, now);
+        const rows = await fetchFfsTargets(ffs, { ...q, limit: 50 });
+        asked++;
+        lists.push(rows);
+        // FFScouter ignored the range: the other slices of this level band would be the same list.
+        if (listIgnoresFf(rows, q)) {
+            ffIgnored = true;
+            skip.add(band);
+        }
+    }
+    const merged = mergeTargetLists(lists);
+    await ensureFfsStats(merged.filter(inFfRange), ffs);
+    const { kept, dropped } = selectTargets(merged, judge || viewJudge);
+    const list = kept.map((r) => ({
+        playerId: r.playerId,
+        name: r.name,
+        level: r.level,
+        fairFight: r.fairFight,
+        bsEstimate: r.bsEstimate,
+        lastAction: r.lastAction,
+        hospitalUntil: r.hospitalUntil,
+        band: r.band,
+        win: r.win,
+        keep: r.keep,
+        respect: r.respect,
+        ours: r.ours,
+        source: r.source,
+        ageDays: r.ageDays,
+    }));
+    const out = { at: now(), params, list, dropped, asked, found: merged.length, ffIgnored };
+    store(out);
+    notify();
+    return out;
+}
+
+/* ------------------------------------------------------ flights (war and watch) */
+
+/** When each flight was first seen, kept across reloads (GM storage, so every tab agrees). */
+export function flightsSeen() {
+    return get(FLIGHTS_KEY, {}) || {};
+}
+
+export function rememberFlights(members, now = Date.now()) {
+    const { seen, changed } = trackFlights(flightsSeen(), members, now);
+    if (changed) set(FLIGHTS_KEY, seen);
+    return seen;
+}
+
+/* ------------------------------------------------------ watch list (ROUND4-PLAN §I) */
+
+export function getWatch() {
+    return watchOf(get(WATCH_KEY, null));
+}
+
+export function watchStates() {
+    const s = get(WATCH_STATE_KEY, null) || {};
+    return { at: s.at || 0, players: s.players || {} };
+}
+
+/**
+ * Watch or stop watching a player.
+ * @returns {{ok, watching, reason?}} reason 'full' at 20 players
+ */
+export function toggleWatch(player) {
+    const cur = getWatch();
+    if (isWatched(cur, player.id)) {
+        set(WATCH_KEY, removeWatch(cur, player.id));
+        notify();
+        return { ok: true, watching: false };
+    }
+    const r = addWatch(cur, player);
+    if (r.ok) {
+        set(WATCH_KEY, r.state);
+        notify();
+    }
+    return { ok: r.ok, watching: r.ok, reason: r.reason };
+}
+
+export function setWatchTag(id, tag) {
+    set(WATCH_KEY, tagWatch(getWatch(), id, tag));
+    notify();
+}
+
+export function dismissWatchOffer(id) {
+    set(WATCH_KEY, dismissOffer(getWatch(), id));
+    notify();
+}
+
+/** "Watch?" offers: who attacked or mugged you in the last hour (from your attacks, read hourly). */
+export function watchOffersNow(now = Date.now()) {
+    return watchOffers((get('myAttacks', null) || {}).incoming || [], getWatch(), now);
+}
+
+
+const watchRun = { busy: false };
+
+/**
+ * Read the watched players that are due (60 s; 5 min for a long hospital
+ * stay or flight). One profile each, through the shared Torn client; a
+ * player in the faction list just read (war) costs nothing. Only from a
+ * visible tab, never while Torn Trading runs; two tabs don't both read.
+ * @param {object} [o] - {members: faction members already read}
+ * @returns {Promise<boolean>} whether anything was read
+ */
+export async function pollWatch({ members = null } = {}) {
+    if (watchRun.busy || !isVisible() || isPaused() || !getKey(K.apiKey) || get(K.apiKeyDead, false)) return false;
+    const w = getWatch();
+    if (!w.list.length) return false;
+    const now = Date.now();
+    const st = get(WATCH_STATE_KEY, null) || {};
+    if (st.lockAt && now - st.lockAt < 20000 && st.lockTab !== pi.tabId) return false;
+    const flights = flightsSeen();
+    const fromList = new Map((members || []).map((m) => [Number(m.id), m]));
+    const players = { ...(st.players || {}) };
+    const due = w.list.filter((x) => fromList.has(Number(x.id)) || dueForRead(players[x.id], now, flights[x.id] ? flights[x.id].at : null));
+    if (!due.length) return false;
+    set(WATCH_STATE_KEY, { ...st, lockAt: now, lockTab: pi.tabId });
+    watchRun.busy = true;
+    const read = [];
+    try {
+        for (const x of due) {
+            if (isPaused() || !isVisible()) break;
+            let rec = null;
+            const m = fromList.get(Number(x.id));
+            if (m) rec = { name: m.name || null, level: m.level || null, status: m.status || null, last_action: m.last_action || null, has_early_discharge: Boolean(m.has_early_discharge), is_revivable: Boolean(m.is_revivable) };
+            else {
+                try {
+                    const p = await fetchProfile(tornClient(), x.id);
+                    if (p) rec = { name: p.name || null, level: p.level || null, status: p.status || null, last_action: p.last_action || null, life: (p.life && p.life.maximum) || null, faction: p.faction_id || null, is_revivable: Boolean(p.revivable) };
+                } catch (error) {
+                    if (error && error.takingTurns) break;
+                    continue;
+                }
+            }
+            if (!rec) continue;
+            const prev = players[x.id];
+            const t = Date.now();
+            const events = [...((prev && prev.events) || []).filter((e) => t - e.at < EVENT_KEEP_MS), ...readEvents(prev, rec, t)];
+            players[x.id] = { ...rec, readAt: t, events };
+            read.push({ id: x.id, ...rec });
+        }
+    } finally {
+        watchRun.busy = false;
+    }
+    const ids = new Set(getWatch().list.map((x) => String(x.id)));
+    for (const k of Object.keys(players)) if (!ids.has(k)) delete players[k];
+    set(WATCH_STATE_KEY, { at: Date.now(), players });
+    rememberFlights(read);
+    // Life and level for the fight model (this page's own cache).
+    const c = await cache();
+    for (const r of read) {
+        const p = (c.players[r.id] = c.players[r.id] || {});
+        if (r.life || r.level) p.profile = { ...(p.profile || {}), level: r.level || (p.profile && p.profile.level) || null, life: r.life || (p.profile && p.profile.life) || null, name: r.name, status: r.status };
+    }
+    if (read.length) wantPlayers(read.map((r) => r.id));
+    notify();
+    return read.length > 0;
 }
 

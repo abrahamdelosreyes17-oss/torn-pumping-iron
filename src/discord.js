@@ -36,6 +36,38 @@ export function setTargetsForSync(list, bands) {
     sync.targetsSig = sig;
 }
 
+/* Torn Eye's war and watch list for the Worker (ROUND4-PLAN §B8, §I): the lead sends them with the plan. */
+const EYE_SYNC_WAR_MAX = 100;
+const EYE_SYNC_WATCH_MAX = 25;
+const EYE_BANDS = ['stomp', 'good', 'tough', 'cant', 'none'];
+
+function eyeSyncRow(r, withTag = false) {
+    const id = Number(r && r.id);
+    if (!(id > 0)) return null;
+    const pct = (x) => (x === null || x === undefined || !Number.isFinite(Number(x)) ? null : Math.max(0, Math.min(100, Math.round(Number(x)))));
+    const row = { id, name: r.name ? String(r.name).slice(0, 40) : null, level: Number(r.level) > 0 ? Math.round(Number(r.level)) : null, band: EYE_BANDS.includes(r.band) ? r.band : 'none', win: pct(r.win), keep: pct(r.keep) };
+    if (withTag) row.tag = r.tag ? String(r.tag).slice(0, 24) : null;
+    return row;
+}
+
+/**
+ * The enemy faction and the watch list, for the bot's war and watch pings (set by the webpage).
+ * @param {object} o - {war: {factionId, members:[{id,name,level,band,win,keep}]} | null, watch: [{id,name,level,band,win,keep,tag}] | null}
+ */
+export function setEyeForSync({ war = null, watch = null } = {}) {
+    const w = war && Number(war.factionId) > 0 ? { factionId: Number(war.factionId), members: (war.members || []).map((r) => eyeSyncRow(r)).filter(Boolean).slice(0, EYE_SYNC_WAR_MAX) } : null;
+    const list = (watch || []).map((r) => eyeSyncRow(r, true)).filter(Boolean).slice(0, EYE_SYNC_WATCH_MAX);
+    const sig = JSON.stringify([w, list]);
+    if (sig === sync.eyeSig) return;
+    sync.eye = { war: w, watch: list };
+    sync.eyeSig = sig;
+}
+
+/** What the plan sync can add to its body: {war, watch, sig} (sig changes when either does). */
+export function eyeSyncPayload() {
+    return { war: sync.eye ? sync.eye.war : null, watch: sync.eye ? sync.eye.watch : [], sig: sync.eyeSig || '' };
+}
+
 /** Steps the player skipped in Discord (the Worker's acks), still in force. */
 export function skippedSteps(now = Date.now()) {
     return (get(K.skipped, []) || []).filter((x) => now - x.at < SKIP_KEEP_MS);
