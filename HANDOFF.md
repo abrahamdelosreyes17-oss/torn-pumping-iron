@@ -26,7 +26,7 @@
 - Company what-ifs, receipts and the what-if graph, unlock goal, war reserve.
 
 Links:
-- Install (pinned 1.2.1): PINNED_LINK
+- Install (pinned 1.2.1): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/6009c39df5aadcb4a32d485ef04cc029a2cfc3a7/torn-pumping-iron.user.js
 - Auto-update URL (`@updateURL`): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/main/torn-pumping-iron.user.js
 - Webpage: https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html (gh-pages branch; unchanged since 1.0.0, `site/` didn't change)
 - Repo: https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron (public; `main` + `gh-pages`)
