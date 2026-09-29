@@ -96,7 +96,17 @@ Links:
      6. **The simulator/candy choice counts held candy as free** for the first boost, so a plan using what you hold can win.
      7. **The same pooling for energy drinks** (cans differ in energy but share the 2 h cooldown) and for EDVD/FHC counts already held.
    - **Tests:** the owner's example (need 49, hold 29 Chocolate Kisses + 20 Lollipops → buy 0), a mixed-tier case, the allowance cap.
-11. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
+11. **Xanax count per day and uneven cooldowns (owner, 2026-09-29):**
+   - **Owner's words:** "for xanax it says 2 of 2 today, its 9:34pm for me, and xanax isnt the same cooldown each time, does this reset per day? at 00:00 torn time?"
+   - **Answer given:**
+     - Yes, "today" is the Torn day, resetting at 00:00 TCT (UTC), not local midnight.
+     - The next Xanax is timed from Torn's real cooldown (API `cooldowns.drug`); later ones assume a fixed `XANAX_CD_MIN` = 7 h [calibrate], so they drift.
+   - **Build:**
+     1. Record each real Xanax cooldown when Torn shows one: the drug cooldown right after a Xanax is taken (`diffStates` drugTaken + `state.drugCd`).
+     2. Plan later Xanax with the player's own average (the learner or a rolling median); show the range if it varies.
+     3. Verify Torn's Xanax cooldown range (research says about 6–8 h; confirm on the wiki).
+     4. Say on Home when the Torn day resets in the player's local time (e.g. "Xanax 2 of 2 today · Torn day resets at 08:00 your time").
+12. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
 Research and background: `docs/research-events-perks.md` (events, job perks, the console), `docs/review-fable-2026-09-29.md` (the three-pass review, all fixed), `docs/research-learning.md`, `docs/discord-bot-design.md`, `worker/USERSCRIPT-INTERFACE.md`, `docs/ENGINE-SPEC.md`, `docs/DESIGN.md` + `mockups/round3/` (the look every page follows now).
 
 ---
