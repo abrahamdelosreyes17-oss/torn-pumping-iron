@@ -78,5 +78,30 @@ export function press(customId, messageId, { user = DISCORD_USER } = {}) {
     return { type: 3, id: 'i2', application_id: '111', token: 'tok-btn', user: { id: user }, message: { id: messageId }, data: { custom_id: customId, component_type: 2 } };
 }
 
+/** The friend's plan at 10:48 TCT: Xanax at 10:51, refill at 10:56, natural energy at 15:48. */
+export const PLAN = {
+    type: 'steady',
+    steps: [
+        { at: T0 + 232, kind: 'xanax', label: 'Xanax #2', train: 'DEX × 27' },
+        { at: T0 + 532, kind: 'refill', label: 'Refill · 30 points', train: 'DEX × 15' },
+        { at: T0 + 18000, kind: 'natural', label: 'Natural energy', train: 'DEX × 15' },
+    ],
+};
+
+/** A user connected through PUT /plan (invite, key, plan) and linked to DISCORD_USER, as if /link had run. */
+export async function linkedEnv(extra = {}, body = {}) {
+    const { handle } = await import('../src/index.js');
+    const env = await botEnv(extra);
+    const r = await handle(req('PUT', '/plan', { invite: 'x', body: { tornKey: KEY, plan: PLAN, ...body } }), env);
+    if (r.status !== 200) throw new Error('setup PUT /plan: ' + r.status + ' ' + (await r.text()));
+    const [id] = env.DB.users.keys();
+    Object.assign(env.DB.users.get(id), { discord_id: DISCORD_USER, linked: 1, plan_at: T0 - 60 });
+    return { env, id, user: () => env.DB.users.get(id) };
+}
+
+export async function body(res) {
+    return (await res).json();
+}
+
 export const req = (method, path, { secret = SECRET, invite = null, body = null } = {}) =>
     new Request('https://pumping-iron.test.workers.dev' + path, { method, headers: { ...(secret ? { authorization: 'Bearer ' + secret } : {}), ...(invite ? { 'x-invite': invite } : {}), 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });

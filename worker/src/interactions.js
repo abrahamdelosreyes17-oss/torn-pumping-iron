@@ -11,9 +11,13 @@
 import { T, R, json, reply, verifyDiscord, interactionUser } from './discord.js';
 import { ensureSchema } from './db.js';
 import { HELP } from './commands.js';
+import { needsLink, statusCmd, planCmd, nextCmd } from './cmd-core.js';
 
 const COMMANDS = {
     help: async () => reply(HELP),
+    status: needsLink(statusCmd),
+    plan: needsLink(planCmd),
+    next: needsLink(nextCmd),
 };
 
 const BUTTONS = {};
