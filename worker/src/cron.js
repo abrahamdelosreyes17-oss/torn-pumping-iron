@@ -6,7 +6,7 @@
  */
 
 import { dueAlerts, resolvedBy, nextPrev } from './alerts.js';
-import { Q, parse, meterDb, ensureSchema } from './db.js';
+import { Q, parse, meterDb, ensureSchema, QUERY_BUDGET } from './db.js';
 import { guard, BudgetError } from './net.js';
 import { userState, pauseUser, TornError } from './torn.js';
 import { deliver, canDeliver, bodyOf, editAlertMessage, PER_MESSAGE, LIVE_KINDS } from './deliver.js';
@@ -172,17 +172,18 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
             await pauseUser(db, row.id, e);
             return { sent, resolved, error: 'Torn error ' + e.code };
         }
-        // A key without the faction selections (error 16) or no faction: wars are checked again in 10 minutes.
-        if (e instanceof TornError) war = { checked: nowS, error: e.code };
+        // A key without the faction selections (16), or a faction Torn doesn't know (6, 7):
+        // wars are checked again in 10 minutes. Other Torn hiccups keep the war as it was.
+        if (e instanceof TornError && [6, 7, 16].includes(e.code)) war = { checked: nowS, error: e.code };
     }
     await db.prepare(Q.userRan).bind(nowS, JSON.stringify(nextPrev(prev, state, nowS)), war ? JSON.stringify(war) : null, row.id).run();
     return { sent, resolved };
 }
 
 export async function runCron(env, nowS = Math.floor(Date.now() / 1000), fetchImpl = fetch) {
-    await ensureSchema(env.DB);
+    const spent = await ensureSchema(env.DB);
     const f = guard(fetchImpl);
-    const db = meterDb(env.DB);
+    const db = meterDb(env.DB, QUERY_BUDGET - spent);
     const { results } = await db.prepare(Q.usersDue).bind(20).all();
     const out = [];
     for (const row of results || []) {

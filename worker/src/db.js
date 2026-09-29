@@ -96,6 +96,7 @@ export const SCHEMA = [
     'CREATE INDEX IF NOT EXISTS sent_at ON sent (at)',
 ];
 
+/** Brings the schema up to date; returns how many queries that took. */
 async function migrate(db) {
     let v = 0;
     try {
@@ -104,7 +105,7 @@ async function migrate(db) {
     } catch {
         v = 0; // No meta table yet: a 1.0 database or a new one.
     }
-    if (v >= SCHEMA_VERSION) return;
+    if (v >= SCHEMA_VERSION) return 1;
     for (const sql of SCHEMA) {
         try {
             await db.prepare(sql).run();
@@ -114,22 +115,30 @@ async function migrate(db) {
         }
     }
     await db.prepare(Q.metaPut).bind('schema', String(SCHEMA_VERSION)).run();
+    return SCHEMA.length + 2;
 }
 
 const checked = new WeakMap();
 
-/** Once per Worker instance (per database): the first request pays one read. */
-export function ensureSchema(db) {
-    if (!checked.has(db)) {
-        checked.set(
-            db,
-            migrate(db).catch((e) => {
-                checked.delete(db);
-                throw e;
-            }),
-        );
+/**
+ * Once per Worker instance (per database): the first request pays one
+ * read (or the migration, once after an update). Returns the queries this
+ * call spent, so a cron run can stay under 50.
+ */
+export async function ensureSchema(db) {
+    if (checked.has(db)) {
+        await checked.get(db);
+        return 0;
     }
-    return checked.get(db);
+    const p = migrate(db);
+    checked.set(
+        db,
+        p.catch((e) => {
+            checked.delete(db);
+            throw e;
+        }),
+    );
+    return p;
 }
 
 /** Count queries so one run stays under the free plan's 50. */

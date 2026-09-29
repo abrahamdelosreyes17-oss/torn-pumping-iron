@@ -190,6 +190,16 @@ test('many users: one run stays under 50 subrequests and 50 D1 queries; the rest
     assert.ok(env.DB.log.length - before <= 46, env.DB.log.length - before + ' queries');
     assert.ok(out.some((o) => o.later), 'some users wait');
     assert.ok(out.filter((o) => o.sent).length >= 3);
+    // The first run after an update also migrates the schema: still under 50 queries in all.
+    const { fakeD1 } = await import('./fake-d1.js');
+    const { Q } = await import('../src/db.js');
+    const fresh = { ...env, DB: fakeD1() };
+    for (const u of env.DB.users.values()) await fresh.DB.prepare(Q.userInsert).bind(u.id, u.torn_key, u.discord_id, '', u.plan, u.rules, 0, null, T0, T0, null, null, null).run();
+    for (const u of fresh.DB.users.values()) Object.assign(u, { linked: 1 });
+    const n0 = fresh.DB.log.length;
+    await runCron(fresh, T0, world());
+    assert.ok(fresh.DB.log.some((s) => s.startsWith('ALTER TABLE')), 'migrated');
+    assert.ok(fresh.DB.log.length - n0 <= 48, fresh.DB.log.length - n0 + ' queries with the migration');
     // Next minute: the ones that waited go first.
     const waited = out.filter((o) => o.later).length;
     const g = world({ torn: tornState({ drug: 172 }) });
