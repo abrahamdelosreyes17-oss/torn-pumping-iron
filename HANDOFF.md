@@ -70,14 +70,33 @@ Links:
    - **Cause:** every 25-happy candy is interchangeable, and `candy.js bestCandy` picks the cheapest listing each time prices reload (every 30 min).
    - **Next session:** add a disclaimer line where the candy is named (step label or sub, Plan's "What you do", Buy), e.g. "gives the same happy as Lollipop, Bag of Bon Bons, Chocolate Kisses… (+25 each); any of them works".
    - **Optionally:** keep the day's pick unless another is ≥ 10% cheaper for the whole boost.
-9. **Sally's Sweet Shop in the computation (owner, 2026-09-29):** "if we haven't reached the daily limit, it should also be part of the computation".
+9. **Sally's Sweet Shop in the computation (owner, 2026-09-29):**
+   - Owner's words: "there is a limit to sally sweet shop, you can look it up" and "sallys sweet shop, if we havent reached the daily limit, should also be part of the computation".
+   - How we calculate it:
    - **Researched** [wiki Sally's_Sweet_Shop via search, 1 source so far; verify]:
      - Sally's sells Lollipop $25, Bag of Chocolate Kisses $150 and Box of Sweet Hearts $500 (all +25 happy).
      - City-shop buys count against Torn's **Daily Items Allowance: 100 items a day from NPC shops**, shared by all city shops.
    - **Remaining allowance today, from the API:** personal stat `cityitemsbought` now, minus its value at the Torn day's start (`user/personalstats?stat=cityitemsbought&timestamp=<day start>`). Two calls, Public access.
    - **Build:** the candy choice and Buy use Sally's for up to the remaining allowance (e.g. 49 Lollipops fit in 100), and the market for the rest.
    - The owner earlier said Sally's is "newbies only" but now treats it as usable. Revisit the default-off "Shops I can buy from" tick: probably count it automatically while allowance remains, with the tick kept as an off switch. Ask the owner.
-10. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
+10. **Use what you hold first; never tell the owner to buy what's already in the inventory (owner, 2026-09-29):**
+   - **Owner's words:**
+     - "it should NOT tell me to buy stuff … i have lollipop and candy, both same happiness, and booster cooldown … it should exhaust my inventory first";
+     - "lets say i need to take 49 chocolates, i have 29 chocolates and 20 lollipops, it should say take that, it's in inventory".
+   - **Checked 2026-09-29: it does NOT do this today.**
+     - `market.js needList` subtracts only the same item id.
+     - `candy.js bestCandy` values candy you hold at its market price, so held candy isn't preferred.
+     - The step names one candy ("Lollipop × 49").
+   - **Build (design):**
+     1. **Candy is a pool.** Every candy takes the same 30 min of booster cooldown; only its happy differs (25 / 35 / 50 / 75 / 100 / 150 / 250). A boost has N slots (49 on a 24 h cap).
+     2. **Fill the slots from the inventory first.** Held candy costs nothing new: happiest held candy first. Held candy of the same or more happy than the pick always goes in. Held candy with less happy goes in when it's the same tier as the pick, or when the budget can't buy better (let the Plan rule decide).
+     3. **Then Sally's** (and any ticked city shop), up to today's allowance (item 9).
+     4. **Then the market,** cheapest per happy (with item 8's steadiness).
+     5. **Step label and Buy say it plainly,** e.g. "Candy × 49: your 29 Chocolate Kisses + 20 Lollipops (all +25 happy) · buy 0". Buy lists only what's still missing.
+     6. **The simulator/candy choice counts held candy as free** for the first boost, so a plan using what you hold can win.
+     7. **The same pooling for energy drinks** (cans differ in energy but share the 2 h cooldown) and for EDVD/FHC counts already held.
+   - **Tests:** the owner's example (need 49, hold 29 Chocolate Kisses + 20 Lollipops → buy 0), a mixed-tier case, the allowance cap.
+11. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
 Research and background: `docs/research-events-perks.md` (events, job perks, the console), `docs/review-fable-2026-09-29.md` (the three-pass review, all fixed), `docs/research-learning.md`, `docs/discord-bot-design.md`, `worker/USERSCRIPT-INTERFACE.md`, `docs/ENGINE-SPEC.md`, `docs/DESIGN.md` + `mockups/round3/` (the look every page follows now).
 
 ---
