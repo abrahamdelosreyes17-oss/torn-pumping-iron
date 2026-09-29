@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Pumping Iron
 // @namespace    torn-pumping-iron
-// @version      1.2.0
+// @version      1.2.1
 // @description  Gym planner and fight scout for Torn: what to take, what to train, what to buy, who you can beat. Reads the API and the page you're on; never acts for you.
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 (function () {
     'use strict';
 
-    const PI_BUILD_VERSION = '1.2.0';
+    const PI_BUILD_VERSION = '1.2.1';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -538,6 +538,99 @@
         );
     }
 
+    /* ===== src/core/lanes.js ===== */
+    /*
+     * Which Torn calls go first (owner, 2026-09-29): Pumping Iron has the
+     * budget to itself (Torn Trading is off while it runs), and what you have
+     * open decides who gets it. Pure.
+     *
+     *   - The plan's own reads always go first (a couple a minute).
+     *   - Torn Eye open (its tab, or a profile, faction or attack page on Torn):
+     *     Torn Eye first, the war read before anything else in it.
+     *   - Buy open (or Torn's items, bazaar, Item Market or points pages): prices first.
+     *   - Both open: half each.
+     *   - A lane that isn't in front may still use what the front lane leaves,
+     *     up to a share of the minute, so nothing sits idle and nothing starves.
+     */
+
+    /** Lanes, by the Torn API path a call reads. */
+    const LANES = ['plan', 'war', 'eye', 'prices', 'other'];
+
+    /** A tab's focus counts this long after its last heartbeat (a closed or hidden tab drops out). */
+    const FOCUS_FRESH_MS = 15 * 1000;
+
+    /** Share of the minute a lane that isn't in front may use while another is (the rest is kept for the front one). */
+    const BACK_LANE_SHARE = 0.3;
+
+    /** Share of the minute each of two front lanes may use when both are open (half each). */
+    const BOTH_SHARE = 0.5;
+
+    /** The lane of a Torn API call, from its path. */
+    function laneOf(path) {
+        const p = String(path || '').replace(/^\/+/, '');
+        if (/^v2\/market\//.test(p)) return 'prices';
+        if (/^v2\/faction(\/|$)/.test(p)) return 'war';
+        if (/^v2\/user\/\d+\//.test(p) || /^v2\/torn\/attacklog/.test(p) || /^v2\/user\/attacks/.test(p)) return 'eye';
+        if (/^v2\/user(\/|$)/.test(p) || /^v2\/key\//.test(p)) return 'plan';
+        return 'other';
+    }
+
+    /** Which Torn Eye lane a lane counts toward (war reads are Torn Eye's). */
+    function sideOf(lane) {
+        return lane === 'war' || lane === 'eye' ? 'eye' : lane === 'prices' ? 'prices' : null;
+    }
+
+    /**
+     * What's open across the tabs, from each tab's heartbeat {focus: 'eye'|'prices'|null, war, at}.
+     * @returns {{eye:boolean, prices:boolean, war:boolean}}
+     */
+    function focusFrom(beats, now = Date.now()) {
+        const out = { eye: false, prices: false, war: false };
+        for (const b of Object.values(beats || {})) {
+            if (!b || !(now - (b.at || 0) < FOCUS_FRESH_MS)) continue;
+            if (b.focus === 'eye') out.eye = true;
+            if (b.focus === 'prices') out.prices = true;
+            if (b.war) out.war = true;
+        }
+        return out;
+    }
+
+    /**
+     * How many of the minute's slots a lane may be using at most before it waits.
+     * @param {string} lane
+     * @param {object} focus - focusFrom()
+     * @param {number} max - the whole minute's budget
+     */
+    function laneCap(lane, focus, max) {
+        const side = sideOf(lane);
+        if (!side || !focus) return max;
+        const front = focus.eye || focus.prices;
+        if (!front) return max;
+        if (focus.eye && focus.prices) return Math.floor(max * BOTH_SHARE);
+        return focus[side] ? max : Math.floor(max * BACK_LANE_SHARE);
+    }
+
+    /**
+     * Order of the queue: lower goes first; ties keep their order. With both
+     * sides open, the side that has used less of the minute goes first.
+     * @param {string} lane
+     * @param {object} focus
+     * @param {object} [used] - {eye, prices}: slots each side used in the last minute
+     */
+    function laneRank(lane, focus, used = {}) {
+        if (lane === 'plan') return 0;
+        const side = sideOf(lane);
+        const f = focus || {};
+        if (side && f[side]) {
+            // War first inside Torn Eye; with both sides open, the one behind on its half goes next.
+            const base = lane === 'war' ? 1 : 2;
+            if (f.eye && f.prices) return base + ((used[side] || 0) > (used[side === 'eye' ? 'prices' : 'eye'] || 0) ? 0.5 : 0);
+            return base;
+        }
+        if (lane === 'other') return 3;
+        return 4;
+    }
+
     /* ===== src/api/client.js ===== */
     /*
      * The one place that talks to the network.
@@ -549,10 +642,11 @@
      *      key, because no third party can be addressed from this client.
      *   2. The key is never logged. Errors are redacted before they are thrown,
      *      so a stack trace pasted into Discord cannot leak it.
-     *   3. Every call goes through one rate-limited queue (<=70/min against
+     *   3. Every call goes through one rate-limited queue (85/min by default against
      *      Torn's ~100/min ceiling) with request dedup and exponential backoff.
      *      A key that trips abuse detection is a worse outcome than a slow panel.
      */
+
 
 
 
@@ -661,7 +755,18 @@
             addToWindow = null,
             onDeadKey = null,
             isPaused = () => false,
+            focus = null,
+            loadLaneWindow = null,
+            addLaneWindow = null,
         } = {}) {
+            // What's open across the tabs (core/lanes.js): decides which calls go first and each side's share.
+            this.focus = focus;
+            this.loadLaneWindow = loadLaneWindow;
+            this.addLaneWindow = addLaneWindow;
+            /** Calls waiting their turn: {lane, run, resolve, reject, n}. */
+            this.queue = [];
+            this.pumping = false;
+            this.queued = 0;
             this.onDeadKey = onDeadKey;
             this.isPaused = isPaused;
             this.addToWindow = addToWindow;
@@ -719,8 +824,27 @@
                 .sort((a, b) => a - b);
         }
 
-        /** Block until the sliding window has room for one more request. */
-        async waitForSlot() {
+        /** The focus now (what's open across the tabs), or null when nobody said. */
+        focusNow() {
+            try {
+                return this.focus ? this.focus() : null;
+            } catch {
+                return null;
+            }
+        }
+
+        /** Slots a side (Torn Eye or prices) used in the last minute, across the tabs. */
+        sideUsed(side, now = Date.now()) {
+            if (!side || !this.loadLaneWindow) return 0;
+            try {
+                return (this.loadLaneWindow(side) || []).filter((t) => now - t < 60000).length;
+            } catch {
+                return 0;
+            }
+        }
+
+        /** Block until the sliding window has room for one more request (and this lane is inside its share). */
+        async waitForSlot(lane = 'other') {
             for (;;) {
                 const now = Date.now();
                 this.syncWindow(now);
@@ -732,7 +856,17 @@
                     continue;
                 }
 
+                // (A side over its share never gets here: the queue passes it over until it has room, see pump().)
+                const side = sideOf(lane);
+
                 if (this.recent.length < this.maxPerMinute) {
+                    if (side && this.addLaneWindow) {
+                        try {
+                            this.addLaneWindow(side, now);
+                        } catch {
+                            // Best-effort: the whole-minute window below still limits every call.
+                        }
+                    }
                     this.recent.push(now);
                     if (this.addToWindow) {
                         try {
@@ -762,7 +896,7 @@
          * @param {string} path - e.g. "torn" or "user" or "market/123"
          * @param {object} params - query params; `key` is added here and only here
          */
-        async get(path, params = {}) {
+        async get(path, params = {}, { lane = null } = {}) {
             const cacheKey = path + '?' + new URLSearchParams(params).toString();
 
             const cached = this.cache.get(cacheKey);
@@ -773,12 +907,12 @@
             const existing = this.inflight.get(cacheKey);
             if (existing) return existing;
 
-            // Queue behind whatever is already scheduled, then take a slot.
-            const promise = this.chain
-                .catch(() => {})
-                .then(() => this.execute(path, params, cacheKey));
-
-            this.chain = promise.catch(() => {});
+            // Wait its turn: the plan first, then what's open (core/lanes.js), in order within a lane.
+            const ln = lane || laneOf(path);
+            const promise = new Promise((resolve, reject) => {
+                this.queue.push({ lane: ln, run: () => this.execute(path, params, cacheKey, ln), resolve, reject, n: this.queued++ });
+                this.pump();
+            });
             this.inflight.set(cacheKey, promise);
 
             try {
@@ -788,6 +922,57 @@
                 return data;
             } finally {
                 this.inflight.delete(cacheKey);
+            }
+        }
+
+        /** Is this lane's side inside its share of the minute (what's open decides the share)? */
+        laneHasRoom(lane, focus, used) {
+            const side = sideOf(lane);
+            if (!side) return true;
+            const cap = laneCap(lane, focus, this.maxPerMinute);
+            return cap >= this.maxPerMinute || (used[side] || 0) < cap;
+        }
+
+        /**
+         * Run the queue one call at a time, the best-ranked first. A call whose
+         * side has used its share waits in the queue while the others go past it,
+         * so one side never holds up another.
+         */
+        async pump() {
+            if (this.pumping) return;
+            this.pumping = true;
+            try {
+                while (this.queue.length) {
+                    const focus = this.focusNow();
+                    const now = Date.now();
+                    const used = { eye: this.sideUsed('eye', now), prices: this.sideUsed('prices', now) };
+                    let best = -1;
+                    for (let i = 0; i < this.queue.length; i++) {
+                        const a = this.queue[i];
+                        if (!this.laneHasRoom(a.lane, focus, used)) continue;
+                        if (best < 0) {
+                            best = i;
+                            continue;
+                        }
+                        const b = this.queue[best];
+                        const ra = laneRank(a.lane, focus, used);
+                        const rb = laneRank(b.lane, focus, used);
+                        if (ra < rb || (ra === rb && a.n < b.n)) best = i;
+                    }
+                    if (best < 0) {
+                        // Everything waiting is over its share: look again in a second (the minute rolls on).
+                        await apiSleep(1000);
+                        continue;
+                    }
+                    const job = this.queue.splice(best, 1)[0];
+                    try {
+                        job.resolve(await job.run());
+                    } catch (error) {
+                        job.reject(error);
+                    }
+                }
+            } finally {
+                this.pumping = false;
             }
         }
 
@@ -806,7 +991,7 @@
             throw e;
         }
 
-        async execute(path, params, cacheKey) {
+        async execute(path, params, cacheKey, lane = 'other') {
             if (!this.fetchImpl) {
                 throw new TornApiError('No fetch implementation available.');
             }
@@ -828,7 +1013,7 @@
 
             while (attempt <= this.maxRetries) {
                 this.throwIfPaused(mine);
-                await this.waitForSlot();
+                await this.waitForSlot(lane);
                 // Another tab may have hit a block while this one waited.
                 this.throwIfPaused(mine);
                 this.throwIfTakingTurns();
@@ -2570,6 +2755,8 @@
                 used.dailySpecial = (used.dailySpecial || 0) + 1;
                 return;
             }
+            // The points refill left out (it isn't worth its price under the Plan rule): special refills above still count.
+            if (o.noRefill) return;
             E = Math.max(E, maxE);
             buy(POINTS, REFILL_POINTS);
         };
@@ -2911,7 +3098,7 @@
     const TRADING_MARK_EVERY_MS = 15 * 1000;
 
     /** Torn Trading's own limits, which Pumping Iron may use while it runs alone. */
-    const TORN_PER_MINUTE_ALONE = 70;
+    const TORN_PER_MINUTE_ALONE = 85;
     const W3B_PER_MINUTE_ALONE = 80;
 
     /** Is Torn Trading running now (seen within the grace period)? */
@@ -3181,6 +3368,8 @@
                 specialLeft = Math.min(specialLeft, heldLeft);
                 return trainEach(at, 'refill', 'Special refill (instead of the points refill)', [{ id: SPECIAL, qty: 1 }], 1, { ...extra, note: 'Torn lets you use the points refill only once your special refills are spent [1 source]' });
             }
+            // Not worth its price under the Plan rule (the comparison decided): the points refill is left out.
+            if (ctx.noRefill) return null;
             return trainEach(at, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }], 1, extra);
         };
         const candyMult = ctx.candyMult || 1;
@@ -3949,7 +4138,7 @@
         return detectPage(href) === PAGE_PROFILE ? numParam(href, 'XID') : null;
     }
 
-    /** The defender on the attack page (loader.php?sid=attack&user2ID=), or null. */
+    /** The defender on the attack page (page.php?sid=attack&user2ID=, older loader.php links too), or null. */
     function attackTargetOf(href) {
         return detectPage(href) === PAGE_ATTACK ? numParam(href, 'user2ID') : null;
     }
@@ -4040,7 +4229,8 @@
     }
 
     function attackUrl(userId) {
-        return TORN + 'loader.php?sid=attack&user2ID=' + encodeURIComponent(String(userId));
+        // Torn retired loader.php for attacks ("This endpoint is no longer available … page.php", 2026-09-29).
+        return TORN + 'page.php?sid=attack&user2ID=' + encodeURIComponent(String(userId));
     }
 
     function factionUrl(factionId) {
@@ -5746,11 +5936,35 @@
      * or over 250k (never recommended then).
      * @param {object} o - {state, pc, shares, settings, prices, special, statics, pickBy}
      */
-    function compareStrategies({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most' }) {
+    function compareStrategies(args) {
+        const steps = compareSteps(args);
+        let r = steps.next();
+        while (!r.done) r = steps.next();
+        return r.value;
+    }
+
+    /**
+     * The same comparison in slices, one plan at a time with a break for the
+     * page in between (a comparison is 60+ thirty-day runs: in one go it froze
+     * the page for a few hundred ms after a click, e.g. ticking a city shop).
+     */
+    async function compareStrategiesAsync(args, { pause = () => new Promise((r) => setTimeout(r, 0)) } = {}) {
+        const steps = compareSteps(args);
+        let r = steps.next();
+        while (!r.done) {
+            await pause();
+            r = steps.next();
+        }
+        return r.value;
+    }
+
+    /** The comparison, yielding after each plan (see compareStrategies / compareStrategiesAsync). */
+    function* compareSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most' }) {
         const base = simInputs({ state, pc, shares, settings, prices, special, statics });
         const results = {};
         const budget = budgetOf(settings);
         for (const id of feasibleStrategies({ bliss: pc.perks.bliss, boosterCapH: base.boosterCapH, toyShop5: base.toyShop5, adultNovelties10: base.adultNovelties10 })) {
+            yield id;
             if (id === 'consoleJump' || id === 'consoleJumpToy') {
                 // Low-stat players only: over 250k in a stat it trains, it's shown (behind the tick) and never picked.
                 const probe = simulateStrategy(id, { ...base, special: 0 });
@@ -5760,16 +5974,39 @@
                     continue;
                 }
             }
-            results[id] = CANDY_PLANS.has(id) ? withBestCandy(id, base, { budget, pickBy }).result : withBestSpecial(id, base);
+            results[id] = withBestRefill(id, base, { budget, pickBy }, (b) => (CANDY_PLANS.has(id) ? withBestCandy(id, b, { budget, pickBy }).result : withBestSpecial(id, b)));
         }
         if (results.steady && Number.isFinite(budget)) {
             const choice = boosterChoice({ perDay: (budget - results.steady.cost) / base.days, maxE: base.energyMax, prices: base.prices, canMult: base.canMult, capH: base.boosterCapH });
             // Only a real middle rung: fewer than steadyMax's FHC every time.
             if (choice && !(choice.id === steadyMaxItem() && results.steadyMax && choice.perDay >= boostersPerDayMax(base))) {
+                yield 'steadyBoost';
                 results.steadyBoost = { ...withBestSpecial('steadyBoost', { ...base, energyBooster: { id: choice.id, perDay: choice.perDay } }), booster: choice };
             }
         }
         return results;
+    }
+
+    /**
+     * Is the daily points refill worth its price (owner, 2026-09-29)? The plan
+     * is run without it too, and the refill is kept only when the Plan rule
+     * says so: inside the budget it's kept (more stats), unless it's what puts
+     * the plan over the budget; for "best value" it's kept only if it doesn't
+     * lower the stats per $1M. The result says which (`refill`, `refillGain`,
+     * `refillCost`), and the day plan follows it.
+     */
+    function withBestRefill(id, base, { budget = Infinity, pickBy = 'most' } = {}, run) {
+        const withIt = run(base);
+        // Nothing to decide: no points bought for refills in this plan (special refills stand in), or no limit and "most".
+        if (!(withIt.used && withIt.used[POINTS] > 0)) return withIt;
+        const limit = pickBy === 'max' ? Infinity : budget;
+        if (pickBy !== 'value' && withIt.cost <= limit) return { ...withIt, refill: true };
+        const without = run({ ...base, noRefill: true });
+        const gain = withIt.gained - without.gained;
+        const cost = withIt.cost - without.cost;
+        const per = (r) => (r.cost > 0 ? r.gained / r.cost : Infinity);
+        const keep = pickBy === 'value' ? per(withIt) >= per(without) && withIt.cost <= limit : withIt.cost <= limit || without.cost > limit;
+        return keep ? { ...withIt, refill: true, refillGain: gain, refillCost: cost } : { ...without, refill: false, refillGain: gain, refillCost: cost };
     }
 
     /**
@@ -5900,6 +6137,8 @@
             boostersToday: today.filter((e) => e.kind === 'booster').length,
             candyMult: pc.perks.candyMult || 1,
             canMult: pc.perks.canMult || 1,
+            // The comparison found the points refill not worth it in this plan: the day plan leaves it out.
+            noRefill: Boolean(compare && compare[plan.strategy] && compare[plan.strategy].refill === false),
             toyShop5: Boolean(pc.perks.toyShop5),
             adultNovelties10: Boolean(pc.perks.adultNovelties10),
         };
@@ -5994,7 +6233,11 @@
         const heads = [];
         if (!plan.buildPicked) heads.push({ tone: 'warn', text: 'Pick your build type', sub: 'Plan › Build: the plan trains toward it', go: 'plan' });
         for (const w of strictWarnings(steps, now)) heads.push({ tone: 'warn', text: w.text });
-        if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
+        if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS && !ctx.noRefill) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
+        if (ctx.noRefill) {
+            const r = compare[plan.strategy];
+            heads.push({ tone: 'plain', text: 'Daily refill left out', sub: 'not worth its price in your plan' + (r && r.refillGain > 0 ? ' (+' + Math.round(r.refillGain).toLocaleString('en-US') + ' stats for $' + Math.round(r.refillCost / 1e6) + 'M over the plan)' : ''), go: 'plan' });
+        }
         if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.known ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost), go: 'progress' });
         for (const e of events.slice(0, 2)) {
             const hu = eventHeadsUp(e, now);
@@ -6079,6 +6322,7 @@
             events,
             pickBy,
             keepEnergy: warKeep,
+            noRefill: Boolean(ctx.noRefill),
             auto: auto ? { ...auto, afford: affordLine(auto, recRow ? recRow.cost / horizon : 0), wait: autoWaitLine(auto), switch: autoSwitch } : null,
             unlock,
             // held: while any are held the daily refill is a special (Torn blocks the points refill until they're spent [verify]).
@@ -7461,10 +7705,11 @@
 
     /* ===== src/runtime.js ===== */
     /*
-     * What every tab shares at run time: the one Torn client (70/min across
+     * What every tab shares at run time: the one Torn client (85/min across
      * tabs, visible only, silent while Torn Trading runs), the state feed, and the model every surface renders
      * from. Userscript-only; core/ and api/ stay plain modules.
      */
+
 
 
 
@@ -7513,7 +7758,41 @@
      */
     const TORN_PER_MINUTE = TORN_PER_MINUTE_ALONE;
 
-    /** The one Torn client every part of this tab uses: 70/min across tabs, visible only, nothing while paused. */
+    /** Where each tab's focus heartbeat is kept ({tabId: {focus, war, at}}), and each side's shared minute. */
+    const FOCUS_KEY = 'apiFocus';
+    const laneWindows = {};
+    function laneWindow(side) {
+        if (!laneWindows[side]) laneWindows[side] = tabWindow('apiLane_' + side, pi.tabId, storeApi);
+        return laneWindows[side];
+    }
+
+    /** What's open across the tabs (core/lanes.js): Torn Eye, prices, both or neither. */
+    function apiFocus(now = Date.now()) {
+        return focusFrom(get(FOCUS_KEY, {}) || {}, now);
+    }
+
+    /** Lane options every Torn client in this tab shares. */
+    function laneOptions() {
+        return { focus: () => apiFocus(), loadLaneWindow: (side) => laneWindow(side).load(), addLaneWindow: (side, at) => laneWindow(side).add(at) };
+    }
+
+    /**
+     * This tab says what it shows, so the Torn calls for it go first: a page
+     * sets `pi.focusOf` (() => {focus: 'eye'|'prices'|null, war}); a heartbeat
+     * every few seconds keeps it fresh while the tab is visible.
+     */
+    function beatFocus(now = Date.now()) {
+        const all = { ...(get(FOCUS_KEY, {}) || {}) };
+        const mine = isVisible() && pi.focusOf ? pi.focusOf() : null;
+        const had = all[pi.tabId];
+        // Old entries from closed tabs go too.
+        for (const [id, b] of Object.entries(all)) if (!b || !(now - (b.at || 0) < FOCUS_FRESH_MS * 4)) delete all[id];
+        if (mine && (mine.focus || mine.war)) all[pi.tabId] = { focus: mine.focus || null, war: Boolean(mine.war), at: now };
+        else delete all[pi.tabId];
+        if (JSON.stringify(had || null) !== JSON.stringify(all[pi.tabId] || null) || (all[pi.tabId] && now - ((had && had.at) || 0) > FOCUS_FRESH_MS / 3)) set(FOCUS_KEY, all);
+    }
+
+    /** The one Torn client every part of this tab uses: 85/min across tabs, visible only, nothing while paused; what's open goes first. */
     function tornClient() {
         if (pi.client) return pi.client;
         const win = tabWindow('apiWindow', pi.tabId, storeApi);
@@ -7528,6 +7807,7 @@
             isVisible,
             onDeadKey: () => set(K.apiKeyDead, true),
             isPaused: () => isPaused(),
+            ...laneOptions(),
         });
         return pi.client;
     }
@@ -7549,6 +7829,7 @@
             isVisible,
             onDeadKey: () => set(K.fullKeyState, { ...(get(K.fullKeyState, {}) || {}), ok: false, dead: true, error: 'Torn refused the Full key', at: Date.now() }),
             isPaused: () => isPaused(),
+            ...laneOptions(),
         });
         return pi.fullClient;
     }
@@ -7601,14 +7882,33 @@
         const days = Math.max(1, Math.round((event.end - event.start) / (24 * 3600e3)));
         const key = [event.id, event.start, pi.compareKey, days, Math.round(budgetPerDay || 0)].join('|');
         if (pi.eventCompare && pi.eventCompare.key === key) return pi.eventCompare;
+        // Two more full comparisons: never inside a redraw. The last answer stands until the new one is ready.
+        if (pi.eventWanted !== key) {
+            pi.eventWanted = key;
+            setTimeout(async () => {
+                if (pi.eventWanted !== key) return;
+                await runEventComparison(key, event, state, pc, shares, settings, budgetPerDay, statics, days);
+                if (pi.eventWanted === key) refresh();
+            }, COMPARE_CLICK_DELAY_MS * 2);
+        }
+        return pi.eventCompare || { eventCompare: null, normalCompare: null };
+    }
+
+    async function runEventComparison(key, event, state, pc, shares, settings, budgetPerDay, statics, days) {
         const es = { ...settings, horizonDays: days, budget: Number.isFinite(budgetPerDay) ? budgetPerDay * days : Infinity };
         const prices = getPrices();
         const special = 0;
         const boosted = { ...pc, perks: { ...pc.perks, candyMult: (pc.perks.candyMult || 1) * (event.candyMult || 1), canMult: (pc.perks.canMult || 1) * (event.canMult || 1) } };
         // Same inputs as the plan's own comparison (shops, console held, job), with the event's multiplier on one side.
-        pi.eventCompare = { key, eventCompare: compareStrategies({ state, pc: boosted, shares, settings: es, prices, special, statics, pickBy: 'most' }), normalCompare: compareStrategies({ state, pc, shares, settings: es, prices, special, statics, pickBy: 'most' }) };
+        const eventCompare = await compareStrategiesAsync({ state, pc: boosted, shares, settings: es, prices, special, statics, pickBy: 'most' });
+        const normalCompare = await compareStrategiesAsync({ state, pc, shares, settings: es, prices, special, statics, pickBy: 'most' });
+        if (pi.eventWanted === key) pi.eventCompare = { key, eventCompare, normalCompare };
         return pi.eventCompare;
     }
+
+    /** After a click, the plan runs wait this long (the page paints first); after new prices only, this long (batched). */
+    const COMPARE_CLICK_DELAY_MS = 80;
+    const COMPARE_PRICE_DELAY_MS = 5000;
 
     /** Re-run the strategy comparison at most once per Torn hour or when inputs change. */
     function comparisonFor(state, statics, plan, settings) {
@@ -7623,26 +7923,36 @@
         // Items and job: the candy rule (Plan dropdown), shops ticked, Torn's item data, a console held, the job, specials held.
         const pickBy = plan.pickBy || 'most';
         const itemSig = JSON.stringify([pickBy, settings.npcShops || [], statics.itemsAt || 0, Number((statics.inventory || {})[104]) > 0, statics.job || null, statics.jobPoints || null, state.specialRefills || 0]);
-        const key = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, priceSig, pc.unlocked.join(','), special, itemSig].join('|');
+        const keyNoPrice = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, pc.unlocked.join(','), special, itemSig].join('|');
+        const key = keyNoPrice + '|' + priceSig;
         if (key !== pi.compareKey) {
-            const run = () => {
-                pi.compare = compareStrategies({ state, pc, shares, settings, prices, special, statics, pickBy });
+            // The what-ifs after the plans (they're small); `compare` is the plans' results.
+            const finish = (compare) => {
+                pi.compare = compare;
                 // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
                 pi.whatIf = pc.perks.bliss ? null : blissWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy });
                 // Company what-ifs: hired where a jump variant would beat the recommended plan.
                 const rec = recommend(pi.compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy });
                 pi.jobWhatIf = companyWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy, compare: pi.compare, recommended: rec.recommended });
                 pi.compareKey = key;
+                pi.compareKeyNoPrice = keyNoPrice;
             };
+            const run = () => finish(compareStrategies({ state, pc, shares, settings, prices, special, statics, pickBy }));
             if (!pi.compare) run();
             else if (pi.compareWanted !== key) {
-                // A click (build, budget, days) redraws at once; the 15 plan runs follow a moment later, off the click.
+                // A click (build, budget, days, a shop tick) redraws at once and the plan runs follow once the page has
+                // painted. New prices alone (they arrive in batches while Buy loads) are gathered: one run 5 s later.
+                const priceOnly = pi.compareKeyNoPrice === keyNoPrice;
                 pi.compareWanted = key;
-                setTimeout(() => {
+                clearTimeout(pi.compareTimer);
+                pi.compareTimer = setTimeout(async () => {
                     if (pi.compareWanted !== key) return;
-                    run();
+                    // One plan at a time, with the page free in between; a newer change drops this run.
+                    const compare = await compareStrategiesAsync({ state, pc, shares, settings, prices, special, statics, pickBy });
+                    if (pi.compareWanted !== key) return;
+                    finish(compare);
                     refresh();
-                }, 0);
+                }, priceOnly ? COMPARE_PRICE_DELAY_MS : COMPARE_CLICK_DELAY_MS);
             }
         }
         return { compare: pi.compare, pc };
@@ -7833,6 +8143,13 @@
         gmOnChange(K.settings, refresh);
         gmOnChange(K.stateError, refresh);
         gmOnChange(K.apiKeyDead, refresh);
+        // What this tab shows (Torn Eye, prices): its Torn calls go first while it's open.
+        setInterval(() => beatFocus(), 4000);
+        document.addEventListener('visibilitychange', () => beatFocus());
+        window.addEventListener('pagehide', () => {
+            pi.focusOf = null;
+            beatFocus();
+        });
         // Countdowns tick by themselves every second; the model itself is worked out again every 5 s, in a tab you can see.
         setInterval(() => {
             if (isVisible()) refresh();
@@ -8016,7 +8333,7 @@
 
     /* Torn Eye's war and watch list for the Worker (ROUND4-PLAN §B8, §I): the lead sends them with the plan. */
     const EYE_SYNC_WAR_MAX = 100;
-    const EYE_SYNC_WATCH_MAX = 25;
+    const EYE_SYNC_WATCH_MAX = 50;
     const EYE_BANDS = ['stomp', 'good', 'tough', 'cant', 'none'];
 
     function eyeSyncRow(r, withTag = false) {
@@ -8083,7 +8400,7 @@
 
     function planPayload(m) {
         if (!m || !m.ready) return null;
-        return { type: m.steps.some((s) => s.kind === 'stack' || s.kind === 'jump') ? 'jump' : 'steady', steps: stepsForWorker(m.steps) };
+        return { type: m.steps.some((s) => s.kind === 'stack' || s.kind === 'jump') ? 'jump' : 'steady', steps: stepsForWorker(m.steps), ...(m.noRefill ? { noRefill: true } : {}) };
     }
 
     /** Your Discord id, if linked in Torn (/user/discord). */
@@ -9265,6 +9582,12 @@
         return { parts, current, done: current === null };
     }
 
+    /** Torn lists its gyms in groups of eight: the one a gym is in, to find its button. */
+    function gymGroupWord(gymId) {
+        const id = Number(gymId);
+        return id <= 8 ? 'a lightweight gym' : id <= 16 ? 'a middleweight gym' : id <= 24 ? 'a heavyweight gym' : 'a specialist gym';
+    }
+
     /** Energy the session still needs. */
     function sessionEnergyLeft(session) {
         return sessionProgress(session).parts.reduce((a, p) => a + p.left * p.perTrain, 0);
@@ -9367,9 +9690,11 @@
 
         if (cur && !here) {
             const label = 'Next: ' + cur.gymName + ' · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
-            out.nextGym = { id: cur.gymId, label };
-            out.switchHint = label;
+            out.nextGym = { id: cur.gymId, label, group: gymGroupWord(cur.gymId) };
+            out.switchHint = 'Switch to ' + cur.gymName + ' (' + gymGroupWord(cur.gymId) + ') · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
         }
+        // In the right gym: its button is outlined too, so where to train is never a guess.
+        if (cur && here) out.hereGym = { id: cur.gymId, label: 'Train here · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left };
 
         out.strip.push(m.build.name);
         if (m.nextGym && m.nextGym.gym) {
@@ -9953,6 +10278,7 @@
             ctx.plan.pickBy === 'auto' && a && a.wait ? h('div', { class: 'warnb', style: 'margin-top:10px' }, [h('b', { text: a.needsKey ? 'Auto mode needs a Full key' : 'Reading your income' }), h('p', { text: a.wait }), a.needsKey ? h('div', { class: 'acts' }, [h('button', { class: 'btn primary sm', type: 'button', onclick: () => ctx.go('settings'), text: 'Add it in Settings' })]) : null]) : null,
             autoOn && a.breakdown && a.breakdown.lines.length ? incomeLines(a.breakdown) : null,
             m.unlock ? unlockBlock(m, ctx, days) : null,
+            refillLine(best, days),
             h('div', { class: 'note2', text: 'If you’re late: steady and goal plans re-time by themselves. Jump plans warn 5 min before the tick, then re-time.' }),
         ];
         if (ctx.ui.goalForm) kids.push(goalForm(m, ctx));
@@ -9971,6 +10297,14 @@
             );
         }
         return h('div', { class: 'lead' }, kids);
+    }
+
+    /** Is the daily points refill worth it in this plan? (The comparison ran it with and without when it mattered.) */
+    function refillLine(r, days) {
+        if (!r || r.refill === undefined) return null;
+        const words = r.refillGain > 0 ? ' +' + fmtShort(r.refillGain) + ' stats for ' + fmtMoney(r.refillCost) + ' over ' + days + ' days' : '';
+        if (r.refill === false) return h('div', { class: 'note2 num' }, [h('b', { class: 'white', text: 'Daily refill: left out.' }), words ? ' It would add' + words + ', which isn’t worth it under your Plan rule.' : ' Not worth its price under your Plan rule.']);
+        return h('div', { class: 'note2 num' }, [h('b', { class: 'white', text: 'Daily refill: worth it.' }), words ? ' It adds' + words + '.' : ' It fits your budget.']);
     }
 
     /** Where Auto's income comes from, from the money log (the Full key). */
@@ -12576,7 +12910,7 @@
         ]);
 
         const d = ctx.diagnostics();
-        const diagSec = h('div', {}, [sectionHead('Diagnostics', null, null, 'h3'), h('dl', { class: 'facts num' }, [h('dt', { text: 'Torn API, last minute' }), h('dd', { text: d.torn + ' of ' + (d.tornMax || 70) }), h('dt', { text: 'FFScouter, last minute' }), h('dd', { text: d.ffs + ' of 60' }), h('dt', { text: 'TornW3B, last minute' }), h('dd', { text: d.w3b + ' of 80' }), h('dt', { text: 'Last error' }), h('dd', { text: d.lastError || 'none' }), h('dt', { text: 'Perk lines not understood' }), h('dd', { text: String(d.unknownPerks) }), h('dt', { text: 'Version' }), h('dd', { text: d.version })])]);
+        const diagSec = h('div', {}, [sectionHead('Diagnostics', null, null, 'h3'), h('dl', { class: 'facts num' }, [h('dt', { text: 'Torn API, last minute' }), h('dd', { text: d.torn + ' of ' + (d.tornMax || 85) + (d.focus ? ' · first: ' + d.focus : '') }), h('dt', { text: 'FFScouter, last minute' }), h('dd', { text: d.ffs + ' of 60' }), h('dt', { text: 'TornW3B, last minute' }), h('dd', { text: d.w3b + ' of 80' }), h('dt', { text: 'Last error' }), h('dd', { text: d.lastError || 'none' }), h('dt', { text: 'Perk lines not understood' }), h('dd', { text: String(d.unknownPerks) }), h('dt', { text: 'Version' }), h('dd', { text: d.version })])]);
         const devSec = developerSection(m, ctx);
 
         const dataRows = [
@@ -13332,7 +13666,7 @@
 
 
 
-    const WATCH_MAX = 20;
+    const WATCH_MAX = 50;
     const WATCH_TAGS = ['hospitalize', 'mug', 'revenge', 'bounty'];
     const TAG_MAX = 24;
     const WATCH_POLL_MS = 60 * 1000;
@@ -14726,7 +15060,7 @@
 
     /**
      * Watch or stop watching a player.
-     * @returns {{ok, watching, reason?}} reason 'full' at 20 players
+     * @returns {{ok, watching, reason?}} reason 'full' at WATCH_MAX (50) players
      */
     function toggleWatch(player) {
         const cur = getWatch();
@@ -14785,11 +15119,26 @@
         watchRun.busy = true;
         const read = [];
         try {
+            // Watched players in the same faction (two or more due): one faction read covers them all.
+            const byFaction = new Map();
+            for (const x of due) {
+                const fid = players[x.id] && players[x.id].faction;
+                if (!fid || fromList.has(Number(x.id))) continue;
+                byFaction.set(fid, (byFaction.get(fid) || 0) + 1);
+            }
+            for (const [fid, n] of byFaction) {
+                if (n < 2 || isPaused() || !isVisible()) continue;
+                try {
+                    for (const mm of await fetchFactionMembers(tornClient(), fid)) if (mm && mm.id) fromList.set(Number(mm.id), { ...mm, faction: fid });
+                } catch (error) {
+                    if (error && error.takingTurns) break;
+                }
+            }
             for (const x of due) {
                 if (isPaused() || !isVisible()) break;
                 let rec = null;
                 const m = fromList.get(Number(x.id));
-                if (m) rec = { name: m.name || null, level: m.level || null, status: m.status || null, last_action: m.last_action || null, has_early_discharge: Boolean(m.has_early_discharge), is_revivable: Boolean(m.is_revivable) };
+                if (m) rec = { name: m.name || null, level: m.level || null, status: m.status || null, last_action: m.last_action || null, has_early_discharge: Boolean(m.has_early_discharge), is_revivable: Boolean(m.is_revivable), faction: m.faction || (players[x.id] && players[x.id].faction) || null };
                 else {
                     try {
                         const p = await fetchProfile(tornClient(), x.id);
@@ -15117,6 +15466,11 @@
         return {
             torn: tornClient().stats().usedLastMinute,
             tornMax: TORN_PER_MINUTE,
+            // Which calls go first right now (Settings › Diagnostics).
+            focus: (() => {
+                const f = apiFocus();
+                return f.eye && f.prices ? 'Torn Eye and prices, half each' : f.eye ? (f.war ? 'the war, then Torn Eye' : 'Torn Eye') : f.prices ? 'prices' : '';
+            })(),
             ffs: page.ffs ? page.ffs.stats().usedLastMinute : 0,
             w3b,
             lastError: err ? new Date(err.at).toISOString().slice(11, 16) + ' ' + err.message : null,
@@ -15412,6 +15766,10 @@
 
     function bootAppPage({ renderers = {} } = {}) {
         page.app = new PiApp({ getCtx, renderers: { eye: renderEye, ...renderers }, getUpdated: () => (get(K.userState, null) || {}).at || null });
+        // The API lanes: Torn Eye's calls go first while its tab is open (War mode: the war read first), prices while Buy is.
+        pi.focusOf = () => ({ focus: page.app.tab === 'eye' ? 'eye' : page.app.tab === 'buy' ? 'prices' : null, war: page.app.tab === 'eye' && page.app.ui.eyeMode === 'war' });
+        window.addEventListener('hashchange', () => beatFocus());
+        beatFocus();
         onEye(() => {
             gearCount().then((n) => (page.eye.gear = n));
             page.app.render(true);
@@ -15787,12 +16145,16 @@
         const out = [];
         for (const b of (root && root.querySelectorAll('[class*="gymButton___"]')) || []) {
             const icon = b.querySelector('[class*="gymIcon___"]');
-            const m = icon && String(icon.className).match(/\bgym-(\d+)\b/);
+            // Live Torn (checked 2026-09-29) hashes this class too: "gym-1___Ij5f9"; older pages had a plain "gym-1".
+            const m = icon && String(icon.className).match(/(?:^|\s)gym-(\d+)(?:___[\w-]*)?(?=\s|$)/);
             if (!m) continue;
             const cls = String(b.className);
-            const state = /selected___/.test(cls) ? 'selected' : /inProgress___/.test(cls) ? 'inProgress' : /lockedPurchased___/.test(cls) ? 'lockedPurchased' : /locked___/.test(cls) ? 'locked' : /active___/.test(cls) ? 'active' : 'unknown';
+            // A button with no state class (live Torn: just "gymButton___…") is a gym you can use.
+            const state = /selected___/.test(cls) ? 'selected' : /inProgress___/.test(cls) ? 'inProgress' : /lockedPurchased___/.test(cls) ? 'lockedPurchased' : /locked___/.test(cls) ? 'locked' : 'active';
             const pct = b.querySelector('[class*="percentage___"]');
-            out.push({ id: Number(m[1]), state, percent: pct ? gymNum(pct.textContent) : null, name: b.getAttribute('aria-label') || null, el: b });
+            // "Premier Fitness. Membership cost - $10. Energy usage - 5 per train." → the gym's name.
+            const label = b.getAttribute('aria-label') || '';
+            out.push({ id: Number(m[1]), state, percent: pct ? gymNum(pct.textContent) : null, name: label ? label.split('.')[0].trim() : null, el: b });
         }
         return out;
     }
@@ -15930,6 +16292,12 @@
         if (plan.nextGym) {
             const b = buttons.find((x) => x.id === plan.nextGym.id);
             if (b && b.el) outline(b.el, plan.nextGym.label);
+            // Its button isn't on the page (Torn shows one group of gyms at a time): the strip says which group to open.
+            else strip.appendChild(h('span', { class: 'pi-hint', text: ' · open ' + plan.nextGym.group.replace(/^a /, 'the ') + 's to find it' }));
+        }
+        if (plan.hereGym) {
+            const b = buttons.find((x) => x.id === plan.hereGym.id);
+            if (b && b.el) outline(b.el, plan.hereGym.label);
         }
         for (const box of boxes) {
             const p = plan.perStat[box.stat];
@@ -16287,8 +16655,18 @@
         return 0;
     }
 
+    /** What this Torn page is about, for the API lanes: Torn Eye pages or market pages go first while open. */
+    function tornPageFocus(href = location.href) {
+        const p = detectPage(href);
+        if (p === PAGE_PROFILE || p === PAGE_FACTION || p === PAGE_ATTACK) return { focus: 'eye', war: p === PAGE_FACTION && Boolean(document.getElementById('faction_war_list_id')) };
+        if (p === PAGE_ITEMS || p === PAGE_BAZAAR || p === PAGE_ITEM_MARKET || p === PAGE_POINTS) return { focus: 'prices', war: false };
+        return { focus: null, war: false };
+    }
+
     function bootTornPage() {
         ensureMarkCss();
+        pi.focusOf = () => tornPageFocus();
+        beatFocus();
         tp.overlay = new Overlay({
             // A key problem opens straight on Settings, where the key is replaced.
             onOpen: () => gmOpenTab(APP_PAGE_URL + (currentProblem() && !(tp.model && tp.model.ready) ? '#settings' : '')),

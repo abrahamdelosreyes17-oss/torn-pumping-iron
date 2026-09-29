@@ -62,12 +62,16 @@ export function readGymButtons(root) {
     const out = [];
     for (const b of (root && root.querySelectorAll('[class*="gymButton___"]')) || []) {
         const icon = b.querySelector('[class*="gymIcon___"]');
-        const m = icon && String(icon.className).match(/\bgym-(\d+)\b/);
+        // Live Torn (checked 2026-09-29) hashes this class too: "gym-1___Ij5f9"; older pages had a plain "gym-1".
+        const m = icon && String(icon.className).match(/(?:^|\s)gym-(\d+)(?:___[\w-]*)?(?=\s|$)/);
         if (!m) continue;
         const cls = String(b.className);
-        const state = /selected___/.test(cls) ? 'selected' : /inProgress___/.test(cls) ? 'inProgress' : /lockedPurchased___/.test(cls) ? 'lockedPurchased' : /locked___/.test(cls) ? 'locked' : /active___/.test(cls) ? 'active' : 'unknown';
+        // A button with no state class (live Torn: just "gymButton___…") is a gym you can use.
+        const state = /selected___/.test(cls) ? 'selected' : /inProgress___/.test(cls) ? 'inProgress' : /lockedPurchased___/.test(cls) ? 'lockedPurchased' : /locked___/.test(cls) ? 'locked' : 'active';
         const pct = b.querySelector('[class*="percentage___"]');
-        out.push({ id: Number(m[1]), state, percent: pct ? gymNum(pct.textContent) : null, name: b.getAttribute('aria-label') || null, el: b });
+        // "Premier Fitness. Membership cost - $10. Energy usage - 5 per train." → the gym's name.
+        const label = b.getAttribute('aria-label') || '';
+        out.push({ id: Number(m[1]), state, percent: pct ? gymNum(pct.textContent) : null, name: label ? label.split('.')[0].trim() : null, el: b });
     }
     return out;
 }

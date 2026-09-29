@@ -172,11 +172,35 @@ function withBestCandy(id, base, { budget = Infinity, pickBy = 'most' } = {}) {
  * or over 250k (never recommended then).
  * @param {object} o - {state, pc, shares, settings, prices, special, statics, pickBy}
  */
-export function compareStrategies({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most' }) {
+export function compareStrategies(args) {
+    const steps = compareSteps(args);
+    let r = steps.next();
+    while (!r.done) r = steps.next();
+    return r.value;
+}
+
+/**
+ * The same comparison in slices, one plan at a time with a break for the
+ * page in between (a comparison is 60+ thirty-day runs: in one go it froze
+ * the page for a few hundred ms after a click, e.g. ticking a city shop).
+ */
+export async function compareStrategiesAsync(args, { pause = () => new Promise((r) => setTimeout(r, 0)) } = {}) {
+    const steps = compareSteps(args);
+    let r = steps.next();
+    while (!r.done) {
+        await pause();
+        r = steps.next();
+    }
+    return r.value;
+}
+
+/** The comparison, yielding after each plan (see compareStrategies / compareStrategiesAsync). */
+function* compareSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most' }) {
     const base = simInputs({ state, pc, shares, settings, prices, special, statics });
     const results = {};
     const budget = budgetOf(settings);
     for (const id of feasibleStrategies({ bliss: pc.perks.bliss, boosterCapH: base.boosterCapH, toyShop5: base.toyShop5, adultNovelties10: base.adultNovelties10 })) {
+        yield id;
         if (id === 'consoleJump' || id === 'consoleJumpToy') {
             // Low-stat players only: over 250k in a stat it trains, it's shown (behind the tick) and never picked.
             const probe = simulateStrategy(id, { ...base, special: 0 });
@@ -192,6 +216,7 @@ export function compareStrategies({ state, pc, shares, settings, prices, special
         const choice = boosterChoice({ perDay: (budget - results.steady.cost) / base.days, maxE: base.energyMax, prices: base.prices, canMult: base.canMult, capH: base.boosterCapH });
         // Only a real middle rung: fewer than steadyMax's FHC every time.
         if (choice && !(choice.id === steadyMaxItem() && results.steadyMax && choice.perDay >= boostersPerDayMax(base))) {
+            yield 'steadyBoost';
             results.steadyBoost = { ...withBestSpecial('steadyBoost', { ...base, energyBooster: { id: choice.id, perDay: choice.perDay } }), booster: choice };
         }
     }

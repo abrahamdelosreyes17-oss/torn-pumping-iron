@@ -12,7 +12,7 @@ import { focusFrom, FOCUS_FRESH_MS } from './core/lanes.js';
 import { TornApiClient } from './api/client.js';
 import { StateFeed } from './feed/state.js';
 import { normalizeState, tornDayStart } from './core/bars.js';
-import { buildModel, compareStrategies, blissWhatIf, companyWhatIf, playerContext, buildOf, isDrugEntry, specialLeft } from './core/model.js';
+import { buildModel, compareStrategies, compareStrategiesAsync, blissWhatIf, companyWhatIf, playerContext, buildOf, isDrugEntry, specialLeft } from './core/model.js';
 import { recommend } from './core/recommend.js';
 import { targetShares } from './core/plan.js';
 import { upcomingEvents } from './core/events.js';
@@ -176,14 +176,33 @@ function eventComparisonFor(event, state, pc, shares, settings, budgetPerDay, st
     const days = Math.max(1, Math.round((event.end - event.start) / (24 * 3600e3)));
     const key = [event.id, event.start, pi.compareKey, days, Math.round(budgetPerDay || 0)].join('|');
     if (pi.eventCompare && pi.eventCompare.key === key) return pi.eventCompare;
+    // Two more full comparisons: never inside a redraw. The last answer stands until the new one is ready.
+    if (pi.eventWanted !== key) {
+        pi.eventWanted = key;
+        setTimeout(async () => {
+            if (pi.eventWanted !== key) return;
+            await runEventComparison(key, event, state, pc, shares, settings, budgetPerDay, statics, days);
+            if (pi.eventWanted === key) refresh();
+        }, COMPARE_CLICK_DELAY_MS * 2);
+    }
+    return pi.eventCompare || { eventCompare: null, normalCompare: null };
+}
+
+async function runEventComparison(key, event, state, pc, shares, settings, budgetPerDay, statics, days) {
     const es = { ...settings, horizonDays: days, budget: Number.isFinite(budgetPerDay) ? budgetPerDay * days : Infinity };
     const prices = getPrices();
     const special = 0;
     const boosted = { ...pc, perks: { ...pc.perks, candyMult: (pc.perks.candyMult || 1) * (event.candyMult || 1), canMult: (pc.perks.canMult || 1) * (event.canMult || 1) } };
     // Same inputs as the plan's own comparison (shops, console held, job), with the event's multiplier on one side.
-    pi.eventCompare = { key, eventCompare: compareStrategies({ state, pc: boosted, shares, settings: es, prices, special, statics, pickBy: 'most' }), normalCompare: compareStrategies({ state, pc, shares, settings: es, prices, special, statics, pickBy: 'most' }) };
+    const eventCompare = await compareStrategiesAsync({ state, pc: boosted, shares, settings: es, prices, special, statics, pickBy: 'most' });
+    const normalCompare = await compareStrategiesAsync({ state, pc, shares, settings: es, prices, special, statics, pickBy: 'most' });
+    if (pi.eventWanted === key) pi.eventCompare = { key, eventCompare, normalCompare };
     return pi.eventCompare;
 }
+
+/** After a click, the plan runs wait this long (the page paints first); after new prices only, this long (batched). */
+export const COMPARE_CLICK_DELAY_MS = 80;
+export const COMPARE_PRICE_DELAY_MS = 5000;
 
 /** Re-run the strategy comparison at most once per Torn hour or when inputs change. */
 function comparisonFor(state, statics, plan, settings) {
@@ -198,26 +217,36 @@ function comparisonFor(state, statics, plan, settings) {
     // Items and job: the candy rule (Plan dropdown), shops ticked, Torn's item data, a console held, the job, specials held.
     const pickBy = plan.pickBy || 'most';
     const itemSig = JSON.stringify([pickBy, settings.npcShops || [], statics.itemsAt || 0, Number((statics.inventory || {})[104]) > 0, statics.job || null, statics.jobPoints || null, state.specialRefills || 0]);
-    const key = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, priceSig, pc.unlocked.join(','), special, itemSig].join('|');
+    const keyNoPrice = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, pc.unlocked.join(','), special, itemSig].join('|');
+    const key = keyNoPrice + '|' + priceSig;
     if (key !== pi.compareKey) {
-        const run = () => {
-            pi.compare = compareStrategies({ state, pc, shares, settings, prices, special, statics, pickBy });
+        // The what-ifs after the plans (they're small); `compare` is the plans' results.
+        const finish = (compare) => {
+            pi.compare = compare;
             // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
             pi.whatIf = pc.perks.bliss ? null : blissWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy });
             // Company what-ifs: hired where a jump variant would beat the recommended plan.
             const rec = recommend(pi.compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy });
             pi.jobWhatIf = companyWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy, compare: pi.compare, recommended: rec.recommended });
             pi.compareKey = key;
+            pi.compareKeyNoPrice = keyNoPrice;
         };
+        const run = () => finish(compareStrategies({ state, pc, shares, settings, prices, special, statics, pickBy }));
         if (!pi.compare) run();
         else if (pi.compareWanted !== key) {
-            // A click (build, budget, days) redraws at once; the 15 plan runs follow a moment later, off the click.
+            // A click (build, budget, days, a shop tick) redraws at once and the plan runs follow once the page has
+            // painted. New prices alone (they arrive in batches while Buy loads) are gathered: one run 5 s later.
+            const priceOnly = pi.compareKeyNoPrice === keyNoPrice;
             pi.compareWanted = key;
-            setTimeout(() => {
+            clearTimeout(pi.compareTimer);
+            pi.compareTimer = setTimeout(async () => {
                 if (pi.compareWanted !== key) return;
-                run();
+                // One plan at a time, with the page free in between; a newer change drops this run.
+                const compare = await compareStrategiesAsync({ state, pc, shares, settings, prices, special, statics, pickBy });
+                if (pi.compareWanted !== key) return;
+                finish(compare);
                 refresh();
-            }, 0);
+            }, priceOnly ? COMPARE_PRICE_DELAY_MS : COMPARE_CLICK_DELAY_MS);
         }
     }
     return { compare: pi.compare, pc };

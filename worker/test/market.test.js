@@ -133,7 +133,7 @@ test('targets sync through PUT /plan (kept small); /targets lists them with Atta
     const r = await body(handleInteraction(command('targets'), env, world(), ctx(), t.at + 720));
     assert.match(r.data.content, /\*\*Stomp\*\* \(win 99%, keeps 81% life\) · Iron_Monk \[1234567\] · Lv 23/);
     assert.match(r.data.content, /Synced 12 min ago/);
-    assert.deepEqual(r.data.components[0].components.map((b) => b.url), ['https://www.torn.com/loader.php?sid=attack&user2ID=1234567', 'https://www.torn.com/loader.php?sid=attack&user2ID=2345678', 'https://www.torn.com/loader.php?sid=attack&user2ID=3456789']);
+    assert.deepEqual(r.data.components[0].components.map((b) => b.url), ['https://www.torn.com/page.php?sid=attack&user2ID=1234567', 'https://www.torn.com/page.php?sid=attack&user2ID=2345678', 'https://www.torn.com/page.php?sid=attack&user2ID=3456789']);
     // A plan sync without targets keeps them.
     await handle(req('PUT', '/plan', { body: { plan: PLAN } }), env);
     assert.equal(JSON.parse(user().targets).list.length, 3);

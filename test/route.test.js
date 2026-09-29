@@ -73,7 +73,7 @@ test('the webpage is the GitHub Pages address, or the harness marker off torn.co
 test('links go to the exact Torn page', () => {
     assert.equal(bazaarUrl(1234567), 'https://www.torn.com/bazaar.php?userId=1234567#/');
     assert.equal(itemMarketUrl(206), 'https://www.torn.com/page.php?sid=ItemMarket#/market/view=search&itemID=206');
-    assert.equal(attackUrl(77), 'https://www.torn.com/loader.php?sid=attack&user2ID=77');
+    assert.equal(attackUrl(77), 'https://www.torn.com/page.php?sid=attack&user2ID=77');
 });
 
 test('only one visible tab leads, and a hidden leader steps down', () => {

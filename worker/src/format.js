@@ -34,7 +34,8 @@ export const PAGES = {
     itemMarket: (id) => TORN + 'page.php?sid=ItemMarket#/market/view=search&itemID=' + encodeURIComponent(String(id)),
     bazaar: (id) => TORN + 'bazaar.php?userId=' + encodeURIComponent(String(id)) + '#/',
     profile: (id) => TORN + 'profiles.php?XID=' + encodeURIComponent(String(id)),
-    attack: (id) => TORN + 'loader.php?sid=attack&user2ID=' + encodeURIComponent(String(id)),
+    // Torn retired loader.php for attacks (2026-09-29): page.php is the one that works.
+    attack: (id) => TORN + 'page.php?sid=attack&user2ID=' + encodeURIComponent(String(id)),
     faction: (id) => TORN + 'factions.php?step=profile&ID=' + encodeURIComponent(String(id)),
     myFaction: TORN + 'factions.php?step=your',
 };

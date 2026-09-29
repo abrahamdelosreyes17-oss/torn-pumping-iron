@@ -99,7 +99,7 @@ export function profileIdOf(href) {
     return detectPage(href) === PAGE_PROFILE ? numParam(href, 'XID') : null;
 }
 
-/** The defender on the attack page (loader.php?sid=attack&user2ID=), or null. */
+/** The defender on the attack page (page.php?sid=attack&user2ID=, older loader.php links too), or null. */
 export function attackTargetOf(href) {
     return detectPage(href) === PAGE_ATTACK ? numParam(href, 'user2ID') : null;
 }
@@ -190,7 +190,8 @@ export function profileUrl(userId) {
 }
 
 export function attackUrl(userId) {
-    return TORN + 'loader.php?sid=attack&user2ID=' + encodeURIComponent(String(userId));
+    // Torn retired loader.php for attacks ("This endpoint is no longer available … page.php", 2026-09-29).
+    return TORN + 'page.php?sid=attack&user2ID=' + encodeURIComponent(String(userId));
 }
 
 export function factionUrl(factionId) {

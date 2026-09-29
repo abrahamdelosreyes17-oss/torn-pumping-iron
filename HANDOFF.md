@@ -1,36 +1,65 @@
 # HANDOFF: Torn Pumping Iron
 
-**Released: 1.2.0 (2026-09-29, round 4; 1.1.1 / 1.1.0 / 1.0.1 / 1.0.0 the same day).** 1.2.0 includes:
-- Auto mode as the default plan (from your income; needs a Full key, header warning without it).
+**Released: 1.2.1 (2026-09-29; 1.2.0 = round 4 earlier the same night).**
+
+1.2.1 fixes and additions:
+- **Gym walk-through actually outlines gyms on live Torn:** the gym-icon class is hashed (`gym-1___Ij5f9`), and buttons carry no state class. Checked with the owner's console output.
+- **Attack links use `page.php?sid=attack`:** Torn retired `loader.php` for attacks. This covers the Torn Eye button and the bot's links.
+- **API lanes:**
+  - 85 a minute; the plan's read first, then what's open (Torn Eye with the war first, or prices, or half each).
+  - The side not in front keeps to 30% and steps aside in the queue.
+  - Diagnostics shows what goes first.
+- **Watch list up to 50,** one faction read covering watched players in the same faction.
+- **The daily points refill only when it's worth it** under the Plan rule. Plan, Home, Buy and the bot follow.
+- **No more lag on clicks** (e.g. ticking Sally's):
+  - the plan comparison runs after the page paints, in slices;
+  - price-only changes are batched (one run 5 s later);
+  - Auto's event comparison runs off the redraw.
+
+1.2.0 (round 4):
+- Auto mode is the default plan (from your income; needs a Full key, header warning without it).
 - Log in with Discord.
-- Torn Eye fixed: only players you beat, no respect cap.
-- War mode with advance bot pings, and the ☆ watch list.
-- The best-split trainer with the gym-page walk-through.
-- The engine names every item (19 candies, city shops you tick), Buy includes the full next jump, and the console jump runs under 250k.
-- Refills never above max; company what-ifs.
-- Receipts and the what-if graph; unlock-gym goal; war reserve.
+- Torn Eye: only players you beat, no respect cap.
+- War mode with advance bot pings; the ☆ watch list.
+- Best-split trainer with the gym walk-through.
+- The engine names every item; Buy covers the full next jump; console jump under 250k; refills never above max.
+- Company what-ifs, receipts and the what-if graph, unlock goal, war reserve.
 
 Links:
-- Install (pinned 1.2.0): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/811186b7a5be14d920065e29b93ab8c489f0d96c/torn-pumping-iron.user.js
+- Install (pinned 1.2.1): PINNED_LINK
 - Auto-update URL (`@updateURL`): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/main/torn-pumping-iron.user.js
 - Webpage: https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html (gh-pages branch; unchanged since 1.0.0, `site/` didn't change)
 - Repo: https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron (public; `main` + `gh-pages`)
 - Discord service: https://pumping-iron.pumping-iron-worker.workers.dev (the owner's Cloudflare; bot in the owner's server)
 
 **Next session, start here:**
-1. Read this file (§2, §3), then **`docs/ROUND4-PLAN.md`** (§0 is the owner's round-4 decisions) and the newest session entry below.
-2. Owner to-dos:
-   - **Discord login:** add the OAuth2 redirect `https://pumping-iron.pumping-iron-worker.workers.dev/login/callback`, then run `npx --yes wrangler@4 secret put DISCORD_CLIENT_SECRET` in `worker/`. Until then Log in with Discord says "isn't set up yet".
-   - Then the live test (B10): Log in with Discord, test ping, first DM (watch for the gateway note in BOT.md), `/timers`, a real step ping, a war ping. The friend joins the server, then logs in.
-   - A Full key in Settings for Auto mode.
+1. Read this file (§2 how the owner works, §3 settled decisions), then **`docs/ROUND4-PLAN.md`** (§0 is the owner's round-4 decisions) and the two newest session entries below.
+2. **Live state (2026-09-29, end of session):**
+   - The owner is logged in with Discord. The bot DMs work: test ping, a jump ping and "Energy is full" auto-closing all seen in the `sent` table.
+   - Client Secret and redirect are done.
+   - Read the service without keys:
+     `cd worker; npx --yes wrangler@4 d1 execute pumping-iron --remote --json --command "SELECT substr(id,1,8) id, linked, paused, last_error, datetime(updated,'unixepoch') synced FROM users"`
+     (never select `torn_key`).
+3. **Owner to-dos:**
+   - A Full key in Settings (Auto mode).
+   - The friend joins the Discord server, then Log in with Discord.
    - O5: read Torn's rules.php.
    - Learning-data exports after a week or two.
-3. Still open:
-   - The Torn Eye watch-list defaults (20 players, 60 s, bot pings on, offers from attacks, kept until removed) were chosen without the owner: confirm.
+4. **Check live next time** (read-only, with the owner): does the gym page now outline the right gym, and does "open the … gyms" show when its button isn't on the page? Also verify:
+   - the Sally's shop link (`shops.php?step=candy`) [verify];
+   - special refills blocking the points refill (1 source);
+   - `user/{id}/profile` last_action for watch pings;
+   - the gym-page energy-bar selector (`#barEnergy [class*="bar-value___"]`);
+   - money-log title matching [calibrate].
+5. **Owner defaults to confirm:**
+   - watch list 50 players (60 s for those close to out, 5 min for the rest) and bot pings on;
+   - Keep for war days starts at 0;
+   - the API shares (the side in front gets the whole minute, the other 30%, both open half each).
+6. **Known gaps:**
    - `/link CODE` (own-service path) still moves a link silently.
-   - Verify live: Sally's shop URL; specials blocking the points refill (1 source); `user/{id}/profile` last_action; the gym-page energy-bar selector; money-log title matching [calibrate].
-4. Ideas recorded: the learned HP-kept model, timing habits, happy loss per train.
-
+   - The comparison is ~150 ms of work (run in slices now); a Web Worker would take it off the page entirely if it's still felt.
+   - The FFScouter list honouring `minff`/`maxff` is unconfirmed: Torn Eye stores `ffIgnored` when a slice comes back out of range.
+7. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
 Research and background: `docs/research-events-perks.md` (events, job perks, the console), `docs/review-fable-2026-09-29.md` (the three-pass review, all fixed), `docs/research-learning.md`, `docs/discord-bot-design.md`, `worker/USERSCRIPT-INTERFACE.md`, `docs/ENGINE-SPEC.md`, `docs/DESIGN.md` + `mockups/round3/` (the look every page follows now).
 
 ---
@@ -189,6 +218,22 @@ Done on the owner's yes. For later releases, the same steps minus the one-time r
 ---
 
 ## What each session did (newest first)
+
+### 2026-09-29 (end of night): 1.2.1 (live fixes after the owner used 1.2.0)
+- **Owner live reports and fixes:**
+  - "It doesn't highlight the gym I have to use": the owner's console output showed hashed icon classes (`gym-1___Ij5f9`) and bare `gymButton___T6tQg` buttons. `readGymButtons` now matches both; no state class counts as usable; the name comes from the aria-label. Test built from that markup.
+  - The Attack button showed Torn's "This endpoint is no longer available … page.php": `attackUrl` and the Worker's link now use `page.php?sid=attack&user2ID=`.
+  - "Lag when I click Sally's Sweet Shop": every price batch and every click ran the whole comparison (60+ thirty-day runs, 150 ms in node) on the page, plus Auto's two event comparisons inside the redraw. Fixed:
+    - `compareStrategiesAsync` (a generator, one plan per slice);
+    - click-driven runs 80 ms after paint; price-only runs batched 5 s;
+    - the event comparison deferred and async.
+- **Owner asks, built:**
+  - API lanes (`core/lanes.js`, priority queue plus per-side shared windows in `api/client.js`; focus heartbeats `apiFocus` from each tab via `pi.focusOf`/`beatFocus`).
+  - 85 a minute (Torn Trading is off while Pumping Iron runs).
+  - Watch list 50 (userscript and Worker; faction-grouped reads).
+  - The daily refill worth-it check (`withBestRefill`, `noRefill` in the day plan, the plan payload and the Worker's refill ping).
+- **Checks:** 525 unit tests, ux-check and torn-check ALL PASSED, both harness walkthroughs clean.
+
 
 ### 2026-09-29 (late night, round 4): Discord live, Torn Eye fix, the friend's feedback → 1.2.0
 - **Discord bot live (B0):**

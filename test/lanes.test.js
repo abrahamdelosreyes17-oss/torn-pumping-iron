@@ -95,3 +95,52 @@ test('a side that isn’t in front waits once it used its share of the minute (s
     await p;
     assert.equal(done, true);
 });
+
+test('live gym page (2026-09-29): hashed "gym-1___Ij5f9" icons and bare "gymButton___" buttons are read', async () => {
+    const { readGymButtons, gymListSummary } = await import('../src/sources/dom/gym.js');
+    // A stand-in for the page, from the owner's console output (only what the reader touches).
+    const btn = (cls, iconCls, label) => {
+        const icon = { className: iconCls };
+        return { className: cls, getAttribute: (k) => (k === 'aria-label' ? label : null), querySelector: (sel) => (sel.includes('gymIcon___') ? icon : null) };
+    };
+    const buttons = [
+        btn('gymButton___T6tQg', 'gymIcon___D89ig gym-1___Ij5f9', 'Premier Fitness. Membership cost - $10. Energy usage -\n     5 per train. '),
+        btn('gymButton___T6tQg selected___aB1', 'gymIcon___D89ig gym-21___Zz9', 'Atlas. Membership cost - $50,000,000. Energy usage - 10 per train.'),
+        btn('gymButton___T6tQg locked___q2', 'gymIcon___D89ig gym-27___Qq', 'Gym 3000. Membership cost - $50,000,000.'),
+        btn('gymButton___T6tQg', 'gymIcon___D89ig gym-3', 'Woody\'s Workout Club. Membership cost - $250.'),
+    ];
+    const root = { querySelectorAll: (sel) => (sel.includes('gymButton___') ? buttons : []) };
+    const read = readGymButtons(root);
+    assert.deepEqual(read.map((b) => [b.id, b.state, b.name]), [
+        [1, 'active', 'Premier Fitness'],
+        [21, 'selected', 'Atlas'],
+        [27, 'locked', 'Gym 3000'],
+        [3, 'active', "Woody's Workout Club"],
+    ]);
+    const sum = gymListSummary(read);
+    assert.equal(sum.selectedId, 21);
+    assert.ok(sum.unlocked.includes(1) && sum.unlocked.includes(21) && !sum.unlocked.includes(27));
+});
+
+test('the Attack button goes to Torn’s current attack page (page.php), and old loader.php links are still recognised', async () => {
+    const { attackUrl, detectPage, attackTargetOf, PAGE_ATTACK } = await import('../src/sources/route.js');
+    assert.equal(attackUrl(1945385), 'https://www.torn.com/page.php?sid=attack&user2ID=1945385');
+    assert.equal(detectPage('https://www.torn.com/page.php?sid=attack&user2ID=1945385'), PAGE_ATTACK);
+    assert.equal(attackTargetOf('https://www.torn.com/page.php?sid=attack&user2ID=1945385'), '1945385');
+    assert.equal(detectPage('https://www.torn.com/loader.php?sid=attack&user2ID=5'), PAGE_ATTACK);
+});
+
+test('the comparison in slices gives the same answer as in one go (the page stays free between plans)', async () => {
+    const { compareStrategies, compareStrategiesAsync, playerContext, buildOf } = await import('../src/core/model.js');
+    const { targetShares } = await import('../src/core/plan.js');
+    const { normalizeState } = await import('../src/core/bars.js');
+    const state = normalizeState({ bars: { energy: { current: 20, maximum: 150, increment: 5, interval: 600, tick_time: 120 }, happy: { current: 5000, maximum: 5025, increment: 5, interval: 900, tick_time: 300 } }, cooldowns: { drug: 0, booster: 0 }, refills: { energy: false }, battlestats: { strength: { value: 118400 }, speed: { value: 110900 }, defense: { value: 96200 }, dexterity: { value: 82700 } }, gym: { id: 18 } }, Date.UTC(2026, 8, 29, 12));
+    const pc = playerContext(state, {});
+    const args = { state, pc, shares: targetShares({ build: 'balanced' }, pc.stats, buildOf('balanced').shares), settings: { horizonDays: 30, budget: 150e6 }, prices: {} };
+    let pauses = 0;
+    const a = await compareStrategiesAsync(args, { pause: async () => pauses++ });
+    const b = compareStrategies(args);
+    assert.deepEqual(Object.keys(a).sort(), Object.keys(b).sort());
+    for (const id of Object.keys(b)) assert.equal(Math.round(a[id].gained), Math.round(b[id].gained), id);
+    assert.ok(pauses >= Object.keys(b).length, 'a break before each plan (' + pauses + ')');
+});
