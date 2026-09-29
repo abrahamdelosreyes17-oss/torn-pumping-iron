@@ -1,6 +1,12 @@
 # HANDOFF: Torn Pumping Iron
 
-Read this first. Then `docs/BUILD-PLAN.md` (what to build, in order), `docs/ENGINE-SPEC.md` (the maths), `docs/DESIGN.md` (the look), and open `mockups/K-home.html` and `mockups/J-blueprint.html` in a browser.
+**Released: 1.0.0 (2026-09-29).**
+- Install (pinned): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/33c89f451be534bfe5e98e15bef5d8048c9649c8/torn-pumping-iron.user.js
+- Auto-update URL (`@updateURL`): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/main/torn-pumping-iron.user.js
+- Webpage: https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html (gh-pages branch; without the script it shows the placeholder)
+- Repo: https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron (public; `main` + `gh-pages`)
+
+**Next session, start here:** the owner is installing 1.0.0 and checking it live. Wait for their notes; the list they were asked to check is in §8 ("What the owner should look at first"). Then §9 (open items). Read this file, then `docs/BUILD-PLAN.md` for the history, `docs/ENGINE-SPEC.md` (the maths), `docs/DESIGN.md` (the look), `docs/audit-1.0.md` (the pre-release audit).
 
 ---
 
@@ -12,8 +18,8 @@ Read this first. Then `docs/BUILD-PLAN.md` (what to build, in order), `docs/ENGI
   - a **webpage** the script opens (GitHub Pages host page);
   - an optional **Discord pinger** (a Cloudflare Worker).
 - **Users:** the owner (13B networth, ~1B total stats, Private Island) and a returning friend (low stats, under $200M liquid, Private Island).
-- **Where it stands (2026-09-29, end of the build session):** M0–M8 built; **1.0.0 is ready locally and waiting for the owner's go-ahead** to commit to the release repo, push and publish the page (§8 below has the exact steps). Local git on `main`, no remote. Nothing is on GitHub yet.
-- **The owner checks in only at the first release (1.0.0).** Build M0–M8 without asking. Stop at the end of M8 and ask before any commit to GitHub, push or release.
+- **Where it stands (2026-09-29, end of the build session):** M0–M8 built and **1.0.0 released** on the owner's yes ("commit and publish the page"): `main` and `gh-pages` pushed, links at the top. Next: the owner's live check (§8), then fixes as a 1.0.x.
+- **Releases from now on:** only when the owner asks ("asking for the link means release", trading's rule): bump the version, `npm run check` + both browser checks, commit, push `main`, verify the pinned raw file's `@version`, give the pinned link. `gh-pages` only changes if `site/` does.
 - **Release repo:** https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron. Release like the trading app (one file at the repo root, `@updateURL` on `main`, a `gh-pages` host page, pinned `<sha>` install links). Not like the poker app: the owner says poker "uninstalls itself from Tampermonkey every release". Its headers were stable, so the cause is unknown. Never change `@name`/`@namespace`.
 
 ### Milestones (update as you go)
@@ -115,13 +121,13 @@ Research index: `docs/research-gym.md`, `research-builds-gympage.md`, `research-
 8. The page hook is read-only: clone responses, never modify Torn's data or state.
 9. The Torn rules page (torn.com/rules.php) could never be fetched by tools. Ask the owner to read the scripting section before release.
 
-## 8. Release 1.0.0 (waiting for the owner's yes)
+## 8. Release 1.0.0 (done 2026-09-29; the steps, for the next release)
 
-**Ask:** "1.0.0 is ready. Commit, push to torn-pumping-iron and publish the page?" Only on a yes:
+Done on the owner's yes. For later releases, the same steps minus the one-time remote and gh-pages set-up:
 
 1. `npm run check` (all green) and the two browser checks:
    `PWPATH=<scratchpad>/node_modules/playwright-core node test/ux-check.mjs` and `… node test/torn-check.mjs` (install playwright-core into the session scratchpad with `npm i playwright-core@1`; they drive the installed Edge).
-2. `git remote add origin https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron.git`
+2. (done once) `git remote add origin https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron.git`; Pages serves `gh-pages` /.
 3. `git add src test worker site build.mjs package.json README.md HANDOFF.md CLAUDE.md torn-pumping-iron.user.js .gitignore` (never `docs/`, `mockups/`, `.claude/`; they're ignored) → commit → `git push -u origin main`.
 4. gh-pages: `git checkout --orphan gh-pages`, keep only `site/app.html` and `site/.nojekyll` moved to the root, commit, `git push origin gh-pages`, back to `main`. Check https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html shows the placeholder.
 5. Verify: `curl -s https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/<sha>/torn-pumping-iron.user.js | grep -m1 @version` → `1.0.0`.
@@ -138,11 +144,24 @@ Research index: `docs/research-gym.md`, `research-builds-gympage.md`, `research-
 
 **Calibrations that need real data** (all named exports marked [calibrate]): post-50M damping (`POST_50M_MODE`), happy loss per train, fight base damage/zones/accuracy/default gear, life by level, respect base, SSL drug limit, specialist gyms needing George's. Torn Eye's replay test uses FFScouter's published difficulty scale, not real logs: once installed, the owner's own attacks (`myAttacks`) are the data to check it against.
 
+## 9. Open items after 1.0.0
+
+- **Live check pending** (§8 list). The things most likely wrong, because no source could confirm them: Fill on the gym box (React may need more than the native setter + input event); `selected___` = the gym you're in; `refills.energy` = "used today"; `bars.*.full_time` semantics; the items page Use row; the attack page's armour field (`arm`?); the first attackData answer is missed at `@run-at document-idle` (later polls are read).
+- **Calibrate with real data** (named exports marked [calibrate]): post-50M damping, happy loss per train, fight base damage / hit zones / accuracy / default gear, life by level, respect base, SSL drug limit, specialist gyms needing George's. Progress › Gain model collects predicted-vs-actual from the owner's trains (`calibration` in GM storage); Torn Eye can be checked against `myAttacks` (the replay test uses FFScouter's published scale, not real logs).
+- **Audit items left as low risk** (`docs/audit-1.0.md`): the pill overlaps Torn's content at ≤ 1340 px (it's draggable; Alt+P hides it); `.pi-on`/`.pi-outlined` set `position:relative` on Torn's rows; the Worker has no rate limit on invite guesses (constant-time compare only).
+- **Owner decisions still open** (defaults in §4): Compact vs Comfortable, one Discord Worker or one each, sharing captured gear with the friend, the pill on every page.
+- **Not built (by plan):** the Discord bot (worker/BOT.md); goal "unlock gym" only re-labels the plan (it doesn't change the split); the 99k jump needs a booster-cap setting (no UI yet; `settings.boosterCapH`).
+- **The friend's numbers:** every friend figure in docs/mockups is from EXAMPLE stats. Real ones come when his key is in.
+
 ---
 
 ## What each session did (newest first)
 
-### 2026-09-29: build session (M0 →)
+### 2026-09-29: build session (M0 → M8, released 1.0.0)
+- Built every milestone in order, researched unknowns with subagents (API shapes, Torn page DOM + fixtures, FFScouter/TornStats/TornW3B), backed numbers with sims, tests first, pages to K. An independent audit before release (`docs/audit-1.0.md`); both FAILs and the day-one bugs fixed.
+- Owner feedback mid-M8: "balanced is never really the way to go… better to be a specialist as we can even put merits there"; "you don't even know his stats yet". Built: you pick the build and high stat, specialist first; fights use effective stats; friend figures labelled as examples.
+- Released on the owner's "commit and publish the page": `main` (33c89f4) and `gh-pages` pushed; pinned raw file checked at `@version 1.0.0`.
+- Tools that worked: Playwright core installed in the session scratchpad (`npm i playwright-core@1`) driving the installed Edge (`channel: 'msedge'`) for `test/mockup-check.mjs`, `test/ux-check.mjs`, `test/torn-check.mjs`. Python edit scripts written to the scratchpad (bash heredocs mangled some quoting).
 - **M0 ☑** Scaffold: `build.mjs` (trading's bundler; header per BUILD-PLAN, `PI_BUILD_VERSION`, outputs `dist/` + root `torn-pumping-iron.user.js`), `src/platform/{gm,idb,tab-window}.js` (prefix `pumpingIron.v1.`; `gmFetch(url, {method, headers, body})` now does POST/PUT for the Worker), `src/core/leader.js`, `src/api/client.js` (`comment=PumpingIron`), `src/ui/mask.js`, a new `src/sources/route.js` (every page we mark + every Torn link), `site/app.html` + `.nojekyll`, `test/harness.html` (GM stubs; `?page=gym` etc. stands in for Torn pages off torn.com; `?pi=app` boots the webpage). Local `git init` on `main`, no remote. Harness server: `harness` in `.claude/launch.json` (127.0.0.1:8785).
 - **M1 ☑** Mockups L–R in `mockups/` (Plan, Buy, Progress, Torn Eye tab, Settings, Overlay + gym/items/bazaar marks, Torn Eye on Torn's pages), all on the shared `mockups/pi.css` (K's CSS + new components; M4 lifts it into the userscript). Every number comes from `docs/sims/mockup-data.mjs` (→ `mockup-data.json`) and the new fight Monte Carlo `docs/sims/fight.mjs` (ENGINE §10). `test/mockup-check.mjs` (Playwright core + the installed Edge) passes for all 7: no sideways scroll at 1280, no text under 11px, the DESIGN section named on top.
   - Sim fix found on the way: `split.mjs` never let happy recover between sessions, so multi-day splits under-counted gains. With happy back up each session: day 2 = DEX 123 / DEF 39, SPD joins day 5, STR day 7, balanced in about 7 days (ENGINE §7's "129/33, day 6" was the old run).
