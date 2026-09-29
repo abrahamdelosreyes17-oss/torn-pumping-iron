@@ -17,6 +17,14 @@ import { tornDayStart, countdown } from '../../core/bars.js';
 import { fmtInt, fmtShort } from '../../core/format.js';
 import { clock, sectionHead, meta } from './common.js';
 
+/**
+ * The fair-fight range asked from FFScouter's target finder. Sent every time:
+ * without it FFScouter answered with Torn's strongest players (fair fight
+ * 30+, billions of stats). 1.3–2.6 is Stomp to Good at your own stats (the
+ * fight model: 2.5 ≈ Good, 3 ≈ Tough); a higher fair fight gives more respect.
+ */
+export const TARGET_FF = { min: 1.3, max: 2.6 };
+
 export const EYE_SORTS = [
     ['easy', 'Easiest'],
     ['respect', 'Most respect'],
@@ -192,7 +200,7 @@ export function renderEye(m, ctx) {
     const reload = () => {
         f.minLevel = Math.max(1, Math.min(100, Number(inputs.min && inputs.min.value) || f.minLevel || 1));
         f.maxLevel = Math.max(f.minLevel, Math.min(100, Number(inputs.max && inputs.max.value) || f.maxLevel || 100));
-        e.load({ minLevel: f.minLevel, maxLevel: f.maxLevel, inactiveOnly: f.inactive ? 1 : 0, factionless: f.factionless ? 1 : null });
+        e.load({ minLevel: f.minLevel, maxLevel: f.maxLevel, inactiveOnly: f.inactive ? 1 : 0, factionless: f.factionless ? 1 : null, minFf: TARGET_FF.min, maxFf: TARGET_FF.max });
     };
     const attacks = e.attacks ? e.attacks() : [];
     const today = tornDayStart(now);
@@ -230,7 +238,9 @@ export function renderEye(m, ctx) {
     const pane = [];
     const rowsAll = e.rows();
     // First visit with FFScouter connected: load the targets without a click.
-    if (mode !== 'war' && ctx.flags.hasFfs && !rowsAll.length && !e.loading() && !e.error() && !ui.eyeAutoLoaded) {
+    // Also once when the stored list was asked without a fair-fight range (1.1.0: it held Torn's strongest players).
+    const oldList = rowsAll.length && e.params && !(e.params() && e.params().maxFf);
+    if (mode !== 'war' && ctx.flags.hasFfs && (!rowsAll.length || oldList) && !e.loading() && !e.error() && !ui.eyeAutoLoaded) {
         ui.eyeAutoLoaded = true;
         setTimeout(reload, 0);
     }
@@ -277,6 +287,7 @@ export function renderEye(m, ctx) {
         else body = targetsTable(rows, { now, chain: mode === 'chain' });
         const notes = [];
         if (hiddenCant && mode === 'targets') notes.push(hiddenCant + ' can’t-win player' + (hiddenCant === 1 ? '' : 's') + ' hidden');
+        if (rowsAll.length && hiddenCant === rowsAll.length) notes.push('every player in this list is far stronger than you: Refresh asks FFScouter for fair fight ' + TARGET_FF.min + '–' + TARGET_FF.max + ' (Stomp to Good)');
         if (hiddenKeep) notes.push(hiddenKeep + ' hidden because you’d keep under 50% HP');
         main.push(
             h('div', { class: 'lead', 'data-mode': mode }, [

@@ -325,6 +325,7 @@ function getCtx() {
             view: (id, extra, o) => eyeView(id, extra, o),
             attacks: () => (get('myAttacks', null) || {}).list || [],
             updatedAt: () => (get('eyeTargets', null) || {}).at || null,
+            params: () => (get('eyeTargets', null) || {}).params || null,
             war: {
                 state: () => ({ fid: war.fid, name: war.name, members: war.members, early: war.early, seen: new Map([...war.seen].map(([k, v]) => [k, v.at])), loading: war.loading, error: war.error }),
                 watch: (fid) => {

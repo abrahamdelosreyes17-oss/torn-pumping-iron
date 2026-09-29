@@ -4,6 +4,7 @@
  * only to www.tornstats.com, and nothing keyed to weav3r.dev.
  */
 import test from 'node:test';
+import { TARGET_FF } from '../src/ui/app/eye-tab.js';
 import assert from 'node:assert/strict';
 
 import { TornApiClient } from '../src/api/client.js';
@@ -199,6 +200,11 @@ test('FFScouter check-key and targets (404 code 17 = no targets)', async () => {
     assert.equal(t[0].name, 'Pallas');
     assert.equal(new URL(f.calls[2].url).searchParams.get('preset'), 'respect');
     assert.equal(new URL(f.calls[1].url).searchParams.get('inactiveonly'), '1');
+    // The fair-fight range goes out every time (without it FFScouter sent Torn's strongest players).
+    await fetchFfsTargets(c, { minLevel: 1, maxLevel: 100, minFf: TARGET_FF.min, maxFf: TARGET_FF.max });
+    const q = new URL(f.calls[3].url).searchParams;
+    assert.equal(q.get('minff'), '1.3');
+    assert.equal(q.get('maxff'), '2.6');
 });
 
 test('TornStats: the key goes in the path to www.tornstats.com only', async () => {

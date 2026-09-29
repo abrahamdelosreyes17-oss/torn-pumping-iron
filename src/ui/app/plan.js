@@ -80,6 +80,29 @@ function numberInput(value, width, onSet, { money = false, min = 0, max = Infini
     return inp;
 }
 
+/** Every build, specialist ones with each high stat (DEF/DEX high = their defensive versions), as a real dropdown. */
+export function buildOptions() {
+    const out = [];
+    for (const id of BUILD_ORDER) {
+        if (highStatOf(id + ':str')) for (const k of STATS) out.push({ value: id + ':' + k, label: resolveBuild(id + ':' + k).name });
+        else out.push({ value: id, label: BUILDS[id].name });
+    }
+    return out;
+}
+
+function buildSelect(ctx) {
+    const plan = ctx.plan;
+    const current = BUILD_ALIASES[plan.build] || String(plan.build || 'baldr');
+    const opts = buildOptions();
+    const sel = h(
+        'select',
+        { 'aria-label': 'Build to train toward', onchange: (e) => ctx.setPlan({ build: e.target.value, buildPicked: true }) },
+        [plan.buildPicked ? null : h('option', { value: '', text: 'Pick your build', disabled: true }), ...opts.map((o) => h('option', { value: o.value, text: 'Build · ' + o.label }))],
+    );
+    sel.value = plan.buildPicked || opts.some((o) => o.value === current) ? current : '';
+    return sel;
+}
+
 function controls(m, ctx) {
     const plan = ctx.plan;
     const s = ctx.settings;
@@ -87,10 +110,10 @@ function controls(m, ctx) {
     const goal = plan.goal;
     const goalChip =
         goal && goal.kind === 'statTargets'
-            ? h('span', { class: 'sel' }, ['Stat numbers · ' + Object.entries(goal.targets || {}).map(([k, v]) => STAT_LABEL[k] + ' ' + fmtShort(v)).join(' · ')])
+            ? h('b', { class: 'white', text: 'Stat numbers · ' + Object.entries(goal.targets || {}).map(([k, v]) => STAT_LABEL[k] + ' ' + fmtShort(v)).join(' · ') })
             : goal && goal.kind === 'unlockGym'
-              ? h('span', { class: 'sel', text: 'Unlock ' + ((gymById(goal.gymId, m.pc && m.pc.table) || {}).name || 'a gym') })
-              : h('span', { class: 'sel', text: 'Build · ' + m.build.name });
+              ? h('b', { class: 'white', text: 'Unlock ' + ((gymById(goal.gymId, m.pc && m.pc.table) || {}).name || 'a gym') })
+              : buildSelect(ctx);
     const bar1 = [
         planChooser(ctx),
         t('lab', 'for'),

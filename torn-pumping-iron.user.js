@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Pumping Iron
 // @namespace    torn-pumping-iron
-// @version      1.1.0
+// @version      1.1.1
 // @description  Gym planner and fight scout for Torn: what to take, what to train, what to buy, who you can beat. Reads the API and the page you're on; never acts for you.
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 (function () {
     'use strict';
 
-    const PI_BUILD_VERSION = '1.1.0';
+    const PI_BUILD_VERSION = '1.1.1';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -6898,6 +6898,29 @@
         return inp;
     }
 
+    /** Every build, specialist ones with each high stat (DEF/DEX high = their defensive versions), as a real dropdown. */
+    function buildOptions() {
+        const out = [];
+        for (const id of BUILD_ORDER) {
+            if (highStatOf(id + ':str')) for (const k of STATS) out.push({ value: id + ':' + k, label: resolveBuild(id + ':' + k).name });
+            else out.push({ value: id, label: BUILDS[id].name });
+        }
+        return out;
+    }
+
+    function buildSelect(ctx) {
+        const plan = ctx.plan;
+        const current = BUILD_ALIASES[plan.build] || String(plan.build || 'baldr');
+        const opts = buildOptions();
+        const sel = h(
+            'select',
+            { 'aria-label': 'Build to train toward', onchange: (e) => ctx.setPlan({ build: e.target.value, buildPicked: true }) },
+            [plan.buildPicked ? null : h('option', { value: '', text: 'Pick your build', disabled: true }), ...opts.map((o) => h('option', { value: o.value, text: 'Build · ' + o.label }))],
+        );
+        sel.value = plan.buildPicked || opts.some((o) => o.value === current) ? current : '';
+        return sel;
+    }
+
     function controls(m, ctx) {
         const plan = ctx.plan;
         const s = ctx.settings;
@@ -6905,10 +6928,10 @@
         const goal = plan.goal;
         const goalChip =
             goal && goal.kind === 'statTargets'
-                ? h('span', { class: 'sel' }, ['Stat numbers · ' + Object.entries(goal.targets || {}).map(([k, v]) => STAT_LABEL[k] + ' ' + fmtShort(v)).join(' · ')])
+                ? h('b', { class: 'white', text: 'Stat numbers · ' + Object.entries(goal.targets || {}).map(([k, v]) => STAT_LABEL[k] + ' ' + fmtShort(v)).join(' · ') })
                 : goal && goal.kind === 'unlockGym'
-                  ? h('span', { class: 'sel', text: 'Unlock ' + ((gymById(goal.gymId, m.pc && m.pc.table) || {}).name || 'a gym') })
-                  : h('span', { class: 'sel', text: 'Build · ' + m.build.name });
+                  ? h('b', { class: 'white', text: 'Unlock ' + ((gymById(goal.gymId, m.pc && m.pc.table) || {}).name || 'a gym') })
+                  : buildSelect(ctx);
         const bar1 = [
             planChooser(ctx),
             t('lab', 'for'),
@@ -9579,6 +9602,14 @@
 
 
 
+    /**
+     * The fair-fight range asked from FFScouter's target finder. Sent every time:
+     * without it FFScouter answered with Torn's strongest players (fair fight
+     * 30+, billions of stats). 1.3–2.6 is Stomp to Good at your own stats (the
+     * fight model: 2.5 ≈ Good, 3 ≈ Tough); a higher fair fight gives more respect.
+     */
+    const TARGET_FF = { min: 1.3, max: 2.6 };
+
     const EYE_SORTS = [
         ['easy', 'Easiest'],
         ['respect', 'Most respect'],
@@ -9754,7 +9785,7 @@
         const reload = () => {
             f.minLevel = Math.max(1, Math.min(100, Number(inputs.min && inputs.min.value) || f.minLevel || 1));
             f.maxLevel = Math.max(f.minLevel, Math.min(100, Number(inputs.max && inputs.max.value) || f.maxLevel || 100));
-            e.load({ minLevel: f.minLevel, maxLevel: f.maxLevel, inactiveOnly: f.inactive ? 1 : 0, factionless: f.factionless ? 1 : null });
+            e.load({ minLevel: f.minLevel, maxLevel: f.maxLevel, inactiveOnly: f.inactive ? 1 : 0, factionless: f.factionless ? 1 : null, minFf: TARGET_FF.min, maxFf: TARGET_FF.max });
         };
         const attacks = e.attacks ? e.attacks() : [];
         const today = tornDayStart(now);
@@ -9792,7 +9823,9 @@
         const pane = [];
         const rowsAll = e.rows();
         // First visit with FFScouter connected: load the targets without a click.
-        if (mode !== 'war' && ctx.flags.hasFfs && !rowsAll.length && !e.loading() && !e.error() && !ui.eyeAutoLoaded) {
+        // Also once when the stored list was asked without a fair-fight range (1.1.0: it held Torn's strongest players).
+        const oldList = rowsAll.length && e.params && !(e.params() && e.params().maxFf);
+        if (mode !== 'war' && ctx.flags.hasFfs && (!rowsAll.length || oldList) && !e.loading() && !e.error() && !ui.eyeAutoLoaded) {
             ui.eyeAutoLoaded = true;
             setTimeout(reload, 0);
         }
@@ -9839,6 +9872,7 @@
             else body = targetsTable(rows, { now, chain: mode === 'chain' });
             const notes = [];
             if (hiddenCant && mode === 'targets') notes.push(hiddenCant + ' can’t-win player' + (hiddenCant === 1 ? '' : 's') + ' hidden');
+            if (rowsAll.length && hiddenCant === rowsAll.length) notes.push('every player in this list is far stronger than you: Refresh asks FFScouter for fair fight ' + TARGET_FF.min + '–' + TARGET_FF.max + ' (Stomp to Good)');
             if (hiddenKeep) notes.push(hiddenKeep + ' hidden because you’d keep under 50% HP');
             main.push(
                 h('div', { class: 'lead', 'data-mode': mode }, [
@@ -11063,6 +11097,7 @@
                 view: (id, extra, o) => eyeView(id, extra, o),
                 attacks: () => (get('myAttacks', null) || {}).list || [],
                 updatedAt: () => (get('eyeTargets', null) || {}).at || null,
+                params: () => (get('eyeTargets', null) || {}).params || null,
                 war: {
                     state: () => ({ fid: war.fid, name: war.name, members: war.members, early: war.early, seen: new Map([...war.seen].map(([k, v]) => [k, v.at])), loading: war.loading, error: war.error }),
                     watch: (fid) => {
