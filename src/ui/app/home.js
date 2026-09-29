@@ -17,7 +17,7 @@ import { itemsUrl, gymUrl, pointsUrl, itemMarketUrl, pointsMarketUrl } from '../
 import { stackBars } from '../charts.js';
 import { clock, cd, sectionHead, meta, trainsText, headsList, STAT_COLOR, DAY_NAMES, MONTH_NAMES } from './common.js';
 import { partsText, trainInText } from '../../core/gympage.js';
-import { summarizeReceipts } from '../../core/receipts.js';
+import { spentOverDays } from '../../core/receipts.js';
 
 const DAYS = DAY_NAMES;
 const MONTHS = MONTH_NAMES;
@@ -182,8 +182,7 @@ function weekCard(m, ctx) {
     const xp = unitPrice((ctx.prices || {})[XANAX]) || 0;
     const pp = unitPrice((ctx.prices || {})[POINTS], 300) || 0;
     // Money really spent this week (receipts: every item and refill at that day's price); before receipts, Xanax and refills.
-    const rc = ctx.receipts ? summarizeReceipts(ctx.receipts, today - 6 * DAY, today, { priceHistory: ctx.priceHistory, prices: ctx.prices || {} }) : null;
-    const spent = rc && rc.days > 0 ? rc.cost : xan * xp + refills * REFILL_POINTS * pp;
+    const spent = spentOverDays(ctx.receipts, days, { priceHistory: ctx.priceHistory, prices: ctx.prices || {} }, (d) => ((totals[d] && totals[d].xanax) || 0) * xp + ((totals[d] && totals[d].refills) || 0) * REFILL_POINTS * pp);
     const pct = planned > 0 ? Math.min(100, (100 * gained) / planned) : 0;
     return h('div', {}, [
         sectionHead('This week', meta([days.length ? days.length + ' day' + (days.length === 1 ? '' : 's') + ' recorded' : 'from today']), null, 'h3'),

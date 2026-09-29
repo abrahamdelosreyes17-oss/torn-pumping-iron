@@ -137,8 +137,8 @@ export function receiptChange(prev, next, diff, { table = GYMS, perks = null, ca
     // A refill fills the bar up to its maximum, never above (O2): the first adds what was missing, each further one a
     // full bar (the one before was trained first, or it would have added nothing).
     const fills = out.refills + out.special;
-    if (fills > 0) added += Math.max(0, maxE - expected) + (fills - 1) * maxE;
-    const eBar = Math.max(0, expected + added - next.energy.current);
+    const fillLo = fills > 0 ? Math.max(0, maxE - expected) + (fills - 1) * maxE : 0;
+    const fillHi = fills * maxE;
     // The gain model's count, for when the bar can't say (and to split several stats).
     const model = {};
     let eModel = 0;
@@ -147,6 +147,9 @@ export function receiptChange(prev, next, diff, { table = GYMS, perks = null, ca
         model[k] = per > 0 ? out.gain[k] / per : 0;
         eModel += model[k] * ept;
     }
+    // Refills: trained first then refilled (a full bar each) or refilled at once (what was missing); the gains decide.
+    const barWith = (fill) => Math.max(0, expected + added + fill - next.energy.current);
+    const eBar = fills > 0 && eModel > 0 ? [fillLo, fillHi].map(barWith).sort((a, b) => Math.abs(a - eModel) - Math.abs(b - eModel))[0] : barWith(fillLo);
     const exact = !out.drugs && !out.boosterH && !out.refills && !out.special && !catchUp;
     out.est = !exact;
     let e = eBar > 0 ? eBar : eModel;
@@ -392,6 +395,17 @@ export function summarizeReceipts(receipts, from, to, sources = {}) {
     out.perK = out.gained > 0 && out.cost > 0 ? (out.cost * 1000) / out.gained : null;
     out.ePerK = out.gained > 0 && out.e > 0 ? (out.e * 1000) / out.gained : null;
     return out;
+}
+
+/**
+ * Money spent over some Torn days: receipts for the days they cover, `fallback(day)` for the rest (before
+ * receipts existed), so a week isn't one receipt day against seven days of gains.
+ */
+export function spentOverDays(receipts, days, sources = {}, fallback = () => 0) {
+    const r = readReceipts(receipts);
+    let total = 0;
+    for (const d of days) total += r.days[d] ? receiptDayCost(r.days[d], d, sources).cost : fallback(d) || 0;
+    return total;
 }
 
 /** "Xanax × 3 · EDVD × 5", most used first. */

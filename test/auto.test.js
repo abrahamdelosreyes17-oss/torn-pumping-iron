@@ -264,10 +264,12 @@ test('review fixes: Auto budget 0 is a limit; the gym walk-through keeps going w
     assert.equal(budgetOf({ budget: Infinity }), Infinity);
     const { startSession, needsNewSession } = await import('../src/core/gympage.js');
     const step = { id: 'x', label: 'Xanax #1', items: [], parts: [{ gymId: 24, gymName: "George's", stat: 'str', trains: 10, perTrain: 10 }] };
-    const m = { build: { id: 'hank' } };
+    const m = { build: { id: 'hank' }, keepEnergy: 300 };
     const now = Date.now();
     const s = startSession(step, { energy: 400, stats: { str: 1, spd: 1, def: 1, dex: 1 }, happy: 5000 }, m, now);
-    assert.equal(s.spare, 300, '400 energy, the step needs 100: 300 kept on purpose');
+    assert.equal(s.spare, 300, '300 kept for a war on purpose');
+    // A stale step (energy the model hasn't seen yet) is not "spare": the walk-through starts again.
+    assert.equal(startSession(step, { energy: 400, stats: { str: 1, spd: 1, def: 1, dex: 1 }, happy: 5000 }, { build: { id: 'hank' } }, now).spare, 0);
     assert.equal(needsNewSession(s, { energy: 370 }, m, now + 60000), false, 'three trains in: still the same session');
     assert.equal(needsNewSession(s, { energy: 700 }, m, now + 60000), true, 'a refill later: a new session');
 });

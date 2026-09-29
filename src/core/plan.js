@@ -179,9 +179,12 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     // A refill (points or special) or an FHC sets energy to the maximum, never above it (O2): `qty` of them are
     // used one at a time, each once the last is trained, and shown as one step.
     const trainEach = (at, kind, label, items, qty, extra = {}, happyEach = 0) => {
-        // Energy kept for a war sits above the maximum: a refill or FHC then adds nothing, so none is planned (or bought).
-        if ((ctx.keepEnergy || 0) > 0 && E >= maxE) return null;
+        const keep = Math.max(0, ctx.keepEnergy || 0);
+        // Energy kept for a war fills the bar on its own: a refill or FHC then adds nothing, so none is planned (or bought).
+        if (keep >= maxE && E >= maxE) return null;
         const first = steps.length;
+        // A full bar is trained first: a refill or FHC only fills up to the maximum.
+        if (E >= maxE && E - keep >= minTrain) train(at, kind, label, items, extra);
         for (let i = 0; i < qty; i++) {
             E = Math.max(E, maxE);
             H += happyEach;
@@ -214,13 +217,16 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         while (qty < specialLeft && H - drain * (qty + 1) > happyMax) qty++;
         shareLeft = Math.max(0, shareLeft - qty);
         if (!qty) return;
-        if (!trainEach(at, 'special', 'Special refills × ' + qty + ', train after each', [{ id: SPECIAL, qty }], qty, { note: 'free: they come with your account · each fills energy to ' + maxE + ', never above' })) return;
+        if (!trainEach(at, 'special', 'Special refills × ' + qty + ', train after each', [{ id: SPECIAL, qty }], qty, { note: 'free: they come with your account · each fills energy to ' + maxE + ', never above' })) {
+            shareLeft += qty;
+            return;
+        }
         specialLeft -= qty;
         heldLeft = Math.max(0, heldLeft - qty);
     };
     // The day's refill: a special while any are held (never both on one day), else 30 points.
     const refill = (at, extra = {}) => {
-        if ((ctx.keepEnergy || 0) > 0 && E >= maxE) return null;
+        if (Math.max(0, ctx.keepEnergy || 0) >= maxE && E >= maxE) return null;
         if (heldLeft > 0) {
             heldLeft--;
             specialLeft = Math.min(specialLeft, heldLeft);
@@ -414,6 +420,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             const it = ITEMS[eb.id];
             const at = t + MIN;
             let qty = 0;
+            const boosterBefore = boosterAt;
             while (ebToday + qty < eb.perDay && boosterAt - at < capMs) {
                 qty++;
                 boosterAt = Math.max(boosterAt, at) + boosterHours(eb.id, ctx.cdMult) * HOUR;
@@ -421,12 +428,14 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             if (qty > 0) {
                 advance(at);
                 // An FHC sets energy to the maximum (never above): one at a time, train after each.
-                if (it.toMax) trainEach(at, 'booster', itemNameShort(eb.id) + ' × ' + qty + ', train after each', [{ id: eb.id, qty }], qty, {}, it.happy || 0);
+                let used = true;
+                if (it.toMax) used = Boolean(trainEach(at, 'booster', itemNameShort(eb.id) + ' × ' + qty + ', train after each', [{ id: eb.id, qty }], qty, {}, it.happy || 0));
                 else {
                     E += qty * Math.round(it.energy * (ctx.canMult || 1));
                     train(at, 'booster', itemNameShort(eb.id) + ' × ' + qty + ', train after each', [{ id: eb.id, qty }]);
                 }
-                ebToday += qty;
+                if (used) ebToday += qty;
+                else boosterAt = boosterBefore;
             }
         }
         drugAt += xanCD;

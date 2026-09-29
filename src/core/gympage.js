@@ -92,7 +92,7 @@ export function startSession(step, reading, m, now) {
         last: { stats: { ...reading.stats }, energy: reading.energy },
         spent,
         // Energy the step leaves on purpose (kept for a war, or a stop that keeps a specialist gym): not a sign of a new session.
-        spare: Number.isFinite(reading.energy) ? Math.max(0, reading.energy - step.parts.reduce((a, p) => a + p.trains * p.perTrain, 0)) : 0,
+        spare: Math.max(0, Number(m.keepEnergy) || 0),
     };
 }
 

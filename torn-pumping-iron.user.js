@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Pumping Iron
 // @namespace    torn-pumping-iron
-// @version      1.1.1
+// @version      1.2.0
 // @description  Gym planner and fight scout for Torn: what to take, what to train, what to buy, who you can beat. Reads the API and the page you're on; never acts for you.
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 (function () {
     'use strict';
 
-    const PI_BUILD_VERSION = '1.1.1';
+    const PI_BUILD_VERSION = '1.2.0';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -296,8 +296,6 @@
         horizonDays: 30,
         buyWindow: 'three',
         bands: DEFAULT_BANDS,
-        donator: true,
-        odRisk: 0,
         w3b: true,
         // Auto mode: energy kept for a faction war (0 = you decide).
         warReserve: 0,
@@ -2609,7 +2607,7 @@
                 // Once a day the Xanax waits for a tick, then candy + Xanax and train it (no Ecstasy: the candy happy lasts one session).
                 if (t >= drugFree && doneDay !== day) {
                     if (t % 15 === TICK_OFFSET_MIN) {
-                        H += candyN * candyHappy + jobHappy(day);
+                        H = Math.min(HAPPY_CAP, H + candyN * candyHappy + jobHappy(day));
                         buy(candyId, candyN);
                         boosterFree = Math.max(boosterFree, t) + candyN * boosterHours(candyId, cdMult) * 60;
                         xanax(t);
@@ -2629,7 +2627,7 @@
             } else if (id === 'dailyChoco') {
                 // Hold one Xanax's worth of cooldown, then candy + Ecstasy in its place.
                 if (phase === 'hold' && t >= drugFree && t % 15 === TICK_OFFSET_MIN) {
-                    H = (H + candyN * candyHappy + jobHappy(day)) * 2;
+                    H = Math.min(HAPPY_CAP, (H + candyN * candyHappy + jobHappy(day)) * 2);
                     buy(candyId, candyN);
                     buy(ECSTASY);
                     drugFree = t + ecsCD;
@@ -3130,7 +3128,12 @@
         // A refill (points or special) or an FHC sets energy to the maximum, never above it (O2): `qty` of them are
         // used one at a time, each once the last is trained, and shown as one step.
         const trainEach = (at, kind, label, items, qty, extra = {}, happyEach = 0) => {
+            const keep = Math.max(0, ctx.keepEnergy || 0);
+            // Energy kept for a war fills the bar on its own: a refill or FHC then adds nothing, so none is planned (or bought).
+            if (keep >= maxE && E >= maxE) return null;
             const first = steps.length;
+            // A full bar is trained first: a refill or FHC only fills up to the maximum.
+            if (E >= maxE && E - keep >= minTrain) train(at, kind, label, items, extra);
             for (let i = 0; i < qty; i++) {
                 E = Math.max(E, maxE);
                 H += happyEach;
@@ -3163,12 +3166,16 @@
             while (qty < specialLeft && H - drain * (qty + 1) > happyMax) qty++;
             shareLeft = Math.max(0, shareLeft - qty);
             if (!qty) return;
-            trainEach(at, 'special', 'Special refills × ' + qty + ', train after each', [{ id: SPECIAL, qty }], qty, { note: 'free: they come with your account · each fills energy to ' + maxE + ', never above' });
+            if (!trainEach(at, 'special', 'Special refills × ' + qty + ', train after each', [{ id: SPECIAL, qty }], qty, { note: 'free: they come with your account · each fills energy to ' + maxE + ', never above' })) {
+                shareLeft += qty;
+                return;
+            }
             specialLeft -= qty;
             heldLeft = Math.max(0, heldLeft - qty);
         };
         // The day's refill: a special while any are held (never both on one day), else 30 points.
         const refill = (at, extra = {}) => {
+            if (Math.max(0, ctx.keepEnergy || 0) >= maxE && E >= maxE) return null;
             if (heldLeft > 0) {
                 heldLeft--;
                 specialLeft = Math.min(specialLeft, heldLeft);
@@ -3362,19 +3369,22 @@
                 const it = ITEMS[eb.id];
                 const at = t + MIN;
                 let qty = 0;
+                const boosterBefore = boosterAt;
                 while (ebToday + qty < eb.perDay && boosterAt - at < capMs) {
                     qty++;
-                    boosterAt = Math.max(boosterAt, at) + it.boosterH * HOUR;
+                    boosterAt = Math.max(boosterAt, at) + boosterHours(eb.id, ctx.cdMult) * HOUR;
                 }
                 if (qty > 0) {
                     advance(at);
                     // An FHC sets energy to the maximum (never above): one at a time, train after each.
-                    if (it.toMax) trainEach(at, 'booster', itemNameShort(eb.id) + ' × ' + qty + ', train after each', [{ id: eb.id, qty }], qty, {}, it.happy || 0);
+                    let used = true;
+                    if (it.toMax) used = Boolean(trainEach(at, 'booster', itemNameShort(eb.id) + ' × ' + qty + ', train after each', [{ id: eb.id, qty }], qty, {}, it.happy || 0));
                     else {
                         E += qty * Math.round(it.energy * (ctx.canMult || 1));
                         train(at, 'booster', itemNameShort(eb.id) + ' × ' + qty + ', train after each', [{ id: eb.id, qty }]);
                     }
-                    ebToday += qty;
+                    if (used) ebToday += qty;
+                    else boosterAt = boosterBefore;
                 }
             }
             drugAt += xanCD;
@@ -4603,16 +4613,311 @@
         return itemsInfoFrom(await fetchItems(client, itemIds));
     }
 
+    /* ===== src/core/eye/bands.js ===== */
+    /*
+     * Torn Eye's colour bands (user-set in the Torn Eye tab; ENGINE-SPEC §10):
+     * Stomp, Good, Tough, Can't win, or No data. Never "FF".
+     */
+
+    const BAND_ORDER = ['stomp', 'good', 'tough', 'cant', 'none'];
+    const BAND_WORDS = { stomp: 'Stomp', good: 'Good', tough: 'Tough', cant: "Can't win", none: 'No data' };
+    const BAND_COLORS = { stomp: '#3fbf5a', good: '#a6e08a', tough: '#f0a040', cant: '#ff5a4e', none: '#6c737a' };
+    const DEFAULT_BAND_LIMITS = { stomp: { win: 99, keep: 75 }, good: { win: 90, keep: 40 }, tough: { win: 60, keep: 0 } };
+
+    /**
+     * @param {object|null} f - forecast() output (pWin 0..1, keep 0..1)
+     * @param {object} [limits] - {stomp:{win,keep}, good:{win,keep}, tough:{win}} in percent
+     */
+    function bandOf(f, limits = DEFAULT_BAND_LIMITS) {
+        if (!f || !Number.isFinite(f.pWin)) return 'none';
+        const win = f.pWin * 100;
+        const keep = (f.keep || 0) * 100;
+        const L = { ...DEFAULT_BAND_LIMITS, ...(limits || {}) };
+        if (win >= L.stomp.win && keep >= L.stomp.keep) return 'stomp';
+        if (win >= L.good.win && keep >= L.good.keep) return 'good';
+        if (win >= L.tough.win) return 'tough';
+        return 'cant';
+    }
+
+    /** "win 96% · keep ~62% · 2.80 respect" (no "~" when the stats are exact). */
+    function chipFigures(f, est, respect) {
+        if (!f) return 'no estimate yet';
+        const parts = ['win ' + Math.round(f.pWin * 100) + '%'];
+        if (f.pWin >= 0.05 && f.keep !== null && f.keep !== undefined) parts.push('keep ' + (est && est.confidence === 'exact' ? '' : '~') + Math.round(f.keep * 100) + '%');
+        if (f.pWin < 0.05 && est && est.confidence === 'rough') parts.push('rough estimate');
+        else if (respect) parts.push(respect.toFixed(2) + ' respect');
+        return parts.join(' · ');
+    }
+
+    /* ===== src/core/eye/war.js ===== */
+    /*
+     * War mode (ENGINE-SPEC §12): an enemy faction's members, sorted by what
+     * you can do now. Out early (left hospital before their time: revived or
+     * medded) first, then Okay by band and respect, then Hospital by time out,
+     * then Traveling, then Abroad; a summary line on top.
+     */
+
+
+
+    function memberState(m) {
+        const st = (m && m.status) || {};
+        const s = String(st.state || st.description || '').toLowerCase();
+        if (s.includes('hospital')) return 'hospital';
+        if (s.includes('travel')) return 'traveling';
+        if (s.includes('abroad')) return 'abroad';
+        if (s.includes('jail') || s.includes('federal')) return 'jail';
+        if (s.includes('fallen')) return 'fallen';
+        return 'okay';
+    }
+
+    /**
+     * Members that left hospital early: Hospital with a future `until` before,
+     * Okay now, before that time.
+     * @returns {Set<number>}
+     */
+    function outEarly(prevMembers, members, nowS) {
+        const prev = new Map((prevMembers || []).map((m) => [Number(m.id), m]));
+        const out = new Set();
+        for (const m of members || []) {
+            const p = prev.get(Number(m.id));
+            if (!p || memberState(p) !== 'hospital' || memberState(m) !== 'okay') continue;
+            const until = Number(p.status && p.status.until) || 0;
+            if (until > nowS + 30) out.add(Number(m.id));
+        }
+        return out;
+    }
+
+    const STATE_RANK = { early: 0, okay: 1, hospital: 2, traveling: 3, abroad: 4, jail: 5, fallen: 6 };
+
+    /**
+     * @param {object[]} members - /faction/{id}/members rows
+     * @param {object} o - {bands: {id: band}, respect: {id: number}, early: Set, nowS}
+     * @returns {object[]} rows {m, id, state, band, respect, until}
+     */
+    function sortWar(members, { bands = {}, respect = {}, early = new Set(), nowS = 0 } = {}) {
+        const rows = (members || []).map((m) => {
+            const id = Number(m.id);
+            const state = early.has(id) ? 'early' : memberState(m);
+            return { m, id, state, band: bands[id] || 'none', respect: respect[id] || 0, until: Number(m.status && m.status.until) || 0 };
+        });
+        rows.sort((a, b) => {
+            const s = STATE_RANK[a.state] - STATE_RANK[b.state];
+            if (s) return s;
+            if (a.state === 'okay' || a.state === 'early') {
+                const bd = BAND_ORDER.indexOf(a.band) - BAND_ORDER.indexOf(b.band);
+                if (bd) return bd;
+                return b.respect - a.respect;
+            }
+            if (a.state === 'hospital' || a.state === 'traveling') return (a.until || Infinity) - (b.until || Infinity);
+            return a.id - b.id;
+        });
+        return rows;
+    }
+
+    /** "7 attackable now · 0:48 until the next one is out · 3 traveling" as numbers. */
+    function warSummary(rows, nowS) {
+        const attackable = rows.filter((r) => r.state === 'okay' || r.state === 'early').length;
+        const outs = rows.filter((r) => r.state === 'hospital' && r.until > nowS).map((r) => r.until - nowS);
+        return { attackable, nextOutS: outs.length ? Math.min(...outs) : null, traveling: rows.filter((r) => r.state === 'traveling').length, early: rows.filter((r) => r.state === 'early').length };
+    }
+
+    /**
+     * Standard-class flight times in minutes (Torn's travel agency; an airstrip
+     * or business class is faster, so landings are marked as estimates).
+     */
+    const FLIGHT_MIN = {
+        mexico: 26,
+        'cayman islands': 35,
+        canada: 41,
+        hawaii: 134,
+        'united kingdom': 159,
+        argentina: 167,
+        switzerland: 175,
+        japan: 225,
+        china: 242,
+        uae: 271,
+        'united arab emirates': 271,
+        'south africa': 297,
+    };
+
+    /**
+     * Where a traveller is going, from the status line: "Traveling to Mexico",
+     * "Returning to Torn from Mexico", "In Mexico".
+     * @returns {{kind:'to'|'back'|'abroad', place:string, minutes:number|null}|null}
+     */
+    function travelOf(member) {
+        const d = String((member && member.status && member.status.description) || '');
+        let m;
+        const mins = (p) => FLIGHT_MIN[p.toLowerCase()] ?? null;
+        if ((m = d.match(/returning to torn from (.+)$/i))) return { kind: 'back', place: m[1].trim(), minutes: mins(m[1].trim()) };
+        if ((m = d.match(/travel(?:l)?ing to (.+)$/i))) return { kind: 'to', place: m[1].trim(), minutes: mins(m[1].trim()) };
+        if ((m = d.match(/^in (.+)$/i))) return { kind: 'abroad', place: m[1].trim(), minutes: mins(m[1].trim()) };
+        return null;
+    }
+
+    /**
+     * When a traveller lands (ms): from when we first saw this flight plus the
+     * flight time; abroad: "if they fly now". null when unknown.
+     */
+    function landingAt(travel, seenAt, now) {
+        if (!travel || !travel.minutes) return null;
+        if (travel.kind === 'abroad') return now + travel.minutes * 60000;
+        return Math.max(now, (seenAt || now) + travel.minutes * 60000);
+    }
+
+    /* ------------------------------------------------ round 4: war mode (ROUND4-PLAN §B) */
+
+    /**
+     * The enemy from your own faction's current wars (/faction/wars: ranked,
+     * raids, territory). Ranked first, then territory, then raids; wars that
+     * ended are skipped.
+     * @returns {{id, name, kind:'ranked'|'territory'|'raid', warId, start, end}[]}
+     */
+    function enemiesFromWars(resp, myFactionId, nowS = Math.floor(Date.now() / 1000)) {
+        const w = (resp && (resp.wars || resp)) || {};
+        const mine = Number(myFactionId) || 0;
+        const out = [];
+        const add = (war, kind) => {
+            if (!war || typeof war !== 'object') return;
+            if (war.end && Number(war.end) < nowS) return;
+            if (war.winner) return;
+            const facs = Array.isArray(war.factions) ? war.factions : [];
+            // Your side is found by id; without one, a war is read only when it's two-sided.
+            const other = facs.filter((f) => f && Number(f.id) && Number(f.id) !== mine);
+            if (!mine && other.length !== 1) return;
+            for (const f of other) {
+                if (out.some((x) => x.id === Number(f.id))) continue;
+                out.push({ id: Number(f.id), name: f.name ? String(f.name) : null, kind, warId: Number(war.war_id || war.id) || null, start: Number(war.start) || null, end: Number(war.end) || null });
+            }
+        };
+        add(w.ranked, 'ranked');
+        for (const t of Array.isArray(w.territory) ? w.territory : []) add(t, 'territory');
+        for (const r of Array.isArray(w.raids) ? w.raids : []) add(r, 'raid');
+        return out;
+    }
+
+    const WAR_KIND_WORDS = { ranked: 'ranked war', territory: 'territory war', raid: 'raid' };
+
+    /** "5 min ago", "3 h ago", "2 d ago". */
+    function agoText(ms, now = Date.now()) {
+        const s = Math.max(0, Math.round((now - ms) / 1000));
+        if (s < 60) return 'just now';
+        if (s < 3600) return Math.round(s / 60) + ' min ago';
+        if (s < 86400 * 2) return Math.round(s / 3600) + ' h ago';
+        return Math.round(s / 86400) + ' d ago';
+    }
+
+    /** Online / Idle / Offline from Torn's last_action, with "last active". */
+    function activityOf(m, now = Date.now()) {
+        const la = (m && m.last_action) || null;
+        if (!la) return { kind: null, at: null, text: '—' };
+        const s = String(la.status || '').toLowerCase();
+        const kind = s === 'online' ? 'online' : s === 'idle' ? 'idle' : 'offline';
+        const at = Number(la.timestamp) ? Number(la.timestamp) * 1000 : null;
+        const text = kind === 'online' ? 'Online' : at ? (kind === 'idle' ? 'Idle · ' : '') + agoText(at, now) : la.relative || (kind === 'idle' ? 'Idle' : 'Offline');
+        return { kind, at, text };
+    }
+
+    const ACTIVITY_COLORS = { online: '#9bdc8a', idle: '#e8a33d', offline: '#6c737a' };
+    const ACTIVITY_WORDS = { online: 'Online', idle: 'Idle', offline: 'Offline' };
+
+    /** Flights are kept this long after first seen (the longest standard flight is under 5 h). */
+    const FLIGHT_KEEP_MS = 12 * 60 * 60 * 1000;
+    const FLIGHTS_KEPT = 400;
+
+    /**
+     * When each flight was first seen, kept across reloads: {id: {desc, at}}.
+     * A new status line is a new flight; someone no longer flying is dropped.
+     * @returns {{seen: object, changed: boolean}}
+     */
+    function trackFlights(seen, members, now = Date.now()) {
+        const next = { ...(seen || {}) };
+        let changed = false;
+        for (const m of members || []) {
+            const n = Number(m && m.id);
+            if (!(n > 0)) continue;
+            const id = String(n);
+            const st = memberState(m);
+            const desc = String((m.status && m.status.description) || '');
+            if (st === 'traveling' || st === 'abroad') {
+                if (!next[id] || next[id].desc !== desc) {
+                    next[id] = { desc, at: now };
+                    changed = true;
+                }
+            } else if (next[id]) {
+                delete next[id];
+                changed = true;
+            }
+        }
+        for (const id of Object.keys(next)) {
+            if (now - (next[id].at || 0) > FLIGHT_KEEP_MS) {
+                delete next[id];
+                changed = true;
+            }
+        }
+        const left = Object.keys(next);
+        if (left.length > FLIGHTS_KEPT) {
+            left.sort((a, b) => next[a].at - next[b].at);
+            for (const id of left.slice(0, left.length - FLIGHTS_KEPT)) delete next[id];
+            changed = true;
+        }
+        return { seen: next, changed };
+    }
+
+    /**
+     * The status cell, in parts so the page can keep the countdown ticking:
+     * text = pre + clock(at) [+ " TCT" (m:ss) when cd] + post.
+     * @param {object} m - faction member or profile {status, has_early_discharge, is_revivable}
+     * @param {object} o - {now (ms), seenAt (ms, first seen flying), early (left hospital early)}
+     * @returns {{kind, pre, at, cd, post, cls, soonAt}}
+     */
+    function statusParts(m, { now = Date.now(), seenAt = null, early = false } = {}) {
+        const st = memberState(m);
+        const s = (m && m.status) || {};
+        const until = Number(s.until) > 0 ? Number(s.until) * 1000 : null;
+        if (early) return { kind: 'early', pre: 'Out early · attack now', at: null, cd: false, post: '', cls: 'c-good', soonAt: null };
+        if (st === 'okay') return { kind: 'okay', pre: 'Okay · attack now', at: null, cd: false, post: '', cls: 'c-good', soonAt: null };
+        if (st === 'hospital') {
+            const flags = [m && m.has_early_discharge ? 'may leave early' : null, m && m.is_revivable ? 'revivable' : null].filter(Boolean);
+            return { kind: 'hospital', pre: until ? 'Hospital · out ' : 'Hospital', at: until, cd: true, post: flags.length ? ' · ' + flags.join(' · ') : '', cls: 'cdn', soonAt: until };
+        }
+        if (st === 'jail') {
+            const fed = /federal/i.test(String(s.state || s.description || ''));
+            return { kind: 'jail', pre: fed ? 'Federal jail' : until ? 'Jail · out ' : 'Jail', at: fed ? null : until, cd: true, post: '', cls: 'muted', soonAt: fed ? null : until };
+        }
+        if (st === 'traveling' || st === 'abroad') {
+            const tr = travelOf(m);
+            if (!tr) return { kind: st, pre: s.description || 'Traveling', at: null, cd: false, post: '', cls: null, soonAt: null };
+            if (tr.kind === 'abroad') {
+                const back = landingAt(tr, null, now);
+                return { kind: 'abroad', pre: 'In ' + tr.place + (back ? ' · back ~' : ''), at: back, cd: false, post: back ? ' at the earliest (est.)' : '', cls: null, soonAt: null };
+            }
+            const land = landingAt(tr, seenAt, now);
+            const pre = (tr.kind === 'back' ? '← from ' : '→ ') + tr.place + (land ? ', lands ~' : '');
+            return { kind: 'traveling', pre, at: land, cd: false, post: land ? ' (est.)' : '', cls: null, soonAt: land };
+        }
+        if (st === 'fallen') return { kind: 'fallen', pre: 'Fallen', at: null, cd: false, post: '', cls: 'muted', soonAt: null };
+        return { kind: st, pre: s.description || st, at: null, cd: false, post: '', cls: null, soonAt: null };
+    }
+
+    /** The status cell as one line: "Hospital · out 14:32 TCT (3:10)", "→ Mexico, lands ~15:05 (est.)". */
+    function statusText(parts, { now = Date.now(), clockFn, tct = true, countdownFn } = {}) {
+        if (!parts.at) return parts.pre + parts.post;
+        const c = parts.cd ? (tct ? ' TCT' : '') + ' (' + countdownFn(parts.at - now) + ')' : '';
+        return parts.pre + clockFn(parts.at) + c + parts.post;
+    }
+
     /* ===== src/core/auto.js ===== */
     /*
      * Auto mode (the Plan dropdown's default): the plan picks itself from what
      * you can afford. Pure. ROUND4-PLAN §E.
      *
-     * Income is how fast your networth grows, read from Torn's own history
-     * (personal stats at past dates), plus what the gym already cost you over
-     * those days (it left your networth). The plan may spend up to that a day:
-     * "you can afford this with your income". Auto needs the Full key (owner's
-     * rule): the key reads your money log for where the money comes from.
+     * Income comes from your money log (the Full key, owner's rule): money in
+     * less money out a day, plus what the gym plan spent (its purchases are in
+     * the "out" lines). Networth growth from Torn's own history (personal stats
+     * at past dates, plus the gym spend) is the cross-check, and the fallback
+     * while the log has nothing readable. The plan may spend up to that a day:
+     * "you can afford this with your income".
      *
      * Events: when an event multiplies what a plan uses (World Diabetes Day's
      * candy ×3, CaffeineCon's cans ×2), Auto compares the event plans over the
@@ -4667,17 +4972,22 @@
      * @param {object} o.plan - stored plan ({pickBy})
      * @param {object} o.settings
      * @param {boolean} o.hasFullKey
-     * @param {object|null} o.income - incomeFrom()
-     * @returns {{on:boolean, ready:boolean, needsKey:boolean, waiting:boolean, perDay:number|null, budgetPerDay:number|null, budget:number|null}}
+     * @param {object|null} o.income - incomeFrom() (networth)
+     * @param {object|null} [o.log] - incomeBreakdown() of the money log
+     * @param {number} [o.spentPerDay] - what the gym plan spends a day (added back to the log's net)
+     * @returns {{on:boolean, ready:boolean, needsKey:boolean, waiting:boolean, perDay:number|null, budgetPerDay:number|null, budget:number|null, source:'log'|'networth'|null, networthPerDay:number|null}}
      */
-    function autoState({ plan, settings, hasFullKey, income }) {
+    function autoState({ plan, settings, hasFullKey, income, log = null, spentPerDay = 0 }) {
         const on = Boolean(plan && plan.pickBy === 'auto');
         const horizon = (settings && settings.horizonDays) || 30;
         if (!on) return { on, ready: false, needsKey: false, waiting: false, perDay: null, budgetPerDay: null, budget: null };
         if (!hasFullKey) return { on, ready: false, needsKey: true, waiting: false, perDay: null, budgetPerDay: null, budget: null };
-        if (!income || !Number.isFinite(income.perDay)) return { on, ready: false, needsKey: false, waiting: true, perDay: null, budgetPerDay: null, budget: null };
-        const budgetPerDay = Math.max(0, income.perDay);
-        return { on, ready: true, needsKey: false, waiting: false, perDay: income.perDay, budgetPerDay, budget: budgetPerDay * horizon, days: income.days };
+        const nw = income && Number.isFinite(income.perDay) ? income.perDay : null;
+        const fromLog = log && log.lines && log.lines.some((l) => l.dir === 'in') ? log.inPerDay - log.outPerDay + Math.max(0, spentPerDay || 0) : null;
+        const perDay = fromLog !== null ? fromLog : nw;
+        if (perDay === null) return { on, ready: false, needsKey: false, waiting: true, perDay: null, budgetPerDay: null, budget: null, source: null, networthPerDay: null };
+        const budgetPerDay = Math.max(0, perDay);
+        return { on, ready: true, needsKey: false, waiting: false, perDay, budgetPerDay, budget: budgetPerDay * horizon, days: fromLog !== null ? log.days : income.days, source: fromLog !== null ? 'log' : 'networth', networthPerDay: nw };
     }
 
     /**
@@ -4688,6 +4998,12 @@
     function effectiveSettings(settings, auto) {
         if (auto && auto.ready) return { ...settings, budget: auto.budget, autoBudget: true };
         return settings;
+    }
+
+    /** The budget the plans run with: a number (Auto's can be 0: nothing that costs money), else no limit. */
+    function budgetOf(settings) {
+        const b = settings ? settings.budget : null;
+        return typeof b === 'number' && Number.isFinite(b) && b >= 0 ? b : Infinity;
     }
 
     /** The pick rule the recommender uses (Auto is "most stats" inside the income budget). */
@@ -5433,7 +5749,7 @@
     function compareStrategies({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most' }) {
         const base = simInputs({ state, pc, shares, settings, prices, special, statics });
         const results = {};
-        const budget = settings.budget || Infinity;
+        const budget = budgetOf(settings);
         for (const id of feasibleStrategies({ bliss: pc.perks.bliss, boosterCapH: base.boosterCapH, toyShop5: base.toyShop5, adultNovelties10: base.adultNovelties10 })) {
             if (id === 'consoleJump' || id === 'consoleJumpToy') {
                 // Low-stat players only: over 250k in a stat it trains, it's shown (behind the tick) and never picked.
@@ -5482,7 +5798,7 @@
      */
     function blissWhatIf({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most' }) {
         const base = { ...simInputs({ state, pc, shares, settings, prices, special, statics }), bliss: true };
-        return { blissSteady: { ...simulateStrategy('blissSteady', base), whatIf: true }, dailyChoco: { ...withBestCandy('dailyChoco', base, { budget: settings.budget || Infinity, pickBy }).result, whatIf: true } };
+        return { blissSteady: { ...simulateStrategy('blissSteady', base), whatIf: true }, dailyChoco: { ...withBestCandy('dailyChoco', base, { budget: budgetOf(settings), pickBy }).result, whatIf: true } };
     }
 
     /**
@@ -5499,7 +5815,7 @@
         if (!best) return [];
         const base = simInputs({ state, pc, shares, settings, prices, special, statics });
         const cj = companyJob(statics.job, statics.jobPoints);
-        const limit = pickBy === 'max' ? Infinity : settings.budget || Infinity;
+        const limit = pickBy === 'max' ? Infinity : budgetOf(settings);
         const out = [];
         const note = 'It means being hired by that company (its director hires you), and job specials are locked for ' + JOB_LOCK_H + ' h after joining.';
         const add = (key, strategy, company, stars, r) => {
@@ -5512,7 +5828,7 @@
         }
         if (!base.toyShop5) {
             const probe = simulateStrategy('consoleJumpToy', { ...base, special: 0, toyShop5: true, jobHappy: null });
-            if (!consoleBlocked(pc.stats, probe.perStat)) add('toy5', 'consoleJumpToy', 'Toy Shop or Game Shop', 5, withBestCandy('consoleJumpToy', { ...base, toyShop5: true, jobHappy: null }, { budget: settings.budget || Infinity, pickBy }).result);
+            if (!consoleBlocked(pc.stats, probe.perStat)) add('toy5', 'consoleJumpToy', 'Toy Shop or Game Shop', 5, withBestCandy('consoleJumpToy', { ...base, toyShop5: true, jobHappy: null }, { budget: budgetOf(settings), pickBy }).result);
         }
         return out.sort((a, b) => b.result.gained - a.result.gained);
     }
@@ -5695,15 +6011,18 @@
         const sw = eventSwitchHeads(autoSwitch, now);
         if (sw) heads.push({ ...sw, go: 'plan' });
         if (compare) {
-            const r = recommend(compare, { budget: settings.budget || Infinity, bliss: pc.perks.bliss, pickBy, goal: goalKind });
+            const r = recommend(compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy, goal: goalKind });
             rec = r;
             const mine = compare[plan.strategy];
-            if (r.recommended === plan.strategy) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is still best' });
+            // Auto switched for an event: the usual comparison has no event in it, so it doesn't argue with the switch.
+            const eventOn = autoSwitch && autoSwitch.active && autoSwitch.id === plan.strategy;
+            if (eventOn) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' for ' + autoSwitch.event.name });
+            else if (r.recommended === plan.strategy) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is still best' });
             else if (mine) {
                 const w = pickWarning(compare[r.recommended], mine, { bliss: pc.perks.bliss, days: settings.horizonDays || 30 });
                 if (w.warn) heads.push({ tone: 'warn', text: (STRATEGIES[r.recommended] || {}).name + ' would gain more', sub: 'see Plan', go: 'plan' });
             }
-            ladder = energyLadder({ state, pc, shares, prices, compare, recommended: r.recommended, days: settings.horizonDays || 30, budget: settings.budget || Infinity, specialHave: state.specialRefills || 0, specialUse: specialLeft(plan, state) });
+            ladder = energyLadder({ state, pc, shares, prices, compare, recommended: r.recommended, days: settings.horizonDays || 30, budget: budgetOf(settings), specialHave: state.specialRefills || 0, specialUse: specialLeft(plan, state) });
         }
         // Spend per day, and how long the cash on hand lasts at the recommended plan's pace.
         const horizon = settings.horizonDays || 30;
@@ -5759,6 +6078,7 @@
             spend,
             events,
             pickBy,
+            keepEnergy: warKeep,
             auto: auto ? { ...auto, afford: affordLine(auto, recRow ? recRow.cost / horizon : 0), wait: autoWaitLine(auto), switch: autoSwitch } : null,
             unlock,
             // held: while any are held the daily refill is a special (Torn blocks the points refill until they're spent [verify]).
@@ -5904,8 +6224,11 @@
             if (it.toMax) added += Math.max(0, maxE - expected) * Math.min(1, n);
             else if (it.energy) added += Math.round(it.energy * canMult) * n;
         }
-        added += (out.refills + out.special) * maxE;
-        const eBar = Math.max(0, expected + added - next.energy.current);
+        // A refill fills the bar up to its maximum, never above (O2): the first adds what was missing, each further one a
+        // full bar (the one before was trained first, or it would have added nothing).
+        const fills = out.refills + out.special;
+        const fillLo = fills > 0 ? Math.max(0, maxE - expected) + (fills - 1) * maxE : 0;
+        const fillHi = fills * maxE;
         // The gain model's count, for when the bar can't say (and to split several stats).
         const model = {};
         let eModel = 0;
@@ -5914,6 +6237,9 @@
             model[k] = per > 0 ? out.gain[k] / per : 0;
             eModel += model[k] * ept;
         }
+        // Refills: trained first then refilled (a full bar each) or refilled at once (what was missing); the gains decide.
+        const barWith = (fill) => Math.max(0, expected + added + fill - next.energy.current);
+        const eBar = fills > 0 && eModel > 0 ? [fillLo, fillHi].map(barWith).sort((a, b) => Math.abs(a - eModel) - Math.abs(b - eModel))[0] : barWith(fillLo);
         const exact = !out.drugs && !out.boosterH && !out.refills && !out.special && !catchUp;
         out.est = !exact;
         let e = eBar > 0 ? eBar : eModel;
@@ -6161,6 +6487,17 @@
         return out;
     }
 
+    /**
+     * Money spent over some Torn days: receipts for the days they cover, `fallback(day)` for the rest (before
+     * receipts existed), so a week isn't one receipt day against seven days of gains.
+     */
+    function spentOverDays(receipts, days, sources = {}, fallback = () => 0) {
+        const r = readReceipts(receipts);
+        let total = 0;
+        for (const d of days) total += r.days[d] ? receiptDayCost(r.days[d], d, sources).cost : fallback(d) || 0;
+        return total;
+    }
+
     /** "Xanax × 3 · EDVD × 5", most used first. */
     function itemsWords(items) {
         return Object.entries(items || {})
@@ -6277,6 +6614,7 @@
 
 
 
+
     const STATE_POLL_MS = 30000;
 
     /** After a failed state call, wait this long before asking again (not every 3 s heartbeat). */
@@ -6299,6 +6637,8 @@
         job: 6 * 60 * 60 * 1000,
         jobPoints: 6 * 60 * 60 * 1000,
         items: 24 * 60 * 60 * 1000,
+        // Your faction's wars (Settings › Keep for war days, and Torn Eye's War mode): one Public call.
+        factionWars: 15 * 60 * 1000,
     };
 
     /** The items whose Torn data (market price, city shops) the plan reads: every candy and the Game Console. */
@@ -6498,6 +6838,14 @@
                 ['job', () => fetchJob(this.client)],
                 ['jobPoints', () => fetchJobPoints(this.client)],
                 ['items', () => fetchItemsInfo(this.client, ITEMS_INFO_IDS)],
+                [
+                    'factionWars',
+                    async () => {
+                        const ki = (this.store.get(this.keys.static, {}) || {}).keyInfo || {};
+                        if (!ki.factionId) return { enemies: [], at: this.now() };
+                        return { enemies: enemiesFromWars(await fetchFactionWars(this.client), ki.factionId, Math.floor(this.now() / 1000)), at: this.now() };
+                    },
+                ],
             ];
             for (const [k, fn] of jobs) {
                 if (!due(k)) continue;
@@ -7137,6 +7485,7 @@
 
 
 
+
     const pi = {
         tabId: makeTabId(),
         client: null,
@@ -7216,26 +7565,39 @@
      * event wins enough to switch the plan for it.
      */
     function autoFor(plan, settings, statics) {
-        const horizon = settings.horizonDays || 30;
-        const r = pi.compare && pi.compare[plan.strategy];
-        const income = incomeFrom(statics.income || [], { spentPerDay: r ? r.cost / horizon : 0 });
-        const auto = autoState({ plan, settings, hasFullKey: hasFullKey(), income });
+        // What the gym really cost over the same days (receipts), added back: it left your networth and shows in the log's "out".
+        // Never the plan's own projected cost, which would feed the budget back into itself.
+        const now = Date.now();
+        const rc = get(K.receipts, null);
+        const today = tornDayStart(now);
+        // 30 Torn days, today included.
+        const sum = rc ? summarizeReceipts(rc, today - 29 * 86400e3, today, { prices: getPrices(), priceHistory: get(K.priceHistory, null) }) : null;
+        // Until receipts cover a few days (everyone upgrading starts with none), the steady plan's cost stands in: it
+        // doesn't depend on the budget, so the budget never feeds itself.
+        const steady = pi.compare && pi.compare.steady ? pi.compare.steady.cost / (settings.horizonDays || 30) : 0;
+        const spentPerDay = sum && sum.days >= INCOME_MIN_DAYS ? sum.cost / sum.days : steady;
+        const income = incomeFrom(statics.income || [], { spentPerDay });
         const ml = get(K.moneyLog, null);
-        auto.breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now(), ml.days || null) : null;
+        const breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now(), ml.days || null) : null;
+        const auto = autoState({ plan, settings, hasFullKey: hasFullKey(), income, log: breakdown, spentPerDay });
+        auto.breakdown = breakdown;
         auto.income = income;
         return auto;
     }
 
     /** Your faction's war, as Torn Eye last read it (its wars every 5 minutes): on now or within a day, read in the last 6 hours. */
-    function warOnNow(now = Date.now()) {
-        const w = get('eyeWarAuto', null);
-        if (!w || !Array.isArray(w.enemies) || !w.enemies.length || !(now - (w.at || 0) < 6 * 3600e3)) return null;
+    function warOnNow(now = Date.now(), statics = null) {
+        // The feed reads your faction's wars every 15 minutes; Torn Eye's own read (webpage) counts too, whichever is newer.
+        const fw = statics && statics.factionWars;
+        const ea = get('eyeWarAuto', null);
+        const w = [fw, ea].filter((x) => x && Array.isArray(x.enemies)).sort((a, b) => (b.at || 0) - (a.at || 0))[0];
+        if (!w || !w.enemies.length || !(now - (w.at || 0) < 6 * 3600e3)) return null;
         const nowS = Math.floor(now / 1000);
         return w.enemies.find((e) => (!e.start || e.start - nowS <= 86400) && (!e.end || e.end > nowS)) || null;
     }
 
     /** The comparison over a coming event's days, with and without its multiplier (cached per event and inputs). */
-    function eventComparisonFor(event, state, pc, shares, settings, budgetPerDay) {
+    function eventComparisonFor(event, state, pc, shares, settings, budgetPerDay, statics = {}) {
         const days = Math.max(1, Math.round((event.end - event.start) / (24 * 3600e3)));
         const key = [event.id, event.start, pi.compareKey, days, Math.round(budgetPerDay || 0)].join('|');
         if (pi.eventCompare && pi.eventCompare.key === key) return pi.eventCompare;
@@ -7243,7 +7605,8 @@
         const prices = getPrices();
         const special = 0;
         const boosted = { ...pc, perks: { ...pc.perks, candyMult: (pc.perks.candyMult || 1) * (event.candyMult || 1), canMult: (pc.perks.canMult || 1) * (event.canMult || 1) } };
-        pi.eventCompare = { key, eventCompare: compareStrategies({ state, pc: boosted, shares, settings: es, prices, special }), normalCompare: compareStrategies({ state, pc, shares, settings: es, prices, special }) };
+        // Same inputs as the plan's own comparison (shops, console held, job), with the event's multiplier on one side.
+        pi.eventCompare = { key, eventCompare: compareStrategies({ state, pc: boosted, shares, settings: es, prices, special, statics, pickBy: 'most' }), normalCompare: compareStrategies({ state, pc, shares, settings: es, prices, special, statics, pickBy: 'most' }) };
         return pi.eventCompare;
     }
 
@@ -7267,7 +7630,7 @@
                 // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
                 pi.whatIf = pc.perks.bliss ? null : blissWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy });
                 // Company what-ifs: hired where a jump variant would beat the recommended plan.
-                const rec = recommend(pi.compare, { budget: settings.budget || Infinity, bliss: pc.perks.bliss, pickBy });
+                const rec = recommend(pi.compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy });
                 pi.jobWhatIf = companyWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy, compare: pi.compare, recommended: rec.recommended });
                 pi.compareKey = key;
             };
@@ -7305,14 +7668,17 @@
             const ev = eventToPlan(events, now);
             if (ev) {
                 const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
-                const ec = eventComparisonFor(ev, state, pc, shares, settings, auto.budgetPerDay);
+                const ec = eventComparisonFor(ev, state, pc, shares, settings, auto.budgetPerDay, statics);
                 autoSwitch = eventSwitch({ event: ev, eventCompare: ec.eventCompare, normalCompare: ec.normalCompare, budgetPerDay: auto.budgetPerDay, now });
                 if (autoSwitch && autoSwitch.active) strategy = autoSwitch.id;
             }
-            // The plan follows Auto's pick (saved, so the day plan, Discord and Progress all see the same plan).
-            if (strategy && strategy !== plan.strategy) plan = setPlan({ ...plan, strategy, strategyPicked: false, createdAt: now });
+            // The plan follows Auto's pick (saved, so the day plan, Discord and Progress all see the same plan): written by the
+            // leader tab only, and only from an up-to-date comparison, so tabs never take turns rewriting it.
+            const lead = get(K.leader, null);
+            const fresh = !pi.compareWanted || pi.compareWanted === pi.compareKey;
+            if (strategy && strategy !== plan.strategy && fresh && lead && lead.id === pi.tabId) plan = setPlan({ ...plan, strategy, strategyPicked: false, createdAt: now });
         }
-        return buildModel({ state, statics, plan, settings, auto, autoSwitch, warOn: warOnNow(now), log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, whatIf: pi.whatIf || null, jobWhatIf: pi.jobWhatIf || null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+        return buildModel({ state, statics, plan, settings, auto, autoSwitch, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, whatIf: pi.whatIf || null, jobWhatIf: pi.jobWhatIf || null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
     }
 
     /**
@@ -7604,6 +7970,11 @@
         return workerCall(base, '/login/status', { method: 'POST', secret, body: { id }, fetchImpl });
     }
 
+    /** Log in with Discord: close an open login (Cancel), so finishing Discord's page afterwards does nothing. */
+    function workerLoginCancel({ base, secret, id, fetchImpl }) {
+        return workerCall(base, '/login/cancel', { method: 'POST', secret, body: { id }, fetchImpl });
+    }
+
     /* ===== src/discord.js ===== */
     /*
      * Settings › Discord (Log in with Discord) and the plan sync. The plan's
@@ -7698,9 +8069,16 @@
         return r && r.paused ? 'Your Worker paused pings: ' + (r.lastError || 'Torn refused its key') + '. Paste a new key for it.' : null;
     }
 
-    function discordState() {
+    /** What's stored about the service, connected or not (a login may be under way). */
+    function discordRaw() {
         const w = get(K.worker, null);
         return w && w.base && w.secret ? w : null;
+    }
+
+    /** A connected service (logged in with Discord, or your own service set up): only then is anything synced. */
+    function discordState() {
+        const w = discordRaw();
+        return w && (w.discordName || w.connectedAt) ? w : null;
     }
 
     function planPayload(m) {
@@ -7761,41 +8139,85 @@
         full: 'The Pumping Iron service is full. Ask whoever runs it.',
         failed: 'Discord didn’t finish the login. Try again in a minute.',
         expired: 'The login timed out. Press Log in with Discord again.',
+        elsewhere: 'This Discord account is already connected to Pumping Iron in another browser. Press Disconnect there, or type /unlink in Discord, then log in here again.',
     };
 
     /**
      * Log in with Discord: open Discord's page in a new tab, wait until you've
      * said yes there, then connect this browser: the plan and your Torn key go to
      * the service (encrypted there), and pings start. Being a member of the
-     * Pumping Iron Discord server is what lets you in.
+     * Pumping Iron Discord server is what lets you in. The same browser secret is
+     * kept across tries, so a second try (or a login finished after Cancel) lands
+     * on the same row on the service.
      * @param {object} model
      * @param {object} [o] - {onUpdate(text), base (your own service), sleep, open}
      * @returns {Promise<{ok:boolean, name?:string, text:string}>}
      */
-    async function loginDiscord(model, { onUpdate = () => {}, base: baseIn = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), open = gmOpenTab } = {}) {
-        const prev = discordState();
+    async function loginDiscord(model, { onUpdate = () => {}, base: baseIn = null, sleep = defaultSleep, open = gmOpenTab } = {}) {
+        const prev = discordRaw();
         const base = workerBase(baseIn || (prev && prev.base) || DEFAULT_WORKER);
         const secret = prev && prev.base === base ? prev.secret : newSecret();
         const start = await workerLoginStart({ base, secret });
-        open(start.url);
+        // Only an address on the service itself is opened (it sends you on to discord.com).
+        let url = null;
+        try {
+            url = new URL(String(start.url));
+        } catch {
+            url = null;
+        }
+        if (!url || url.origin !== base) throw new Error('The service answered with an unexpected address.');
         set(K.worker, { ...(prev && prev.base === base ? prev : {}), base, secret, login: { id: start.id, at: Date.now() } });
+        open(url.toString());
         onUpdate('Waiting for you on Discord…');
-        const until = Date.now() + LOGIN_WAIT_MS;
+        return pollLogin(model, { sleep });
+    }
+
+    const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    /** Only one wait loop per tab (a reload resumes it; a second click doesn't start another). */
+    let polling = null;
+
+    /**
+     * Wait for the login stored in `K.worker.login` (started here, or before a
+     * reload) and finish it.
+     */
+    function pollLogin(model, { sleep = defaultSleep } = {}) {
+        if (polling) return polling;
+        polling = pollLoginOnce(model, { sleep }).finally(() => {
+            polling = null;
+        });
+        return polling;
+    }
+
+    async function pollLoginOnce(model, { sleep }) {
+        const first = discordRaw();
+        if (!first || !first.login) return { ok: false, text: 'No login to wait for.' };
+        let { base, secret } = first;
+        let id = first.login.id;
+        let until = (first.login.at || Date.now()) + LOGIN_WAIT_MS;
         while (Date.now() < until) {
             await sleep(LOGIN_POLL_MS);
-            const w = discordState();
-            // Cancelled here, or another login started meanwhile.
-            if (!w || !w.login || w.login.id !== start.id) return { ok: false, text: 'Login cancelled.' };
+            const w = discordRaw();
+            // Cancelled here.
+            if (!w || !w.login) return { ok: false, text: 'Login cancelled.' };
+            // Another login started meanwhile (Cancel, then Log in again): wait for that one instead.
+            if (w.login.id !== id) {
+                ({ base, secret } = w);
+                id = w.login.id;
+                until = (w.login.at || Date.now()) + LOGIN_WAIT_MS;
+                continue;
+            }
             let st;
             try {
-                st = await workerLoginStatus({ base, secret, id: start.id });
+                st = await workerLoginStatus({ base, secret, id });
             } catch (e) {
                 if (e && e.http === 404) return finishLogin(false, LOGIN_FAIL.expired);
                 continue; // A blip: ask again.
             }
             if (st.state === 'open') continue;
             if (st.state !== 'done') return finishLogin(false, LOGIN_FAIL[st.state] || LOGIN_FAIL.failed);
-            // In: the plan and the key go now, so pings start without waiting for the next sync.
+            // In. Saved first: if the first sync fails, the next minute's sync sends the plan and the key (no keyTag yet).
+            set(K.worker, { ...(discordRaw() || {}), base, secret, login: null, discordName: st.name || null, keyTag: null, connectedAt: Date.now(), lastSync: 0, lastSig: null, lastError: null });
             const key = getKey(K.apiKey);
             const statics = get(K.userStatic, {}) || {};
             const ki = statics.keyInfo || {};
@@ -7803,23 +8225,44 @@
             if (key) body.tornKey = key;
             if (ki.userId) body.playerId = ki.userId;
             if (ki.factionId !== undefined) body.factionId = ki.factionId || null;
-            const r = await workerSync(body);
-            set(K.worker, { ...(discordState() || {}), base, secret, login: null, discordName: st.name || null, linked: Boolean(r.linked), bot: Boolean(r.bot), ready: Boolean(r.ready), keyTag: keyTag(key), connectedAt: Date.now(), lastSync: Date.now(), lastSig: null, lastError: pausedText(r) });
+            try {
+                const r = await workerSync(body);
+                set(K.worker, { ...(discordRaw() || {}), linked: Boolean(r.linked), bot: Boolean(r.bot), ready: Boolean(r.ready), keyTag: keyTag(key), lastSync: Date.now(), lastError: pausedText(r) });
+            } catch (e) {
+                set(K.worker, { ...(discordRaw() || {}), lastError: 'First sync failed (' + String((e && e.message) || e) + '); it tries again within a minute.' });
+            }
             return { ok: true, name: st.name || null, text: 'Connected as ' + (st.name || 'you') + '. Pings come as DMs from the Pumping Iron bot.' };
         }
         return finishLogin(false, LOGIN_FAIL.expired);
     }
 
-    function finishLogin(ok, text) {
-        const w = discordState();
+    /** A login that didn't finish: the browser secret stays (the next try reuses it), nothing is connected. */
+    function endLogin() {
+        const w = discordRaw();
         if (w) set(K.worker, { ...w, login: null });
+    }
+
+    function finishLogin(ok, text) {
+        endLogin();
         return { ok, text };
     }
 
-    /** Stop waiting for a login (the Cancel button). */
+    /** Stop waiting for a login (the Cancel button); the service closes it too, so finishing Discord's page later does nothing. */
     function cancelLogin() {
-        const w = discordState();
-        if (w && w.login) set(K.worker, { ...w, login: null });
+        const w = discordRaw();
+        if (w && w.login) workerLoginCancel({ base: w.base, secret: w.secret, id: w.login.id }).catch(() => {});
+        endLogin();
+    }
+
+    /** After a reload in the middle of a login: keep waiting for it (at most until it expires). */
+    function resumeLogin(model) {
+        const w = discordRaw();
+        if (!w || !w.login) return null;
+        if (Date.now() - (w.login.at || 0) >= LOGIN_WAIT_MS) {
+            endLogin();
+            return null;
+        }
+        return pollLogin(model);
     }
 
     /** Link Discord: a one-time code from your Worker (on a click only; never stored). */
@@ -7837,7 +8280,7 @@
     }
 
     async function forgetDiscord() {
-        const w = discordState();
+        const w = discordRaw();
         if (w) {
             try {
                 await workerForget({ base: w.base, secret: w.secret });
@@ -7889,7 +8332,15 @@
                 set(K.worker, { ...(get(K.worker, {}) || {}), lastError: pausedText(r), ready: Boolean(r.ready), linked: Boolean(r.linked), bot: Boolean(r.bot), pendingAcks: acked });
             })
             // Failed: the plan counts as unsent (next minute tries again); the acks wait too.
-            .catch((e) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks, lastSig: w.lastSig, ...(keyDue ? { keyTag: w.keyTag } : {}), ...(eyeDue ? { eyeSig: w.eyeSig } : {}) }));
+            .catch((e) => {
+                // The service forgot this browser (Disconnect elsewhere, /unlink in Discord, or 30 days without a sync): disconnected here too.
+                const cur = get(K.worker, null);
+                if (e && e.http === 403 && cur && cur.secret === w.secret && !cur.login && (cur.discordName || cur.connectedAt)) {
+                    set(K.worker, { base: w.base, secret: w.secret, login: null, lastError: 'The Pumping Iron service no longer knows this browser (/unlink, or 30 days without a sync). ' + (cur.discordName ? 'Log in with Discord again.' : 'Connect your service again.') });
+                    return;
+                }
+                set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks, lastSig: w.lastSig, ...(keyDue ? { keyTag: w.keyTag } : {}), ...(eyeDue ? { eyeSig: w.eyeSig } : {}) });
+            });
         return true;
     }
 
@@ -8752,6 +9203,8 @@
             happy0: reading.happy,
             last: { stats: { ...reading.stats }, energy: reading.energy },
             spent,
+            // Energy the step leaves on purpose (kept for a war, or a stop that keeps a specialist gym): not a sign of a new session.
+            spare: Math.max(0, Number(m.keepEnergy) || 0),
         };
     }
 
@@ -8822,7 +9275,7 @@
         if (!session || session.v !== 1 || !Array.isArray(session.parts) || !session.parts.length) return true;
         if (session.build !== m.build.id) return true;
         if (!(now - session.at < SESSION_MAX_MS) || now < session.at) return true;
-        return Number.isFinite(reading.energy) && reading.energy - sessionEnergyLeft(session) >= NEW_SESSION_E;
+        return Number.isFinite(reading.energy) && reading.energy - sessionEnergyLeft(session) - (session.spare || 0) >= NEW_SESSION_E;
     }
 
     /**
@@ -9004,6 +9457,8 @@
 
 
 
+
+
     const DAYS = DAY_NAMES;
     const MONTHS = MONTH_NAMES;
 
@@ -9062,10 +9517,13 @@
     }
 
     /** Cheapest fill for one need, from stored listings. */
-    function buyRow(need, prices) {
-        const p = prices && prices[need.id];
-        if (!p || !Array.isArray(p.listings) || !p.listings.length) return { need, fill: null, verdict: null };
-        const fill = fillCheapest(p.listings, need.buy, need.id);
+    function buyRow(need, prices, ic = null) {
+        const p = (prices && prices[need.id]) || {};
+        // A city shop you ticked (Buy › Shops I can buy from) joins the listings, as on the Buy tab.
+        const shop = ic && ic.npc && ic.npc[need.id] ? npcListing(ic.npc[need.id], need.buy) : null;
+        const listings = (Array.isArray(p.listings) ? p.listings : []).concat(shop ? [shop] : []);
+        if (!listings.length) return { need, fill: null, verdict: null };
+        const fill = fillCheapest(listings, need.buy, need.id);
         const cheapest = fill.rows[0] ? fill.rows[0].price : null;
         return { need, fill, verdict: priceVerdict(cheapest, p.avg7 || null) };
     }
@@ -9074,7 +9532,8 @@
         const needs = m.buyToday.filter((n) => n.buy > 0);
         // Home refreshes today's prices too, at most every 5 minutes.
         if (needs.length && ctx.wantPrices) ctx.wantPrices(needs.map((n) => n.id));
-        const rows = needs.map((n) => buyRow(n, ctx.prices));
+        const ic = itemContext(ctx.statics || {}, ctx.settings || {});
+        const rows = needs.map((n) => buyRow(n, ctx.prices, ic));
         const total = rows.reduce((a, r) => a + (r.fill ? r.fill.total : 0), 0);
         const trs = rows.map(({ need, fill }) => {
             const first = fill && fill.rows[0];
@@ -9162,7 +9621,8 @@
         const refills = sum('refills');
         const xp = unitPrice((ctx.prices || {})[XANAX]) || 0;
         const pp = unitPrice((ctx.prices || {})[POINTS], 300) || 0;
-        const spent = xan * xp + refills * REFILL_POINTS * pp;
+        // Money really spent this week (receipts: every item and refill at that day's price); before receipts, Xanax and refills.
+        const spent = spentOverDays(ctx.receipts, days, { priceHistory: ctx.priceHistory, prices: ctx.prices || {} }, (d) => ((totals[d] && totals[d].xanax) || 0) * xp + ((totals[d] && totals[d].refills) || 0) * REFILL_POINTS * pp);
         const pct = planned > 0 ? Math.min(100, (100 * gained) / planned) : 0;
         return h('div', {}, [
             sectionHead('This week', meta([days.length ? days.length + ' day' + (days.length === 1 ? '' : 's') + ' recorded' : 'from today']), null, 'h3'),
@@ -9199,8 +9659,10 @@
         const now = m.now;
         const next = m.next;
         const late = next && next.kind === 'xanax' && m.strip.drug.left === 0;
+        // "On plan" only while no step is waiting on you (the plan re-times, so a due step is the one sign of being behind).
+        const overdue = Boolean(next && next.at <= now - 5 * 60 * 1000);
         const buyTotal = m.buyToday.reduce((a, n) => {
-            const r = buyRow(n, ctx.prices);
+            const r = buyRow(n, ctx.prices, itemContext(ctx.statics || {}, ctx.settings || {}));
             return a + (r.fill ? r.fill.total : 0);
         }, 0);
 
@@ -9212,7 +9674,7 @@
                 ' planned',
                 buyTotal ? ' · ' + fmtMoney(buyTotal) + ' to spend' : '',
                 ' · ',
-                h('b', { style: late ? 'color:var(--warn)' : null, text: late ? 'Xanax ready' : 'on plan' }),
+                h('b', { style: late || overdue ? 'color:var(--warn)' : null, text: late ? 'Xanax ready' : overdue ? 'a step is due' : 'on plan' }),
             ]),
         );
 
@@ -9265,6 +9727,7 @@
      * the pick (plans that don't fit you hidden behind a tick), and where your
      * energy comes from. Pane: the 30-day chart, the build, the Bliss card.
      */
+
 
 
 
@@ -9385,7 +9848,7 @@
         const a = m.auto;
         if (pickBy === 'max') return [h('span', { class: 'muted', text: '· no budget' })];
         if (pickBy === 'auto' && a && a.ready) {
-            return [t('lab', 'with'), h('b', { class: 'white num', text: fmtMoney(Math.round(a.budgetPerDay)) + ' a day' }), h('span', { class: 'muted', text: 'from your income (last ' + Math.round(a.days) + ' days)' }), h('span', { class: 'info', title: 'Income = how fast your networth grew, read from Torn’s own history, plus what the gym cost you in that time. Auto spends at most that a day.', text: 'i' })];
+            return [t('lab', 'with'), h('b', { class: 'white num', text: fmtMoney(Math.round(a.budgetPerDay)) + ' a day' }), h('span', { class: 'muted', text: 'from your income (last ' + Math.round(a.days) + ' days' + (a.source === 'log' ? ', money log' : ', networth') + ')' }), h('span', { class: 'info', title: (a.source === 'log' ? 'Income = money in less money out a day in your money log (Full key), plus what the gym plan spends.' : 'Income = how fast your networth grew (Torn’s own history), plus what the gym plan spends; your money log has nothing readable yet.') + (a.networthPerDay !== null && a.source === 'log' ? ' Cross-check: your networth grew ' + fmtMoney(Math.round(a.networthPerDay)) + ' a day.' : '') + ' Auto spends at most that a day.', text: 'i' })];
         }
         const box = [t('lab', 'with'), numberInput(s.budget || 0, 130, (v) => (v > 0 ? ctx.setSettings({ budget: v }) : ctx.rerender()), { money: true, label: 'Budget' }), h('span', { class: 'muted', text: 'budget' })];
         if (pickBy === 'auto' && a && a.wait) box.push(h('span', { class: 'tag warn', title: a.wait, text: a.needsKey ? 'Auto needs a Full key' : 'Reading your income…' }));
@@ -9705,7 +10168,7 @@
         const lines = [
             tin ? h('div', { class: 'note2' }, ['Train in ', h('b', { class: 'white', text: tin })]) : null,
             why ? h('div', { class: 'note2' }, [why.text + ' · ', h('a', { href: '#plan', onclick: focusBuild, text: 'Change build' })]) : null,
-            ng ? h('div', { class: 'note2' }, ['Next gym unlock: ', h('b', { class: 'white', text: ng.gym.name }), ng.known && ng.days !== null ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' day' + (Math.max(1, Math.round(ng.days)) === 1 ? '' : 's') : ' · open Torn’s gym page once to track it']) : null,
+            ng ? h('div', { class: 'note2' }, ['Next gym unlock: ', h('b', { class: 'white', text: ng.gym.name }), ng.known && ng.days !== null ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' day' + (Math.max(1, Math.round(ng.days)) === 1 ? '' : 's') : ' · open Torn’s gym page once to track it', ng.cost ? ' · ' + fmtMoney(ng.cost) + ' to buy once it opens' : '']) : null,
         ].filter(Boolean);
         return h('div', {}, [
             sectionHead('Build', meta([plan.buildPicked ? 'what the plan trains toward' : 'pick yours: the plan trains toward it']), null, 'h3'),
@@ -9727,7 +10190,7 @@
         if (!bliss && w.blissSteady) {
             const pct = (x) => Math.round((100 * (x.gained - best.gained)) / Math.max(1, best.gained));
             lines.push(h('b', { text: 'For you' }), h('span', { text: 'Steady with Bliss +' + fmtShort(w.blissSteady.gained) + ' in ' + days + ' days (' + fmtPct(pct(w.blissSteady)) + ') for ' + fmtMoney(w.blissSteady.cost) + (w.dailyChoco ? '; Daily choco with Bliss +' + fmtShort(w.dailyChoco.gained) + ' (' + fmtPct(pct(w.dailyChoco)) + ') for ' + fmtMoney(w.dailyChoco.cost) : '') + '.' }));
-            const budget = ctx.settings.budget || Infinity;
+            const budget = m.auto && m.auto.ready && ctx.plan.pickBy === 'auto' ? m.auto.budget : budgetOf(ctx.settings);
             const cheapest = [w.blissSteady, w.dailyChoco].filter((x) => x && x.gained > best.gained).sort((a, b) => a.cost - b.cost)[0];
             lines.push(h('b', { text: 'Worth it?' }), h('span', {}, [cheapest ? (cheapest.cost <= budget ? 'Yes inside your budget: ' + STRATEGIES[cheapest.id].short.toLowerCase() + ' with the book beats today’s pick. ' : 'Only with a budget of ~' + fmtMoney(cheapest.cost) + '. ') : 'Not at your stats. ', h('a', { href: '#buy', onclick: (e) => { e.preventDefault(); ctx.go('buy'); }, text: 'Price on Buy' })]));
         }
@@ -10550,7 +11013,8 @@
         const p = sum('planned');
         const xp = unitPrice((ctx.prices || {})[XANAX]) || 0;
         const pp = unitPrice((ctx.prices || {})[POINTS], 300) || 0;
-        const spent = sum('xanax') * xp + sum('refills') * REFILL_POINTS * pp;
+        // Money really spent this week (receipts: every item and refill at that day's price); before receipts, Xanax and refills.
+        const spent = spentOverDays(ctx.receipts, days, { priceHistory: ctx.priceHistory, prices: ctx.prices || {} }, (d) => ((totals[d] && totals[d].xanax) || 0) * xp + ((totals[d] && totals[d].refills) || 0) * REFILL_POINTS * pp);
         const first = new Date(today - 6 * DAY);
         return h('div', {}, [
             sectionHead('This week', meta([DAY_NAMES[first.getUTCDay()] + '–' + DAY_NAMES[new Date(today).getUTCDay()] + ' · ' + days.length + ' of 7 days']), null, 'h3'),
@@ -11312,42 +11776,6 @@
         return out;
     }
 
-    /* ===== src/core/eye/bands.js ===== */
-    /*
-     * Torn Eye's colour bands (user-set in the Torn Eye tab; ENGINE-SPEC §10):
-     * Stomp, Good, Tough, Can't win, or No data. Never "FF".
-     */
-
-    const BAND_ORDER = ['stomp', 'good', 'tough', 'cant', 'none'];
-    const BAND_WORDS = { stomp: 'Stomp', good: 'Good', tough: 'Tough', cant: "Can't win", none: 'No data' };
-    const BAND_COLORS = { stomp: '#3fbf5a', good: '#a6e08a', tough: '#f0a040', cant: '#ff5a4e', none: '#6c737a' };
-    const DEFAULT_BAND_LIMITS = { stomp: { win: 99, keep: 75 }, good: { win: 90, keep: 40 }, tough: { win: 60, keep: 0 } };
-
-    /**
-     * @param {object|null} f - forecast() output (pWin 0..1, keep 0..1)
-     * @param {object} [limits] - {stomp:{win,keep}, good:{win,keep}, tough:{win}} in percent
-     */
-    function bandOf(f, limits = DEFAULT_BAND_LIMITS) {
-        if (!f || !Number.isFinite(f.pWin)) return 'none';
-        const win = f.pWin * 100;
-        const keep = (f.keep || 0) * 100;
-        const L = { ...DEFAULT_BAND_LIMITS, ...(limits || {}) };
-        if (win >= L.stomp.win && keep >= L.stomp.keep) return 'stomp';
-        if (win >= L.good.win && keep >= L.good.keep) return 'good';
-        if (win >= L.tough.win) return 'tough';
-        return 'cant';
-    }
-
-    /** "win 96% · keep ~62% · 2.80 respect" (no "~" when the stats are exact). */
-    function chipFigures(f, est, respect) {
-        if (!f) return 'no estimate yet';
-        const parts = ['win ' + Math.round(f.pWin * 100) + '%'];
-        if (f.pWin >= 0.05 && f.keep !== null && f.keep !== undefined) parts.push('keep ' + (est && est.confidence === 'exact' ? '' : '~') + Math.round(f.keep * 100) + '%');
-        if (f.pWin < 0.05 && est && est.confidence === 'rough') parts.push('rough estimate');
-        else if (respect) parts.push(respect.toFixed(2) + ' respect');
-        return parts.join(' · ');
-    }
-
     /* ===== src/core/zip.js ===== */
     /*
      * A tiny .zip writer and reader for the learning export (Settings ›
@@ -11763,12 +12191,12 @@
 
     /** Torn's API ToS disclosure for the userscript's Torn key. */
     const TOS_TORN = [
-        ['Data storage', 'In this browser. If you log in with Discord, also on the Pumping Iron service (a Cloudflare Worker run by the Pumping Iron owner), the key encrypted (AES-GCM), until you press Disconnect'],
-        ['Data sharing', 'Nobody. (Other data, never this key: player ids you look at go to FFScouter and TornStats if you connect them; item ids go to TornW3B; with Discord pings on, the Pumping Iron service gets your plan\u2019s next steps, your player and faction id, and Torn Eye\u2019s lists: player ids, names, levels, colour bands, win % and watch tags.)'],
-        ['Purpose of use', 'Personal gain: gym planning and fight estimates'],
+        ['Data storage', 'In this browser. If you log in with Discord, also on the Pumping Iron service (a Cloudflare Worker run by the Pumping Iron owner), the key encrypted (AES-GCM) with a key only that service holds, until you press Disconnect (or type /unlink in Discord); rows not synced for 30 days are deleted'],
+        ['Data sharing', 'Nobody. (Other data, never this key: player ids you look at go to FFScouter and TornStats if you connect them; item ids go to TornW3B; with Discord pings on, the Pumping Iron service gets your plan’s next steps, your player and faction id, and Torn Eye’s lists: player ids, names, levels, colour bands, win % and HP kept, watch tags.) The service’s owner runs it and could decrypt stored keys; it only uses yours for your own pings.'],
+        ['Purpose of use', 'Personal gain: gym planning, fight estimates and your gym pings; Competitive advantage: war pings, /war and /chain'],
         ['Key storage & sharing', 'Stored locally / With Discord pings: stored (encrypted) on the Pumping Iron service and used only for your own pings and the bot commands you type; shared with nobody'],
-        ['Key access level', 'Limited (user: bars, cooldowns, refills, battlestats, gym, perks, property, equipment, inventory, attacks, personalstats, discord, profile, job, jobpoints, money; torn: gyms, items, itemdetails, attacklog, logcategories, calendar; market: itemmarket, pointsmarket; faction: members, wars; key: info)'],
-        ['Other services', 'This key goes to api.torn.com, and to the Pumping Iron service only if you log in with Discord. FFScouter and TornStats use the key you give them in their own sections (it may be the same Torn key, which they already hold). TornW3B never receives it. The webpage\u2019s font comes from fonts.googleapis.com (no data of yours).'],
+        ['Key access level', 'Limited (user: basic, bars, cooldowns, refills, travel, battlestats, gym, perks, property, equipment, inventory, attacks, personalstats, discord, profile, job, jobpoints, money; other players: profile; torn: gyms, items, itemdetails, attacklog, logcategories, calendar; market: itemmarket, pointsmarket; faction: members, wars, chain; key: info)'],
+        ['Other services', 'This key goes to api.torn.com, and to the Pumping Iron service only if you log in with Discord. FFScouter and TornStats use the key you give them in their own sections (it may be the same Torn key, which they already hold). TornW3B never receives it. The webpage’s font comes from fonts.googleapis.com (no data of yours).'],
     ];
 
     const TOS_FFS = [
@@ -11945,7 +12373,10 @@
         const result = ctx.ui.discordResult ? h('span', { class: 'msg ' + (ctx.ui.discordResult.ok ? 'ok' : 'bad'), text: ctx.ui.discordResult.text }) : null;
         const waiting = Boolean(st && st.login);
         const connected = Boolean(st && st.discordName && !waiting);
-        if (!ctx.ui.discordAdvanced && (!st || !st.base || st.discordName || waiting)) {
+        // Your own service (set up by hand, no Discord login) opens the Advanced form; everyone else sees Log in with Discord.
+        const ownService = Boolean(st && st.connectedAt && !st.discordName);
+        // "Back to Log in with Discord" (discordAdvanced === false) shows the login view even when an own service is set up.
+        if (ctx.ui.discordAdvanced === false || (!ctx.ui.discordAdvanced && !ownService)) {
             if (connected) {
                 const test = async () => {
                     say('', 'Sending…');
@@ -11981,7 +12412,8 @@
                 ]),
                 msg,
                 result,
-                h('p', { class: 'muted', text: 'Your Torn key goes to the Pumping Iron service, encrypted, so it can read your timers while you’re away. Disconnect removes it.' }),
+                st && st.lastError && !waiting ? h('p', { class: 'msg bad', text: st.lastError }) : null,
+                h('p', { class: 'muted', text: 'Your Torn key goes to the Pumping Iron service, encrypted, so it can read your timers while you’re away. Disconnect (or /unlink in Discord) removes it.' }),
                 h('details', { class: 'dis' }, [h('summary', { text: 'How your Torn key is used there' }), tosTable(TOS_TORN)]),
                 h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.discordAdvanced = true; ctx.rerender(); }, text: 'Advanced: your own service' }),
             ]);
@@ -12053,7 +12485,7 @@
         const rows = [
             h('p', { text: 'A small free service on your Cloudflare account checks your timers every minute and tags you, even with your PC off: "Drug cooldown ends in 5 min · Xanax #2, then DEX × 27". Pings never come from a Torn tab.' }),
             h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('base', 'Service address' + (st ? '' : ' (needed)'), { placeholder: 'https://pumping-iron.you.workers.dev', value: st ? st.base : '', onblur: (e) => { const v = e.target.value.trim(); if (!v) return; try { workerBase(v); msg.className = 'msg'; msg.textContent = 'Your Worker key and webhook will be stored on ' + new URL(v).hostname + '.'; } catch (err) { msg.className = 'msg bad'; msg.textContent = String(err.message || err); } } }), field('invite', 'Invite code' + (st ? ' (first time only)' : ' (needed the first time)'), { placeholder: 'from SETUP.md', ...keyAttrs, class: secretCls })]),
-            h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('hook', 'Discord webhook', { placeholder: st ? 'Saved on your Worker · paste to change' : 'https://discord.com/api/webhooks/…', ...keyAttrs, class: secretCls }), field('key', 'Torn key for the Worker' + (st ? '' : ' (needed)'), { placeholder: st ? 'Saved on your Worker · paste to change' : 'Custom key made for the Worker (see below)', ...keyAttrs, class: secretCls })]),
+            h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('hook', 'Discord webhook', { placeholder: st ? 'Saved on your Worker · paste to change' : 'https://discord.com/api/webhooks/…', ...keyAttrs, class: secretCls }), field('key', 'Torn key for your service' + (st ? '' : ' (needed)'), { placeholder: st ? 'Saved on your service · paste to change' : 'Your Torn key (Limited)', ...keyAttrs, class: secretCls })]),
             h('div', { class: 'row', style: 'max-width:760px' }, [field('discordId', 'Your Discord user id', { placeholder: 'Blank: the one linked in Torn', value: st && st.discordId ? st.discordId : '', inputmode: 'numeric' })]),
             h('div', { class: 'row' }, [h('button', { class: 'btn primary', type: 'button', onclick: connect, text: st ? 'Save' : 'Connect' }), h('button', { class: 'btn', type: 'button', disabled: !st, onclick: () => run(() => d.test(), 'Test ping sent. Check your channel.'), text: 'Send a test ping' }), st ? confirmButton(ctx, 'discord-forget', 'Forget', () => run(async () => { await d.forget(); ctx.rerender(); }, 'Forgotten here and on your Worker.')) : null, h('a', { href: d.setupUrl, target: '_blank', rel: 'noopener', text: 'Set it up (10 minutes)' })]),
             msg,
@@ -12108,7 +12540,7 @@
         const fullSec = settingsSection('Full key (Auto mode)', fullState, [
             h('p', { text: 'Auto mode, the default plan, sizes your gym spending to your income. It needs a Full key, used for one thing only: reading your money log to see where your income comes from. It never leaves this browser.' }),
             full.row,
-            full.msg,
+            ctx.ui.fullKeyMsg ? h('span', { class: 'msg ' + (ctx.ui.fullKeyMsg.ok ? 'ok' : 'bad'), text: ctx.ui.fullKeyMsg.text }) : full.msg,
             fk.has ? h('div', { class: 'row' }, [fk.logAt ? h('span', { class: 'muted num', text: 'Money log read ' + new Date(fk.logAt).toISOString().slice(11, 16) + ' UTC' + (fk.logLines ? ' · ' + fk.logLines + ' lines' : '') }) : h('span', { class: 'muted', text: 'Money log not read yet' }), confirmButton(ctx, 'full-forget', 'Forget the Full key', () => { ctx.forgetFullKey(); ctx.rerender(); })]) : null,
             h('div', { class: 'row' }, [t('lab', 'Keep for war days'), h('input', { class: 'inp num', style: 'width:72px', inputmode: 'numeric', 'aria-label': 'Energy kept for war days', value: String(s.warReserve || 0), onchange: (ev) => ctx.setSettings({ warReserve: Math.max(0, Math.min(1000, Math.round(Number(ev.target.value) || 0))) }) }), h('span', { class: 'muted', text: 'energy · during a faction war the plan never trains below this (0 = you decide)' })]),
             h('p', {}, ['No Full key? Pick a manual plan on Plan (Most stats in my budget) and set the budget yourself. ', h('a', { href: apiKeyPageUrl(), target: '_blank', rel: 'noopener', text: 'Make a Full key' })]),
@@ -12378,264 +12810,6 @@
                 this.clockText.textContent = clock(now, settings) + (settings && settings.timeFormat === 'local' ? ' local' : ' Torn time') + (ago !== null ? ' · updated ' + (ago < 90 ? ago + 's' : Math.round(ago / 60) + ' min') + ' ago' : '');
             }
         }
-    }
-
-    /* ===== src/core/eye/war.js ===== */
-    /*
-     * War mode (ENGINE-SPEC §12): an enemy faction's members, sorted by what
-     * you can do now. Out early (left hospital before their time: revived or
-     * medded) first, then Okay by band and respect, then Hospital by time out,
-     * then Traveling, then Abroad; a summary line on top.
-     */
-
-
-
-    function memberState(m) {
-        const st = (m && m.status) || {};
-        const s = String(st.state || st.description || '').toLowerCase();
-        if (s.includes('hospital')) return 'hospital';
-        if (s.includes('travel')) return 'traveling';
-        if (s.includes('abroad')) return 'abroad';
-        if (s.includes('jail') || s.includes('federal')) return 'jail';
-        if (s.includes('fallen')) return 'fallen';
-        return 'okay';
-    }
-
-    /**
-     * Members that left hospital early: Hospital with a future `until` before,
-     * Okay now, before that time.
-     * @returns {Set<number>}
-     */
-    function outEarly(prevMembers, members, nowS) {
-        const prev = new Map((prevMembers || []).map((m) => [Number(m.id), m]));
-        const out = new Set();
-        for (const m of members || []) {
-            const p = prev.get(Number(m.id));
-            if (!p || memberState(p) !== 'hospital' || memberState(m) !== 'okay') continue;
-            const until = Number(p.status && p.status.until) || 0;
-            if (until > nowS + 30) out.add(Number(m.id));
-        }
-        return out;
-    }
-
-    const STATE_RANK = { early: 0, okay: 1, hospital: 2, traveling: 3, abroad: 4, jail: 5, fallen: 6 };
-
-    /**
-     * @param {object[]} members - /faction/{id}/members rows
-     * @param {object} o - {bands: {id: band}, respect: {id: number}, early: Set, nowS}
-     * @returns {object[]} rows {m, id, state, band, respect, until}
-     */
-    function sortWar(members, { bands = {}, respect = {}, early = new Set(), nowS = 0 } = {}) {
-        const rows = (members || []).map((m) => {
-            const id = Number(m.id);
-            const state = early.has(id) ? 'early' : memberState(m);
-            return { m, id, state, band: bands[id] || 'none', respect: respect[id] || 0, until: Number(m.status && m.status.until) || 0 };
-        });
-        rows.sort((a, b) => {
-            const s = STATE_RANK[a.state] - STATE_RANK[b.state];
-            if (s) return s;
-            if (a.state === 'okay' || a.state === 'early') {
-                const bd = BAND_ORDER.indexOf(a.band) - BAND_ORDER.indexOf(b.band);
-                if (bd) return bd;
-                return b.respect - a.respect;
-            }
-            if (a.state === 'hospital' || a.state === 'traveling') return (a.until || Infinity) - (b.until || Infinity);
-            return a.id - b.id;
-        });
-        return rows;
-    }
-
-    /** "7 attackable now · 0:48 until the next one is out · 3 traveling" as numbers. */
-    function warSummary(rows, nowS) {
-        const attackable = rows.filter((r) => r.state === 'okay' || r.state === 'early').length;
-        const outs = rows.filter((r) => r.state === 'hospital' && r.until > nowS).map((r) => r.until - nowS);
-        return { attackable, nextOutS: outs.length ? Math.min(...outs) : null, traveling: rows.filter((r) => r.state === 'traveling').length, early: rows.filter((r) => r.state === 'early').length };
-    }
-
-    /**
-     * Standard-class flight times in minutes (Torn's travel agency; an airstrip
-     * or business class is faster, so landings are marked as estimates).
-     */
-    const FLIGHT_MIN = {
-        mexico: 26,
-        'cayman islands': 35,
-        canada: 41,
-        hawaii: 134,
-        'united kingdom': 159,
-        argentina: 167,
-        switzerland: 175,
-        japan: 225,
-        china: 242,
-        uae: 271,
-        'united arab emirates': 271,
-        'south africa': 297,
-    };
-
-    /**
-     * Where a traveller is going, from the status line: "Traveling to Mexico",
-     * "Returning to Torn from Mexico", "In Mexico".
-     * @returns {{kind:'to'|'back'|'abroad', place:string, minutes:number|null}|null}
-     */
-    function travelOf(member) {
-        const d = String((member && member.status && member.status.description) || '');
-        let m;
-        const mins = (p) => FLIGHT_MIN[p.toLowerCase()] ?? null;
-        if ((m = d.match(/returning to torn from (.+)$/i))) return { kind: 'back', place: m[1].trim(), minutes: mins(m[1].trim()) };
-        if ((m = d.match(/travel(?:l)?ing to (.+)$/i))) return { kind: 'to', place: m[1].trim(), minutes: mins(m[1].trim()) };
-        if ((m = d.match(/^in (.+)$/i))) return { kind: 'abroad', place: m[1].trim(), minutes: mins(m[1].trim()) };
-        return null;
-    }
-
-    /**
-     * When a traveller lands (ms): from when we first saw this flight plus the
-     * flight time; abroad: "if they fly now". null when unknown.
-     */
-    function landingAt(travel, seenAt, now) {
-        if (!travel || !travel.minutes) return null;
-        if (travel.kind === 'abroad') return now + travel.minutes * 60000;
-        return Math.max(now, (seenAt || now) + travel.minutes * 60000);
-    }
-
-    /* ------------------------------------------------ round 4: war mode (ROUND4-PLAN §B) */
-
-    /**
-     * The enemy from your own faction's current wars (/faction/wars: ranked,
-     * raids, territory). Ranked first, then territory, then raids; wars that
-     * ended are skipped.
-     * @returns {{id, name, kind:'ranked'|'territory'|'raid', warId, start, end}[]}
-     */
-    function enemiesFromWars(resp, myFactionId, nowS = Math.floor(Date.now() / 1000)) {
-        const w = (resp && (resp.wars || resp)) || {};
-        const mine = Number(myFactionId) || 0;
-        const out = [];
-        const add = (war, kind) => {
-            if (!war || typeof war !== 'object') return;
-            if (war.end && Number(war.end) < nowS) return;
-            if (war.winner) return;
-            const facs = Array.isArray(war.factions) ? war.factions : [];
-            // Your side is found by id; without one, a war is read only when it's two-sided.
-            const other = facs.filter((f) => f && Number(f.id) && Number(f.id) !== mine);
-            if (!mine && other.length !== 1) return;
-            for (const f of other) {
-                if (out.some((x) => x.id === Number(f.id))) continue;
-                out.push({ id: Number(f.id), name: f.name ? String(f.name) : null, kind, warId: Number(war.war_id || war.id) || null, start: Number(war.start) || null, end: Number(war.end) || null });
-            }
-        };
-        add(w.ranked, 'ranked');
-        for (const t of Array.isArray(w.territory) ? w.territory : []) add(t, 'territory');
-        for (const r of Array.isArray(w.raids) ? w.raids : []) add(r, 'raid');
-        return out;
-    }
-
-    const WAR_KIND_WORDS = { ranked: 'ranked war', territory: 'territory war', raid: 'raid' };
-
-    /** "5 min ago", "3 h ago", "2 d ago". */
-    function agoText(ms, now = Date.now()) {
-        const s = Math.max(0, Math.round((now - ms) / 1000));
-        if (s < 60) return 'just now';
-        if (s < 3600) return Math.round(s / 60) + ' min ago';
-        if (s < 86400 * 2) return Math.round(s / 3600) + ' h ago';
-        return Math.round(s / 86400) + ' d ago';
-    }
-
-    /** Online / Idle / Offline from Torn's last_action, with "last active". */
-    function activityOf(m, now = Date.now()) {
-        const la = (m && m.last_action) || null;
-        if (!la) return { kind: null, at: null, text: '—' };
-        const s = String(la.status || '').toLowerCase();
-        const kind = s === 'online' ? 'online' : s === 'idle' ? 'idle' : 'offline';
-        const at = Number(la.timestamp) ? Number(la.timestamp) * 1000 : null;
-        const text = kind === 'online' ? 'Online' : at ? (kind === 'idle' ? 'Idle · ' : '') + agoText(at, now) : la.relative || (kind === 'idle' ? 'Idle' : 'Offline');
-        return { kind, at, text };
-    }
-
-    const ACTIVITY_COLORS = { online: '#9bdc8a', idle: '#e8a33d', offline: '#6c737a' };
-    const ACTIVITY_WORDS = { online: 'Online', idle: 'Idle', offline: 'Offline' };
-
-    /** Flights are kept this long after first seen (the longest standard flight is under 5 h). */
-    const FLIGHT_KEEP_MS = 12 * 60 * 60 * 1000;
-    const FLIGHTS_KEPT = 400;
-
-    /**
-     * When each flight was first seen, kept across reloads: {id: {desc, at}}.
-     * A new status line is a new flight; someone no longer flying is dropped.
-     * @returns {{seen: object, changed: boolean}}
-     */
-    function trackFlights(seen, members, now = Date.now()) {
-        const next = { ...(seen || {}) };
-        let changed = false;
-        for (const m of members || []) {
-            const n = Number(m && m.id);
-            if (!(n > 0)) continue;
-            const id = String(n);
-            const st = memberState(m);
-            const desc = String((m.status && m.status.description) || '');
-            if (st === 'traveling' || st === 'abroad') {
-                if (!next[id] || next[id].desc !== desc) {
-                    next[id] = { desc, at: now };
-                    changed = true;
-                }
-            } else if (next[id]) {
-                delete next[id];
-                changed = true;
-            }
-        }
-        for (const id of Object.keys(next)) {
-            if (now - (next[id].at || 0) > FLIGHT_KEEP_MS) {
-                delete next[id];
-                changed = true;
-            }
-        }
-        const left = Object.keys(next);
-        if (left.length > FLIGHTS_KEPT) {
-            left.sort((a, b) => next[a].at - next[b].at);
-            for (const id of left.slice(0, left.length - FLIGHTS_KEPT)) delete next[id];
-            changed = true;
-        }
-        return { seen: next, changed };
-    }
-
-    /**
-     * The status cell, in parts so the page can keep the countdown ticking:
-     * text = pre + clock(at) [+ " TCT" (m:ss) when cd] + post.
-     * @param {object} m - faction member or profile {status, has_early_discharge, is_revivable}
-     * @param {object} o - {now (ms), seenAt (ms, first seen flying), early (left hospital early)}
-     * @returns {{kind, pre, at, cd, post, cls, soonAt}}
-     */
-    function statusParts(m, { now = Date.now(), seenAt = null, early = false } = {}) {
-        const st = memberState(m);
-        const s = (m && m.status) || {};
-        const until = Number(s.until) > 0 ? Number(s.until) * 1000 : null;
-        if (early) return { kind: 'early', pre: 'Out early · attack now', at: null, cd: false, post: '', cls: 'c-good', soonAt: null };
-        if (st === 'okay') return { kind: 'okay', pre: 'Okay · attack now', at: null, cd: false, post: '', cls: 'c-good', soonAt: null };
-        if (st === 'hospital') {
-            const flags = [m && m.has_early_discharge ? 'may leave early' : null, m && m.is_revivable ? 'revivable' : null].filter(Boolean);
-            return { kind: 'hospital', pre: until ? 'Hospital · out ' : 'Hospital', at: until, cd: true, post: flags.length ? ' · ' + flags.join(' · ') : '', cls: 'cdn', soonAt: until };
-        }
-        if (st === 'jail') {
-            const fed = /federal/i.test(String(s.state || s.description || ''));
-            return { kind: 'jail', pre: fed ? 'Federal jail' : until ? 'Jail · out ' : 'Jail', at: fed ? null : until, cd: true, post: '', cls: 'muted', soonAt: fed ? null : until };
-        }
-        if (st === 'traveling' || st === 'abroad') {
-            const tr = travelOf(m);
-            if (!tr) return { kind: st, pre: s.description || 'Traveling', at: null, cd: false, post: '', cls: null, soonAt: null };
-            if (tr.kind === 'abroad') {
-                const back = landingAt(tr, null, now);
-                return { kind: 'abroad', pre: 'In ' + tr.place + (back ? ' · back ~' : ''), at: back, cd: false, post: back ? ' at the earliest (est.)' : '', cls: null, soonAt: null };
-            }
-            const land = landingAt(tr, seenAt, now);
-            const pre = (tr.kind === 'back' ? '← from ' : '→ ') + tr.place + (land ? ', lands ~' : '');
-            return { kind: 'traveling', pre, at: land, cd: false, post: land ? ' (est.)' : '', cls: null, soonAt: land };
-        }
-        if (st === 'fallen') return { kind: 'fallen', pre: 'Fallen', at: null, cd: false, post: '', cls: 'muted', soonAt: null };
-        return { kind: st, pre: s.description || st, at: null, cd: false, post: '', cls: null, soonAt: null };
-    }
-
-    /** The status cell as one line: "Hospital · out 14:32 TCT (3:10)", "→ Mexico, lands ~15:05 (est.)". */
-    function statusText(parts, { now = Date.now(), clockFn, tct = true, countdownFn } = {}) {
-        if (!parts.at) return parts.pre + parts.post;
-        const c = parts.cd ? (tct ? ' TCT' : '') + ' (' + countdownFn(parts.at - now) + ')' : '';
-        return parts.pre + clockFn(parts.at) + c + parts.post;
     }
 
     /* ===== src/core/eye/fight.js ===== */
@@ -13682,7 +13856,8 @@
         if (w.enemies.length > 1 && !w.manual) {
             kids.push(h('div', { class: 'seg', role: 'group', 'aria-label': 'Which war' }, w.enemies.slice(0, 4).map((x) => h('button', { type: 'button', 'aria-pressed': String(x.id === w.fid), onclick: () => e.war.pick(x.id), text: (x.name || x.id) + ' · ' + WAR_KIND_WORDS[x.kind] }))));
         }
-        if (w.manual && w.enemies.length) kids.push(h('button', { class: 'btn sm', type: 'button', onclick: () => e.war.auto(), text: 'Back to our war' }));
+        // A faction typed in can always be cleared (back to your faction's own war, or to none).
+        if (w.manual) kids.push(h('button', { class: 'btn sm', type: 'button', onclick: () => e.war.auto(), text: w.enemies.length ? 'Back to our war' : 'Clear' }));
         let fidIn;
         kids.push(
             h('span', { class: 'sep' }),
@@ -14685,7 +14860,7 @@
             set(K.fullKeyState, { ok: true, at: Date.now(), type: info.type || 'Full Access' });
             del(K.moneyLog);
             refreshMoneyLog({ force: true }).catch(() => {});
-            return { ok: true, text: 'Saved · Full key. Auto mode is on.' };
+            return { ok: true, text: getPlan().pickBy === 'auto' ? 'Saved · Full key. Auto mode is on.' : 'Saved · Full key. Pick Auto (from your income) on Plan to use it.' };
         } catch (error) {
             set(K.fullKeyState, { ok: false, error: String((error && error.message) || error), at: Date.now() });
             return { ok: false, text: String((error && error.message) || error) };
@@ -15133,11 +15308,14 @@
             saveTornKey,
             saveFullKey: async (v) => {
                 const r = await saveFullKey(v);
+                // The answer stays on screen through the redraw that follows (the new key changes the page).
+                page.app.ui.fullKeyMsg = r;
                 refresh();
                 page.app.render(true);
                 return r;
             },
             forgetFullKey: () => {
+                page.app.ui.fullKeyMsg = null;
                 forgetFullKey();
                 refresh();
                 page.app.render(true);
@@ -15146,6 +15324,17 @@
             saveTsKey,
             revealKey: (name) => getKey(name),
             clearGroup: (g) => {
+                // Forget keys also removes your key, plan and pings from the Pumping Iron service (the ToS promise).
+                if (g === 'keys' && discordRaw()) {
+                    forgetDiscord()
+                        .catch(() => {})
+                        .finally(() => {
+                            clearGroup(g);
+                            refresh();
+                            page.app.render(true);
+                        });
+                    return;
+                }
                 if (g === 'eye') clearEye();
                 clearGroup(g);
                 refresh();
@@ -15153,7 +15342,7 @@
             },
             diagnostics,
             discord: {
-                state: discordState,
+                state: discordRaw,
                 connect: (f) => connectDiscord(f, pi.model),
                 test: testDiscord,
                 forget: forgetDiscord,
@@ -15247,6 +15436,11 @@
             if (page.app.tab === 'eye' && page.app.ui.eyeMode === 'watched') pollWatch({ members: war.members }).catch(() => {});
             syncEye();
         }, 2000);
+        // A Log in with Discord that was under way when the page reloaded: keep waiting for it.
+        setTimeout(() => {
+            const p = resumeLogin(pi.model);
+            if (p) p.then((r) => { page.app.ui.discordResult = { ok: r.ok, text: r.text }; page.app.render(true); }).catch(() => {});
+        }, 1500);
         // Auto mode's money log (Full key): at most every 6 hours, visible tab only.
         const moneyLog = () => {
             if (isVisible()) refreshMoneyLog().then((r) => { if (r) refresh(); }).catch(() => {});
@@ -15871,6 +16065,7 @@
 
 
 
+
     const tp = { overlay: null, model: null, observer: null, drawing: false, lastGymPlan: null };
 
     /** Torn's page (its sidebar and content column) as {left, right}; a centred 976 px guess if it can't be measured. */
@@ -15976,6 +16171,8 @@
         }
         if (!m || !m.ready || !getSettings().gymMarks) {
             clearMarks(root);
+            // Marks off: the panel's pill stops showing the gym plan too.
+            tp.lastGymPlan = null;
             return;
         }
         const boxes = readStatBoxes(root);
@@ -16033,10 +16230,16 @@
         const statics = get(K.userStatic, {}) || {};
         const prices = getPrices();
         const needs = needList(needsForWindow(m, m.compare, getPlan(), s.buyWindow || 'three', s.horizonDays), statics.inventory || {});
+        // The same list as the Buy tab: its type ticks, and a city shop you ticked joins the listings.
+        const show = shownTypes(s, [...new Set(needs.map((n) => typeOf(n.id)))]);
+        const ic = itemContext(statics, s);
         const out = [];
         for (const n of needs) {
-            const p = prices[n.id];
-            if (n.buy > 0 && p && p.listings) out.push({ id: n.id, fill: fillCheapest(p.listings, n.buy, n.id) });
+            if (!(n.buy > 0) || !show.has(typeOf(n.id))) continue;
+            const p = prices[n.id] || {};
+            const shop = ic.npc[n.id] ? npcListing(ic.npc[n.id], n.buy) : null;
+            const listings = (Array.isArray(p.listings) ? p.listings : []).concat(shop ? [shop] : []);
+            if (listings.length) out.push({ id: n.id, fill: fillCheapest(listings, n.buy, n.id) });
         }
         return out;
     }
@@ -16729,14 +16932,14 @@
             ep.attack.gearSaved = true;
             saveGear(d.defenderId, d.items);
         }
-        drawAttack();
+        if (getSettings().eyeChips) drawAttack();
     }
 
     /* ------------------------------------------------------------- wiring */
 
     function drawAll() {
-        // Taking turns with Torn Trading: nothing of ours on Torn's page.
-        if (isPaused()) {
+        // Taking turns with Torn Trading, or Torn Eye chips switched off in Settings: nothing of ours on Torn's page.
+        if (isPaused() || !getSettings().eyeChips) {
             removeChips(document);
             for (const el of document.querySelectorAll('#pi-attack')) el.remove();
             // Torn's war rows back in their own order.
@@ -16746,7 +16949,7 @@
             }
             return;
         }
-        if (!getSettings().eyeChips || !isVisible()) return;
+        if (!isVisible()) return;
         const p = detectPage(location.href);
         if (p === PAGE_PROFILE) drawProfile();
         if (p === PAGE_FACTION) {
@@ -16783,7 +16986,7 @@
         let lastSig = '';
         onModel((m) => {
             if (!m || !m.ready) return;
-            const sig = [location.href, m.state.at, readFactionRows().length, readWarRows().length, miniProfileId()].join('|');
+            const sig = [location.href, m.state.at, readFactionRows().length, readWarRows().length, miniProfileId(), getSettings().eyeChips ? 1 : 0].join('|');
             if (sig !== lastSig) {
                 lastSig = sig;
                 ask();
@@ -16802,7 +17005,7 @@
         // The mini-profile popup is added to the body on the first hover, then re-drawn for each player.
         let watchedRoot = null;
         const onMini = () => {
-            if (ep.drawing || isPaused()) return;
+            if (ep.drawing || isPaused() || !getSettings().eyeChips) return;
             const root = document.getElementById('profile-mini-root');
             if (root && root !== watchedRoot) {
                 watchedRoot = root;

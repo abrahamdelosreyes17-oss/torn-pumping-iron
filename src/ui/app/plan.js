@@ -13,6 +13,7 @@ import { STATS, STAT_LABEL } from '../../core/gain.js';
 import { fmtInt, fmtShort, fmtMoney, fmtPct } from '../../core/format.js';
 import { STRATEGIES, SPECIAL, planWhat } from '../../core/strategies.js';
 import { pickWarning, perMillion, PICK_BY } from '../../core/recommend.js';
+import { budgetOf } from '../../core/auto.js';
 import { BUILDS, BUILD_ORDER, BUILD_ALIASES, resolveBuild, highStatOf } from '../../core/builds.js';
 import { GEORGES, gymById } from '../../core/gyms.js';
 import { XANAX, EDVD, FHC, POINTS, REFILL_POINTS, ITEMS, CANDY_KISSES, CANDY_IDS, itemName } from '../../core/items.js';
@@ -469,7 +470,7 @@ function blissCard(m, ctx, rec, compare, days) {
     if (!bliss && w.blissSteady) {
         const pct = (x) => Math.round((100 * (x.gained - best.gained)) / Math.max(1, best.gained));
         lines.push(h('b', { text: 'For you' }), h('span', { text: 'Steady with Bliss +' + fmtShort(w.blissSteady.gained) + ' in ' + days + ' days (' + fmtPct(pct(w.blissSteady)) + ') for ' + fmtMoney(w.blissSteady.cost) + (w.dailyChoco ? '; Daily choco with Bliss +' + fmtShort(w.dailyChoco.gained) + ' (' + fmtPct(pct(w.dailyChoco)) + ') for ' + fmtMoney(w.dailyChoco.cost) : '') + '.' }));
-        const budget = ctx.settings.budget || Infinity;
+        const budget = m.auto && m.auto.ready && ctx.plan.pickBy === 'auto' ? m.auto.budget : budgetOf(ctx.settings);
         const cheapest = [w.blissSteady, w.dailyChoco].filter((x) => x && x.gained > best.gained).sort((a, b) => a.cost - b.cost)[0];
         lines.push(h('b', { text: 'Worth it?' }), h('span', {}, [cheapest ? (cheapest.cost <= budget ? 'Yes inside your budget: ' + STRATEGIES[cheapest.id].short.toLowerCase() + ' with the book beats today’s pick. ' : 'Only with a budget of ~' + fmtMoney(cheapest.cost) + '. ') : 'Not at your stats. ', h('a', { href: '#buy', onclick: (e) => { e.preventDefault(); ctx.go('buy'); }, text: 'Price on Buy' })]));
     }

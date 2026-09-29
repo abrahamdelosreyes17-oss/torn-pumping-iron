@@ -1,26 +1,36 @@
 # HANDOFF: Torn Pumping Iron
 
-**Released: 1.1.1 (2026-09-29; 1.1.0 earlier the same night, 1.0.1 / 1.0.0 that day).** 1.1.0 = round 3 (the redesign, energy ladder + Plan dropdown, taking turns with Torn Trading, learning from your own trains, the Discord bot, every fix from the three-pass review). 1.1.1 = Plan › Train toward is a real build dropdown; Torn Eye asks FFScouter for fair fight 1.3–2.6 (without a range it sent Torn's strongest players, ~20B stats, all "Can't win") and refreshes an old list once.
-- Install (pinned 1.1.1): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/7cfbcb04352d5b6270598a11e706f144e6e81845/torn-pumping-iron.user.js
+**Released: 1.2.0 (2026-09-29, round 4; 1.1.1 / 1.1.0 / 1.0.1 / 1.0.0 the same day).** 1.2.0 includes:
+- Auto mode as the default plan (from your income; needs a Full key, header warning without it).
+- Log in with Discord.
+- Torn Eye fixed: only players you beat, no respect cap.
+- War mode with advance bot pings, and the ☆ watch list.
+- The best-split trainer with the gym-page walk-through.
+- The engine names every item (19 candies, city shops you tick), Buy includes the full next jump, and the console jump runs under 250k.
+- Refills never above max; company what-ifs.
+- Receipts and the what-if graph; unlock-gym goal; war reserve.
+
+Links:
+- Install (pinned 1.2.0): PINNED_LINK
 - Auto-update URL (`@updateURL`): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/main/torn-pumping-iron.user.js
 - Webpage: https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html (gh-pages branch; unchanged since 1.0.0, `site/` didn't change)
 - Repo: https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron (public; `main` + `gh-pages`)
+- Discord service: https://pumping-iron.pumping-iron-worker.workers.dev (the owner's Cloudflare; bot in the owner's server)
 
 **Next session, start here:**
-0. **Round 4 plan: `docs/ROUND4-PLAN.md`** (Torn Eye fix, the friend's feedback, Discord login paused mid-build). Waiting for the owner's pick.
-1. Read this file (§2 how the owner works, §3 settled decisions, the newest session entry at the bottom), then **`docs/ROUND3-PLAN.md` §5 "Auto mode"**: the owner's next feature (plan the days around events, faction wars, chains and income; the player just follows). No machine learning needed: a schedule search on the existing simulator. **Ask the owner first** (not answered yet):
-   - how much energy and Xanax to keep for a war day;
-   - whether saving days may stop natural-energy training;
-   - how many days the spend must stay sustainable.
-   Plus the income key choice (§5: a log-only custom key if Torn allows it, else an optional Full key; wars need no new key, they're Public).
-2. Owner to-dos still open (ROUND3-PLAN §3b):
-   - O2: does a special refill go past max energy?
-   - O3: Game Console, "Hardcore Game" 5 E for 80–120 happy, doubled by the 5★ Toy/Game Shop perk.
-   - O4: are CaffeineCon and World Diabetes Day the events that matter?
+1. Read this file (§2, §3), then **`docs/ROUND4-PLAN.md`** (§0 is the owner's round-4 decisions) and the newest session entry below.
+2. Owner to-dos:
+   - **Discord login:** add the OAuth2 redirect `https://pumping-iron.pumping-iron-worker.workers.dev/login/callback`, then run `npx --yes wrangler@4 secret put DISCORD_CLIENT_SECRET` in `worker/`. Until then Log in with Discord says "isn't set up yet".
+   - Then the live test (B10): Log in with Discord, test ping, first DM (watch for the gateway note in BOT.md), `/timers`, a real step ping, a war ping. The friend joins the server, then logs in.
+   - A Full key in Settings for Auto mode.
    - O5: read Torn's rules.php.
-   - B0 + B10: Discord bot setup and live test (steps in `worker/SETUP.md` parts 1–4; the owner has a Discord channel).
-   - The learner's real-data check: the owner and the friend export their data (Settings › Developer › Export as .zip) after a week or two.
-3. Ideas already recorded: the Worker's one-message war pings, the learned HP-kept model (no data source yet: the attack page's final `attackData` could feed it), timing habits, happy loss per train.
+   - Learning-data exports after a week or two.
+3. Still open:
+   - The Torn Eye watch-list defaults (20 players, 60 s, bot pings on, offers from attacks, kept until removed) were chosen without the owner: confirm.
+   - `/link CODE` (own-service path) still moves a link silently.
+   - Verify live: Sally's shop URL; specials blocking the points refill (1 source); `user/{id}/profile` last_action; the gym-page energy-bar selector; money-log title matching [calibrate].
+4. Ideas recorded: the learned HP-kept model, timing habits, happy loss per train.
+
 Research and background: `docs/research-events-perks.md` (events, job perks, the console), `docs/review-fable-2026-09-29.md` (the three-pass review, all fixed), `docs/research-learning.md`, `docs/discord-bot-design.md`, `worker/USERSCRIPT-INTERFACE.md`, `docs/ENGINE-SPEC.md`, `docs/DESIGN.md` + `mockups/round3/` (the look every page follows now).
 
 ---
@@ -179,6 +189,55 @@ Done on the owner's yes. For later releases, the same steps minus the one-time r
 ---
 
 ## What each session did (newest first)
+
+### 2026-09-29 (late night, round 4): Discord live, Torn Eye fix, the friend's feedback → 1.2.0
+- **Discord bot live (B0):**
+  - Worker deployed at `https://pumping-iron.pumping-iron-worker.workers.dev` (D1 `pumping-iron`, id in wrangler.toml).
+  - Secrets: INVITE_CODE, KEY_ENC, DISCORD_APP_ID, DISCORD_PUBLIC_KEY, BOT_TOKEN. A copy of the first four is in `.claude/worker-secrets.txt` (git-ignored); the owner uploaded the bot token.
+  - Bot added to the owner's server (`GUILD_ID` 1551784561237561344), guild commands registered.
+  - **Owner still to do:** OAuth2 redirect `…/login/callback` and `wrangler secret put DISCORD_CLIENT_SECRET`. Until then Log in with Discord answers "isn't set up yet" (501).
+- **Owner's decisions** are in `docs/ROUND4-PLAN.md` §0:
+  - Torn Eye never imports can't-win targets; no respect cap.
+  - War shows everyone, with advance bot pings for enemies you can beat.
+  - The split trains whatever is best, gym by gym, with an overlay walk-through.
+  - The engine names the candy; the console jump only under 250k.
+  - **Auto mode is the default and needs a Full key** (header warning without it).
+  - Saving days skip natural energy.
+  - The main key goes to the Worker after Log in with Discord.
+  - Sally's is newbies only.
+  - No "FF" or "fair fight" words on screen.
+- **Torn Eye bug (owner's list all "Can't win" at 4.50):**
+  - FFScouter's filtered get-targets comes strongest-first, so every row was a 20B-class level-100 account.
+  - Fix: slices of fair fight 1–3 × level bands; each candidate judged by the fight model; only beatable stored.
+  - The owner is 142M / level 50, not 1B.
+- **Built (5 helpers in worktrees plus the lead):**
+  - Auto mode: `core/auto.js`, `income.js`, the Full key in Settings, networth history via `personalstats?timestamp`, the money log.
+  - Unlock-gym goal.
+  - Log in with Discord: Worker `login.js` and the userscript flow.
+  - Worker: war and watch pings in advance, `/war` paging.
+  - Torn Eye: targets, war mode, watch list.
+  - Training split, session parts and the gym-page walk-through.
+  - Items: 19 candies, `bestCandy`, city shops, Buy with the full next jump, console, refills to max, company what-ifs, "current plan".
+  - Receipts and the what-if graph.
+  - War reserve.
+- **Review:** three reviews (engine, every UI control, Worker/security), all findings fixed, then a regression review of the fixes. Highlights:
+  - Auto's budget fed its own plan cost back in → now only real receipts spend.
+  - A 0 budget was read as "no budget".
+  - A failed login left Settings stuck.
+  - Orphan Worker rows kept keys → `elsewhere` state, `/unlink` forgets, 30-day cleanup.
+  - Login flood → evict oldest + 5 per IP.
+  - "Forget keys" now also disconnects.
+  - The chips switch was ignored on some pages.
+  - Refills during a war reserve.
+- **Checks:** 513 unit tests; ux-check and torn-check ALL PASSED (Edge headless); a scripted walk-through of every new action in the harness.
+- **Assumptions to check live:**
+  - Sally's shop URL `shops.php?step=candy` [verify].
+  - The specials-block-points-refill rule (1 source).
+  - `user/{id}/profile` last_action for watch pings.
+  - The gym-page energy-bar selector.
+  - Money-log category and title matching [calibrate].
+  - `/link CODE` (own-service path) still moves a link silently.
+
 
 ### 2026-09-29 (late night): releases 1.1.0 and 1.1.1
 - **1.1.0** on "all, then commit and push to main": b7c9a6a (handoff f5ad677). Pinned file checked at `@version 1.1.0`.

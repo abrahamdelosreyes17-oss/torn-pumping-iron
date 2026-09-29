@@ -16,7 +16,7 @@ import { gymById, GEORGES, GYMS, gymAccess } from '../../core/gyms.js';
 import { tornDayStart, DAY } from '../../core/bars.js';
 import { lineChart, planBars } from '../charts.js';
 import { clock, sectionHead, meta, STAT_COLOR, MONTH_NAMES, DAY_NAMES } from './common.js';
-import { summarizeReceipts, itemsWords, receiptDays, readReceipts, whatIfPeriod, whatIfLines, runWhatIf } from '../../core/receipts.js';
+import { summarizeReceipts, spentOverDays, itemsWords, receiptDays, readReceipts, whatIfPeriod, whatIfLines, runWhatIf } from '../../core/receipts.js';
 
 const dayLabel = (d) => new Date(d).getUTCDate() + ' ' + MONTH_NAMES[new Date(d).getUTCMonth()];
 
@@ -161,8 +161,7 @@ function weekFacts(m, ctx) {
     const xp = unitPrice((ctx.prices || {})[XANAX]) || 0;
     const pp = unitPrice((ctx.prices || {})[POINTS], 300) || 0;
     // Money really spent this week (receipts: every item and refill at that day's price); before receipts, Xanax and refills.
-    const rc = ctx.receipts ? summarizeReceipts(ctx.receipts, today - 6 * DAY, today, { priceHistory: ctx.priceHistory, prices: ctx.prices || {} }) : null;
-    const spent = rc && rc.days > 0 ? rc.cost : sum('xanax') * xp + sum('refills') * REFILL_POINTS * pp;
+    const spent = spentOverDays(ctx.receipts, days, { priceHistory: ctx.priceHistory, prices: ctx.prices || {} }, (d) => ((totals[d] && totals[d].xanax) || 0) * xp + ((totals[d] && totals[d].refills) || 0) * REFILL_POINTS * pp);
     const first = new Date(today - 6 * DAY);
     return h('div', {}, [
         sectionHead('This week', meta([DAY_NAMES[first.getUTCDay()] + '–' + DAY_NAMES[new Date(today).getUTCDay()] + ' · ' + days.length + ' of 7 days']), null, 'h3'),

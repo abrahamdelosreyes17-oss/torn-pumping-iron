@@ -214,14 +214,21 @@ export function pollLogin(model, { sleep = defaultSleep } = {}) {
 async function pollLoginOnce(model, { sleep }) {
     const first = discordRaw();
     if (!first || !first.login) return { ok: false, text: 'No login to wait for.' };
-    const { base, secret } = first;
-    const id = first.login.id;
-    const until = (first.login.at || Date.now()) + LOGIN_WAIT_MS;
+    let { base, secret } = first;
+    let id = first.login.id;
+    let until = (first.login.at || Date.now()) + LOGIN_WAIT_MS;
     while (Date.now() < until) {
         await sleep(LOGIN_POLL_MS);
         const w = discordRaw();
-        // Cancelled here, or another login started meanwhile.
-        if (!w || !w.login || w.login.id !== id) return { ok: false, text: 'Login cancelled.' };
+        // Cancelled here.
+        if (!w || !w.login) return { ok: false, text: 'Login cancelled.' };
+        // Another login started meanwhile (Cancel, then Log in again): wait for that one instead.
+        if (w.login.id !== id) {
+            ({ base, secret } = w);
+            id = w.login.id;
+            until = (w.login.at || Date.now()) + LOGIN_WAIT_MS;
+            continue;
+        }
         let st;
         try {
             st = await workerLoginStatus({ base, secret, id });
@@ -349,8 +356,9 @@ export function maybeSyncPlan(m, now = Date.now()) {
         // Failed: the plan counts as unsent (next minute tries again); the acks wait too.
         .catch((e) => {
             // The service forgot this browser (Disconnect elsewhere, /unlink in Discord, or 30 days without a sync): disconnected here too.
-            if (e && e.http === 403 && w.discordName) {
-                set(K.worker, { base: w.base, secret: w.secret, login: null, lastError: 'The Pumping Iron service no longer knows this browser (/unlink, or 30 days without a sync). Log in with Discord again.' });
+            const cur = get(K.worker, null);
+            if (e && e.http === 403 && cur && cur.secret === w.secret && !cur.login && (cur.discordName || cur.connectedAt)) {
+                set(K.worker, { base: w.base, secret: w.secret, login: null, lastError: 'The Pumping Iron service no longer knows this browser (/unlink, or 30 days without a sync). ' + (cur.discordName ? 'Log in with Discord again.' : 'Connect your service again.') });
                 return;
             }
             set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks, lastSig: w.lastSig, ...(keyDue ? { keyTag: w.keyTag } : {}), ...(eyeDue ? { eyeSig: w.eyeSig } : {}) });

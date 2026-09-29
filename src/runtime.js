@@ -15,7 +15,7 @@ import { buildModel, compareStrategies, blissWhatIf, companyWhatIf, playerContex
 import { recommend } from './core/recommend.js';
 import { targetShares } from './core/plan.js';
 import { upcomingEvents } from './core/events.js';
-import { budgetOf, incomeFrom, autoState, effectiveSettings, eventToPlan, eventSwitch, incomeBreakdown } from './core/auto.js';
+import { INCOME_MIN_DAYS, budgetOf, incomeFrom, autoState, effectiveSettings, eventToPlan, eventSwitch, incomeBreakdown } from './core/auto.js';
 import { summarizeReceipts } from './core/receipts.js';
 import { livePrices } from './core/market.js';
 import { TORN_PER_MINUTE_ALONE } from './core/turns.js';
@@ -106,11 +106,14 @@ function autoFor(plan, settings, statics) {
     // What the gym really cost over the same days (receipts), added back: it left your networth and shows in the log's "out".
     // Never the plan's own projected cost, which would feed the budget back into itself.
     const now = Date.now();
-    const winDays = 30;
     const rc = get(K.receipts, null);
     const today = tornDayStart(now);
-    const spent = rc ? summarizeReceipts(rc, today - winDays * 86400e3, today, { prices: getPrices(), priceHistory: get(K.priceHistory, null) }).cost : 0;
-    const spentPerDay = spent / winDays;
+    // 30 Torn days, today included.
+    const sum = rc ? summarizeReceipts(rc, today - 29 * 86400e3, today, { prices: getPrices(), priceHistory: get(K.priceHistory, null) }) : null;
+    // Until receipts cover a few days (everyone upgrading starts with none), the steady plan's cost stands in: it
+    // doesn't depend on the budget, so the budget never feeds itself.
+    const steady = pi.compare && pi.compare.steady ? pi.compare.steady.cost / (settings.horizonDays || 30) : 0;
+    const spentPerDay = sum && sum.days >= INCOME_MIN_DAYS ? sum.cost / sum.days : steady;
     const income = incomeFrom(statics.income || [], { spentPerDay });
     const ml = get(K.moneyLog, null);
     const breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now(), ml.days || null) : null;

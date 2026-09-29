@@ -504,6 +504,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         spend,
         events,
         pickBy,
+        keepEnergy: warKeep,
         auto: auto ? { ...auto, afford: affordLine(auto, recRow ? recRow.cost / horizon : 0), wait: autoWaitLine(auto), switch: autoSwitch } : null,
         unlock,
         // held: while any are held the daily refill is a special (Torn blocks the points refill until they're spent [verify]).
