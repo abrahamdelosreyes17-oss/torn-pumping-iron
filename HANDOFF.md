@@ -59,7 +59,13 @@ Links:
    - `/link CODE` (own-service path) still moves a link silently.
    - The comparison is ~150 ms of work (run in slices now); a Web Worker would take it off the page entirely if it's still felt.
    - The FFScouter list honouring `minff`/`maxff` is unconfirmed: Torn Eye stores `ffIgnored` when a slice comes back out of range.
-7. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
+7. **Next build (owner, 2026-09-29):**
+   - **A "why this mix" line** on Home and Plan: work each session out both ways and say e.g. "STR + DEX this session: +X% toward Hank's vs STR only". Today the split picks the mix, but only a single-stat session gets a why line.
+   - **Training the split on real data: not yet** (owner asked; answer "not yet, yes in 1–2 weeks"). Receipts and real sessions only started 2026-09-29. Once the owner and the friend have 1–2 weeks:
+     - compare what `pickStat` chose with the alternatives on their real sessions, using the learner's per-stat numbers;
+     - adjust the weighting (`SPLIT_HAPPY_WEIGHT`, the band) only if it beats the current rule on held-out days, the way `core/learn.js` keeps a change.
+   - The learner already refits per-stat gain multipliers from your trains, and the split uses them; it doesn't learn the split rule itself.
+8. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
 Research and background: `docs/research-events-perks.md` (events, job perks, the console), `docs/review-fable-2026-09-29.md` (the three-pass review, all fixed), `docs/research-learning.md`, `docs/discord-bot-design.md`, `worker/USERSCRIPT-INTERFACE.md`, `docs/ENGINE-SPEC.md`, `docs/DESIGN.md` + `mockups/round3/` (the look every page follows now).
 
 ---
