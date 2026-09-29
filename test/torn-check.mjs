@@ -64,7 +64,9 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
 {
     const { page, errors, tornHits } = await open('page=gym&fixture=gym-friend&energy=275&build=balanced');
     const strip = (await text(page, '.pi-strip'))[0] || '';
-    ok(strip.includes('Balanced') && strip.includes('DEX is furthest behind'), 'gym: strip names the build and the stat behind (' + strip + ')');
+    ok(strip.includes('Balanced') && strip.includes('Gun Shop: DEX × 27'), 'gym: strip names the build and the session\'s parts (' + strip + ')');
+    const cur = (await text(page, '.pi-strip .pi-part.pi-cur'))[0] || '';
+    ok(cur === 'Gun Shop: DEX × 27', 'gym: the current part is the bright one (' + cur + ')');
     ok(/Force Training in [\d,]+ E/.test(strip), 'gym: next gym from the page\'s 80% (' + strip + ')');
     const on = await page.evaluate(() => [...document.querySelectorAll('li.pi-on')].map((li) => li.className.match(/(strength|speed|defense|dexterity)/)[1]));
     ok(on.length === 1 && on[0] === 'dexterity', 'gym: DEX outlined, and only DEX (' + on + ')');
@@ -90,20 +92,37 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     ok(/Train DEX × 27/.test(pill), 'gym: the panel bar says "Train DEX × 27" (' + pill + ')');
     const stored = await page.evaluate(() => ({ u: JSON.parse(_store['pumpingIron.v1.unlockedGyms'] || 'null'), p: JSON.parse(_store['pumpingIron.v1.gymProgress'] || 'null') }));
     ok(stored.u && stored.u.length === 18 && stored.p && stored.p.nextId === 19 && stored.p.energy === Math.round(36610 * 0.8), 'gym: unlocked gyms and progress read from the page');
+    // Torn shows 10 DEX trains (the box's value and the sidebar bar move): the page moves on at once, no API read needed.
+    await page.evaluate(() => {
+        const v = document.querySelector('li[class*="dexterity___"] [class*="propertyValue___"]');
+        v.textContent = '83,230.00';
+        document.querySelector('#barEnergy [class*="bar-value___"]').textContent = '175/150';
+    });
+    await page.waitForTimeout(500);
+    const moved = (await text(page, 'li.pi-on .pi-panel'))[0] || '';
+    ok(/17 trains left/.test(moved) && /Fill 17/.test(moved), 'gym: after 10 trains the panel says 17 left, Fill 17 (' + moved + ')');
+    const sess = await page.evaluate(() => JSON.parse(_store['pumpingIron.v1.gymSession'] || 'null'));
+    ok(sess && sess.parts && sess.parts.length === 1 && sess.spent.dex === 100, 'gym: the session snapshot counts the 100 energy spent on DEX (' + JSON.stringify(sess && sess.spent) + ')');
     ok(errors.length === 0, 'gym: no page errors ' + JSON.stringify(errors));
     ok(tornHits() === 0, 'gym: nothing loaded from torn.com');
     await page.screenshot({ path: resolve(shots, 'torn-gym-friend.png'), fullPage: true });
     await page.close();
 }
 
-/* Gym page: the owner on Hank's, 1,000 energy at Gym 3000. */
+/* Gym page: the owner on Hank's, 1,000 energy at Gym 3000; the session's part is SPD at The Edge (SPD is the stat under its share). */
 {
     const { page, errors } = await open('page=gym&fixture=gym-owner&who=owner&build=hank');
-    const warn = (await text(page, 'li.pi-on .pi-warn'))[0] || '';
-    ok(/Stop at 18 trains/.test(warn) && /Balboas/.test(warn) && /Fill 18/.test(warn), 'gym (Hank\'s): stop at 18 before Balboas is lost (' + warn + ')');
-    await page.locator('li.pi-on .pi-fill').click();
-    const v = await page.evaluate(() => document.querySelector('li[class*="strength___"] input').value);
-    ok(v === '18', 'gym (Hank\'s): Fill uses the capped number (' + v + ')');
+    const next = await page.evaluate(() => {
+        const b = document.querySelector('.gymButton___3OFdI.pi-outlined');
+        return b ? { icon: b.querySelector('[class*="gymIcon___"]').className, label: (b.querySelector('.pi-label') || {}).textContent } : null;
+    });
+    ok(next && /gym-23/.test(next.icon) && /^Next: The Edge · SPD × \d+$/.test(next.label), 'gym (Hank\'s): The Edge\'s button is outlined with "Next: The Edge · SPD × N" (' + JSON.stringify(next) + ')');
+    const dim = await page.evaluate(() => document.querySelectorAll('li.pi-dim').length);
+    ok(dim === 4, 'gym (Hank\'s): the four stat boxes are greyed while the part is in another gym (' + dim + ')');
+    const fills = await page.evaluate(() => document.querySelectorAll('.pi-fill').length);
+    ok(fills === 0, 'gym (Hank\'s): no Fill in a gym the part isn\'t in');
+    const clicks = await page.evaluate(() => document.querySelectorAll('.gymButton___3OFdI.selected___2PmTc').length && document.querySelector('.gymButton___3OFdI.selected___2PmTc [class*="gym-27"]') !== null);
+    ok(clicks, 'gym (Hank\'s): we never switched gyms (Gym 3000 is still the one selected)');
     ok(errors.length === 0, 'gym (Hank\'s): no page errors ' + JSON.stringify(errors));
     await page.screenshot({ path: resolve(shots, 'torn-gym-owner.png'), fullPage: true });
     await page.close();

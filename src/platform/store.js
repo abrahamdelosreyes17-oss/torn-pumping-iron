@@ -27,6 +27,7 @@ export const K = {
     recheck: 'recheck',
     unlocked: 'unlockedGyms',
     gymProgress: 'gymProgress',
+    gymSession: 'gymSession',
     leader: 'leader',
     overlayPos: 'overlayPos',
     overlayCollapsed: 'overlayCollapsed',
@@ -141,7 +142,7 @@ export function del(name) {
 /** What "Your data" in Settings can clear, by group. */
 export const DATA_GROUPS = {
     keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker],
-    plan: [K.plan, K.recheck],
+    plan: [K.plan, K.recheck, K.gymSession],
     progress: [K.statsHistory, K.dayLog, K.dayTotals, K.planLine],
     learning: ['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions],
     prices: [K.priceHistory, K.prices],

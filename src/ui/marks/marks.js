@@ -26,6 +26,11 @@ export const MARK_CSS = `
 .pi-warn { display: flex; align-items: center; gap: 10px; padding: 7px 10px; margin: 6px 0; background: #2a1f10; border-left: 3px solid #e8a33d; border-radius: 0 5px 5px 0; font-size: 12px; color: #ffd79a; }
 .pi-warn b { color: #ffe3b3; }
 .pi-outlined { box-shadow: inset 0 0 0 2px #efebe2 !important; position: relative; }
+.pi-dim { opacity: .45; }
+.pi-strip .pi-part { color: #939aa1; white-space: nowrap; }
+.pi-strip .pi-part.pi-cur { color: #fff; font-weight: bold; }
+.pi-strip .pi-part.pi-done { color: #9bdc8a; }
+.pi-strip .pi-done-all { color: #9bdc8a; font-weight: bold; }
 .pi-label { position: absolute; top: -9px; left: 10px; right: auto; height: 18px; line-height: 18px; padding: 0 8px; border-radius: 9px; background: #efebe2; color: #15171a; font: bold 11px Arial, sans-serif; pointer-events: none; z-index: 2; white-space: nowrap; }
 `;
 
@@ -41,7 +46,7 @@ export function ensureMarkCss(doc = document) {
 /** Remove every mark we drew inside `scope`. */
 export function clearMarks(scope = document) {
     for (const el of scope.querySelectorAll('.pi-mark')) el.remove();
-    for (const el of scope.querySelectorAll('.pi-on, .pi-outlined')) el.classList.remove('pi-on', 'pi-outlined');
+    for (const el of scope.querySelectorAll('.pi-on, .pi-outlined, .pi-dim')) el.classList.remove('pi-on', 'pi-outlined', 'pi-dim');
 }
 
 function plate() {
@@ -54,42 +59,66 @@ function plate() {
  * @param {object} plan - planGymPage(model, page)
  * @param {object[]} boxes - readStatBoxes(root)
  * @param {function} rereadBox - (stat) => the box as it is now (React may have replaced the input)
+ * @param {{id, el}[]} [buttons] - readGymButtons(root): the next part's gym gets an outline
  */
-export function drawGymMarks(root, plan, boxes, rereadBox) {
+export function drawGymMarks(root, plan, boxes, rereadBox, buttons = []) {
     clearMarks(root);
     const list = root.querySelector('ul[class*="properties___"]');
     if (!list) return;
+    const sep = (text) => h('span', { class: 'pi-sep', text });
     const strip = h('div', { class: 'pi-mark pi-strip' }, [plate()]);
-    plan.strip.forEach((p, i) => {
-        if (i) strip.appendChild(h('span', { class: 'pi-sep', text: '·' }));
-        strip.appendChild(i === 0 ? h('b', { text: p }) : h('span', { text: p }));
-    });
+    strip.appendChild(h('b', { text: plan.strip[0] || '' }));
+    // The session, part by part: ticks on the ones done, the current one bright.
+    if (plan.parts && plan.parts.length) {
+        strip.appendChild(sep('·'));
+        plan.parts.forEach((p, i) => {
+            if (i) strip.appendChild(sep('→'));
+            const words = p.gymName + ': ' + p.stat.toUpperCase() + ' × ' + p.trains + (p.state === 'current' && p.done > 0 ? ' (' + p.left + ' left)' : '');
+            strip.appendChild(h('span', { class: 'pi-part' + (p.state === 'done' ? ' pi-done' : p.state === 'current' ? ' pi-cur' : ''), text: (p.state === 'done' ? '✓ ' : '') + words }));
+        });
+    }
+    if (plan.done) {
+        strip.appendChild(sep('·'));
+        strip.appendChild(h('span', { class: 'pi-done-all', text: 'Session done' }));
+    }
+    for (const p of plan.strip.slice(1)) {
+        strip.appendChild(sep('·'));
+        strip.appendChild(h('span', { text: p }));
+    }
     if (plan.switchHint) {
-        strip.appendChild(h('span', { class: 'pi-sep', text: '·' }));
+        strip.appendChild(sep('·'));
         strip.appendChild(h('span', { class: 'pi-hint', text: plan.switchHint }));
     }
     list.parentNode.insertBefore(strip, list);
+    // The next part is in another gym: outline that gym's button (the user switches; we never do).
+    if (plan.nextGym) {
+        const b = buttons.find((x) => x.id === plan.nextGym.id);
+        if (b && b.el) outline(b.el, plan.nextGym.label);
+    }
     for (const box of boxes) {
         const p = plan.perStat[box.stat];
         if (!p) continue;
         if (p.kind === 'train') {
+            const n = p.fill !== undefined ? p.fill : p.trains;
             box.li.classList.add('pi-on');
             box.li.appendChild(h('span', { class: 'pi-mark pi-label', text: 'Train this' }));
             const fill = h('button', {
                 class: 'pi-fill',
                 type: 'button',
-                text: 'Fill ' + p.trains,
-                disabled: p.trains <= 0,
+                text: 'Fill ' + n,
+                disabled: n <= 0,
                 onclick: (e) => {
                     e.preventDefault();
                     e.stopPropagation();
                     const now = rereadBox(box.stat) || box;
-                    fillTrains(now.input, p.trains);
+                    fillTrains(now.input, n);
                 },
             });
             const panel = p.warn ? h('div', { class: 'pi-mark pi-warn' }, [h('span', {}, [h('b', { text: p.warn.split('. ')[0] + '.' }), ' ' + p.warn.split('. ').slice(1).join('. ')]), fill]) : h('div', { class: 'pi-mark pi-panel' }, [h('b', { text: p.text }), h('span', { text: p.sub }), fill]);
             box.content.insertBefore(panel, box.content.firstChild);
         } else {
+            // Waiting on another gym's part: the whole box greys out.
+            if (p.kind === 'grey') box.li.classList.add('pi-dim');
             box.content.insertBefore(h('div', { class: 'pi-mark pi-grey', text: p.text }), box.content.firstChild);
         }
     }

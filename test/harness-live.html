@@ -118,6 +118,8 @@ if (Q.get('fixture')) {
   x.open('GET', 'fixtures/' + Q.get('fixture').replace(/[^a-z-]/g, '') + '.html', false);
   x.send();
   document.write(x.responseText);
+  // Torn's sidebar energy bar shows the same energy as the canned API answer (the gym walk-through reads it).
+  document.write('<script>(function () { var v = document.querySelector(\'#barEnergy [class*="bar-value___"]\'); if (v) v.textContent = "' + (OWNER ? 1000 : Number(Q.get('energy') || 20)) + '/150"; })();<\/script>');
 }
 if (Q.get('trading')) setTimeout(() => { const d = document.createElement('div'); d.id = 'ttv2-host'; d.style.cssText = 'position:fixed;right:16px;bottom:16px;width:300px;height:300px;background:#2e2e2e'; document.body.appendChild(d); }, Number(Q.get('trading')) || 0);
 window.onerror = (m) => { document.getElementById('out').textContent = 'BOOT ERROR: ' + m; };
