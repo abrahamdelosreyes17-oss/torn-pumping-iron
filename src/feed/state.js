@@ -20,6 +20,7 @@ import { fetchUserState, fetchPerks, fetchProperty, fetchGyms, fetchInventory, f
 import { POINTS } from '../core/items.js';
 import { TRADING_SEEN_KEY } from '../core/turns.js';
 import { KEY_DEAD_CODES } from '../api/client.js';
+import { receiptChange, recordChange, applyInventory, receiptPriceNow } from '../core/receipts.js';
 
 export const STATE_POLL_MS = 30000;
 
@@ -57,7 +58,7 @@ export class StateFeed {
      * @param {function} [o.onState] - (state, api) => void, after each poll
      * @param {function} [o.onError] - (error) => void
      * @param {function} [o.isPaused] - () => boolean: Torn Trading runs, ask nothing
-     * @param {object} [o.keys] - store keys {state, static, log, leader, history}
+     * @param {object} [o.keys] - store keys {state, static, log, leader, history, receipts}
      */
     constructor({ client, store, tabId, now = () => Date.now(), isVisible = () => true, nextStep = () => null, onState = () => {}, onError = () => {}, isPaused = () => false, keys = {} }) {
         this.isPaused = isPaused;
@@ -69,7 +70,7 @@ export class StateFeed {
         this.nextStep = nextStep;
         this.onState = onState;
         this.onError = onError;
-        this.keys = { state: 'userState', static: 'userStatic', log: 'dayLog', leader: 'leader', history: 'statsHistory', dead: 'apiKeyDead', stateError: 'stateError', ...keys };
+        this.keys = { state: 'userState', static: 'userStatic', log: 'dayLog', leader: 'leader', history: 'statsHistory', dead: 'apiKeyDead', stateError: 'stateError', receipts: 'receipts', ...keys };
         this.polling = false;
     }
 
@@ -115,6 +116,8 @@ export class StateFeed {
                 const st = this.store.get(this.keys.static, {}) || {};
                 const sample = calibrationSample(prev, next, diff, { table: st.gyms && st.gyms.length ? mergeLiveGyms(st.gyms) : GYMS, perks: parsePerks(st.perks || {}).mult });
                 if (sample) this.store.set('calibration', addCalibration(this.store.get('calibration', null), sample));
+                // Receipts (Progress): what these two reads trained and used; after a pause, one catch-up change.
+                this.recordReceipt(prev, next, diff, at - last.at > CATCH_UP_GAP_MS && Number(this.store.get(TRADING_SEEN_KEY, 0)) > last.at);
             }
             this.store.set(this.keys.state, { at, api });
             if (failed) this.clearStateError();
@@ -152,12 +155,40 @@ export class StateFeed {
         this.store.set(this.keys.history, h);
     }
 
+    /** Receipts: one read-to-read change. A drug or booster use asks for the inventory now, to name it. */
+    recordReceipt(prev, next, diff, catchUp) {
+        const st = this.store.get(this.keys.static, {}) || {};
+        const perks = parsePerks(st.perks || {});
+        const change = receiptChange(prev, next, diff, { table: st.gyms && st.gyms.length ? mergeLiveGyms(st.gyms) : GYMS, perks: perks.mult, canMult: perks.canMult || 1, hint: this.nextStep(), catchUp });
+        const before = this.store.get(this.keys.receipts, null);
+        const after = recordChange(before, change, { priceOf: this.priceOf(next.at) });
+        if (JSON.stringify(after) !== JSON.stringify(before)) this.store.set(this.keys.receipts, after);
+        if (change.drugs || change.boosterH) this.store.set(this.keys.static, { ...st, inventoryAt: 0 });
+    }
+
+    /** Receipts: a new inventory read names the uses since the last one. */
+    recordInventory(st) {
+        if (!st || !st.inventory || !(st.inventoryAt > 0)) return;
+        const before = this.store.get(this.keys.receipts, null);
+        if (before && before.inv && before.inv.at >= st.inventoryAt) return;
+        this.store.set(this.keys.receipts, applyInventory(before, st.inventory, st.inventoryAt, { priceOf: this.priceOf(st.inventoryAt) }));
+    }
+
+    /** The cheapest price known now for an item (today's low or a listing loaded today). */
+    priceOf(now) {
+        const prices = this.store.get('prices', {}) || {};
+        const priceHistory = this.store.get('priceHistory', null);
+        return (id) => receiptPriceNow(id, { prices, priceHistory, now });
+    }
+
     /** Perks, property, gyms, inventory, key info: each on its own clock. */
     async refreshStatic() {
         if (this.refreshing) return this.store.get(this.keys.static, {}) || {};
         this.refreshing = true;
         try {
-            return await this.refreshStaticOnce();
+            const st = await this.refreshStaticOnce();
+            this.recordInventory(st);
+            return st;
         } finally {
             this.refreshing = false;
         }

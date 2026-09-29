@@ -16,6 +16,7 @@ import { gymById, GEORGES, GYMS, gymAccess } from '../../core/gyms.js';
 import { tornDayStart, DAY } from '../../core/bars.js';
 import { lineChart, planBars } from '../charts.js';
 import { clock, sectionHead, meta, STAT_COLOR, MONTH_NAMES, DAY_NAMES } from './common.js';
+import { summarizeReceipts, itemsWords, receiptDays, readReceipts, whatIfPeriod, whatIfLines, runWhatIf } from '../../core/receipts.js';
 
 const dayLabel = (d) => new Date(d).getUTCDate() + ' ' + MONTH_NAMES[new Date(d).getUTCMonth()];
 
@@ -263,6 +264,194 @@ function gymFacts(m) {
     return h('div', {}, [sectionHead('Gyms', null, null, 'h3'), h('dl', { class: 'facts num' }, lines)]);
 }
 
+/* ---------- Receipts ---------- */
+
+/** Items, then refills, in words: "Xanax × 3 · EDVD × 5 · Refill × 1". */
+export function usedWords(x) {
+    const parts = [itemsWords(x.items)];
+    if (x.refills > 0) parts.push('Refill × ' + x.refills);
+    if (x.special > 0) parts.push('Special refill × ' + x.special);
+    return parts.filter(Boolean).join(' · ');
+}
+
+/** Energy per 1,000 stats: "5.5", "1,480". */
+function rcPerK(v) {
+    return v === null ? '—' : v >= 100 ? fmtInt(v) : v.toFixed(v >= 10 ? 1 : 2);
+}
+
+/**
+ * Today / 7 days / 30 days, and the last 14 days, from the stored receipts.
+ * @returns {{cols: [label, summary][], days: {day, s, d}[], any: boolean}}
+ */
+export function receiptsView(receipts, now, sources = {}) {
+    const today = tornDayStart(now);
+    const cols = [
+        ['Today', today],
+        ['7 days', today - 6 * DAY],
+        ['30 days', today - 29 * DAY],
+    ].map(([label, from]) => [label, summarizeReceipts(receipts, from, today, sources)]);
+    const r = readReceipts(receipts);
+    const days = receiptDays(receipts)
+        .filter((d) => d <= today)
+        .slice(-14)
+        .reverse()
+        .map((d) => ({ day: d, s: summarizeReceipts(receipts, d, d, sources), d: r.days[d] }));
+    return { cols, days, any: days.length > 0 };
+}
+
+const rcMoney = (s) => (s.cost > 0 ? (s.est ? '~' : '') + fmtMoney(s.cost) : '$0');
+
+function receiptDetail(row, m) {
+    const d = row.d;
+    const table = (m.pc && m.pc.table) || GYMS;
+    const by = Object.entries(d.by || {}).map(([k, [n, e]]) => {
+        const [stat, gid] = k.split('@');
+        return ((gymById(Number(gid), table) || {}).name || 'Gym ' + gid) + ' · ' + STAT_LABEL[stat] + ' × ' + fmtInt(n) + ' (' + fmtInt(e) + ' E)';
+    });
+    const gains = STATS.filter((k) => d.gain && d.gain[k] > 0).map((k) => fmtSigned(d.gain[k]) + ' ' + STAT_LABEL[k]);
+    const prices = Object.entries(d.px || {}).map(([id, p]) => (id === POINTS ? 'points' : itemsWords({ [id]: 1 }).replace(/ × 1$/, '')) + ' ' + fmtMoney(p));
+    const notes = [];
+    if (Object.keys(d.guess || {}).length) notes.push(itemsWords(d.guess) + ' not seen in your inventory yet (the plan’s step)');
+    if (d.catchUp) notes.push('includes ' + d.catchUp + ' catch-up after Torn Trading ran');
+    if (d.est) notes.push('energy worked out around a drug, booster or refill');
+    if (row.s.est) notes.push('a price wasn’t seen that day: nearest known price');
+    return h('dl', { class: 'facts num', style: 'grid-template-columns:auto 1fr;padding:6px 0 10px' }, [
+        h('dt', { text: 'Trained' }),
+        h('dd', { style: 'text-align:left', text: by.length ? by.join(' · ') : fmtInt(d.e) + ' E' }),
+        h('dt', { text: 'Gained' }),
+        h('dd', { style: 'text-align:left', text: gains.join(' · ') || '+0' }),
+        prices.length ? h('dt', { text: 'Cheapest that day' }) : null,
+        prices.length ? h('dd', { style: 'text-align:left', text: prices.join(' · ') }) : null,
+        notes.length ? h('dt', { text: 'Notes' }) : null,
+        notes.length ? h('dd', { style: 'text-align:left', text: notes.join('; ') }) : null,
+    ]);
+}
+
+export function receiptsCard(m, ctx) {
+    const v = receiptsView(ctx.receipts, m.now, { priceHistory: ctx.priceHistory, prices: ctx.prices || {} });
+    const line = (label, fn) => h('tr', {}, [h('td', { class: 'muted', text: label }), ...v.cols.map(([, s]) => h('td', { class: 'r', text: fn(s) }))]);
+    const summary = h('table', { class: 'tbl num rc-sum' }, [
+        h('thead', {}, [h('tr', {}, [h('th', { text: '' }), ...v.cols.map(([l]) => h('th', { class: 'r', text: l }))])]),
+        h('tbody', {}, [
+            line('Energy trained', (s) => fmtInt(s.e) + ' E'),
+            line('Trains', (s) => fmtInt(s.n)),
+            h('tr', {}, [h('td', { class: 'muted', text: 'Items used' }), ...v.cols.map(([, s]) => h('td', { class: 'r', style: 'white-space:normal', text: usedWords(s) || '—' }))]),
+            line('Money spent', rcMoney),
+            line('Stats gained', (s) => fmtSigned(s.gained)),
+            line('$ per 1,000 stats', (s) => (s.perK === null ? '—' : fmtMoney(s.perK))),
+            line('Energy per 1,000 stats', (s) => rcPerK(s.ePerK)),
+        ]),
+    ]);
+    const open = ctx.ui.receiptOpen;
+    const rows = [];
+    for (const row of v.days) {
+        const toggle = () => {
+            ctx.ui.receiptOpen = open === row.day ? null : row.day;
+            ctx.rerender();
+        };
+        rows.push(
+            h('tr', { class: 'click' + (open === row.day ? ' sel' : ''), tabindex: '0', 'aria-expanded': String(open === row.day), onclick: toggle, onkeydown: (e) => { if (e.key === 'Enter') toggle(); } }, [
+                h('td', { class: 't', text: row.day === tornDayStart(m.now) ? 'today' : dayLabel(row.day) }),
+                h('td', { class: 'r', text: fmtInt(row.s.e) }),
+                h('td', { class: 'r', text: fmtInt(row.s.n) }),
+                h('td', { text: usedWords(row.s) || '—' }),
+                h('td', { class: 'r', text: rcMoney(row.s) }),
+                h('td', { class: 'r', text: fmtSigned(row.s.gained) }),
+                h('td', { class: 'r', text: row.s.perK === null ? '—' : fmtMoney(row.s.perK) }),
+            ]),
+        );
+        if (open === row.day) rows.push(h('tr', { class: 'sub' }, [h('td', { colspan: '7' }, [receiptDetail(row, m)])]));
+    }
+    const any = v.cols.some(([, s]) => s.est);
+    return h('div', {}, [
+        sectionHead('Receipts', meta(['energy, items and money you trained with']), null, 'h3'),
+        summary,
+        v.any
+            ? h('table', { class: 'tbl num', style: 'margin-top:14px' }, [
+                  h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'Day' }), h('th', { class: 'r', text: 'Energy' }), h('th', { class: 'r', text: 'Trains' }), h('th', { text: 'Used' }), h('th', { class: 'r', text: 'Spent' }), h('th', { class: 'r', text: 'Gained' }), h('th', { class: 'r', text: '$ / 1k' })])]),
+                  h('tbody', {}, rows),
+              ])
+            : null,
+        h('div', { class: 'note2', text: v.any ? 'Click a day for its gyms, prices and notes.' + (any ? ' ~ a price that day wasn’t seen: the nearest known one.' : '') : 'Receipts start today: each train, drug, booster and refill is added here as Torn shows it.' }),
+    ]);
+}
+
+/* ---------- What if you'd done another plan ---------- */
+
+/** One colour per plan (never the stat colours); "you" is chalk. */
+export const WHAT_IF_COLOR = { steady: '#8fb8e8', dailyChoco: '#e8a33d', chocoJump: '#c79bf0', edvdJump: '#e98fb5', happy99k: '#f06f9f', blissSteady: '#5cc8c0', steadyBoost: '#a6e08a', steadyMax: '#d7d06a', candyXanax: '#f0c8a0', consoleJump: '#9aa8ff', consoleJumpToy: '#9aa8ff', edvdJumpAN: '#e98fb5' };
+
+const whatIfMemo = { key: '', value: null };
+
+/** The plans re-run for the period (heavy: kept until the period or the player's setup changes). */
+function whatIfFor(m, ctx, period) {
+    // The plan runs depend on the start, the days and (for the budget) the money; a new train only moves the lines.
+    const key = JSON.stringify([period.start, period.days.length, Number((period.money || 0).toPrecision(2)), m.shares, m.pc.unlocked, m.pc.perks && m.pc.perks.mult, m.state.happy.maximum, m.state.energy.maximum, ctx.settings.boosterCapH || 24]);
+    if (key !== whatIfMemo.key) {
+        whatIfMemo.key = key;
+        whatIfMemo.value = runWhatIf({ state: m.state, pc: m.pc, shares: m.shares, settings: ctx.settings, prices: ctx.prices || {} }, period).results;
+    }
+    return whatIfLines(period, whatIfMemo.value);
+}
+
+/** The plans switched on: what the user picked, else the recommended plan. */
+export function whatIfShown(ui, recommended, ids) {
+    const want = Array.isArray(ui.whatIfOn) ? ui.whatIfOn : [recommended];
+    return ids.filter((id) => want.includes(id));
+}
+
+/** "Steady would have given +1.2M, Choco jump +1.5M over these 14 days". */
+export function whatIfSummary(plans, shown, nDays) {
+    const parts = shown.filter((id) => plans[id]).map((id) => ((STRATEGIES[id] || {}).short || id) + ' ' + fmtSigned(plans[id].gained));
+    if (!parts.length) return '';
+    return parts[0].replace(/ ([+−])/, ' would have given $1') + (parts.length > 1 ? ', ' + parts.slice(1).join(', ') : '') + ' over these ' + nDays + ' days';
+}
+
+export function whatIfCard(m, ctx) {
+    const head = sectionHead('What if you’d done another plan', meta(['your energy, at most your money']), null, 'h3');
+    const rangeKey = ctx.ui.progressRange || 14;
+    const today = tornDayStart(m.now);
+    let days = receiptDays(ctx.receipts).filter((d) => d <= today);
+    if (rangeKey !== 'all') days = days.filter((d) => d > today - rangeKey * DAY);
+    const sources = { priceHistory: ctx.priceHistory, prices: ctx.prices || {} };
+    const period = days.length >= 2 ? whatIfPeriod(ctx.receipts, days, sources) : null;
+    if (!period || !m.state || !m.pc) return h('div', {}, [head, h('p', { class: 'muted', style: 'margin:0', text: 'Receipts start today; the comparison appears after two days.' })]);
+    const w = whatIfFor(m, ctx, period);
+    const ids = Object.keys(w.plans).sort((a, b) => w.plans[b].gained - w.plans[a].gained);
+    const rec = m.recommendation && w.plans[m.recommendation.recommended] ? m.recommendation.recommended : ids.includes('steady') ? 'steady' : ids[0];
+    const shown = whatIfShown(ctx.ui, rec, ids);
+    const toggle = (id) => {
+        const cur = whatIfShown(ctx.ui, rec, ids);
+        ctx.ui.whatIfOn = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
+        ctx.rerender();
+    };
+    const series = [{ name: 'you', color: 'var(--chalk)', width: 2.5, values: w.real, label: 'you ' + fmtSigned(period.gained) }];
+    for (const id of shown) series.push({ name: id, color: WHAT_IF_COLOR[id] || 'var(--muted)', dash: '5 4', width: id === rec ? 2 : 1.5, values: w.plans[id].values, label: ((STRATEGIES[id] || {}).short || id) + ' ' + fmtSigned(w.plans[id].gained) });
+    const vals = series.flatMap((s) => s.values);
+    const lo = Math.min(...vals);
+    const hi = Math.max(...vals);
+    const n = period.days.length;
+    const lastDay = period.days[n - 1].day;
+    const chips = ids.map((id) =>
+        h('button', { type: 'button', class: 'tk', 'aria-pressed': String(shown.includes(id)), onclick: () => toggle(id) }, [
+            h('i'),
+            h('span', { style: 'display:inline-block;width:14px;height:2px;background:' + (WHAT_IF_COLOR[id] || 'var(--muted)') }),
+            ((STRATEGIES[id] || {}).short || id) + (id === rec ? ' (recommended)' : '') + ' ' + fmtSigned(w.plans[id].gained),
+        ]),
+    );
+    const summary = whatIfSummary(w.plans, shown, n);
+    return h('div', {}, [
+        head,
+        h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [
+            h('span', { class: 'muted', style: 'font-size:12px', text: 'You: ' + fmtSigned(period.gained) + ' from ' + fmtInt(period.energy) + ' E and ' + fmtMoney(period.money) }),
+            h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), 'you']), h('span', {}, [h('i', { class: 'dash', style: 'color:var(--muted)' }), 'another plan'])]),
+        ]),
+        lineChart(series, { w: 1000, h: 180, left: 50, right: 150, yMin: lo - (hi - lo || hi * 0.01) * 0.08, yMax: hi + (hi - lo || hi * 0.01) * 0.08, grid: [lo, hi], xLabels: [[0, dayLabel(period.days[0].day)], [n, lastDay === today ? 'today' : dayLabel(lastDay)]], n: n + 1, label: 'Total stats: you against other plans with your energy' }),
+        h('div', { class: 'ticks', role: 'group', 'aria-label': 'Plans on the graph', style: 'margin-top:8px' }, chips),
+        summary ? h('div', { class: 'note2', text: summary + '. Each plan trains the energy you trained, with its own happy and boosters; one that costs more than you spent only counts what your money covers.' }) : null,
+    ]);
+}
+
 export function renderProgress(m, ctx) {
     const rangeKey = ctx.ui.progressRange || 14;
     const s = seriesFor(m, ctx, rangeKey === 'all' ? 'all' : rangeKey);
@@ -284,7 +473,7 @@ export function renderProgress(m, ctx) {
     lead.classList.add('lead');
     return {
         ctl: [ctl],
-        main: [lead, statCharts(m, ctx, s), dayBars(m, ctx), lastTrains(m, ctx)],
+        main: [lead, statCharts(m, ctx, s), dayBars(m, ctx), receiptsCard(m, ctx), whatIfCard(m, ctx), lastTrains(m, ctx)],
         pane: [weekFacts(m, ctx), budgetFacts(m, ctx, s), buildFacts(m, ctx, s), milestones(m, ctx), gymFacts(m)].filter(Boolean),
     };
 }
