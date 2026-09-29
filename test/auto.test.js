@@ -134,6 +134,8 @@ test('money log: the amount an entry carries, and a breakdown by line that leave
     assert.deepEqual(b.lines.map((l) => [l.title, l.dir]), [['Bazaar sell', 'in'], ['Item market buy', 'out']]);
     assert.equal(Math.round(b.inPerDay), 3e6);
     assert.equal(incomeBreakdown([], T), null);
+    // Read over 30 days: one sale 2 days ago is spread over the 30.
+    assert.equal(Math.round(incomeBreakdown([{ at: T - 2 * DAY, title: 'Bazaar sell', money: 30e6 }], T, 30).inPerDay), 1e6);
 });
 
 test('Log in with Discord: opens Discord, waits, then sends the plan and the main key; a non-member is told why', async () => {

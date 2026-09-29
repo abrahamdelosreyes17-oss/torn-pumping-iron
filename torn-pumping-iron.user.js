@@ -4539,11 +4539,17 @@
      */
     async function fetchMoneyLog(client, { from, categories, perCategory = 100 }) {
         const out = [];
+        // A category that filled its page covers less than the whole span: only the newest `perCategory` lines came back.
+        let coveredFrom = from * 1000;
         for (const c of categories) {
             const d = await client.get('v2/user/log', { cat: c.id, from, limit: perCategory });
-            for (const e of (d && d.log) || []) out.push({ at: Number(e.timestamp) * 1000, title: String((e.details && e.details.title) || ''), category: c.title, money: moneyOf(e.data) });
+            const rows = (d && d.log) || [];
+            for (const e of rows) out.push({ at: Number(e.timestamp) * 1000, title: String((e.details && e.details.title) || ''), category: c.title, money: moneyOf(e.data) });
+            if (rows.length >= perCategory) coveredFrom = Math.max(coveredFrom, Math.min(...rows.map((e) => Number(e.timestamp) * 1000)));
         }
-        return out.sort((a, b) => b.at - a.at);
+        out.sort((a, b) => b.at - a.at);
+        out.coveredFrom = coveredFrom;
+        return out;
     }
 
     /** The amount a log entry is about: the first money-like field it carries. */
@@ -4788,13 +4794,16 @@
      * log line, over the days read (biggest first). Titles that say neither are
      * left out rather than guessed.
      * @param {{at, title, money}[]} log
+     * @param {number} now
+     * @param {number} [windowDays] - how far back the log was read
      * @returns {{days:number, inPerDay:number, outPerDay:number, lines:{title:string, perDay:number, n:number, dir:'in'|'out'}[]}|null}
      */
-    function incomeBreakdown(log, now) {
+    function incomeBreakdown(log, now, windowDays = null) {
         const rows = (log || []).filter((e) => e && e.money > 0 && Number.isFinite(e.at));
         if (!rows.length) return null;
+        // Spread over the whole span that was read (one sale 2 days ago in a 30-day read is 1/30 a day, not 1/2).
         const oldest = Math.min(...rows.map((e) => e.at));
-        const days = Math.max(1, (now - oldest) / DAY);
+        const days = Math.max(1, windowDays || 0, (now - oldest) / DAY);
         const by = new Map();
         for (const e of rows) {
             const dir = IN_WORDS.test(e.title) ? 'in' : OUT_WORDS.test(e.title) ? 'out' : null;
@@ -7212,7 +7221,7 @@
         const income = incomeFrom(statics.income || [], { spentPerDay: r ? r.cost / horizon : 0 });
         const auto = autoState({ plan, settings, hasFullKey: hasFullKey(), income });
         const ml = get(K.moneyLog, null);
-        auto.breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now()) : null;
+        auto.breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now(), ml.days || null) : null;
         auto.income = income;
         return auto;
     }
@@ -10560,13 +10569,15 @@
 
     function budgetFacts(m, ctx, s) {
         const days = ctx.settings.horizonDays || 30;
-        const budget = ctx.settings.budget || 0;
+        // Auto mode: the budget is what your income affords over the horizon.
+        const auto = m.auto && m.auto.ready && ctx.plan && ctx.plan.pickBy === 'auto' ? m.auto : null;
+        const budget = auto ? auto.budget : ctx.settings.budget || 0;
         const line = s.line;
         const dayN = line ? Math.min(days, Math.floor((tornDayStart(m.now) - line.start) / DAY) + 1) : 1;
         const perDay = line ? line.cost / days : m.spend ? m.spend.perDay : 0;
         const spent = perDay * dayN;
         return h('div', {}, [
-            sectionHead('Budget', meta([fmtMoney(budget) + ' for ' + days + ' days']), null, 'h3'),
+            sectionHead('Budget', meta([fmtMoney(budget) + ' for ' + days + ' days' + (auto ? ' · Auto, from your income' : '')]), null, 'h3'),
             h('dl', { class: 'facts num' }, [
                 h('dt', { text: 'At the plan’s pace' }),
                 h('dd', {}, ['about ' + fmtMoney(spent) + ' · day ' + dayN + ' of ' + days, h('div', { class: 'mini' }, [h('i', { style: 'width:' + (budget ? Math.min(100, (100 * spent) / budget) : 0).toFixed(0) + '%;background:var(--muted)' })])]),
@@ -14701,7 +14712,10 @@
         const cats = (await fetchLogCategories(tornClient())).filter((c) => MONEY_LOG_CATEGORY.test(String(c.title || ''))).slice(0, MONEY_LOG_MAX_CATS);
         const log = await fetchMoneyLog(fullKeyClient(), { from: Math.floor(now / 1000) - MONEY_LOG_DAYS * 86400, categories: cats });
         // Only what the breakdown needs (title, amount, time), newest 1,500.
-        const row = { at: now, cats: cats.map((c) => c.title), log: log.slice(0, 1500).map((e) => ({ at: e.at, title: e.title, money: e.money })) };
+        // Only the lines from when every category is complete count (a busy category's page may not reach back 30 days).
+        const since = log.coveredFrom || now - MONEY_LOG_DAYS * 86400e3;
+        const kept = log.filter((e) => e.at >= since);
+        const row = { at: now, days: Math.max(1, (now - since) / 86400e3), cats: cats.map((c) => c.title), log: kept.slice(0, 1500).map((e) => ({ at: e.at, title: e.title, money: e.money })) };
         set(K.moneyLog, row);
         return row;
     }

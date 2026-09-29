@@ -179,13 +179,15 @@ function weekFacts(m, ctx) {
 
 function budgetFacts(m, ctx, s) {
     const days = ctx.settings.horizonDays || 30;
-    const budget = ctx.settings.budget || 0;
+    // Auto mode: the budget is what your income affords over the horizon.
+    const auto = m.auto && m.auto.ready && ctx.plan && ctx.plan.pickBy === 'auto' ? m.auto : null;
+    const budget = auto ? auto.budget : ctx.settings.budget || 0;
     const line = s.line;
     const dayN = line ? Math.min(days, Math.floor((tornDayStart(m.now) - line.start) / DAY) + 1) : 1;
     const perDay = line ? line.cost / days : m.spend ? m.spend.perDay : 0;
     const spent = perDay * dayN;
     return h('div', {}, [
-        sectionHead('Budget', meta([fmtMoney(budget) + ' for ' + days + ' days']), null, 'h3'),
+        sectionHead('Budget', meta([fmtMoney(budget) + ' for ' + days + ' days' + (auto ? ' · Auto, from your income' : '')]), null, 'h3'),
         h('dl', { class: 'facts num' }, [
             h('dt', { text: 'At the plan’s pace' }),
             h('dd', {}, ['about ' + fmtMoney(spent) + ' · day ' + dayN + ' of ' + days, h('div', { class: 'mini' }, [h('i', { style: 'width:' + (budget ? Math.min(100, (100 * spent) / budget) : 0).toFixed(0) + '%;background:var(--muted)' })])]),

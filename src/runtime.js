@@ -107,7 +107,7 @@ function autoFor(plan, settings, statics) {
     const income = incomeFrom(statics.income || [], { spentPerDay: r ? r.cost / horizon : 0 });
     const auto = autoState({ plan, settings, hasFullKey: hasFullKey(), income });
     const ml = get(K.moneyLog, null);
-    auto.breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now()) : null;
+    auto.breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now(), ml.days || null) : null;
     auto.income = income;
     return auto;
 }

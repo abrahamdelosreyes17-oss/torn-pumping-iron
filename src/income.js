@@ -60,7 +60,10 @@ export async function refreshMoneyLog({ force = false, now = Date.now() } = {}) 
     const cats = (await fetchLogCategories(tornClient())).filter((c) => MONEY_LOG_CATEGORY.test(String(c.title || ''))).slice(0, MONEY_LOG_MAX_CATS);
     const log = await fetchMoneyLog(fullKeyClient(), { from: Math.floor(now / 1000) - MONEY_LOG_DAYS * 86400, categories: cats });
     // Only what the breakdown needs (title, amount, time), newest 1,500.
-    const row = { at: now, cats: cats.map((c) => c.title), log: log.slice(0, 1500).map((e) => ({ at: e.at, title: e.title, money: e.money })) };
+    // Only the lines from when every category is complete count (a busy category's page may not reach back 30 days).
+    const since = log.coveredFrom || now - MONEY_LOG_DAYS * 86400e3;
+    const kept = log.filter((e) => e.at >= since);
+    const row = { at: now, days: Math.max(1, (now - since) / 86400e3), cats: cats.map((c) => c.title), log: kept.slice(0, 1500).map((e) => ({ at: e.at, title: e.title, money: e.money })) };
     set(K.moneyLog, row);
     return row;
 }

@@ -269,11 +269,17 @@ export async function fetchLogCategories(client) {
  */
 export async function fetchMoneyLog(client, { from, categories, perCategory = 100 }) {
     const out = [];
+    // A category that filled its page covers less than the whole span: only the newest `perCategory` lines came back.
+    let coveredFrom = from * 1000;
     for (const c of categories) {
         const d = await client.get('v2/user/log', { cat: c.id, from, limit: perCategory });
-        for (const e of (d && d.log) || []) out.push({ at: Number(e.timestamp) * 1000, title: String((e.details && e.details.title) || ''), category: c.title, money: moneyOf(e.data) });
+        const rows = (d && d.log) || [];
+        for (const e of rows) out.push({ at: Number(e.timestamp) * 1000, title: String((e.details && e.details.title) || ''), category: c.title, money: moneyOf(e.data) });
+        if (rows.length >= perCategory) coveredFrom = Math.max(coveredFrom, Math.min(...rows.map((e) => Number(e.timestamp) * 1000)));
     }
-    return out.sort((a, b) => b.at - a.at);
+    out.sort((a, b) => b.at - a.at);
+    out.coveredFrom = coveredFrom;
+    return out;
 }
 
 /** The amount a log entry is about: the first money-like field it carries. */

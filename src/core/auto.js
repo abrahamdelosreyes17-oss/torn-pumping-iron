@@ -188,13 +188,16 @@ const OUT_WORDS = /(buy|bought|purchase|send|sent|paid|fee|lose|lost|bet|donat|d
  * log line, over the days read (biggest first). Titles that say neither are
  * left out rather than guessed.
  * @param {{at, title, money}[]} log
+ * @param {number} now
+ * @param {number} [windowDays] - how far back the log was read
  * @returns {{days:number, inPerDay:number, outPerDay:number, lines:{title:string, perDay:number, n:number, dir:'in'|'out'}[]}|null}
  */
-export function incomeBreakdown(log, now) {
+export function incomeBreakdown(log, now, windowDays = null) {
     const rows = (log || []).filter((e) => e && e.money > 0 && Number.isFinite(e.at));
     if (!rows.length) return null;
+    // Spread over the whole span that was read (one sale 2 days ago in a 30-day read is 1/30 a day, not 1/2).
     const oldest = Math.min(...rows.map((e) => e.at));
-    const days = Math.max(1, (now - oldest) / DAY);
+    const days = Math.max(1, windowDays || 0, (now - oldest) / DAY);
     const by = new Map();
     for (const e of rows) {
         const dir = IN_WORDS.test(e.title) ? 'in' : OUT_WORDS.test(e.title) ? 'out' : null;
