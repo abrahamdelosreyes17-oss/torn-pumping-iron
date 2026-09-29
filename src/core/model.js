@@ -22,7 +22,7 @@ import { PICK_BY } from './recommend.js';
 import { XANAX, SAMPLE_PRICES, ITEMS, XANAX_CD_MIN, GAME_CONSOLE } from './items.js';
 import { HAPPY_CAP } from './gain.js';
 import { JUMP_STACK } from './strategies.js';
-import { effectivePickBy, eventSwitchHeads, affordLine, autoWaitLine, unlockDays, unlockEnergyLeft } from './auto.js';
+import { budgetOf, effectivePickBy, eventSwitchHeads, affordLine, autoWaitLine, unlockDays, unlockEnergyLeft } from './auto.js';
 
 /*
  * The 30-day build projection is the heavy part of a model (thousands of
@@ -175,7 +175,7 @@ function withBestCandy(id, base, { budget = Infinity, pickBy = 'most' } = {}) {
 export function compareStrategies({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most' }) {
     const base = simInputs({ state, pc, shares, settings, prices, special, statics });
     const results = {};
-    const budget = settings.budget || Infinity;
+    const budget = budgetOf(settings);
     for (const id of feasibleStrategies({ bliss: pc.perks.bliss, boosterCapH: base.boosterCapH, toyShop5: base.toyShop5, adultNovelties10: base.adultNovelties10 })) {
         if (id === 'consoleJump' || id === 'consoleJumpToy') {
             // Low-stat players only: over 250k in a stat it trains, it's shown (behind the tick) and never picked.
@@ -224,7 +224,7 @@ function boostersPerDayMax(base) {
  */
 export function blissWhatIf({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most' }) {
     const base = { ...simInputs({ state, pc, shares, settings, prices, special, statics }), bliss: true };
-    return { blissSteady: { ...simulateStrategy('blissSteady', base), whatIf: true }, dailyChoco: { ...withBestCandy('dailyChoco', base, { budget: settings.budget || Infinity, pickBy }).result, whatIf: true } };
+    return { blissSteady: { ...simulateStrategy('blissSteady', base), whatIf: true }, dailyChoco: { ...withBestCandy('dailyChoco', base, { budget: budgetOf(settings), pickBy }).result, whatIf: true } };
 }
 
 /**
@@ -241,7 +241,7 @@ export function companyWhatIf({ state, pc, shares, settings, prices, special = 0
     if (!best) return [];
     const base = simInputs({ state, pc, shares, settings, prices, special, statics });
     const cj = companyJob(statics.job, statics.jobPoints);
-    const limit = pickBy === 'max' ? Infinity : settings.budget || Infinity;
+    const limit = pickBy === 'max' ? Infinity : budgetOf(settings);
     const out = [];
     const note = 'It means being hired by that company (its director hires you), and job specials are locked for ' + JOB_LOCK_H + ' h after joining.';
     const add = (key, strategy, company, stars, r) => {
@@ -254,7 +254,7 @@ export function companyWhatIf({ state, pc, shares, settings, prices, special = 0
     }
     if (!base.toyShop5) {
         const probe = simulateStrategy('consoleJumpToy', { ...base, special: 0, toyShop5: true, jobHappy: null });
-        if (!consoleBlocked(pc.stats, probe.perStat)) add('toy5', 'consoleJumpToy', 'Toy Shop or Game Shop', 5, withBestCandy('consoleJumpToy', { ...base, toyShop5: true, jobHappy: null }, { budget: settings.budget || Infinity, pickBy }).result);
+        if (!consoleBlocked(pc.stats, probe.perStat)) add('toy5', 'consoleJumpToy', 'Toy Shop or Game Shop', 5, withBestCandy('consoleJumpToy', { ...base, toyShop5: true, jobHappy: null }, { budget: budgetOf(settings), pickBy }).result);
     }
     return out.sort((a, b) => b.result.gained - a.result.gained);
 }
@@ -437,15 +437,18 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const sw = eventSwitchHeads(autoSwitch, now);
     if (sw) heads.push({ ...sw, go: 'plan' });
     if (compare) {
-        const r = recommend(compare, { budget: settings.budget || Infinity, bliss: pc.perks.bliss, pickBy, goal: goalKind });
+        const r = recommend(compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy, goal: goalKind });
         rec = r;
         const mine = compare[plan.strategy];
-        if (r.recommended === plan.strategy) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is still best' });
+        // Auto switched for an event: the usual comparison has no event in it, so it doesn't argue with the switch.
+        const eventOn = autoSwitch && autoSwitch.active && autoSwitch.id === plan.strategy;
+        if (eventOn) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' for ' + autoSwitch.event.name });
+        else if (r.recommended === plan.strategy) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is still best' });
         else if (mine) {
             const w = pickWarning(compare[r.recommended], mine, { bliss: pc.perks.bliss, days: settings.horizonDays || 30 });
             if (w.warn) heads.push({ tone: 'warn', text: (STRATEGIES[r.recommended] || {}).name + ' would gain more', sub: 'see Plan', go: 'plan' });
         }
-        ladder = energyLadder({ state, pc, shares, prices, compare, recommended: r.recommended, days: settings.horizonDays || 30, budget: settings.budget || Infinity, specialHave: state.specialRefills || 0, specialUse: specialLeft(plan, state) });
+        ladder = energyLadder({ state, pc, shares, prices, compare, recommended: r.recommended, days: settings.horizonDays || 30, budget: budgetOf(settings), specialHave: state.specialRefills || 0, specialUse: specialLeft(plan, state) });
     }
     // Spend per day, and how long the cash on hand lasts at the recommended plan's pace.
     const horizon = settings.horizonDays || 30;

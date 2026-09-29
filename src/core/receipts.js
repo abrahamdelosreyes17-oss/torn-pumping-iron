@@ -134,7 +134,10 @@ export function receiptChange(prev, next, diff, { table = GYMS, perks = null, ca
         if (it.toMax) added += Math.max(0, maxE - expected) * Math.min(1, n);
         else if (it.energy) added += Math.round(it.energy * canMult) * n;
     }
-    added += (out.refills + out.special) * maxE;
+    // A refill fills the bar up to its maximum, never above (O2): the first adds what was missing, each further one a
+    // full bar (the one before was trained first, or it would have added nothing).
+    const fills = out.refills + out.special;
+    if (fills > 0) added += Math.max(0, maxE - expected) + (fills - 1) * maxE;
     const eBar = Math.max(0, expected + added - next.energy.current);
     // The gain model's count, for when the bar can't say (and to split several stats).
     const model = {};

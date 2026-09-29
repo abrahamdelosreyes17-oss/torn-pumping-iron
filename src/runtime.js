@@ -15,7 +15,8 @@ import { buildModel, compareStrategies, blissWhatIf, companyWhatIf, playerContex
 import { recommend } from './core/recommend.js';
 import { targetShares } from './core/plan.js';
 import { upcomingEvents } from './core/events.js';
-import { incomeFrom, autoState, effectiveSettings, eventToPlan, eventSwitch, incomeBreakdown } from './core/auto.js';
+import { budgetOf, incomeFrom, autoState, effectiveSettings, eventToPlan, eventSwitch, incomeBreakdown } from './core/auto.js';
+import { summarizeReceipts } from './core/receipts.js';
 import { livePrices } from './core/market.js';
 import { TORN_PER_MINUTE_ALONE } from './core/turns.js';
 import { isPaused } from './turns.js';
@@ -102,9 +103,14 @@ export function hasFullKey() {
  * event wins enough to switch the plan for it.
  */
 function autoFor(plan, settings, statics) {
-    const horizon = settings.horizonDays || 30;
-    const r = pi.compare && pi.compare[plan.strategy];
-    const spentPerDay = r ? r.cost / horizon : 0;
+    // What the gym really cost over the same days (receipts), added back: it left your networth and shows in the log's "out".
+    // Never the plan's own projected cost, which would feed the budget back into itself.
+    const now = Date.now();
+    const winDays = 30;
+    const rc = get(K.receipts, null);
+    const today = tornDayStart(now);
+    const spent = rc ? summarizeReceipts(rc, today - winDays * 86400e3, today, { prices: getPrices(), priceHistory: get(K.priceHistory, null) }).cost : 0;
+    const spentPerDay = spent / winDays;
     const income = incomeFrom(statics.income || [], { spentPerDay });
     const ml = get(K.moneyLog, null);
     const breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now(), ml.days || null) : null;
@@ -115,9 +121,12 @@ function autoFor(plan, settings, statics) {
 }
 
 /** Your faction's war, as Torn Eye last read it (its wars every 5 minutes): on now or within a day, read in the last 6 hours. */
-export function warOnNow(now = Date.now()) {
-    const w = get('eyeWarAuto', null);
-    if (!w || !Array.isArray(w.enemies) || !w.enemies.length || !(now - (w.at || 0) < 6 * 3600e3)) return null;
+export function warOnNow(now = Date.now(), statics = null) {
+    // The feed reads your faction's wars every 15 minutes; Torn Eye's own read (webpage) counts too, whichever is newer.
+    const fw = statics && statics.factionWars;
+    const ea = get('eyeWarAuto', null);
+    const w = [fw, ea].filter((x) => x && Array.isArray(x.enemies)).sort((a, b) => (b.at || 0) - (a.at || 0))[0];
+    if (!w || !w.enemies.length || !(now - (w.at || 0) < 6 * 3600e3)) return null;
     const nowS = Math.floor(now / 1000);
     return w.enemies.find((e) => (!e.start || e.start - nowS <= 86400) && (!e.end || e.end > nowS)) || null;
 }
@@ -155,7 +164,7 @@ function comparisonFor(state, statics, plan, settings) {
             // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
             pi.whatIf = pc.perks.bliss ? null : blissWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy });
             // Company what-ifs: hired where a jump variant would beat the recommended plan.
-            const rec = recommend(pi.compare, { budget: settings.budget || Infinity, bliss: pc.perks.bliss, pickBy });
+            const rec = recommend(pi.compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy });
             pi.jobWhatIf = companyWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy, compare: pi.compare, recommended: rec.recommended });
             pi.compareKey = key;
         };
@@ -197,10 +206,13 @@ export function currentModel(now = Date.now()) {
             autoSwitch = eventSwitch({ event: ev, eventCompare: ec.eventCompare, normalCompare: ec.normalCompare, budgetPerDay: auto.budgetPerDay, now });
             if (autoSwitch && autoSwitch.active) strategy = autoSwitch.id;
         }
-        // The plan follows Auto's pick (saved, so the day plan, Discord and Progress all see the same plan).
-        if (strategy && strategy !== plan.strategy) plan = setPlan({ ...plan, strategy, strategyPicked: false, createdAt: now });
+        // The plan follows Auto's pick (saved, so the day plan, Discord and Progress all see the same plan): written by the
+        // leader tab only, and only from an up-to-date comparison, so tabs never take turns rewriting it.
+        const lead = get(K.leader, null);
+        const fresh = !pi.compareWanted || pi.compareWanted === pi.compareKey;
+        if (strategy && strategy !== plan.strategy && fresh && lead && lead.id === pi.tabId) plan = setPlan({ ...plan, strategy, strategyPicked: false, createdAt: now });
     }
-    return buildModel({ state, statics, plan, settings, auto, autoSwitch, warOn: warOnNow(now), log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, whatIf: pi.whatIf || null, jobWhatIf: pi.jobWhatIf || null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+    return buildModel({ state, statics, plan, settings, auto, autoSwitch, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, whatIf: pi.whatIf || null, jobWhatIf: pi.jobWhatIf || null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
 }
 
 /**

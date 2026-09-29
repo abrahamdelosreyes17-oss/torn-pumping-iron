@@ -90,6 +90,12 @@ export function effectiveSettings(settings, auto) {
     return settings;
 }
 
+/** The budget the plans run with: a number (Auto's can be 0: nothing that costs money), else no limit. */
+export function budgetOf(settings) {
+    const b = settings ? settings.budget : null;
+    return typeof b === 'number' && Number.isFinite(b) && b >= 0 ? b : Infinity;
+}
+
 /** The pick rule the recommender uses (Auto is "most stats" inside the income budget). */
 export function effectivePickBy(pickBy, auto) {
     if (pickBy === 'auto') return auto && auto.ready ? 'auto' : 'most';

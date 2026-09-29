@@ -255,3 +255,29 @@ test('Auto: with the money log, income is money in less money out plus the gym s
     assert.equal(b.source, 'networth');
     assert.equal(b.perDay, 50e6);
 });
+
+test('review fixes: Auto budget 0 is a limit; the gym walk-through keeps going when a step leaves energy on purpose', async () => {
+    const { budgetOf } = await import('../src/core/auto.js');
+    assert.equal(budgetOf({ budget: 0 }), 0);
+    assert.equal(budgetOf({ budget: 150e6 }), 150e6);
+    assert.equal(budgetOf({}), Infinity);
+    assert.equal(budgetOf({ budget: Infinity }), Infinity);
+    const { startSession, needsNewSession } = await import('../src/core/gympage.js');
+    const step = { id: 'x', label: 'Xanax #1', items: [], parts: [{ gymId: 24, gymName: "George's", stat: 'str', trains: 10, perTrain: 10 }] };
+    const m = { build: { id: 'hank' } };
+    const now = Date.now();
+    const s = startSession(step, { energy: 400, stats: { str: 1, spd: 1, def: 1, dex: 1 }, happy: 5000 }, m, now);
+    assert.equal(s.spare, 300, '400 energy, the step needs 100: 300 kept on purpose');
+    assert.equal(needsNewSession(s, { energy: 370 }, m, now + 60000), false, 'three trains in: still the same session');
+    assert.equal(needsNewSession(s, { energy: 700 }, m, now + 60000), true, 'a refill later: a new session');
+});
+
+test('review fix: with energy kept for a war above the maximum, no refill is planned (it would add nothing)', async () => {
+    const { dayTimeline } = await import('../src/core/plan.js');
+    const { BUILDS } = await import('../src/core/builds.js');
+    const now = Date.UTC(2026, 8, 29, 10, 0);
+    const state = { at: now, energy: { current: 650, maximum: 150, increment: 5, interval: 600, fullTime: 0 }, happy: { current: 5000, maximum: 5000, increment: 5, interval: 900, fullTime: 0 }, cooldowns: { drug: 0, booster: 0, medical: 0 }, drugCd: 0, boosterCd: 0, refillUsed: false, stats: { str: 1e6, spd: 1e6, def: 1e6, dex: 1e6 }, gymId: 1, specialRefills: 0 };
+    const ctx = { shares: BUILDS.balanced.shares, unlocked: [1], perks: { str: 1, spd: 1, def: 1, dex: 1 }, keep: [], active: 1, keepEnergy: 500 };
+    const steps = dayTimeline({ state, now, strategy: 'steady', ctx, until: now + 3 * 3600e3 });
+    assert.ok(!steps.some((s) => s.kind === 'refill' && (s.items || []).some((it) => it.id === 'points')), JSON.stringify(steps.map((s) => s.kind + ':' + s.energy)));
+});

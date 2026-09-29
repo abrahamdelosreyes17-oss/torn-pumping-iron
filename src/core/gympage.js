@@ -91,6 +91,8 @@ export function startSession(step, reading, m, now) {
         happy0: reading.happy,
         last: { stats: { ...reading.stats }, energy: reading.energy },
         spent,
+        // Energy the step leaves on purpose (kept for a war, or a stop that keeps a specialist gym): not a sign of a new session.
+        spare: Number.isFinite(reading.energy) ? Math.max(0, reading.energy - step.parts.reduce((a, p) => a + p.trains * p.perTrain, 0)) : 0,
     };
 }
 
@@ -161,7 +163,7 @@ export function needsNewSession(session, reading, m, now) {
     if (!session || session.v !== 1 || !Array.isArray(session.parts) || !session.parts.length) return true;
     if (session.build !== m.build.id) return true;
     if (!(now - session.at < SESSION_MAX_MS) || now < session.at) return true;
-    return Number.isFinite(reading.energy) && reading.energy - sessionEnergyLeft(session) >= NEW_SESSION_E;
+    return Number.isFinite(reading.energy) && reading.energy - sessionEnergyLeft(session) - (session.spare || 0) >= NEW_SESSION_E;
 }
 
 /**

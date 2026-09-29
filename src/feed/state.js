@@ -16,7 +16,8 @@ import { totalOf } from '../core/gain.js';
 import { calibrationSample, addCalibration } from '../core/calibration.js';
 import { mergeLiveGyms, GYMS } from '../core/gyms.js';
 import { parsePerks } from '../core/perks.js';
-import { fetchUserState, fetchPerks, fetchProperty, fetchGyms, fetchInventory, fetchMoney, fetchCalendar, fetchKeyInfo, fetchNetworthHistory, fetchJob, fetchJobPoints, fetchItemsInfo } from '../api/torn.js';
+import { fetchUserState, fetchPerks, fetchProperty, fetchGyms, fetchInventory, fetchMoney, fetchCalendar, fetchKeyInfo, fetchNetworthHistory, fetchJob, fetchJobPoints, fetchItemsInfo, fetchFactionWars } from '../api/torn.js';
+import { enemiesFromWars } from '../core/eye/war.js';
 import { NETWORTH_STATS, INCOME_DAYS } from '../core/auto.js';
 import { POINTS, CANDY_IDS, GAME_CONSOLE } from '../core/items.js';
 import { TRADING_SEEN_KEY } from '../core/turns.js';
@@ -45,6 +46,8 @@ export const STATIC_EVERY = {
     job: 6 * 60 * 60 * 1000,
     jobPoints: 6 * 60 * 60 * 1000,
     items: 24 * 60 * 60 * 1000,
+    // Your faction's wars (Settings › Keep for war days, and Torn Eye's War mode): one Public call.
+    factionWars: 15 * 60 * 1000,
 };
 
 /** The items whose Torn data (market price, city shops) the plan reads: every candy and the Game Console. */
@@ -244,6 +247,14 @@ export class StateFeed {
             ['job', () => fetchJob(this.client)],
             ['jobPoints', () => fetchJobPoints(this.client)],
             ['items', () => fetchItemsInfo(this.client, ITEMS_INFO_IDS)],
+            [
+                'factionWars',
+                async () => {
+                    const ki = (this.store.get(this.keys.static, {}) || {}).keyInfo || {};
+                    if (!ki.factionId) return { enemies: [], at: this.now() };
+                    return { enemies: enemiesFromWars(await fetchFactionWars(this.client), ki.factionId, Math.floor(this.now() / 1000)), at: this.now() };
+                },
+            ],
         ];
         for (const [k, fn] of jobs) {
             if (!due(k)) continue;
