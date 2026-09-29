@@ -72,7 +72,8 @@ function whyRecommended(best, results, { budget }) {
 export function whyNot(best, alt, { bliss = false, budget = Infinity } = {}) {
     if (!best || !alt) return '';
     const pct = Math.round(alt.deltaStatsPct);
-    if (alt.overBudget) return 'Over your ' + fmtMoney(budget) + ' budget' + (alt.gained > best.gained ? ' (it would gain ' + (pct > 0 ? '+' : '') + pct + '% more).' : '.');
+    // Over budget is the reason only when it would otherwise win; a worse plan leads with what it loses.
+    if (alt.overBudget && alt.gained > best.gained) return 'Over your ' + fmtMoney(budget) + ' budget (it would gain +' + pct + '% more).';
     if (alt.verdict === 'same') return 'The same stats for the same money: nothing to gain by switching.';
     const why = [];
     if (JUMP_LIKE.has(alt.id)) why.push('holding four Xanax stops natural energy');
@@ -80,7 +81,7 @@ export function whyNot(best, alt, { bliss = false, budget = Infinity } = {}) {
     if (alt.id === 'dailyChoco') why.push('the candy lifts happy for one session a day');
     if (HAPPY_BOUGHT.has(alt.id) && !bliss) why.push('without Ignorance Is Bliss the extra happy resets');
     const head = pct < 0 ? '−' + -pct + '% stats' : pct > 0 ? '+' + pct + '% stats for ' + fmtMoney(alt.deltaCost) + ' more' : 'No more stats';
-    const cost = pct < 0 && alt.deltaCost > 0 ? ' and ' + fmtMoney(alt.deltaCost) + ' more' : '';
+    const cost = pct < 0 && alt.deltaCost > 0 ? ' and ' + fmtMoney(alt.deltaCost) + ' more' + (alt.overBudget ? ', over your budget' : '') : '';
     return head + cost + (why.length ? ': ' + why.join('; ') + '.' : '.');
 }
 
