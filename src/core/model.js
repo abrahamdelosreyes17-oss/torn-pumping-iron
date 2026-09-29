@@ -25,6 +25,14 @@ import { JUMP_STACK } from './strategies.js';
  */
 const projectionMemo = { key: '', value: null };
 
+/** Energy above the maximum that isn't counted as a stacked or held Xanax (a can or two). */
+export const STRAY_ENERGY = 50;
+
+/** Drug steps in the day log (a held Xanax and a catch-up with a drug count too): one rule everywhere. */
+export function isDrugEntry(e) {
+    return e.kind === 'xanax' || e.kind === 'stack' || e.kind === 'hold' || (e.kind === 'catchup' && e.drug);
+}
+
 export function projectionFor(args) {
     const key = JSON.stringify([args.stats, args.shares, args.energyPerDay, args.happy, args.unlocked, args.perks, args.keep, args.days, args.active, args.table.map((g) => [g.id, g.dots])]);
     if (key !== projectionMemo.key) {
@@ -102,7 +110,8 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const today = (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(now));
     const boostedToday = today.some((e) => e.kind === 'boost');
     // Energy above the maximum is stacked (a jump) or held (daily choco) Xanax: read from the bars, so it survives Torn midnight and reloads.
-    const over = Math.max(0, energyAt(state, now) - state.energy.maximum);
+    // A can (+20–30) above the maximum isn't a Xanax; one Xanax always puts at least 100 above it.
+    const over = Math.max(0, energyAt(state, now) - state.energy.maximum - STRAY_ENERGY);
     const ctx = {
         shares,
         unlocked: pc.unlocked,
@@ -129,7 +138,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const boosterLeft = Math.max(0, boosterFreeAt(state) - now);
     const refillFree = refillAvailable(state, now);
     const refillStep = steps.find((s) => s.kind === 'refill');
-    const xanaxPlanned = today.filter((x) => x.kind === 'xanax' || x.kind === 'stack').length + steps.filter((s) => (s.kind === 'xanax' || s.kind === 'stack' || s.kind === 'hold') && s.at < tornDayStart(now) + DAY).length;
+    const xanaxPlanned = today.filter(isDrugEntry).length + steps.filter((s) => (s.kind === 'xanax' || s.kind === 'stack' || s.kind === 'hold') && s.at < tornDayStart(now) + DAY).length;
     const strip = {
         energy: { current: energy, max: e.maximum, fullAt },
         happy: { current: happyAt(state, now, { bliss: pc.perks.bliss }), max: state.happy.maximum, property: statics.property && statics.property.property ? statics.property.property.name : null },

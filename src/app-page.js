@@ -54,6 +54,11 @@ export async function loadPrices(ids) {
     for (const id of due) page.loading.add(id);
     let hist = readPriceHistory(get(K.priceHistory, null));
     for (const id of due) {
+        // Paused mid-load: keep what's stored, ask again once Torn Trading stops.
+        if (isPaused()) {
+            page.loading.delete(id);
+            continue;
+        }
         const row = { at: Date.now(), listings: [], imAt: null, w3bAt: null, error: null };
         try {
             if (id === POINTS) {
@@ -64,6 +69,7 @@ export async function loadPrices(ids) {
                 row.imAt = Date.now();
                 try {
                     if (getSettings().w3b === false) throw new Error('TornW3B is off');
+                    if (isPaused()) throw new Error('Paused while Torn Trading runs.');
                     const w = await fetchW3bListings(w3bClient(), id);
                     // Bazaars TornW3B re-checked in the last 2 minutes, never a $1 locked listing.
                     row.listings = row.listings.concat(listingsFromW3b(w, { now: Date.now() }));
@@ -73,6 +79,10 @@ export async function loadPrices(ids) {
                 }
             }
         } catch (error) {
+            if (error && error.takingTurns) {
+                page.loading.delete(id);
+                continue;
+            }
             row.error = redactKey(String((error && error.message) || error), getKey(K.apiKey));
         }
         const cheapest = row.listings.length ? Math.min(...row.listings.map((l) => l.price)) : null;
@@ -84,7 +94,7 @@ export async function loadPrices(ids) {
         page.loading.delete(id);
     }
     set(K.priceHistory, hist);
-    const merged = { ...(get(K.prices, {}) || {}), ...Object.fromEntries(due.map((id) => [id, prices[id]])) };
+    const merged = { ...(get(K.prices, {}) || {}), ...Object.fromEntries(due.filter((id) => prices[id] && prices[id].at >= now).map((id) => [id, prices[id]])) };
     set(K.prices, merged);
     refresh();
     if (page.app) page.app.render(true);
@@ -150,7 +160,7 @@ function diagnostics() {
 
 /** Targets for the Torn Eye tab: FFScouter's list, estimated against you. */
 async function loadTargets(params) {
-    if (!getKey(K.ffsKey)) return;
+    if (!getKey(K.ffsKey) || isPaused()) return;
     page.eye.loading = true;
     page.eye.error = null;
     page.app.render(true);

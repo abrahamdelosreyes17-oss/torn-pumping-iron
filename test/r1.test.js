@@ -125,7 +125,7 @@ test('#7 a slow part that fails is asked again in 5 minutes, and keeps what it h
         fetchImpl: async (url) => {
             const p = new URL(url).pathname;
             calls.push(p);
-            if (p === '/v2/user/perks' && fail) return { ok: true, status: 200, json: async () => ({ error: { code: 5, error: 'Too many requests' } }) };
+            if (p === '/v2/user/perks' && fail) return { ok: true, status: 200, json: async () => ({ error: { code: 17, error: 'Backend error occurred' } }) };
             if (p === '/v2/user/perks') return { ok: true, status: 200, json: async () => ({ perks: { property: ['+ 2% gym gains'] } }) };
             return { ok: true, status: 200, json: async () => ({}) };
         },
@@ -247,4 +247,19 @@ test('the day plan still starts at Torn midnight after the fixes', () => {
     const steps = dayTimeline({ state: friend(), now: T0, strategy: 'steady', ctx: { shares: BUILDS.balanced.shares, unlocked: unlockedGyms(18), active: 18, drugsToday: 1 } });
     assert.equal(tornClock(steps[0].at), '10:51');
     assert.ok(steps.every((s) => s.at < tornDayStart(T0) + DAY + MIN));
+});
+
+/* From the R1 review */
+
+test('review: a mark from the future (clock moved back) is replaced, so the pause still starts', () => {
+    const now = 1_790_000_000_000;
+    assert.equal(shouldMarkSeen(now + 5 * 60000, now), true);
+    assert.equal(tradingRunning(now + 5 * 60000, now), true, 'a future mark still counts as running');
+});
+
+test('review: a can above the maximum is not a stacked or held Xanax', () => {
+    const jump = buildModel({ state: friend({ energy: 175, drug: 0 }), statics: STATICS, plan: { ...PLAN, strategy: 'edvdJump' }, settings: SETTINGS, now: T0 });
+    assert.equal(jump.steps[0].label, 'Xanax #1 of 4 · don\'t train');
+    const choco = buildModel({ state: friend({ energy: 175, drug: 3600 }), statics: STATICS, plan: { ...PLAN, strategy: 'dailyChoco' }, settings: SETTINGS, now: T0 });
+    assert.notEqual(choco.steps[0].kind, 'boost');
 });

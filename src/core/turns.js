@@ -27,7 +27,7 @@ export const W3B_PER_MINUTE_ALONE = 80;
 /** Is Torn Trading running now (seen within the grace period)? */
 export function tradingRunning(seenAt, now) {
     const t = Number(seenAt) || 0;
-    return t > 0 && now - t < TRADING_GRACE_MS && now - t >= -TRADING_GRACE_MS;
+    return t > 0 && now - t < TRADING_GRACE_MS;
 }
 
 /** When Pumping Iron starts again if Torn Trading isn't seen any more. */
@@ -37,7 +37,9 @@ export function resumesAt(seenAt) {
 
 /** Should this tab write a fresh "seen" mark? */
 export function shouldMarkSeen(seenAt, now) {
-    return !(Number(seenAt) > 0) || now - Number(seenAt) >= TRADING_MARK_EVERY_MS;
+    const t = Number(seenAt) || 0;
+    // A mark from the future (the clock moved back) is replaced, or the pause would never start.
+    return !(t > 0) || now - t >= TRADING_MARK_EVERY_MS || t > now;
 }
 
 /**

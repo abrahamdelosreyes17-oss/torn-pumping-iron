@@ -6,6 +6,7 @@
 
 import { K, get, set, getKey } from './platform/store.js';
 import { tornClient, isVisible } from './runtime.js';
+import { isPaused } from './turns.js';
 import { fetchDiscord } from './api/torn.js';
 import { workerBase, newSecret, stepsForWorker, workerSync, workerTest, workerForget } from './api/worker.js';
 
@@ -75,7 +76,8 @@ export async function forgetDiscord() {
 /** After each model refresh: send the plan if its steps changed (≤ once a minute, visible tab only). */
 export function maybeSyncPlan(m, now = Date.now()) {
     const w = discordState();
-    if (!w || !isVisible()) return false;
+    // While Torn Trading runs the plan is only the last read moving on the clock: don't send it.
+    if (!w || !isVisible() || isPaused()) return false;
     const plan = planPayload(m);
     if (!plan) return false;
     const sig = JSON.stringify(plan.steps.map((s) => [s.kind, s.label, Math.round(s.at / 300)]));

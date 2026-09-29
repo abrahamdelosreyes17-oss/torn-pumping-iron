@@ -9,6 +9,7 @@
 import { K, get, set, getKey, getSettings } from './platform/store.js';
 import { idbGet, idbSet } from './platform/idb.js';
 import { pi, tornClient, isVisible } from './runtime.js';
+import { isPaused } from './turns.js';
 import { fetchProfile, fetchPersonalStats, fetchAttacks, fetchEquipment } from './api/torn.js';
 import { makeFfsClient, fetchFfsStats, FFS_MEMORY_MS, FFS_STORED_MS } from './api/ffscouter.js';
 import { makeTsClient, fetchSpyUser } from './api/tornstats.js';
@@ -150,7 +151,8 @@ export function wantPlayers(ids, { profiles = false } = {}) {
 }
 
 async function flush() {
-    if (!isVisible()) return;
+    // Nothing asked while hidden, or while Torn Trading runs (the two take turns); the ids stay pending.
+    if (!isVisible() || isPaused()) return;
     const want = [...eye.pending];
     eye.pending.clear();
     const ids = [...new Set(want.map((x) => Number(String(x).split(':')[0])))];
@@ -196,8 +198,9 @@ async function flush() {
                 const p = await fetchProfile(tornClient(), id);
                 if (p) r.profile = { level: p.level, rank: p.rank, life: p.life && p.life.maximum, status: p.status || null, name: p.name, faction: p.faction_id || null };
                 r.profileAt = Date.now();
-            } catch {
-                r.profileAt = Date.now();
+            } catch (error) {
+                // Paused mid-sweep: ask again later instead of remembering "nothing".
+                if (!(error && error.takingTurns)) r.profileAt = Date.now();
             }
         }
         // Public stats only when nothing better exists.
@@ -207,10 +210,13 @@ async function flush() {
                     // The public "popular" group has crimes.total and networth.total (research-api-shapes.md §2).
                     const ps = (await fetchPersonalStats(tornClient(), { id, cat: 'popular' })) || {};
                     r.pub = { crimes: Number(ps.crimes && ps.crimes.total) || 0, networth: Number(ps.networth && ps.networth.total) || 0 };
-                } catch {
-                    r.pub = null;
+                    r.pubAt = Date.now();
+                } catch (error) {
+                    if (!(error && error.takingTurns)) {
+                        r.pub = null;
+                        r.pubAt = Date.now();
+                    }
                 }
-                r.pubAt = Date.now();
             }
         }
     }

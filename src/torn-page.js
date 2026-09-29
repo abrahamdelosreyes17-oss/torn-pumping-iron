@@ -111,6 +111,7 @@ function clearAll() {
 /* ----------------------------------------------------------- gym marks */
 
 function drawGym(m) {
+    if (isPaused()) return;
     const root = gymRoot();
     if (!root || gymLoading(root)) return;
     const buttons = readGymButtons(root);
@@ -151,7 +152,7 @@ function watchGym() {
     tp.observedRoot = root;
     let timer = null;
     tp.observer = new MutationObserver((muts) => {
-        if (tp.drawing) return;
+        if (tp.drawing || isPaused()) return;
         // Our own marks changing is not Torn re-rendering.
         if (muts.every((mu) => [...mu.addedNodes, ...mu.removedNodes].every((n) => n.nodeType === 1 && n.classList && n.classList.contains('pi-mark')))) return;
         clearTimeout(timer);

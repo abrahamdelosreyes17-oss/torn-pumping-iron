@@ -173,9 +173,15 @@ export class StateFeed {
                 'inventory',
                 async () => {
                     const inv = await fetchInventory(this.client);
-                    // Points held (for the refill) come from /user/money.
-                    const points = await fetchPoints(this.client);
-                    if (points !== null) inv[POINTS] = points;
+                    // Points held (for the refill) come from /user/money; a failure there keeps the inventory.
+                    try {
+                        const points = await fetchPoints(this.client);
+                        if (points !== null) inv[POINTS] = points;
+                    } catch (error) {
+                        if (error && (KEY_DEAD_CODES.has(error.code) || error.takingTurns)) throw error;
+                        const old = (this.store.get(this.keys.static, {}) || {}).inventory;
+                        if (old && old[POINTS] !== undefined) inv[POINTS] = old[POINTS];
+                    }
                     return inv;
                 },
             ],

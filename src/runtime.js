@@ -11,7 +11,7 @@ import { makeTabId, LEADER_HEARTBEAT_MS } from './core/leader.js';
 import { TornApiClient } from './api/client.js';
 import { StateFeed } from './feed/state.js';
 import { normalizeState, tornDayStart } from './core/bars.js';
-import { buildModel, compareStrategies, playerContext, buildOf } from './core/model.js';
+import { buildModel, compareStrategies, playerContext, buildOf, isDrugEntry } from './core/model.js';
 import { targetShares } from './core/plan.js';
 import { livePrices } from './core/market.js';
 import { TORN_PER_MINUTE_ALONE } from './core/turns.js';
@@ -102,7 +102,7 @@ function recordDayTotals(m) {
     const row = {
         gained: Math.round(m.gainedToday),
         planned: Math.round(m.plannedGain),
-        xanax: m.done.filter((e) => e.kind === 'xanax' || e.kind === 'stack' || e.kind === 'hold').length,
+        xanax: m.done.filter(isDrugEntry).length,
         xanaxPlanned: m.strip.drug.xanaxPlanned,
         refills: m.strip.refill.free ? 0 : 1,
     };

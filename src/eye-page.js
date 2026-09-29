@@ -167,6 +167,11 @@ function drawAll() {
     if (isPaused()) {
         removeChips(document);
         for (const el of document.querySelectorAll('#pi-attack')) el.remove();
+        // Torn's war rows back in their own order.
+        for (const list of document.querySelectorAll('.pi-warlist')) {
+            list.classList.remove('pi-warlist');
+            for (const li of list.children) li.style.order = '';
+        }
         return;
     }
     if (!getSettings().eyeChips || !isVisible()) return;
