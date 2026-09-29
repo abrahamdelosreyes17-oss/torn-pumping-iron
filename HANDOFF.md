@@ -106,7 +106,23 @@ Links:
      2. Plan later Xanax with the player's own average (the learner or a rolling median); show the range if it varies.
      3. Verify Torn's Xanax cooldown range (research says about 6–8 h; confirm on the wiki).
      4. Say on Home when the Torn day resets in the player's local time (e.g. "Xanax 2 of 2 today · Torn day resets at 08:00 your time").
-12. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
+12. **Booster cooldown not planned for (owner bug report, 2026-09-29; checked, real):**
+   - **Owner's words:** "i used candy cus it told me to use candy, its also in the plan use candy, cant do it once per day BECAUSE OF THE COOLDOWN … its supposed to be smart, and plan everything ahead for me, when not to take xanax, when to take candy, when not to take boosters etc." Screenshot: Home strip "BOOSTER 31h 40m · Not used by this plan" while the plan is Candy + Xanax.
+   - **Findings (code, 2026-09-29):**
+     a. **Simulator** (`strategies.js`): `candyXanax` and `dailyChoco` add candy every day and never check `boosterFree`. 49 candy add about 24.5 h of booster cooldown, so a full load every day is impossible, and their 30-day gains and costs are too optimistic (they can win recommendations wrongly).
+     b. **Day plan** (`plan.js dayTimeline`): the `candyDaily` path and the jump paths (choco/EDVD/console/99k) never read the live booster cooldown (`boosterFreeAt(state)`), and `candyQty()` always assumes an empty cooldown (`boostersThatFit(…, 0)`). They tell you to eat 49 candy with 31 h left on it.
+     c. **Home strip** (`common.js`, `model.js strip.booster.used`): "Not used by this plan" only means no booster in *today's remaining* steps. It says that after the day's candy was already taken.
+     d. **The plan only runs to Torn midnight.** There's no look-ahead across days for cooldowns (booster, drug) or "hold boosters for the jump".
+   - **Build:**
+     1. **Simulator:** every booster use (candy, EDVD, FHC, cans) goes in only while the booster cooldown is under the cap (+ the one overshoot), counting the cuts. Candy boosts then happen when the cooldown allows (about every 24.5 h for a full 49), or with fewer candies if a smaller daily boost wins. Re-check which plans win.
+     2. **Day plan:** read the booster cooldown from the live state.
+        - The candy count is what fits now (`boostersThatFit(id, cap, cdH)`).
+        - If none fits today: no candy step; Xanax sessions run as steady; the plan says "Candy boost tomorrow ~HH:MM (booster cooldown 31h 40m)".
+        - Jumps time their boost for when the cooldown has room, and hold boosters before a planned jump.
+     3. **A 48 h look-ahead timeline** (the plan's steps past Torn midnight) for Home's "next" list and the bot, so "when not to take Xanax / candy / boosters" is planned ahead.
+     4. **Strip:** "Used today · free again in 31h 40m" or "Next candy boost in …" instead of "Not used by this plan".
+     5. **Tests:** the owner's case (Candy + Xanax, booster 31h 40m → no candy step today, the next boost when the cooldown allows); the simulator's candy cadence against the 24 h cap; the jumps with a non-empty cooldown.
+13. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
 Research and background: `docs/research-events-perks.md` (events, job perks, the console), `docs/review-fable-2026-09-29.md` (the three-pass review, all fixed), `docs/research-learning.md`, `docs/discord-bot-design.md`, `worker/USERSCRIPT-INTERFACE.md`, `docs/ENGINE-SPEC.md`, `docs/DESIGN.md` + `mockups/round3/` (the look every page follows now).
 
 ---
