@@ -87,6 +87,8 @@ export function normalizeState(api, at) {
         boosterCd: Number(cd.booster) || 0,
         medicalCd: Number(cd.medical) || 0,
         refillUsed: a.refills ? Boolean(a.refills.energy) : null,
+        // Special refills on the account (free, not limited to one a day).
+        specialRefills: a.refills && a.refills.special_count !== undefined ? Number(a.refills.special_count) || 0 : null,
         stats,
         statMods,
         gymId: a.gym && a.gym.id ? Number(a.gym.id) : null,

@@ -14,6 +14,9 @@ import { dayTimeline, targetShares, drugsToday, itemsNeeded, strictWarnings, REF
 import { simulateStrategy, feasibleStrategies, STRATEGIES } from './strategies.js';
 import { recommend, pickWarning } from './recommend.js';
 import { needList, livePrices } from './market.js';
+import { energyLadder, boosterChoice, priceFor } from './ladder.js';
+import { upcomingEvents, holdBoosterFor, eventHeadsUp } from './events.js';
+import { PICK_BY } from './recommend.js';
 import { XANAX, SAMPLE_PRICES, ITEMS } from './items.js';
 import { HAPPY_CAP } from './gain.js';
 import { JUMP_STACK } from './strategies.js';
@@ -63,29 +66,96 @@ export function playerContext(state, statics = {}, extra = {}) {
     return { table, perks, unlocked, stats, best };
 }
 
-/** Run every feasible strategy for the horizon (cached by the caller per day). */
-export function compareStrategies({ state, pc, shares, settings, prices }) {
+/** The booster cap: 24 h, plus faction Voracity's extra hours, or the setting if higher. */
+export function boosterCapOf(pc, settings = {}) {
+    return Math.max(settings.boosterCapH || 24, 24 + ((pc.perks && pc.perks.boosterCapExtraH) || 0));
+}
+
+/** Special refills the plan may still use: the number set, less what the account has used since. */
+export function specialLeft(plan, state) {
+    const use = Math.max(0, Math.floor((plan && plan.specialUse) || 0));
+    if (!use || !state || state.specialRefills === null || state.specialRefills === undefined) return 0;
+    const start = plan.specialStart === null || plan.specialStart === undefined ? state.specialRefills : plan.specialStart;
+    const spent = Math.max(0, start - state.specialRefills);
+    return Math.max(0, Math.min(state.specialRefills, use - spent));
+}
+
+/** The simulation inputs every strategy shares. */
+function simInputs({ state, pc, shares, settings, prices, special = 0 }) {
     const gyms = {};
     for (const k of STATS) if (pc.best[k]) gyms[k] = { dots: pc.best[k].dots[k], energy: pc.best[k].energy };
+    return {
+        stats: pc.stats,
+        target: shares,
+        gyms,
+        perks: pc.perks.mult,
+        happyMax: state.happy.maximum,
+        energyMax: state.energy.maximum,
+        fastEnergy: state.energy.interval <= 600,
+        days: settings.horizonDays || 30,
+        // Stored price rows are objects: count what 10 units cost from the cheapest up (never $0).
+        prices: { ...SAMPLE_PRICES, ...livePrices(prices) },
+        bliss: pc.perks.bliss,
+        happyLossMult: pc.perks.happyLossMult,
+        boosterCapH: boosterCapOf(pc, settings),
+        special,
+        canMult: pc.perks.canMult || 1,
+        candyMult: pc.perks.candyMult || 1,
+        toyShop5: Boolean(pc.perks.toyShop5),
+        adultNovelties10: Boolean(pc.perks.adultNovelties10),
+    };
+}
+
+/**
+ * Run every feasible strategy for the horizon (cached by the caller). Also
+ * "Steady + energy boosters": what's left of the budget each day, spent on
+ * FHC or cans on the booster cooldown (the ladder's next rung).
+ * @param {object} o - {state, pc, shares, settings, prices, special}
+ */
+export function compareStrategies({ state, pc, shares, settings, prices, special = 0 }) {
+    const base = simInputs({ state, pc, shares, settings, prices, special });
     const results = {};
-    for (const id of feasibleStrategies({ bliss: pc.perks.bliss, boosterCapH: settings.boosterCapH || 24 })) {
-        results[id] = simulateStrategy(id, {
-            stats: pc.stats,
-            target: shares,
-            gyms,
-            perks: pc.perks.mult,
-            happyMax: state.happy.maximum,
-            energyMax: state.energy.maximum,
-            fastEnergy: state.energy.interval <= 600,
-            days: settings.horizonDays || 30,
-            // Stored price rows are objects: count what 10 units cost from the cheapest up (never $0).
-            prices: { ...SAMPLE_PRICES, ...livePrices(prices) },
-            bliss: pc.perks.bliss,
-            happyLossMult: pc.perks.happyLossMult,
-            boosterCapH: settings.boosterCapH || 24,
-        });
+    for (const id of feasibleStrategies({ bliss: pc.perks.bliss, boosterCapH: base.boosterCapH, toyShop5: base.toyShop5, adultNovelties10: base.adultNovelties10 })) {
+        results[id] = withBestSpecial(id, base);
+    }
+    const budget = settings.budget || Infinity;
+    if (results.steady && Number.isFinite(budget)) {
+        const choice = boosterChoice({ perDay: (budget - results.steady.cost) / base.days, maxE: base.energyMax, prices: base.prices, canMult: base.canMult, capH: base.boosterCapH });
+        // Only a real middle rung: fewer than steadyMax's FHC every time.
+        if (choice && !(choice.id === steadyMaxItem() && results.steadyMax && choice.perDay >= boostersPerDayMax(base))) {
+            results.steadyBoost = { ...withBestSpecial('steadyBoost', { ...base, energyBooster: { id: choice.id, perDay: choice.perDay } }), booster: choice };
+        }
     }
     return results;
+}
+
+/**
+ * Special refills are free energy, but every train costs happy: at the
+ * maximum (steady training) spending them can cost more than they add. Run
+ * the plan with and without them and keep the better (`specialHelps`).
+ */
+function withBestSpecial(id, base) {
+    const r = simulateStrategy(id, base);
+    if (!(base.special > 0)) return r;
+    const without = simulateStrategy(id, { ...base, special: 0 });
+    return without.gained > r.gained ? { ...without, specialHelps: false } : { ...r, specialHelps: true, specialGain: r.gained - without.gained };
+}
+
+function steadyMaxItem() {
+    return 367;
+}
+
+function boostersPerDayMax(base) {
+    return Math.floor(base.boosterCapH / 6);
+}
+
+/**
+ * Ignorance Is Bliss, what if (Plan's Bliss card): the plans the book
+ * changes most, run as if it were active. Not recommended from; shown.
+ */
+export function blissWhatIf({ state, pc, shares, settings, prices, special = 0 }) {
+    const base = { ...simInputs({ state, pc, shares, settings, prices, special }), bliss: true };
+    return { blissSteady: { ...simulateStrategy('blissSteady', base), whatIf: true }, dailyChoco: { ...simulateStrategy('dailyChoco', base), whatIf: true } };
 }
 
 /**
@@ -101,7 +171,7 @@ export function compareStrategies({ state, pc, shares, settings, prices }) {
  * @param {object} [o.gymProgress] - {gymId, energy} read from the gym page
  * @param {number} o.now
  */
-export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, gymProgress = null, unlockedKnown = null, now }) {
+export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, now }) {
     if (!state) return { ready: false };
     const pc = playerContext(state, statics, { unlockedKnown });
     const build = buildOf(plan.build);
@@ -125,8 +195,21 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         boostedToday,
         stackedSoFar: Math.min(JUMP_STACK, Math.ceil(over / ITEMS[XANAX].energy)),
         holding: plan.strategy === 'dailyChoco' && !boostedToday && over > 0,
-        boosterCapH: settings.boosterCapH || undefined,
+        boosterCapH: boosterCapOf(pc, settings),
+        // Only where the comparison found they add stats (they cost happy like any train).
+        specialLeft: compare && compare[plan.strategy] && compare[plan.strategy].specialHelps === false ? 0 : specialLeft(plan, state),
+        specialPerDay: Math.ceil(specialLeft(plan, state) / Math.max(1, (settings.horizonDays || 30) - Math.floor((now - (plan.specialSetAt || now)) / DAY))),
+        energyBooster: compare && compare.steadyBoost ? compare.steadyBoost.booster : null,
+        boostersToday: today.filter((e) => e.kind === 'booster').length,
+        candyMult: pc.perks.candyMult || 1,
+        canMult: pc.perks.canMult || 1,
+        toyShop5: Boolean(pc.perks.toyShop5),
+        adultNovelties10: Boolean(pc.perks.adultNovelties10),
     };
+    // Torn events that change training: a heads-up, and no boosters in the day before one that needs the booster cooldown.
+    const events = statics.calendar ? upcomingEvents(statics.calendar.calendar, now, { startTime: statics.calendar.startTime }) : [];
+    const hold = holdBoosterFor(events, now);
+    if (hold) ctx.holdBooster = hold.id;
     const steps = dayTimeline({ state, now, strategy: plan.strategy, ctx });
     const next = steps[0] || null;
 
@@ -189,9 +272,16 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     for (const w of strictWarnings(steps, now)) heads.push({ tone: 'warn', text: w.text });
     if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
     if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.known ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost) });
+    for (const e of events.slice(0, 2)) {
+        const hu = eventHeadsUp(e, now);
+        heads.push({ tone: e.active ? 'good' : 'plain', text: hu.text, sub: hu.sub, event: e.id });
+    }
+    if (hold && steps.some((s2) => (s2.items || []).some((it) => ITEMS[it.id] && ITEMS[it.id].kind === 'booster'))) heads.push({ tone: 'warn', text: 'Keep the booster cooldown free', sub: hold.name + ' starts within a day' });
     let rec = null;
+    let ladder = null;
+    const pickBy = PICK_BY[plan.pickBy] ? plan.pickBy : 'most';
     if (compare) {
-        const r = recommend(compare, { budget: settings.budget || Infinity, bliss: pc.perks.bliss });
+        const r = recommend(compare, { budget: settings.budget || Infinity, bliss: pc.perks.bliss, pickBy });
         rec = r;
         const mine = compare[plan.strategy];
         if (r.recommended === plan.strategy) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is still best' });
@@ -199,7 +289,13 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
             const w = pickWarning(compare[r.recommended], mine, { bliss: pc.perks.bliss, days: settings.horizonDays || 30 });
             if (w.warn) heads.push({ tone: 'warn', text: (STRATEGIES[r.recommended] || {}).name + ' would gain more', sub: 'see Plan' });
         }
+        ladder = energyLadder({ state, pc, shares, prices, compare, recommended: r.recommended, days: settings.horizonDays || 30, budget: settings.budget || Infinity, specialHave: state.specialRefills || 0, specialUse: specialLeft(plan, state) });
     }
+    // Spend per day, and how long the cash on hand lasts at the recommended plan's pace.
+    const horizon = settings.horizonDays || 30;
+    const recRow = rec && compare ? compare[rec.recommended] : null;
+    const cash = statics.inventory && Number.isFinite(statics.inventory.cash) ? statics.inventory.cash : null;
+    const spend = recRow ? { perDay: recRow.cost / horizon, budgetPerDay: Number.isFinite(settings.budget) ? settings.budget / horizon : null, cash, lastsDays: cash !== null && recRow.cost > 0 ? cash / (recRow.cost / horizon) : null } : null;
 
     return {
         ready: true,
@@ -226,6 +322,12 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         buildPicked: Boolean(plan.buildPicked),
         recommendation: rec,
         compare,
+        whatIf,
+        ladder,
+        spend,
+        events,
+        pickBy,
+        special: { have: state.specialRefills, left: specialLeft(plan, state), use: plan.specialUse || 0 },
         prices,
     };
 }

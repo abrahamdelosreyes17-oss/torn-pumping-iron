@@ -57,7 +57,11 @@ export const DEFAULT_SETTINGS = {
     w3b: true,
 };
 
-export const DEFAULT_PLAN = { type: 'steady', strategy: 'steady', build: 'baldr', buildPicked: false, goal: null, createdAt: 0, strategyPicked: false };
+/**
+ * pickBy: the Plan dropdown (most | value | max). specialUse: special refills the plan may use (0 until the
+ * player sets it); specialStart: how many the account had when it was set (the rest are counted from there).
+ */
+export const DEFAULT_PLAN = { type: 'steady', strategy: 'steady', build: 'baldr', buildPicked: false, goal: null, createdAt: 0, strategyPicked: false, pickBy: 'most', specialUse: 0, specialStart: null };
 
 function merged(stored, defaults) {
     return stored && typeof stored === 'object' && !Array.isArray(stored) ? { ...defaults, ...stored } : { ...defaults };

@@ -73,16 +73,47 @@ export async function fetchInventory(client, cats = INVENTORY_CATS) {
     return out;
 }
 
-/** Points held (for the refill): /user/money. A key that can't read it answers null, not an error. */
-export async function fetchPoints(client) {
+/**
+ * Points held (for the refill) and cash on hand (how long a spend lasts):
+ * /user/money. A key that can't read it answers null, not an error.
+ * @returns {Promise<{points:number, cash:number}|null>}
+ */
+export async function fetchMoney(client) {
     try {
         const d = await client.get('v2/user/money');
-        const p = d && d.money ? Number(d.money.points) : NaN;
-        return Number.isFinite(p) ? p : null;
+        const m = d && d.money;
+        const p = m ? Number(m.points) : NaN;
+        if (!Number.isFinite(p)) return null;
+        // Money you can spend today: wallet, vault, Cayman (the city bank is locked in until it matures).
+        const cash = ['wallet', 'vault', 'cayman_bank'].reduce((a, k) => a + (Number(m[k]) || 0), 0);
+        return { points: p, cash };
     } catch (error) {
         if (error instanceof TornApiError && (error.code === TORN_ERROR_ACCESS_LEVEL || error.code === TORN_ERROR_WRONG_FIELDS)) return null;
         throw error;
     }
+}
+
+/** Points held, or null (see fetchMoney). */
+export async function fetchPoints(client) {
+    const m = await fetchMoney(client);
+    return m ? m.points : null;
+}
+
+/**
+ * Torn's calendar and this player's event time slot (most events run 48 h
+ * from it). The slot needs a key that can read it; without, it's null.
+ * @returns {Promise<{calendar:{events:object[], competitions:object[]}, startTime:string|null}>}
+ */
+export async function fetchCalendar(client) {
+    const d = await client.get('v2/torn/calendar');
+    let startTime = null;
+    try {
+        const u = await client.get('v2/user/calendar');
+        startTime = (u && u.calendar && u.calendar.start_time) || null;
+    } catch (error) {
+        if (!(error instanceof TornApiError && (error.code === TORN_ERROR_ACCESS_LEVEL || error.code === TORN_ERROR_WRONG_FIELDS))) throw error;
+    }
+    return { calendar: (d && d.calendar) || { events: [], competitions: [] }, startTime };
 }
 
 /** Your recent attacks (newest first), with Torn's fair-fight modifier and respect. */

@@ -18,23 +18,51 @@ export const STATS_GROWTH_X = 2;
 /** The daily re-check, Torn time. */
 export const DAILY_CHECK_HOUR = 6;
 
-const JUMP_LIKE = new Set(['chocoJump', 'edvdJump', 'happy99k']);
-const HAPPY_BOUGHT = new Set(['dailyChoco', 'chocoJump', 'edvdJump', 'happy99k']);
+const JUMP_LIKE = new Set(['chocoJump', 'edvdJump', 'happy99k', 'consoleJump', 'consoleJumpToy', 'edvdJumpAN']);
+const HAPPY_BOUGHT = new Set(['dailyChoco', 'chocoJump', 'edvdJump', 'happy99k', 'consoleJump', 'consoleJumpToy', 'edvdJumpAN']);
+const BOOSTERS = new Set(['steadyBoost', 'steadyMax']);
+
+/** The Plan dropdown: what "best" means. */
+export const PICK_BY = {
+    most: { id: 'most', name: 'Most stats in my budget', what: 'The most stats the budget allows. Default.' },
+    value: { id: 'value', name: 'Best value for money', what: 'The most stats for each $1M: cheaper plans can win.' },
+    max: { id: 'max', name: 'Max gains, no budget', what: 'Adds FHC and cans on top whenever they add stats; says what it costs a day.' },
+};
+
+/** A plan that loses more than this share of the best plan's stats doesn't fit the player (hidden unless asked). */
+export const FIT_MIN_SHARE = 0.5;
+
+/** Does a plan fit this player? (Owner: only show what fits; a tick shows the rest.) */
+export function fitsPlayer(r, best) {
+    if (!r || !best) return true;
+    return !(best.gained > 0) || r.gained >= FIT_MIN_SHARE * best.gained;
+}
+
+/** Stats per $1M (a free plan: Infinity). */
+export function perMillion(r) {
+    return r && r.cost > 0 ? r.gained / (r.cost / 1e6) : Infinity;
+}
 
 /**
  * @param {object} results - {id: simulateStrategy result}
  * @param {object} o
  * @param {number} [o.budget] - money for the horizon; Infinity when unset
- * @returns {{recommended:string, alternatives:object[], reasons:string[]}}
+ * @param {string} [o.pickBy] - 'most' (default: most stats in the budget), 'value' (most per $1M in the budget), 'max' (most stats, no budget)
+ * @returns {{recommended:string, pickBy:string, alternatives:object[], reasons:string[]}}
  */
-export function recommend(results, { budget = Infinity, bliss = false } = {}) {
+export function recommend(results, { budget = Infinity, bliss = false, pickBy = 'most' } = {}) {
     const list = Object.values(results).filter(Boolean);
-    if (!list.length) return { recommended: null, alternatives: [], reasons: [] };
-    const inBudget = list.filter((r) => r.cost <= budget);
-    const pool = inBudget.length ? inBudget : [list.reduce((a, b) => (b.cost < a.cost ? b : a))];
-    const perM = (r) => (r.cost > 0 ? r.gained / (r.cost / 1e6) : Infinity);
-    pool.sort((a, b) => b.gained - a.gained || perM(b) - perM(a));
+    if (!list.length) return { recommended: null, pickBy, alternatives: [], reasons: [] };
+    const limit = pickBy === 'max' ? Infinity : budget;
+    // A plan whose numbers aren't checked in game yet (the console jump) is shown, never picked.
+    const pickable = list.filter((r) => !(STRATEGIES[r.id] && STRATEGIES[r.id].unverified));
+    const inBudget = (pickable.length ? pickable : list).filter((r) => r.cost <= limit);
+    const pool = inBudget.length ? inBudget : [(pickable.length ? pickable : list).reduce((a, b) => (b.cost < a.cost ? b : a))];
+    const perM = perMillion;
+    if (pickBy === 'value') pool.sort((a, b) => perM(b) - perM(a) || b.gained - a.gained);
+    else pool.sort((a, b) => b.gained - a.gained || perM(b) - perM(a));
     const best = pool[0];
+    budget = limit;
     const alternatives = list
         .filter((r) => r.id !== best.id)
         .map((r) => {
@@ -45,16 +73,19 @@ export function recommend(results, { budget = Infinity, bliss = false } = {}) {
             if (overBudget && r.gained > best.gained) verdict = 'overBudget';
             else if (Math.abs(deltaStatsPct) < 1 && Math.abs(deltaCost) < 1e6) verdict = 'same';
             else if (deltaStatsPct > 0 && !overBudget) verdict = 'better';
-            const alt = { id: r.id, gained: r.gained, cost: r.cost, deltaStatsPct, deltaCost, overBudget, verdict };
-            return { ...alt, why: whyNot(best, alt, { bliss, budget }) };
+            const alt = { id: r.id, gained: r.gained, cost: r.cost, perM: perM(r), deltaStatsPct, deltaCost, overBudget, verdict, fits: fitsPlayer(r, best) };
+            return { ...alt, why: whyNot(best, alt, { bliss, budget, pickBy }) };
         })
         .sort((a, b) => b.gained - a.gained);
-    return { recommended: best.id, alternatives, reasons: whyRecommended(best, results, { budget }) };
+    return { recommended: best.id, pickBy, perM: perM(best), alternatives, reasons: whyRecommended(best, results, { budget, pickBy }) };
 }
 
 /** One line on why the recommended plan wins. */
-function whyRecommended(best, results, { budget }) {
+function whyRecommended(best, results, { budget, pickBy = 'most' }) {
     const out = [];
+    if (pickBy === 'value') out.push('The most stats for each $1M you spend.');
+    if (pickBy === 'max') out.push('The most stats, whatever it costs.');
+    if (BOOSTERS.has(best.id)) out.push('FHC and cans use the booster cooldown, so they add to your Xanax instead of replacing it.');
     const beaten = Object.values(results).filter((r) => r && r.id !== best.id && r.gained > best.gained);
     if (beaten.length && beaten.every((r) => r.cost > budget)) out.push('Anything that gains more is over your budget.');
     if (best.id === 'steady') out.push('Stacking Xanax for a jump stops natural energy, so you end with fewer stats.');
@@ -69,16 +100,21 @@ function whyRecommended(best, results, { budget }) {
  * @param {object} best - the recommended result {id, gained, cost}
  * @param {object} alt - an alternatives[] row
  */
-export function whyNot(best, alt, { bliss = false, budget = Infinity } = {}) {
+export function whyNot(best, alt, { bliss = false, budget = Infinity, pickBy = 'most' } = {}) {
     if (!best || !alt) return '';
     const pct = Math.round(alt.deltaStatsPct);
+    // Picking by value: a plan with more stats loses on stats per $1M.
+    if (pickBy === 'value' && pct > 0) return '+' + pct + '% stats but fewer per $1M (' + fmtShort(alt.perM || 0) + ' vs ' + fmtShort(perMillion(best)) + ').';
     // Over budget is the reason only when it would otherwise win; a worse plan leads with what it loses.
     if (alt.overBudget && alt.gained > best.gained) return 'Over your ' + fmtMoney(budget) + ' budget (it would gain +' + pct + '% more).';
     if (alt.verdict === 'same') return 'The same stats for the same money: nothing to gain by switching.';
     const why = [];
-    if (JUMP_LIKE.has(alt.id)) why.push('holding four Xanax stops natural energy');
+    if (STRATEGIES[alt.id] && STRATEGIES[alt.id].unverified) why.push('from a player’s guide, not checked in game yet (needs a Game Console)');
+    if (JUMP_LIKE.has(alt.id)) why.push('holding Xanax for the jump stops natural energy');
     if (HAPPY_BOUGHT.has(alt.id)) why.push('the Ecstasy takes a drug cooldown a Xanax would fill');
-    if (alt.id === 'dailyChoco') why.push('the candy lifts happy for one session a day');
+    if (alt.id === 'dailyChoco' || alt.id === 'candyXanax') why.push('the candy lifts happy for one session a day');
+    if (alt.id === 'consoleJump' || alt.id === 'consoleJumpToy') why.push('300 energy a day goes to the console, not the gym');
+    if (BOOSTERS.has(alt.id)) why.push('FHC and cans cost far more per stat than Xanax and the refill');
     if (HAPPY_BOUGHT.has(alt.id) && !bliss) why.push('without Ignorance Is Bliss the extra happy resets');
     const head = pct < 0 ? '−' + -pct + '% stats' : pct > 0 ? '+' + pct + '% stats for ' + fmtMoney(alt.deltaCost) + ' more' : 'No more stats';
     const cost = pct < 0 && alt.deltaCost > 0 ? ' and ' + fmtMoney(alt.deltaCost) + ' more' + (alt.overBudget ? ', over your budget' : '') : '';

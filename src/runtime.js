@@ -11,7 +11,7 @@ import { makeTabId, LEADER_HEARTBEAT_MS } from './core/leader.js';
 import { TornApiClient } from './api/client.js';
 import { StateFeed } from './feed/state.js';
 import { normalizeState, tornDayStart } from './core/bars.js';
-import { buildModel, compareStrategies, playerContext, buildOf, isDrugEntry } from './core/model.js';
+import { buildModel, compareStrategies, blissWhatIf, playerContext, buildOf, isDrugEntry, specialLeft } from './core/model.js';
 import { targetShares } from './core/plan.js';
 import { livePrices } from './core/market.js';
 import { TORN_PER_MINUTE_ALONE } from './core/turns.js';
@@ -23,6 +23,7 @@ export const pi = {
     feed: null,
     model: null,
     compare: null,
+    whatIf: null,
     compareKey: '',
     listeners: [],
 };
@@ -69,9 +70,13 @@ function comparisonFor(state, statics, plan, settings) {
     // Every input that moves the answer: all four stats (in ~2% steps), prices (2 significant digits), perks, gyms.
     const statsSig = Object.values(pc.stats).map((v) => Math.round(Math.log1p(v) * 50)).join(',');
     const priceSig = Object.entries(livePrices(prices)).map(([id, p]) => id + ':' + Number(p.toPrecision(2))).join(',');
-    const key = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, JSON.stringify(pc.perks.mult), pc.perks.happyLossMult, statsSig, priceSig, pc.unlocked.join(',')].join('|');
+    const special = specialLeft(plan, state);
+    const perkSig = JSON.stringify([pc.perks.mult, pc.perks.happyLossMult, pc.perks.canMult, pc.perks.candyMult, pc.perks.consoleMult, pc.perks.edvdMult, pc.perks.boosterCapExtraH]);
+    const key = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, priceSig, pc.unlocked.join(','), special].join('|');
     if (key !== pi.compareKey) {
-        pi.compare = compareStrategies({ state, pc, shares, settings, prices });
+        pi.compare = compareStrategies({ state, pc, shares, settings, prices, special });
+        // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
+        pi.whatIf = pc.perks.bliss ? null : blissWhatIf({ state, pc, shares, settings, prices, special });
         pi.compareKey = key;
     }
     return pi.compare;
@@ -86,7 +91,7 @@ export function currentModel(now = Date.now()) {
     const plan = getPlan();
     const settings = getSettings();
     const compare = comparisonFor(state, statics, plan, settings);
-    return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: get(K.prices, {}) || {}, compare, gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+    return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: get(K.prices, {}) || {}, compare, whatIf: pi.whatIf || null, gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
 }
 
 /**

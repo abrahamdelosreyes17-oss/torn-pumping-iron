@@ -22,10 +22,28 @@ const RE_BOOK_STAT = /(?:increases?|incr\.)\s+(strength|speed|defen[sc]e|dexteri
 const RE_BOOK_ALL = /(?:increases?|incr\.)\s+(?:all\s+)?gym\s+gains?\s+by\s+(\d+(?:\.\d+)?)\s*%/i;
 // Ignorance Is Bliss (item 770): "Happiness can regenerate above maximum for 31 days."
 const RE_BLISS = /happiness\s+can\s+regenerate\s+above\s+maximum/i;
-// Music Store "Well Tuned": "30% gym experience" (unlock thresholds ÷ 1.3)
-const RE_GYM_XP = /(\d+(?:\.\d+)?)\s*%\s+gym\s+experience/i;
-// "Goal Oriented": "50% happy loss reduction in gym"
-const RE_HAPPY_LOSS = /(\d+(?:\.\d+)?)\s*%\s+happy\s+loss\s+reduction/i;
+// Torn words company perks two ways (docs/research-events-perks.md §2): the Perks page's
+// "+ 30% increased gym experience" and /torn/companies' "30% gym experience". Match by keyword + number.
+// Music Store "Well Tuned": gym experience (unlock thresholds ÷ 1.3)
+const RE_GYM_XP = /(\d+(?:\.\d+)?)\s*%\s+(?:increased\s+)?gym\s+experience/i;
+// Fitness Center "Goal Oriented": "50% happy loss reduction in gym" / "- 50% reduction of happiness loss in gym"
+const RE_HAPPY_LOSS = /(\d+(?:\.\d+)?)\s*%\s+(?:happy\s+loss\s+reduction|reduction\s+of\s+happiness\s+loss)/i;
+// 5★ Toy/Game Shop "Gamer": "+ 100% console happiness" / "100% happy gain from Game Console"
+const RE_CONSOLE = /(\d+(?:\.\d+)?)\s*%\s+(?:console\s+happiness|happy\s+gain\s+from\s+(?:the\s+)?game\s+console)/i;
+// 10★ Adult Novelties "Indecent": "+ 100% bonus to Erotic DVDs" / "100% happy gain from Erotic DVDs"
+const RE_EDVD = /(\d+(?:\.\d+)?)\s*%\s+(?:bonus\s+to|happy\s+gain\s+from)\s+erotic\s+dvds?/i;
+// Faction Voracity: "Increases energy gain from energy drinks by 50%"; book "Doubles energy drink effects"
+const RE_CAN = /energy\s+(?:gain\s+)?from\s+energy\s+drinks?\s+by\s+(\d+(?:\.\d+)?)\s*%/i;
+const RE_CAN_DOUBLE = /doubles?\s+energy\s+drink\s+effects?/i;
+// Faction Voracity: "Increase happy gain from candy by 50%"; book "Doubles candy effects"
+const RE_CANDY = /happy\s+gain\s+from\s+candy\s+by\s+(\d+(?:\.\d+)?)\s*%/i;
+const RE_CANDY_DOUBLE = /doubles?\s+candy\s+effects?/i;
+// Grocery Store "Absorption": "+ 10% consumable boost" / "10% consumable gain" (candy happy and can energy)
+const RE_CONSUMABLE = /(\d+(?:\.\d+)?)\s*%\s+consumable\s+(?:boost|gain)/i;
+// Grocery/Restaurant: "+ 25% consumable cool down reduction"; book "Decreases all consumable cooldowns by 50%"
+const RE_CONSUMABLE_CD = /(\d+(?:\.\d+)?)\s*%\s+consumable\s+cool\s*down\s+reduction|consumable\s+cool\s*downs?\s+by\s+(\d+(?:\.\d+)?)\s*%/i;
+// Faction Voracity: "Adds 24 hours of maximum booster cooldown"
+const RE_BOOSTER_CAP = /adds?\s+(\d+(?:\.\d+)?)\s+hours?\s+of\s+maximum\s+booster\s+cool\s*down/i;
 // "31 days", "(12 days)" - how long a book lasts
 const RE_DAYS = /(\d+)\s*days?/i;
 
@@ -33,7 +51,9 @@ const num = (s) => Number(String(s).replace(/\s+/g, ''));
 
 /**
  * @param {object} perks - the `perks` object of /v2/user/perks: {faction:[], job:[], property:[], education:[], enhancer:[], book:[], stock:[], merit:[]}
- * @returns {{mult:{str,spd,def,dex}, lines:object[], bliss:boolean, blissDays:number|null, gymExpMult:number, happyLossMult:number, books:object[], unknown:string[]}}
+ * @returns {{mult:{str,spd,def,dex}, lines:object[], bliss:boolean, blissDays:number|null, gymExpMult:number, happyLossMult:number,
+ *   consoleMult:number, edvdMult:number, canMult:number, candyMult:number, consumableCdMult:number, boosterCapExtraH:number,
+ *   toyShop5:boolean, adultNovelties10:boolean, books:object[], unknown:string[]}}
  */
 export function parsePerks(perks) {
     const mult = { str: 1, spd: 1, def: 1, dex: 1 };
@@ -44,6 +64,12 @@ export function parsePerks(perks) {
     let blissDays = null;
     let gymExpMult = 1;
     let happyLossMult = 1;
+    let consoleMult = 1;
+    let edvdMult = 1;
+    let canMult = 1;
+    let candyMult = 1;
+    let consumableCdMult = 1;
+    let boosterCapExtraH = 0;
 
     const src = perks && typeof perks === 'object' ? perks : {};
     for (const [source, list] of Object.entries(src)) {
@@ -65,6 +91,43 @@ export function parsePerks(perks) {
             }
             if ((m = text.match(RE_HAPPY_LOSS))) {
                 happyLossMult *= Math.max(0, 1 - num(m[1]) / 100);
+                continue;
+            }
+            if ((m = text.match(RE_CONSOLE))) {
+                consoleMult *= 1 + num(m[1]) / 100;
+                continue;
+            }
+            if ((m = text.match(RE_EDVD))) {
+                edvdMult *= 1 + num(m[1]) / 100;
+                continue;
+            }
+            if ((m = text.match(RE_CAN))) {
+                canMult *= 1 + num(m[1]) / 100;
+                continue;
+            }
+            if (RE_CAN_DOUBLE.test(text)) {
+                canMult *= 2;
+                continue;
+            }
+            if ((m = text.match(RE_CANDY))) {
+                candyMult *= 1 + num(m[1]) / 100;
+                continue;
+            }
+            if (RE_CANDY_DOUBLE.test(text)) {
+                candyMult *= 2;
+                continue;
+            }
+            if ((m = text.match(RE_CONSUMABLE_CD))) {
+                consumableCdMult *= Math.max(0, 1 - num(m[1] || m[2]) / 100);
+                continue;
+            }
+            if ((m = text.match(RE_CONSUMABLE))) {
+                canMult *= 1 + num(m[1]) / 100;
+                candyMult *= 1 + num(m[1]) / 100;
+                continue;
+            }
+            if ((m = text.match(RE_BOOSTER_CAP))) {
+                boosterCapExtraH += num(m[1]);
                 continue;
             }
             let stat = null;
@@ -92,7 +155,25 @@ export function parsePerks(perks) {
             }
         }
     }
-    return { mult, lines, bliss, blissDays, gymExpMult, happyLossMult, books, unknown };
+    return {
+        mult,
+        lines,
+        bliss,
+        blissDays,
+        gymExpMult,
+        happyLossMult,
+        consoleMult,
+        edvdMult,
+        canMult,
+        candyMult,
+        consumableCdMult,
+        boosterCapExtraH,
+        // The company specials the plan variants need.
+        toyShop5: consoleMult >= 2,
+        adultNovelties10: edvdMult >= 2,
+        books,
+        unknown,
+    };
 }
 
 /** No perks at all (the default before the API answers). */

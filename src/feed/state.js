@@ -16,7 +16,7 @@ import { totalOf } from '../core/gain.js';
 import { calibrationSample, addCalibration } from '../core/calibration.js';
 import { mergeLiveGyms, GYMS } from '../core/gyms.js';
 import { parsePerks } from '../core/perks.js';
-import { fetchUserState, fetchPerks, fetchProperty, fetchGyms, fetchInventory, fetchPoints, fetchKeyInfo } from '../api/torn.js';
+import { fetchUserState, fetchPerks, fetchProperty, fetchGyms, fetchInventory, fetchMoney, fetchCalendar, fetchKeyInfo } from '../api/torn.js';
 import { POINTS } from '../core/items.js';
 import { TRADING_SEEN_KEY } from '../core/turns.js';
 import { KEY_DEAD_CODES } from '../api/client.js';
@@ -36,6 +36,7 @@ export const STATIC_EVERY = {
     gyms: 24 * 60 * 60 * 1000,
     inventory: 30 * 60 * 1000,
     keyInfo: 24 * 60 * 60 * 1000,
+    calendar: 12 * 60 * 60 * 1000,
 };
 
 /** A slow part that failed is asked again after this long (not after its whole period). */
@@ -175,8 +176,12 @@ export class StateFeed {
                     const inv = await fetchInventory(this.client);
                     // Points held (for the refill) come from /user/money; a failure there keeps the inventory.
                     try {
-                        const points = await fetchPoints(this.client);
-                        if (points !== null) inv[POINTS] = points;
+                        const money = await fetchMoney(this.client);
+                        if (money) {
+                            inv[POINTS] = money.points;
+                            // Cash on hand rides along (Plan: how long a spend lasts); not an item.
+                            inv.cash = money.cash;
+                        }
                     } catch (error) {
                         if (error && (KEY_DEAD_CODES.has(error.code) || error.takingTurns)) throw error;
                         const old = (this.store.get(this.keys.static, {}) || {}).inventory;
@@ -185,6 +190,7 @@ export class StateFeed {
                     return inv;
                 },
             ],
+            ['calendar', () => fetchCalendar(this.client)],
         ];
         for (const [k, fn] of jobs) {
             if (!due(k)) continue;
