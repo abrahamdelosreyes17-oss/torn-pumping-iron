@@ -11,18 +11,19 @@
  *                         the first PUT for a secret needs X-Invite: <INVITE_CODE>
  *   POST /test            (Authorization: Bearer <secret>) send a test ping
  *   DELETE /plan          (Authorization: Bearer <secret>) forget this user
+ *   POST /interactions    Discord's slash commands and buttons (Ed25519-signed)
  */
 
 import { dueAlerts, webhookBody, isDiscordWebhook } from './alerts.js';
+import { Q, SCHEMA, ensureSchema } from './db.js';
+import { guard } from './net.js';
+import { interactionsRoute } from './interactions.js';
+
+export { SCHEMA };
 
 export const TORN_URL = 'https://api.torn.com/v2/user?selections=bars,cooldowns,refills,travel&comment=PumpingIronPings';
 export const DEAD_KEY_CODES = [2, 13, 18];
 const SENT_KEEP_S = 2 * 86400;
-
-export const SCHEMA = [
-    'CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, torn_key TEXT, discord_id TEXT, webhook TEXT, plan TEXT, rules TEXT, paused INTEGER DEFAULT 0, last_error TEXT, updated INTEGER)',
-    'CREATE TABLE IF NOT EXISTS sent (user TEXT, alert TEXT, at INTEGER, PRIMARY KEY (user, alert))',
-];
 
 async function sha256(text) {
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
@@ -42,10 +43,6 @@ async function sameSecret(a, b) {
     return diff === 0 && Boolean(a);
 }
 
-async function ensureSchema(env) {
-    for (const sql of SCHEMA) await env.DB.prepare(sql).run();
-}
-
 function bearer(req) {
     const m = String(req.headers.get('authorization') || '').match(/^Bearer\s+([A-Za-z0-9_-]{24,128})$/);
     return m ? m[1] : null;
@@ -55,7 +52,7 @@ async function userFor(req, env) {
     const secret = bearer(req);
     if (!secret) return { error: json({ ok: false, error: 'Missing or malformed secret' }, 401) };
     const id = await sha256(secret);
-    const row = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(id).first();
+    const row = await env.DB.prepare(Q.userGet).bind(id).first();
     return { id, row };
 }
 
@@ -80,9 +77,13 @@ async function putPlan(req, env) {
     const newKey = body.tornKey !== undefined && (!row || tornKey !== row.torn_key);
     const paused = newKey ? 0 : row ? Number(row.paused) || 0 : 0;
     const lastError = newKey ? null : row ? row.last_error || null : null;
-    await env.DB.prepare('INSERT OR REPLACE INTO users (id, torn_key, discord_id, webhook, plan, rules, paused, last_error, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        .bind(id, tornKey, discordId, webhook, plan, rules, paused, lastError, Math.floor(Date.now() / 1000))
-        .run();
+    const nowS = Math.floor(Date.now() / 1000);
+    const planAt = body.plan !== undefined ? nowS : row ? row.plan_at || null : null;
+    const targets = row ? row.targets || null : null;
+    const factionId = row ? row.faction_id || null : null;
+    const playerId = row ? row.player_id || null : null;
+    if (row) await env.DB.prepare(Q.userSync).bind(tornKey, discordId, webhook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId, id).run();
+    else await env.DB.prepare(Q.userInsert).bind(id, tornKey, discordId, webhook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId).run();
     return json({ ok: true, created: !row, ready: Boolean(tornKey && webhook), paused: Boolean(paused), lastError });
 }
 
@@ -103,8 +104,7 @@ async function testPing(req, env, fetchImpl) {
 async function forget(req, env) {
     const { id, error } = await userFor(req, env);
     if (error) return error;
-    await env.DB.prepare('DELETE FROM users WHERE id = ?').bind(id).run();
-    await env.DB.prepare('DELETE FROM sent WHERE user = ?').bind(id).run();
+    for (const sql of [Q.userDelete, Q.sentDeleteUser, Q.ackDeleteUser, Q.watchDeleteUser, Q.linkDeleteUser, Q.priceDeleteUser]) await env.DB.prepare(sql).bind(id).run();
     return json({ ok: true });
 }
 
@@ -123,7 +123,7 @@ export async function runUser(env, row, nowS, fetchImpl = fetch) {
         const code = Number(err.code);
         if (DEAD_KEY_CODES.includes(code)) {
             // Stop on a dead key: Torn warns that repeated bad-key calls can block the IP.
-            await env.DB.prepare('UPDATE users SET paused = 1, last_error = ? WHERE id = ?').bind('Torn error ' + code + ': ' + String(err.error || ''), row.id).run();
+            await env.DB.prepare(Q.userPause).bind('Torn error ' + code + ': ' + String(err.error || ''), row.id).run();
         }
         return { sent: 0, error: 'Torn error ' + code };
     }
@@ -141,11 +141,11 @@ export async function runUser(env, row, nowS, fetchImpl = fetch) {
     }
     let sent = 0;
     for (const a of dueAlerts(state, plan, nowS, rules)) {
-        const seen = await env.DB.prepare('SELECT at FROM sent WHERE user = ? AND alert = ?').bind(row.id, a.id).first();
+        const seen = await env.DB.prepare(Q.sentOne).bind(row.id, a.id).first();
         if (seen) continue;
         const ok = await postWebhook(fetchImpl, row.webhook, webhookBody(a, row.discord_id));
         if (ok) {
-            await env.DB.prepare('INSERT OR REPLACE INTO sent (user, alert, at) VALUES (?, ?, ?)').bind(row.id, a.id, nowS).run();
+            await env.DB.prepare(Q.sentPut).bind(row.id, a.id, nowS, 'sent', null, null, null, null, 'hook').run();
             sent++;
         }
     }
@@ -153,8 +153,8 @@ export async function runUser(env, row, nowS, fetchImpl = fetch) {
 }
 
 export async function runCron(env, nowS = Math.floor(Date.now() / 1000), fetchImpl = fetch) {
-    await ensureSchema(env);
-    const { results } = await env.DB.prepare('SELECT * FROM users WHERE paused = 0').all();
+    await ensureSchema(env.DB);
+    const { results } = await env.DB.prepare(Q.usersDue).bind(20).all();
     const out = [];
     for (const row of results || []) {
         try {
@@ -163,14 +163,17 @@ export async function runCron(env, nowS = Math.floor(Date.now() / 1000), fetchIm
             out.push({ sent: 0, error: String((e && e.message) || e) });
         }
     }
-    await env.DB.prepare('DELETE FROM sent WHERE at < ?').bind(nowS - SENT_KEEP_S).run();
+    await env.DB.prepare(Q.sentClean).bind(nowS - SENT_KEEP_S).run();
     return out;
 }
 
-export async function handle(req, env, fetchImpl = fetch) {
+const NO_CTX = { waitUntil: () => {} };
+
+export async function handle(req, env, fetchImpl = fetch, ctx = NO_CTX) {
     const url = new URL(req.url);
-    await ensureSchema(env);
     if (url.pathname === '/health' && req.method === 'GET') return json({ ok: true });
+    if (url.pathname === '/interactions' && req.method === 'POST') return interactionsRoute(req, env, guard(fetchImpl), ctx);
+    await ensureSchema(env.DB);
     if (url.pathname === '/plan' && req.method === 'PUT') return putPlan(req, env);
     if (url.pathname === '/plan' && req.method === 'DELETE') return forget(req, env);
     if (url.pathname === '/test' && req.method === 'POST') return testPing(req, env, fetchImpl);
@@ -178,6 +181,6 @@ export async function handle(req, env, fetchImpl = fetch) {
 }
 
 export default {
-    fetch: (req, env) => handle(req, env),
+    fetch: (req, env, ctx) => handle(req, env, fetch, ctx),
     scheduled: (event, env, ctx) => ctx.waitUntil(runCron(env)),
 };

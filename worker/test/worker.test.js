@@ -180,7 +180,7 @@ test('cron: a dead Torn key pauses that user; nothing more is asked', async () =
 test('cron: a user without a webhook or key is skipped; old sent rows are cleared', async () => {
     const env = { DB: fakeD1(), INVITE_CODE: 'x' };
     await handle(req('PUT', '/plan', { invite: 'x', body: { plan } }), env);
-    env.DB.sent.set('old|x', T - 3 * 86400);
+    env.DB.sent.set('old|x', { user: 'old', alert: 'x', at: T - 3 * 86400 });
     const f = recorder(() => new Response('{}'));
     const out = await runCron(env, T, f);
     assert.deepEqual(out, [{ sent: 0, skipped: true }]);
