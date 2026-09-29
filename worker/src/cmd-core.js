@@ -121,8 +121,8 @@ function optionsOf(i) {
 }
 
 async function saveSettings(env, user, st) {
-    const { kinds, mute, delivery, quiet, perHour, perDay } = st;
-    const text = JSON.stringify({ kinds, mute, delivery, quiet, perHour, perDay });
+    const { kinds, mute, delivery, quiet, perHour, perDay, warPerHour, warLead } = st;
+    const text = JSON.stringify({ kinds, mute, delivery, quiet, perHour, perDay, warPerHour, warLead });
     await env.DB.prepare(Q.userSettings).bind(text, user.id).run();
     user.settings = text;
 }
@@ -154,6 +154,7 @@ export function settingsText(user, env) {
         'Pings go to: ' + (st.delivery === 'channel' ? 'your channel (webhook)' : 'DM' + (env.BOT_TOKEN ? '' : ' (the bot has no token yet: channel for now)')),
         'Quiet hours: ' + (st.quiet ? st.quiet.from + '–' + st.quiet.to + ' TCT (jump steps still come)' : 'off'),
         'At most: ' + st.perHour + ' an hour, ' + st.perDay + ' a day (jump steps still come)',
+        'War pings: at most ' + st.warPerHour + ' an hour (their own cap) · ' + st.warLead + ' min ahead',
         'On: ' + Object.keys(KINDS).filter((k) => on[k]).map((k) => KINDS[k]).join(', '),
         'Off: ' + (Object.keys(KINDS).filter((k) => !on[k]).map((k) => KINDS[k]).join(', ') || 'none'),
     ].join('\n');
@@ -187,6 +188,14 @@ export async function settingsCmd(user, i, env) {
     if (o.per_day !== undefined) {
         st.perDay = Math.max(1, Math.min(500, Math.round(Number(o.per_day))));
         changed.push('per day');
+    }
+    if (o.war_per_hour !== undefined) {
+        st.warPerHour = Math.max(1, Math.min(120, Math.round(Number(o.war_per_hour))));
+        changed.push('war pings per hour');
+    }
+    if (o.war_lead !== undefined) {
+        st.warLead = Math.max(1, Math.min(15, Math.round(Number(o.war_lead))));
+        changed.push('war lead');
     }
     if (changed.length) await saveSettings(env, user, st);
     return reply((changed.length ? 'Saved: ' + changed.join(', ') + '.\n\n' : '') + settingsText(user, env));

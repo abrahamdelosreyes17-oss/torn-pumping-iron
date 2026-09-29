@@ -61,6 +61,8 @@ export function tornErrorText(e) {
 export const userState = (f, key) => tornGet(f, key, TORN_URL);
 export const itemMarket = (f, key, itemId) => tornGet(f, key, tornUrl('market/' + Number(itemId) + '/itemmarket'));
 export const playerBasic = (f, key, id) => tornGet(f, key, tornUrl('user/' + Number(id) + '/basic'));
+/** A watched player's status and last action (the watch list). */
+export const playerProfile = (f, key, id) => tornGet(f, key, tornUrl('user/' + Number(id) + '/profile'));
 export const factionWars = (f, key) => tornGet(f, key, tornUrl('faction/wars'));
 export const factionMembers = (f, key, id) => tornGet(f, key, tornUrl('faction/' + Number(id) + '/members'));
 export const factionChain = (f, key) => tornGet(f, key, tornUrl('faction/chain'));

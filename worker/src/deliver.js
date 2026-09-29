@@ -16,7 +16,7 @@ export const DM_RETRY_S = 6 * 3600;
 /** Discord allows 5 button rows: one per ping, so 5 pings a message. */
 export const PER_MESSAGE = 5;
 
-export const KIND_WORD = { drug: 'Drug', drugready: 'Drug', booster: 'Booster', energy: 'Energy', refill: 'Refill', jump: 'Jump', step: 'Jump', landed: 'Travel', watch: 'Price', war: 'War', chain: 'Chain', stale: 'Plan', test: 'Test' };
+export const KIND_WORD = { drug: 'Drug', drugready: 'Drug', booster: 'Booster', energy: 'Energy', refill: 'Refill', jump: 'Jump', step: 'Jump', landed: 'Travel', price: 'Price', watch: 'Watch', war: 'War', chain: 'Chain', stale: 'Plan', test: 'Test' };
 
 export function bodyOf(row) {
     return typeof row.body === 'string' ? parse(row.body, {}) : row.body || {};
@@ -25,7 +25,7 @@ export function bodyOf(row) {
 const active = (r) => !r.state || r.state === 'sent';
 
 export function stateLine(r) {
-    if (r.state === 'done') return 'Done';
+    if (r.state === 'done') return bodyOf(r).kind === 'war' ? 'Done: no more war pings for this war' : 'Done';
     if (r.state === 'snoozed') return 'Snoozed until ' + clock(r.until) + ' TCT';
     if (r.state === 'skipped') return 'Step skipped: your plan re-times on its next sync';
     if (r.state === 'resolved') return 'Seen in Torn';
@@ -49,8 +49,10 @@ function headline(rows) {
     return (live.length ? live : rows).map((r) => bodyOf(r).title).join(' · ');
 }
 
-/** War and chain pings: one message edited in place; Done and Attack links, no snooze or skip. */
+/** Chain pings: one message edited in place; Done and a link, no snooze or skip. */
 export const LIVE_KINDS = new Set(['war', 'chain']);
+/** Pings about players (war, watch list) and the chain: no Snooze (they're about the next few minutes). */
+export const NO_SNOOZE = new Set(['war', 'watch', 'chain']);
 
 function liveMessage(r) {
     const b = bodyOf(r);
@@ -61,8 +63,29 @@ function liveMessage(r) {
     return { content: String(b.title || '').slice(0, 1900), embeds: embeds([r]), components: btns.length ? [actionRow(btns)] : [], allowed_mentions: { parse: [] } };
 }
 
+/**
+ * War pings (one or several enemies, a new message each time so Discord
+ * notifies): one row of buttons: Done (stops war pings for this war) and
+ * an Attack link per enemy.
+ */
+function warMessage(rows) {
+    const btns = [];
+    const open = rows.find(active);
+    if (open && !rows.some((r) => r.state === 'done')) btns.push(button('Done: stop war pings', 'done:' + open.alert, 3));
+    const seen = new Set();
+    for (const r of rows) {
+        for (const t of Array.isArray(bodyOf(r).attack) ? bodyOf(r).attack : []) {
+            if (btns.length >= 5 || seen.has(t.id)) continue;
+            seen.add(t.id);
+            btns.push(linkButton('Attack ' + t.name, PAGES.attack(t.id)));
+        }
+    }
+    return { content: headline(rows).slice(0, 1900), embeds: embeds(rows), components: btns.length ? [actionRow(btns)] : [], allowed_mentions: { parse: [] } };
+}
+
 /** The bot's message (DMs): buttons per ping, the Torn link on each. */
 export function alertMessage(rows) {
+    if (rows.length && rows.every((r) => bodyOf(r).kind === 'war' && bodyOf(r).event)) return warMessage(rows);
     if (rows.length === 1 && LIVE_KINDS.has(bodyOf(rows[0]).kind)) return liveMessage(rows[0]);
     const many = rows.length > 1;
     const components = [];
@@ -72,12 +95,12 @@ export function alertMessage(rows) {
         const btns = [];
         if (active(r)) {
             btns.push(button('Done' + tag, 'done:' + r.alert, 3));
-            btns.push(button('Snooze 10 min' + tag, 'snooze:' + r.alert, 2));
+            if (!NO_SNOOZE.has(b.kind)) btns.push(button('Snooze 10 min' + tag, 'snooze:' + r.alert, 2));
             if (b.step) btns.push(button('Skip step' + tag, 'skip:' + r.alert, 2));
         } else if (r.state === 'snoozed') {
             btns.push(button('Done' + tag, 'done:' + r.alert, 3));
         }
-        if (b.link) btns.push(linkButton('Open in Torn' + tag, b.link));
+        if (b.link) btns.push(linkButton((Array.isArray(b.attack) && b.attack.length === 1 ? 'Attack ' + b.attack[0].name : 'Open in Torn') + tag, b.link));
         if (btns.length) components.push(actionRow(btns));
     }
     return { content: headline(rows).slice(0, 1900), embeds: embeds(rows), components, allowed_mentions: { parse: [] } };

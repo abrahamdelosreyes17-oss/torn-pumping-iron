@@ -14,7 +14,6 @@
 
 import { Q } from './db.js';
 import { DISCORD_API } from './discord.js';
-import { sha256 } from './cmd-core.js';
 
 /** A login waits this long for you to finish on Discord. */
 export const LOGIN_TTL_S = 15 * 60;
@@ -41,18 +40,28 @@ function newLoginId() {
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
 /** The page you land on after Discord: plain, in Pumping Iron's colours, no scripts. */
-export function page(title, text, ok) {
+export function page(title, text, ok, status = 200) {
     const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pumping Iron · ${esc(title)}</title>
 <style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#15171a;color:#c9ccd0;font:15px/1.5 Arial,Helvetica,sans-serif}
 main{max-width:440px;margin:16px;padding:22px 24px;background:#1b1e21;border:1px solid #2c3136;border-left:3px solid ${ok ? '#efebe2' : '#e8a33d'};border-radius:6px}
 h1{margin:0 0 8px;font-size:18px;color:#fff}p{margin:0}small{display:block;margin-top:14px;color:#8a9096}</style></head>
 <body><main><h1>${esc(title)}</h1><p>${esc(text)}</p><small>Pumping Iron · you can close this tab.</small></main></body></html>`;
-    return new Response(html, { status: 200, headers: { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'", 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'cache-control': 'no-store' } });
+    return new Response(html, { status, headers: { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'", 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'cache-control': 'no-store' } });
+}
+
+const NOT_READY = 'Log in with Discord isn’t set up on this service yet (it needs DISCORD_CLIENT_SECRET and GUILD_ID).';
+const EXPIRED = ['This login has expired', 'Go back to Pumping Iron → Settings → Discord and press Log in with Discord again.'];
+
+/** Discord's authorize page for this login; `quiet` (prompt=none) skips it when you allowed Pumping Iron before. */
+function authorizeUrl(env, origin, id, quiet) {
+    const q = new URLSearchParams({ client_id: String(env.DISCORD_APP_ID), response_type: 'code', scope: 'identify', redirect_uri: origin + '/login/callback', state: id });
+    if (quiet) q.set('prompt', 'none');
+    return new Response(null, { status: 302, headers: { location: 'https://discord.com/oauth2/authorize?' + q.toString(), 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' } });
 }
 
 /** POST /login/start (Authorization: Bearer <secret>) → {url}: open it; then ask /login/status. */
 export async function loginStart(req, env, userId) {
-    if (!loginReady(env)) return json({ ok: false, error: 'Log in with Discord isn’t set up on this service yet.' }, 501);
+    if (!loginReady(env)) return json({ ok: false, error: NOT_READY }, 501);
     const nowS = Math.floor(Date.now() / 1000);
     await env.DB.prepare(Q.loginClean).bind(nowS - LOGIN_TTL_S).run();
     await env.DB.prepare(Q.loginDeleteUser).bind(userId).run();
@@ -80,13 +89,13 @@ export async function loginStatus(req, env, userId) {
 
 /** GET /login?id=… → Discord's "allow Pumping Iron?" page. */
 export async function loginGo(req, env) {
+    if (!loginReady(env)) return page('Not set up', NOT_READY, false, 501);
     const url = new URL(req.url);
     const id = String(url.searchParams.get('id') || '');
-    const row = loginReady(env) && /^[0-9a-f]{48}$/.test(id) ? await env.DB.prepare(Q.loginGet).bind(id).first() : null;
+    const row = /^[0-9a-f]{48}$/.test(id) ? await env.DB.prepare(Q.loginGet).bind(id).first() : null;
     const nowS = Math.floor(Date.now() / 1000);
-    if (!row || row.state !== 'open' || Number(row.at) < nowS - LOGIN_TTL_S) return page('This login has expired', 'Go back to Pumping Iron → Settings → Discord and press Log in with Discord again.', false);
-    const q = new URLSearchParams({ client_id: String(env.DISCORD_APP_ID), response_type: 'code', scope: 'identify', redirect_uri: url.origin + '/login/callback', state: id, prompt: 'none' });
-    return new Response(null, { status: 302, headers: { location: 'https://discord.com/oauth2/authorize?' + q.toString(), 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' } });
+    if (!row || row.state !== 'open' || Number(row.at) < nowS - LOGIN_TTL_S) return page(...EXPIRED, false);
+    return authorizeUrl(env, url.origin, id, true);
 }
 
 async function finish(env, id, state, discordId = null, name = null) {
@@ -110,10 +119,22 @@ async function discordUser(env, f, code, redirectUri) {
     return { id: String(u.id), name: String(u.global_name || u.username || 'you').slice(0, 64) };
 }
 
+/** Discord's "Unknown Guild": the bot isn't in GUILD_ID (not "you aren't a member"). */
+const UNKNOWN_GUILD = 10004;
+
 /** Is this Discord account in the owner's server? The bot asks (it's a member there). */
 async function inServer(env, f, discordId) {
     const r = await f(DISCORD_API + '/guilds/' + env.GUILD_ID + '/members/' + discordId, { headers: { authorization: 'Bot ' + env.BOT_TOKEN } });
-    if (r.status === 404) return false;
+    if (r.status === 404) {
+        let code = null;
+        try {
+            code = Number((await r.json()).code);
+        } catch {
+            code = null;
+        }
+        if (code === UNKNOWN_GUILD) throw new Error('The bot is not in the Pumping Iron server (ask its owner)');
+        return false;
+    }
     if (!r.ok) throw new Error('The bot could not check the server (' + r.status + ')');
     return true;
 }
@@ -124,19 +145,22 @@ async function inServer(env, f, discordId) {
  * needed), linked to their Discord account like /link.
  */
 export async function loginCallback(req, env, f, { maxUsers }) {
+    if (!loginReady(env)) return page('Not set up', NOT_READY, false, 501);
     const url = new URL(req.url);
     const id = String(url.searchParams.get('state') || '');
     const nowS = Math.floor(Date.now() / 1000);
-    const row = loginReady(env) && /^[0-9a-f]{48}$/.test(id) ? await env.DB.prepare(Q.loginGet).bind(id).first() : null;
-    if (!row || row.state !== 'open' || Number(row.at) < nowS - LOGIN_TTL_S) return page('This login has expired', 'Go back to Pumping Iron → Settings → Discord and press Log in with Discord again.', false);
-    if (url.searchParams.get('error')) {
-        // prompt=none on a first login: Discord asks us to show its page after all.
-        if (url.searchParams.get('error') === 'consent_required') {
-            const q = new URLSearchParams({ client_id: String(env.DISCORD_APP_ID), response_type: 'code', scope: 'identify', redirect_uri: url.origin + '/login/callback', state: id });
-            return new Response(null, { status: 302, headers: { location: 'https://discord.com/oauth2/authorize?' + q.toString(), 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' } });
+    const row = /^[0-9a-f]{48}$/.test(id) ? await env.DB.prepare(Q.loginGet).bind(id).first() : null;
+    if (!row || row.state !== 'open' || Number(row.at) < nowS - LOGIN_TTL_S) return page(...EXPIRED, false);
+    const err = url.searchParams.get('error');
+    if (err) {
+        // prompt=none on a first login: Discord asks us to show its page after all (never loops: no prompt=none this time).
+        if (['consent_required', 'interaction_required', 'login_required'].includes(err)) return authorizeUrl(env, url.origin, id, false);
+        if (err === 'access_denied') {
+            await finish(env, id, 'denied');
+            return page('Not connected', 'You cancelled on Discord. Press Log in with Discord again whenever you like.', false);
         }
-        await finish(env, id, 'denied');
-        return page('Not connected', 'You cancelled on Discord. Press Log in with Discord again whenever you like.', false);
+        await finish(env, id, 'failed');
+        return page('Not connected', 'Discord said: ' + err.slice(0, 60) + '. Try again in a minute.', false);
     }
     const code = String(url.searchParams.get('code') || '');
     if (!code) {
@@ -161,7 +185,7 @@ export async function loginCallback(req, env, f, { maxUsers }) {
             await finish(env, id, 'full', who.id, who.name);
             return page('The service is full', 'It serves ' + maxUsers + ' people. Ask whoever runs it.', false);
         }
-        await env.DB.prepare(Q.userInsert).bind(row.user, '', who.id, '', 'null', '{}', 0, null, nowS, null, null, null, null).run();
+        await env.DB.prepare(Q.userInsert).bind(row.user, '', who.id, '', 'null', '{}', 0, null, nowS, null, null, null, null, null, null).run();
     }
     // One Discord account ↔ one Pumping Iron user: a login elsewhere moves here (as /link does).
     await env.DB.prepare(Q.userUnlink).bind(who.id).run();
@@ -170,4 +194,3 @@ export async function loginCallback(req, env, f, { maxUsers }) {
     return page('Connected as ' + who.name, 'Go back to Pumping Iron: pings start by themselves. They come as DMs from the Pumping Iron bot.', true);
 }
 
-export { sha256 };

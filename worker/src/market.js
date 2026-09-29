@@ -110,7 +110,7 @@ export async function watchAlerts(f, db, key, user, nowS) {
         const { best } = await bestPrice(f, db, key, user.id, w.item, nowS, WATCH_EVERY_S - 30);
         if (!best) continue;
         const under = best.price <= Number(w.price);
-        if (under && !Number(w.fired)) alerts.push({ id: 'watch:' + w.item + ':' + Math.floor(nowS / WATCH_EVERY_S), kind: 'watch', item: w.item, link: best.link, title: itemName(w.item) + ' at ' + money(best.price), text: money(best.price) + ' ' + best.where + ', your watch is ' + money(w.price) + '. You buy in Torn yourself.', step: null });
+        if (under && !Number(w.fired)) alerts.push({ id: 'watch:' + w.item + ':' + Math.floor(nowS / WATCH_EVERY_S), kind: 'price', item: w.item, link: best.link, title: itemName(w.item) + ' at ' + money(best.price), text: money(best.price) + ' ' + best.where + ', your watch is ' + money(w.price) + '. You buy in Torn yourself.', step: null });
         else if (!under && Number(w.fired)) await db.prepare(Q.watchMark).bind(0, user.id, w.item).run();
     }
     return { alerts, watches };

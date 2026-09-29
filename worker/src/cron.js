@@ -11,23 +11,34 @@ import { dueAlerts, resolvedBy, nextPrev } from './alerts.js';
 import { Q, parse, meterDb, ensureSchema, QUERY_BUDGET } from './db.js';
 import { guard, BudgetError } from './net.js';
 import { userState, pauseUser, TornError } from './torn.js';
-import { deliver, canDeliver, bodyOf, editAlertMessage, PER_MESSAGE, LIVE_KINDS } from './deliver.js';
-import { warTick, chainTick } from './war.js';
-import { targetsOf } from './cmd-torn.js';
+import { deliver, canDeliver, bodyOf, editAlertMessage, PER_MESSAGE, NO_SNOOZE } from './deliver.js';
+import { warTick, chainTick, eyeTick, EYE_PER_RUN, EYE_CYCLE } from './war.js';
+import { targetsOf, warListOf, watchListOf } from './cmd-torn.js';
 import { clock, DAY_S } from './format.js';
 import { keyFor, sealKey, isSealed, KeyError } from './keys.js';
 import { watchAlerts, WATCH_EVERY_S, MAX_WATCHES } from './market.js';
 import { kindsOn, settingsOf, muted, inQuiet, planStale, planAge } from './settings.js';
 
 export const SENT_KEEP_S = 2 * 86400;
+/** War and watch-list pings are about the next minutes: their rows go after 6 hours. */
+export const LIVE_KEEP_S = 6 * 3600;
 /** What one user can cost at most in a minute (Torn reads, Discord calls; D1 queries). */
 export const USER_SUBREQUESTS = 12;
 export const USER_QUERIES = 14;
 /** Extra when the user's price watches are due (3 watches: reads, cache writes, marks). */
 export const WATCH_SUBREQUESTS = 2 * MAX_WATCHES;
 export const WATCH_QUERIES = 8;
+/**
+ * Extra in a war: the reads and one message are in the base; each war
+ * message checks the budget left before it goes (a ping that can't go now
+ * waits a minute), so only a little is kept for the save.
+ */
+export const WAR_SUBREQUESTS = 0;
+export const WAR_QUERIES = 2;
+/** Extra with a watch list: its pings' rows (the reads, at most 5, are added per user). */
+export const EYE_QUERIES = 5;
 /** The 10-minute cleanup, plus sealing up to 5 plain 1.0 keys. */
-export const CLEANUP_QUERIES = 9;
+export const CLEANUP_QUERIES = 10;
 /** Message edits (auto-close) per user per minute. */
 export const MAX_EDITS = 2;
 /** Cron runs drift by a few seconds: a watch checked 4.5 minutes ago counts as 5. */
@@ -39,10 +50,25 @@ const chunks = (list, n) => {
     return out;
 };
 
+/** Pings sent by war mode (they have their own cap). */
+const isWarRow = (r) => String(r.alert).startsWith('war:');
+
+/** What this user's minute may cost: subrequests and D1 queries (checked before the user is run). */
+export function userCost(row, nowS) {
+    const w = watchDue(row, nowS);
+    const war = parse(row.war, null);
+    const inWar = Boolean(war && war.enemy && !war.done);
+    const eye = kindsOn(row).watch ? watchListOf(row).length : 0;
+    return {
+        sub: USER_SUBREQUESTS + (w ? WATCH_SUBREQUESTS : 0) + (inWar ? WAR_SUBREQUESTS : 0) + (eye ? Math.min(EYE_PER_RUN, Math.ceil(eye / EYE_CYCLE)) : 0),
+        queries: USER_QUERIES + (w ? WATCH_QUERIES : 0) + (inWar ? WAR_QUERIES : 0) + (eye ? EYE_QUERIES : 0),
+    };
+}
+
 /** Is this user's price-watch check due (at least 5 minutes since the last one)? */
 export function watchDue(row, nowS) {
     const prev = parse(row.prev, null);
-    return kindsOn(row).watch && !(prev && Number(prev.watchAt) > nowS - (WATCH_EVERY_S - WATCH_SLACK_S));
+    return kindsOn(row).price && !(prev && Number(prev.watchAt) > nowS - (WATCH_EVERY_S - WATCH_SLACK_S));
 }
 
 /**
@@ -58,7 +84,7 @@ export async function sendAlerts(env, f, db, user, alerts, nowS) {
     for (const group of chunks(sorted, PER_MESSAGE)) {
         // Room for: the rows, a DM channel save, a watch mark each, the user's minute.
         if (typeof db.left === 'function' && db.left() < group.length * 2 + 2) throw new BudgetError();
-        const rows = group.map((a) => ({ user: user.id, alert: a.id, at: nowS, state: 'sent', until: null, body: { title: a.title, text: a.text, kind: a.kind, link: a.link || null, step: a.step && a.skip !== false ? { at: a.step.at, kind: a.step.kind, label: a.step.label } : null, ...(a.attack ? { attack: a.attack } : {}) } }));
+        const rows = group.map((a) => ({ user: user.id, alert: a.id, at: nowS, state: 'sent', until: null, body: { title: a.title, text: a.text, kind: a.kind, link: a.link || null, step: a.step && a.skip !== false ? { at: a.step.at, kind: a.step.kind, label: a.step.label } : null, ...(a.attack ? { attack: a.attack } : {}), ...(a.event ? { event: a.event } : {}) } }));
         const d = await deliver(env, f, db, user, rows, nowS);
         // Discord refused the message itself (400): record it as failed instead of retrying it every minute.
         if (!d.ok && d.bad) {
@@ -147,6 +173,23 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
             if (!(e instanceof TornError)) throw e;
         }
     }
+    // The watch list: a few watched players read in turn; their pings join this minute's.
+    const oldEye = row.watch_state || null;
+    let eye = parse(oldEye, null);
+    const watched = watchListOf(row);
+    if (!watched.length) eye = null;
+    else if (on.watch && !muted(st, 'watch', nowS)) {
+        try {
+            const r = await eyeTick({ f, key, nowS, list: watched, state: eye, bands: targetsOf(row).bands, leadS: st.warLead * 60 });
+            alerts.push(...r.alerts);
+            eye = r.state;
+        } catch (e) {
+            // eyeTick keeps other Torn errors to itself: only a dead key comes here.
+            if (!(e instanceof TornError && e.dead)) throw e;
+            await pauseUser(db, row.id, e);
+            return { sent: 0, error: 'Torn error ' + e.code };
+        }
+    }
     const { results } = await db.prepare(Q.sentList).bind(row.id).all();
     const rows = results || [];
     const seen = new Map(rows.map((r) => [r.alert, r]));
@@ -158,7 +201,7 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
     for (const r of rows) {
         if (r.state !== 'snoozed' || Number(r.until) > nowS) continue;
         const b = bodyOf(r);
-        if (LIVE_KINDS.has(b.kind)) continue;
+        if (NO_SNOOZE.has(b.kind)) continue;
         const now = alerts.find((a) => a.id === r.alert);
         if (now) fresh.push(now);
         else if (!resolvedBy(b.kind, state, nowS, b)) fresh.push({ id: r.alert, kind: b.kind, link: b.link, step: b.step, title: 'Reminder (snoozed at ' + clock(Number(r.until) - 600) + ')', text: b.title + (b.text ? ' · ' + b.text : '') });
@@ -169,15 +212,17 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
     fresh = fresh.filter((a) => !(a.kind === 'drugready' && drugDone));
     // Muted kinds wait (not recorded: they come if still due when the mute ends).
     fresh = fresh.filter((a) => !muted(st, a.kind, nowS));
-    // Quiet hours and caps: strict jump steps still go through.
-    const room = Math.min(st.perHour - messagesSince(rows, nowS - 3600), st.perDay - messagesSince(rows, nowS - DAY_S));
+    // Quiet hours and caps: strict jump steps still go through. War pings have their own cap.
+    const normal = rows.filter((r) => !isWarRow(r));
+    const room = Math.min(st.perHour - messagesSince(normal, nowS - 3600), st.perDay - messagesSince(normal, nowS - DAY_S));
+    let warRoom = st.warPerHour - messagesSince(rows.filter(isWarRow), nowS - 3600);
     if (inQuiet(st, nowS) || room <= 0) fresh = fresh.filter((a) => a.kind === 'jump');
     else if (fresh.length > room * PER_MESSAGE) fresh = fresh.slice(0, room * PER_MESSAGE);
 
     const out = await sendAlerts(env, f, db, row, fresh, nowS);
     let sent = out.sent;
     let used = out.messages;
-    for (const a of fresh) if (a.kind === 'watch' && out.ids.includes(a.id)) await db.prepare(Q.watchMark).bind(1, row.id, a.item).run();
+    for (const a of fresh) if (a.kind === 'price' && out.ids.includes(a.id)) await db.prepare(Q.watchMark).bind(1, row.id, a.item).run();
 
     // What this read saw, saved right away: an aborted run later can't replay a transition.
     const next = nextPrev(prev, state, nowS);
@@ -187,7 +232,7 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
     row.prev = JSON.stringify(next);
     await db.prepare(Q.userRan).bind(nowS, row.prev, oldWar, row.id).run();
 
-    // Wars and chains: live messages edited in place (see war.js).
+    // Wars (a new message for each minute's pings, their own cap) and chains (a live message edited in place). See war.js.
     let war = parse(oldWar, null);
     const live = {
         env,
@@ -203,10 +248,23 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
             const r = await sendAlerts(env, f, db, row, list, nowS);
             sent += r.sent;
             used += r.messages;
+            return r.ids;
+        },
+    };
+    const warLive = {
+        ...live,
+        warList: warListOf(row),
+        leadS: st.warLead * 60,
+        mayStart: () => !inQuiet(st, nowS) && warRoom > 0,
+        send: async (list) => {
+            const r = await sendAlerts(env, f, db, row, list, nowS);
+            sent += r.sent;
+            warRoom -= r.messages;
+            return r.ids;
         },
     };
     try {
-        if (on.war && row.faction_id && !muted(st, 'war', nowS)) war = await warTick({ ...live, war });
+        if (on.war && row.faction_id && !muted(st, 'war', nowS)) war = await warTick({ ...warLive, war });
         if (on.chain && !muted(st, 'chain', nowS)) await chainTick(live);
     } catch (e) {
         if (!(e instanceof TornError)) throw e;
@@ -219,7 +277,8 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
         if ([6, 7, 16].includes(e.code)) war = { checked: nowS, error: e.code };
     }
     const newWar = war ? JSON.stringify(war) : null;
-    if (newWar !== oldWar) await db.prepare(Q.userWar).bind(newWar, row.id).run();
+    const newEye = eye ? JSON.stringify(eye) : null;
+    if (newWar !== oldWar || newEye !== oldEye) await db.prepare(Q.userLive).bind(newWar, newEye, row.id).run();
     return { sent, resolved };
 }
 
@@ -247,8 +306,8 @@ export async function runCron(env, nowS = Math.floor(Date.now() / 1000), fetchIm
         const { results } = await db.prepare(Q.usersDue).bind(20).all();
         let stop = false;
         for (const row of results || []) {
-            const w = watchDue(row, nowS);
-            if (stop || f.left() < USER_SUBREQUESTS + (w ? WATCH_SUBREQUESTS : 0) || db.left() < USER_QUERIES + (w ? WATCH_QUERIES : 0) + keep) {
+            const cost = userCost(row, nowS);
+            if (stop || f.left() < cost.sub || db.left() < cost.queries + keep) {
                 out.push({ sent: 0, later: true });
                 continue;
             }
@@ -271,6 +330,7 @@ export async function runCron(env, nowS = Math.floor(Date.now() / 1000), fetchIm
         }
         if (cleanup) {
             await db.prepare(Q.sentClean).bind(nowS - SENT_KEEP_S).run();
+            await db.prepare(Q.sentCleanLive).bind(nowS - LIVE_KEEP_S).run();
             await db.prepare(Q.ackClean).bind(nowS - SENT_KEEP_S).run();
             await db.prepare(Q.linkClean).bind(nowS).run();
             await sealPlainKeys(env, db);

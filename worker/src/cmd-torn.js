@@ -9,7 +9,7 @@ import { Q, parse } from './db.js';
 import { reply, defer, linkButton, row as actionRow } from './discord.js';
 import { keyFor, KeyError } from './keys.js';
 import { userState, playerBasic, factionWars, factionMembers, factionChain, pauseUser, tornErrorText, TornError } from './torn.js';
-import { findWar, membersOf, warView, warText, chainText } from './war.js';
+import { findWar, membersOf, playerNow, estimator, warPages, warGroups, chainText, BEATABLE, MAX_WAR_MEMBERS, MAX_WATCH } from './war.js';
 import { bestPrice, buyMessage, itemName, MAX_WATCHES } from './market.js';
 import { ITEMS } from './commands.js';
 import { clock, rel, dur, money, PAGES } from './format.js';
@@ -120,11 +120,51 @@ export function cleanTargets(t, nowS) {
     return { at: nowS, list, bands };
 }
 
-const BAND_WORDS ={ stomp: 'Stomp', good: 'Good', tough: 'Tough', cant: 'Can’t win', none: 'No data' };
+const BAND_WORDS = { stomp: 'Stomp', good: 'Good', tough: 'Tough', cant: 'Can’t win', none: 'No data' };
+
+/** One player as the userscript syncs it: {id, name, level, band, win, keep} (+ tag on the watch list). */
+function cleanPlayer(x, withTag) {
+    const p = { id: posInt(x && x.id), name: x && x.name ? String(x.name).slice(0, 40) : null, level: posInt(x && x.level), band: BANDS.includes(x && x.band) ? x.band : 'none', win: pct(x && x.win), keep: pct(x && x.keep) };
+    if (withTag) p.tag = x && x.tag ? String(x.tag).slice(0, 24) : null;
+    return p;
+}
+
+function uniqueById(list) {
+    const seen = new Set();
+    return list.filter((x) => x.id && !seen.has(x.id) && seen.add(x.id));
+}
+
+/**
+ * The enemy faction as Torn Eye sees it (PUT /plan `war`):
+ * {factionId, members: [{id, name, level, band, win, keep}] ≤ 100}; null clears.
+ */
+export function cleanWarList(w, nowS) {
+    if (!w || typeof w !== 'object' || Array.isArray(w)) return null;
+    const members = uniqueById((Array.isArray(w.members) ? w.members : []).slice(0, MAX_WAR_MEMBERS).map((x) => cleanPlayer(x, false)));
+    return { at: nowS, factionId: posInt(w.factionId), members };
+}
+
+/** The watch list (PUT /plan `watch`): [{id, name, level, band, win, keep, tag}] ≤ 25; null clears. */
+export function cleanWatch(list, nowS) {
+    if (!Array.isArray(list)) return null;
+    return { at: nowS, list: uniqueById(list.slice(0, MAX_WATCH).map((x) => cleanPlayer(x, true))) };
+}
 
 export function targetsOf(user) {
     const t = parse(user.targets, null);
     return t && typeof t === 'object' ? { at: Number(t.at) || 0, list: Array.isArray(t.list) ? t.list : [], bands: t.bands && typeof t.bands === 'object' ? t.bands : {} } : { at: 0, list: [], bands: {} };
+}
+
+/** The synced war list, or null. */
+export function warListOf(user) {
+    const w = parse(user && user.war_list, null);
+    return w && typeof w === 'object' && Array.isArray(w.members) ? w : null;
+}
+
+/** The synced watch list ([] when none). */
+export function watchListOf(user) {
+    const w = parse(user && user.watch_list, null);
+    return w && Array.isArray(w.list) ? w.list.filter((x) => x && posInt(x.id)) : [];
 }
 
 function estimateText(t) {
@@ -168,7 +208,9 @@ export async function targetCmd(user, i, env, fetchImpl, ctx, nowS) {
 /* ---------- /war and /chain ---------- */
 
 export async function warCmd(user, i, env, fetchImpl, ctx, nowS) {
-    const asked = Math.round(Number(opts(i).faction)) || null;
+    const o = opts(i);
+    const asked = Math.round(Number(o.faction)) || null;
+    const page = Math.max(1, Math.round(Number(o.page)) || 1);
     if (!asked && !user.faction_id) return reply('The bot doesn’t know your faction yet: open Pumping Iron once (it sends it), or ask for one: `/war faction:<id>`.');
     return withTorn(user, i, env, fetchImpl, ctx, nowS, async (key) => {
         let war;
@@ -177,9 +219,17 @@ export async function warCmd(user, i, env, fetchImpl, ctx, nowS) {
             war = findWar(await factionWars(fetchImpl, key), user.faction_id, nowS);
             if (!war) return { content: 'No war right now. `/war faction:<id>` shows any faction.' };
         }
-        const view = warView(membersOf(await factionMembers(fetchImpl, key, war.enemy)), targetsOf(user).bands, nowS);
-        const attack = view.hit.slice(0, 4).map((x) => linkButton('Attack ' + x.name, PAGES.attack(x.id)));
-        return { content: warText(war, view, nowS).slice(0, 2000), components: [actionRow([...attack, linkButton('Faction', PAGES.faction(war.enemy))])] };
+        const data = await factionMembers(fetchImpl, key, war.enemy);
+        const players = membersOf(data).map(playerNow).filter((p) => p.id);
+        const est = estimator(warListOf(user), war.enemy, targetsOf(user).bands);
+        // The cron's last read of this faction knows when flights were first seen (landing estimates).
+        const kept = parse(user.war, null);
+        const snap = kept && Number(kept.enemy) === Number(war.enemy) && kept.snap ? kept.snap : null;
+        const pages = warPages(war, players, est, snap, nowS);
+        const n = Math.min(page, pages.length);
+        const ready = warGroups(players, est, nowS).hit.filter((p) => BEATABLE.has(est(p.id).band));
+        const attack = ready.slice(0, 4).map((x) => linkButton('Attack ' + x.name, PAGES.attack(x.id)));
+        return { content: (page > pages.length ? '(Only ' + pages.length + ' page' + (pages.length === 1 ? '' : 's') + '.)\n' : '') + pages[n - 1], components: [actionRow([...attack, linkButton('Faction', PAGES.faction(war.enemy))])] };
     });
 }
 

@@ -8,7 +8,7 @@
 
 import { BudgetError } from './net.js';
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /** Free plan: 50 D1 queries per invocation. Keep a few spare. */
 export const QUERY_BUDGET = 45;
@@ -23,12 +23,13 @@ export const Q = {
     usersCount: 'SELECT COUNT(*) AS n FROM users',
     usersDue: "SELECT * FROM users WHERE paused = 0 AND torn_key != '' AND (webhook != '' OR linked = 1) ORDER BY ran ASC LIMIT ?",
     usersPlainKeys: "SELECT id, torn_key FROM users WHERE torn_key != '' AND torn_key NOT LIKE 'v1.%' LIMIT 5",
-    userInsert: 'INSERT INTO users (id, torn_key, discord_id, webhook, plan, rules, paused, last_error, updated, plan_at, targets, faction_id, player_id, linked, ran) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)',
-    userSync: 'UPDATE users SET torn_key = ?, discord_id = ?, webhook = ?, plan = ?, rules = ?, paused = ?, last_error = ?, updated = ?, plan_at = ?, targets = ?, faction_id = ?, player_id = ? WHERE id = ?',
+    userInsert: 'INSERT INTO users (id, torn_key, discord_id, webhook, plan, rules, paused, last_error, updated, plan_at, targets, faction_id, player_id, war_list, watch_list, linked, ran) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)',
+    userSync: 'UPDATE users SET torn_key = ?, discord_id = ?, webhook = ?, plan = ?, rules = ?, paused = ?, last_error = ?, updated = ?, plan_at = ?, targets = ?, faction_id = ?, player_id = ?, war_list = ?, watch_list = ? WHERE id = ?',
     userPause: 'UPDATE users SET paused = 1, last_error = ? WHERE id = ?',
     userDelete: 'DELETE FROM users WHERE id = ?',
     userRan: 'UPDATE users SET ran = ?, prev = ?, war = ? WHERE id = ?',
-    userWar: 'UPDATE users SET war = ? WHERE id = ?',
+    // The war's per-enemy memory and the watch list's, saved together once a minute when they changed.
+    userLive: 'UPDATE users SET war = ?, watch_state = ? WHERE id = ?',
     userKey: 'UPDATE users SET torn_key = ? WHERE id = ?',
     userLink: 'UPDATE users SET discord_id = ?, linked = 1, dm_channel = NULL, dm_fail = 0 WHERE id = ?',
     userUnlink: "UPDATE users SET discord_id = '', linked = 0, dm_channel = NULL WHERE discord_id = ? AND linked = 1",
@@ -44,6 +45,8 @@ export const Q = {
     sentBody: 'UPDATE sent SET body = ? WHERE user = ? AND alert = ?',
     sentDeleteUser: 'DELETE FROM sent WHERE user = ?',
     sentClean: 'DELETE FROM sent WHERE at < ?',
+    // War and watch-list pings are about the next few minutes: kept 6 hours (Done on a war is kept in users.war).
+    sentCleanLive: "DELETE FROM sent WHERE at < ? AND (alert LIKE 'war:%' OR alert LIKE 'eye:%')",
 
     linkDeleteUser: 'DELETE FROM link_codes WHERE user = ?',
     linkPut: 'INSERT INTO link_codes (hash, user, expires) VALUES (?, ?, ?)',
@@ -104,6 +107,9 @@ export const SCHEMA = [
     'ALTER TABLE users ADD COLUMN war TEXT',
     'ALTER TABLE users ADD COLUMN ran INTEGER DEFAULT 0',
     'ALTER TABLE users ADD COLUMN cmd_at INTEGER DEFAULT 0',
+    'ALTER TABLE users ADD COLUMN war_list TEXT',
+    'ALTER TABLE users ADD COLUMN watch_list TEXT',
+    'ALTER TABLE users ADD COLUMN watch_state TEXT',
     "ALTER TABLE sent ADD COLUMN state TEXT DEFAULT 'sent'",
     'ALTER TABLE sent ADD COLUMN until INTEGER',
     'ALTER TABLE sent ADD COLUMN channel TEXT',
