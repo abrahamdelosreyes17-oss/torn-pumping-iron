@@ -353,6 +353,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         plannedGain,
         reachedDay: proj.reachedDay,
         projection: proj.days.slice(0, 7),
+        buildCatchUp: proj.catchUp || null,
         nextGym: ng,
         energyPerDay,
         buyToday,

@@ -86,6 +86,51 @@ test('the split marks stopAt when the next train would lose a gym the build need
     assert.ok(r.perStat.def.trains + r.perStat.dex.trains > 0, 'the rest of the energy goes elsewhere');
 });
 
+test('parts: the trains in gym parts, the gym you\'re in first; their trains and energy add up to the split', () => {
+    const f = { str: 100e3, spd: 120e3, def: 99e3, dex: 125e3 };
+    const unl = unlockedGyms(9);
+    for (const active of [8, 9]) {
+        const r = splitSession({ stats: f, shares: BAL, energy: 400, happy: 2500, happyMax: 2500, unlocked: unl, active });
+        assert.equal(r.parts[0].gymId, active, 'the gym you are in comes first');
+        assert.deepEqual(r.parts.map((p) => p.stat).sort(), ['def', 'str']);
+        for (const k of ['def', 'str']) assert.equal(r.parts.filter((p) => p.stat === k).reduce((a, p) => a + p.trains, 0), r.perStat[k].trains);
+        assert.equal(r.parts.reduce((a, p) => a + p.energy, 0), r.energyUsed);
+        assert.ok(Math.abs(r.parts.reduce((a, p) => a + p.gain, 0) - r.gain) <= r.parts.length, 'each part rounded');
+        assert.deepEqual(r.order, r.parts.map((p) => p.stat));
+    }
+    // DEF ties at Global Gym (5 E) and Knuckle Heads (10 E): in Knuckle Heads it stays there (one gym, no switch).
+    const kh = splitSession({ stats: f, shares: BAL, energy: 400, happy: 2500, happyMax: 2500, unlocked: unl, active: 9 });
+    assert.equal(kh.parts.length, 2);
+    assert.ok(kh.parts.every((p) => p.gymId === 9));
+});
+
+test('the new split never trains a stat over its share while another is under (the owner: no DEF), and trains the faster one first', () => {
+    const owner = { str: 35.4e6, spd: 4.06e6, def: 82.4e6, dex: 20.5e6 };
+    const shares = BUILDS.hank.shares;
+    const r = projectBuild({ stats: owner, shares, energyPerDay: 1620, happy: 5325, unlocked: unlockedGyms(24), active: 24, days: 10 });
+    assert.ok(r.days.every((d) => d.def === 0));
+    // STR (35M, 10 pts under) before DEX (20M, 13 pts under): gain per energy × gap, not the gap alone.
+    assert.ok(r.days[0].str > r.days[0].dex);
+    const old = projectBuild({ stats: owner, shares, energyPerDay: 1620, happy: 5325, unlocked: unlockedGyms(24), active: 24, days: 10, rule: 'deficit' });
+    assert.ok(old.days[0].dex > old.days[0].str, 'the old rule: the stat furthest behind');
+    assert.ok(r.days.reduce((a, d) => a + d.gain, 0) > old.days.reduce((a, d) => a + d.gain, 0));
+});
+
+test('pickStat: when no stat under its share can train here, the old rule\'s pick (energy is still spent)', async () => {
+    const { pickStat } = await import('../src/core/builds.js');
+    const s = { str: 100, spd: 100, def: 100, dex: 50 };
+    // Only STR and SPD can train (a gym without DEX): both over their share, the less-over one is picked.
+    const c = pickStat([{ k: 'str', dots: 3, energy: 5 }, { k: 'spd', dots: 3, energy: 5 }], { ...s, str: 110 }, BAL, 1000);
+    assert.equal(c.k, 'spd');
+    assert.equal(pickStat([], s, BAL, 1000), null);
+});
+
+test('projection: catch-up day per stat', () => {
+    const r = projectBuild({ stats: FRIEND, shares: BAL, energyPerDay: 1620, happy: 5325, unlocked: unlockedGyms(18), active: 18, days: 10 });
+    assert.equal(r.catchUp.str, 0, 'over its share already');
+    assert.ok(r.catchUp.dex >= 3 && r.catchUp.dex <= r.reachedDay);
+});
+
 test('gaps and on-build', () => {
     const g = buildGaps(FRIEND, BAL);
     assert.ok(Math.abs(g.dex.share - 0.2026) < 0.001);
