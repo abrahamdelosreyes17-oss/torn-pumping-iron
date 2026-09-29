@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { dueAlerts, webhookBody, isDiscordWebhook, DRUG_LEAD_S } from '../src/alerts.js';
 import { handle, runCron, TORN_URL } from '../src/index.js';
 import { fakeD1 } from './fake-d1.js';
+import { KEY_ENC } from './helpers.js';
+import { openKey } from '../src/keys.js';
 
 const SECRET = 'a'.repeat(40);
 const HOOK = 'https://discord.com/api/webhooks/123456789012345678/abcDEF_ghi-123';
@@ -87,24 +89,25 @@ const req = (method, path, { secret = SECRET, invite = null, body = null } = {})
     new Request('https://pumping-iron.test.workers.dev' + path, { method, headers: { ...(secret ? { authorization: 'Bearer ' + secret } : {}), ...(invite ? { 'x-invite': invite } : {}), 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
 
 test('PUT /plan: the first sync needs the invite code; the secret is stored hashed', async () => {
-    const env = { DB: fakeD1(), INVITE_CODE: 'letmein' };
+    const env = { DB: fakeD1(), INVITE_CODE: 'letmein', KEY_ENC };
     let r = await handle(req('PUT', '/plan', { body: { tornKey: KEY, webhookUrl: HOOK, discordId: DISCORD, plan } }), env);
     assert.equal(r.status, 403);
     r = await handle(req('PUT', '/plan', { invite: 'letmein', body: { tornKey: KEY, webhookUrl: HOOK, discordId: DISCORD, plan } }), env);
     assert.equal(r.status, 200);
-    assert.deepEqual(await r.json(), { ok: true, created: true, ready: true, paused: false, lastError: null });
+    assert.deepEqual(await r.json(), { ok: true, created: true, acks: [], ready: true, paused: false, lastError: null, linked: false, bot: false });
     const [id] = env.DB.users.keys();
     assert.notEqual(id, SECRET);
     assert.equal(id.length, 64, 'sha-256 hex');
     // Later syncs: the secret alone; fields left out are kept.
     r = await handle(req('PUT', '/plan', { body: { plan: { type: 'steady', steps: [] } } }), env);
     assert.equal((await r.json()).created, false);
-    assert.equal(env.DB.users.get(id).torn_key, KEY);
+    assert.match(env.DB.users.get(id).torn_key, /^v1./, 'the key is stored sealed');
+    assert.equal((await openKey(env.DB.users.get(id).torn_key, env, id)).key, KEY);
     assert.equal(env.DB.users.get(id).webhook, HOOK);
 });
 
 test('PUT /plan refuses a bad secret, a non-Discord webhook and a malformed key', async () => {
-    const env = { DB: fakeD1(), INVITE_CODE: 'x' };
+    const env = { DB: fakeD1(), INVITE_CODE: 'x', KEY_ENC };
     assert.equal((await handle(req('PUT', '/plan', { secret: 'short', invite: 'x', body: {} }), env)).status, 401);
     assert.equal((await handle(req('PUT', '/plan', { invite: 'x', body: { webhookUrl: 'https://evil.example/hook' } }), env)).status, 400);
     assert.equal((await handle(req('PUT', '/plan', { invite: 'x', body: { tornKey: 'nope' } }), env)).status, 400);
@@ -112,18 +115,18 @@ test('PUT /plan refuses a bad secret, a non-Discord webhook and a malformed key'
 });
 
 test('POST /test sends one ping to the saved webhook', async () => {
-    const env = { DB: fakeD1(), INVITE_CODE: 'x' };
+    const env = { DB: fakeD1(), INVITE_CODE: 'x', KEY_ENC };
     await handle(req('PUT', '/plan', { invite: 'x', body: { tornKey: KEY, webhookUrl: HOOK, discordId: DISCORD } }), env);
     const f = recorder(() => new Response(null, { status: 204 }));
     const r = await handle(req('POST', '/test'), env, f);
     assert.equal(r.status, 200);
     assert.equal(f.calls.length, 1);
-    assert.equal(f.calls[0].url, HOOK);
+    assert.equal(f.calls[0].url, HOOK + '?wait=true');
     assert.match(JSON.parse(f.calls[0].init.body).content, new RegExp('^<@' + DISCORD + '> test ping'));
 });
 
 test('GET /health says only that it is up (no user count), with no CORS header', async () => {
-    const env = { DB: fakeD1(), INVITE_CODE: 'x' };
+    const env = { DB: fakeD1(), INVITE_CODE: 'x', KEY_ENC };
     await handle(req('PUT', '/plan', { invite: 'x', body: { tornKey: KEY, webhookUrl: HOOK } }), env);
     const r = await handle(req('GET', '/health', { secret: null }), env);
     assert.deepEqual(await r.json(), { ok: true });
@@ -131,7 +134,7 @@ test('GET /health says only that it is up (no user count), with no CORS header',
 });
 
 test('a plan sync does not undo a dead-key pause; a new key does', async () => {
-    const env = { DB: fakeD1(), INVITE_CODE: 'x' };
+    const env = { DB: fakeD1(), INVITE_CODE: 'x', KEY_ENC };
     await handle(req('PUT', '/plan', { invite: 'x', body: { tornKey: KEY, webhookUrl: HOOK, plan } }), env);
     await runCron(env, T, recorder(() => new Response(JSON.stringify({ error: { code: 2, error: 'Incorrect key' } }))));
     let r = await (await handle(req('PUT', '/plan', { body: { plan } }), env)).json();
@@ -145,7 +148,7 @@ test('a plan sync does not undo a dead-key pause; a new key does', async () => {
 });
 
 test('cron: one Torn read per user with the Worker key in a header, one ping per alert, deduped', async () => {
-    const env = { DB: fakeD1(), INVITE_CODE: 'x' };
+    const env = { DB: fakeD1(), INVITE_CODE: 'x', KEY_ENC };
     await handle(req('PUT', '/plan', { invite: 'x', body: { tornKey: KEY, webhookUrl: HOOK, discordId: DISCORD, plan } }), env);
     let now = T;
     // Torn's cooldown counts down with the clock.
@@ -156,17 +159,17 @@ test('cron: one Torn read per user with the Worker key in a header, one ping per
     assert.equal(torn[0].url, TORN_URL);
     assert.equal(torn[0].init.headers.Authorization, 'ApiKey ' + KEY);
     assert.ok(!torn[0].url.includes(KEY), 'the key never goes in the URL');
-    const hooks = f.calls.filter((c) => c.url === HOOK);
+    const hooks = f.calls.filter((c) => c.url.startsWith(HOOK));
     assert.equal(hooks.length, 1);
     assert.match(JSON.parse(hooks[0].init.body).embeds[0].description, /Xanax #2, then DEX × 27/);
     // A minute later, still due: no second ping.
     now = T + 60;
     await runCron(env, now, f);
-    assert.equal(f.calls.filter((c) => c.url === HOOK).length, 1);
+    assert.equal(f.calls.filter((c) => c.url.startsWith(HOOK)).length, 1);
 });
 
 test('cron: a dead Torn key pauses that user; nothing more is asked', async () => {
-    const env = { DB: fakeD1(), INVITE_CODE: 'x' };
+    const env = { DB: fakeD1(), INVITE_CODE: 'x', KEY_ENC };
     await handle(req('PUT', '/plan', { invite: 'x', body: { tornKey: KEY, webhookUrl: HOOK, plan } }), env);
     const f = recorder(() => new Response(JSON.stringify({ error: { code: 2, error: 'Incorrect key' } })));
     await runCron(env, T, f);
@@ -178,18 +181,18 @@ test('cron: a dead Torn key pauses that user; nothing more is asked', async () =
 });
 
 test('cron: a user without a webhook or key is skipped; old sent rows are cleared', async () => {
-    const env = { DB: fakeD1(), INVITE_CODE: 'x' };
+    const env = { DB: fakeD1(), INVITE_CODE: 'x', KEY_ENC };
     await handle(req('PUT', '/plan', { invite: 'x', body: { plan } }), env);
-    env.DB.sent.set('old|x', T - 3 * 86400);
+    env.DB.sent.set('old|x', { user: 'old', alert: 'x', at: T - 3 * 86400 });
     const f = recorder(() => new Response('{}'));
-    const out = await runCron(env, T, f);
-    assert.deepEqual(out, [{ sent: 0, skipped: true }]);
+    const out = await runCron(env, T + 120, f);
+    assert.deepEqual(out, [], 'a user no ping can reach is not picked');
     assert.equal(f.calls.length, 0);
     assert.equal(env.DB.sent.size, 0);
 });
 
 test('DELETE /plan forgets the user', async () => {
-    const env = { DB: fakeD1(), INVITE_CODE: 'x' };
+    const env = { DB: fakeD1(), INVITE_CODE: 'x', KEY_ENC };
     await handle(req('PUT', '/plan', { invite: 'x', body: { plan } }), env);
     await handle(req('DELETE', '/plan'), env);
     assert.equal(env.DB.users.size, 0);

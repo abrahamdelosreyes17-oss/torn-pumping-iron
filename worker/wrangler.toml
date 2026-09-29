@@ -7,10 +7,19 @@ compatibility_date = "2026-09-01"
 [triggers]
 crons = ["* * * * *"]
 
-# Users, their plans and which pings were already sent.
+# Users, their plans, pings sent, link codes, acks, price watches.
 [[d1_databases]]
 binding = "DB"
 database_name = "pumping-iron"
 database_id = "PASTE-THE-ID-FROM-wrangler-d1-create"
 
-# Secret (not here): INVITE_CODE, set with `npx wrangler secret put INVITE_CODE`.
+# Secrets (not here; `npx wrangler secret put NAME`):
+#   INVITE_CODE          the word a first connect needs
+#   KEY_ENC              32 random bytes, base64: encrypts Torn keys in D1
+#   BOT_TOKEN            the Discord bot's token
+#   DISCORD_PUBLIC_KEY   the application's public key (checks /interactions)
+#   DISCORD_APP_ID       the application id
+
+# Test mode: read Torn, send nothing (messages go to the outbox table).
+# [vars]
+# DRY_RUN = "1"
