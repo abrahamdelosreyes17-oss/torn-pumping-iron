@@ -11,9 +11,10 @@ import { fmtInt, fmtMoney } from '../../core/format.js';
 import { itemName, ITEMS, REFILL_POINTS, POINTS, XANAX, ECSTASY, EDVD, FHC, CANDY_KISSES, MUNSTER, CANDY_IDS, GAME_CONSOLE } from '../../core/items.js';
 import { itemsNeeded } from '../../core/plan.js';
 import { tornDayStart, DAY } from '../../core/bars.js';
-import { needList, fillCheapest, whereText, linkFor, WINDOWS, SOURCE_BAZAAR, SOURCE_ITEM_MARKET, SOURCE_NPC, npcListing, candyShopsFrom } from '../../core/market.js';
+import { needList, fillCheapest, whereText, linkFor, WINDOWS, SOURCE_BAZAAR, SOURCE_ITEM_MARKET, SOURCE_NPC, npcListing, candyShopsFrom, shopsAllowed, toggleShop, CITY_DAILY_ALLOWANCE } from '../../core/market.js';
 import { itemContext } from '../../core/model.js';
 import { CANDY_PLANS } from '../../core/strategies.js';
+import { tierWords } from '../../core/candy.js';
 import { W3B_SITE_URL } from '../../api/w3b.js';
 import { itemMarketUrl, pointsMarketUrl } from '../../sources/route.js';
 import { sectionHead, meta } from './common.js';
@@ -67,7 +68,9 @@ export function needsForWindow(m, compare, plan, windowKey, horizonDays) {
             // Not bought: special refills (and their counters), EDVD the job pays for; the console is bought once.
             if (id !== POINTS && !/^\d+$/.test(id)) continue;
             if (Number(id) === GAME_CONSOLE) continue;
-            const extra = ((n || 0) / (horizonDays || 30)) * rest;
+            // Boosters the simulation took from your inventory aren't bought again on the days after.
+            const bought = (n || 0) - ((r.used.held && r.used.held[id]) || 0);
+            const extra = (Math.max(0, bought) / (horizonDays || 30)) * rest;
             if (extra > 0) out[id] = Math.ceil((out[id] || 0) + extra - 1e-9);
         }
     }
@@ -153,7 +156,7 @@ export function renderBuy(m, ctx) {
     // The plan's candy (picked in the comparison), and the city shops the player may buy from.
     const mine = ctx.compare && ctx.compare[ctx.plan.strategy];
     const candy = mine && mine.candy ? mine.candy : null;
-    const ic = itemContext(ctx.statics, s);
+    const ic = itemContext(ctx.statics, s, now);
     const tracked = TRACKED.map((id) => (id === CANDY_KISSES && candy ? candy.id : id));
     // Every candy the plan might pick is priced too (fewer listings, every 30 min), so the pick can change with prices.
     ctx.wantPrices([...new Set(toBuy.map((n) => n.id).concat(tracked.filter((id) => show.has(typeOf(id)))))], CANDY_PLANS.has(ctx.plan.strategy) ? CANDY_IDS : []);
@@ -162,13 +165,16 @@ export function renderBuy(m, ctx) {
     const firstOpen = { done: false };
 
     const rows = [];
+    // Today's city-shop allowance, shared by every item bought there (100 a day).
+    let cityLeft = ic.cityLeft;
     for (const n of toBuy) {
         const p = prices[n.id] || {};
-        // A city shop the player ticked sells it: its price joins the listings (as many as needed).
-        const shop = ic.npc[n.id] ? npcListing(ic.npc[n.id], n.buy) : null;
+        // A city shop you may buy from sells it: its price joins the listings, up to today's allowance.
+        const shop = ic.npc[n.id] ? npcListing(ic.npc[n.id], n.buy, cityLeft) : null;
         const listings = (Array.isArray(p.listings) ? p.listings : []).concat(shop ? [shop] : []);
         const fill = listings.length ? fillCheapest(listings, n.buy, n.id) : null;
         if (fill) total += fill.total;
+        if (fill && cityLeft !== null) cityLeft = Math.max(0, cityLeft - fill.rows.filter((r) => r.source === SOURCE_NPC).reduce((a, r) => a + r.qty, 0));
         const days = WINDOWS[win] || 1;
         const perDay = n.id === GAME_CONSOLE ? 'once, for the console jump' : days > 1 ? Math.round((n.need / days) * 10) / 10 + ' a day' : n.need + ' today';
         const side = listings.length ? sideLine(listings) : null;
@@ -177,7 +183,7 @@ export function renderBuy(m, ctx) {
             h('tr', { class: 'ih' }, [
                 h('td', { colspan: '6' }, [
                     h('b', { text: n.name + ' × ' + fmtInt(n.buy) }),
-                    h('span', { class: 'muted', text: ' · ' + (n.id === POINTS ? refillWords() : perDay) + ' · you have ' + fmtInt(n.have) + (fill ? ' · ' + fmtMoney(fill.total) : '') + (picked ? ' · ' + picked : '') }),
+                    h('span', { class: 'muted', text: ' · ' + (n.id === POINTS ? refillWords() : perDay) + ' · you have ' + fmtInt(n.have) + (n.fromPool ? ' (and ' + n.fromPool.map((x) => x.qty + ' ' + x.name).join(' + ') + ', the same use)' : '') + (fill ? ' · ' + fmtMoney(fill.total) : '') + (picked ? ' · ' + picked : '') + (tierWords(n.id) ? ' · ' + tierWords(n.id) : '') }),
                     side ? h('span', { class: 'verdict c-good', style: 'margin-left:10px', text: side.text }) : null,
                 ]),
             ]),
@@ -199,7 +205,7 @@ export function renderBuy(m, ctx) {
                     h('td', { class: 'r' }, [openBtn(r.link, primary)]),
                 ]),
             );
-            if (r.source === SOURCE_NPC) rows.push(h('tr', { class: 'sub' }, [h('td', { colspan: '6', class: 'muted', text: 'City shop purchases count against Torn’s daily items allowance. Shown because you ticked ' + r.shop + ' under “Shops I can buy from”.' })]));
+            if (r.source === SOURCE_NPC) rows.push(h('tr', { class: 'sub' }, [h('td', { colspan: '6', class: 'muted', text: 'City shop purchases count against Torn’s daily items allowance (' + CITY_DAILY_ALLOWANCE + ' a day' + (ic.cityLeft !== null ? ', ' + ic.cityLeft + ' left today' : '') + '); the rest comes from the market. Untick ' + r.shop + ' under “Shops I can buy from” to leave it out.' })]));
         }
         if (fill.short > 0) rows.push(h('tr', { class: 'sub' }, [h('td', { colspan: '6', class: 'c-bad', text: 'Only ' + fmtInt(fill.filled) + ' listed at these prices' })]));
         // The Item Market's cheapest, when the fill didn't need it: a check that bazaars really are cheaper.
@@ -290,7 +296,7 @@ export function renderBuy(m, ctx) {
     );
     const ctl = [t('lab', 'Buy for'), seg, h('span', { class: 'muted' }, [summary ? summary + ' · ' : 'Nothing to buy · ', h('b', { class: 'white', text: fmtMoney(total) })]), h('span', { class: 'sep' }), t('lab', 'Show'), ticks];
     const newest = Math.max(0, ...Object.values(prices).map((p) => p.at || 0));
-    const shops = shopsControl(ctx);
+    const shops = shopsControl(ctx, now);
     return { ctl: shops ? [ctl, shops] : [ctl], upd: newest ? 'prices ' + agoShort(newest, now) + ' ago' : 'prices load now', main: [listCard, dealsCard], pane };
 }
 
@@ -300,20 +306,20 @@ export function renderBuy(m, ctx) {
  * owner: Sally's Sweet Shop is for newbies only), so the plan uses a shop's
  * price only once it's ticked.
  */
-function shopsControl(ctx) {
+function shopsControl(ctx, now) {
     const list = candyShopsFrom((ctx.statics && ctx.statics.items) || {});
     if (!list.length) return null;
-    const on = new Set(Array.isArray(ctx.settings.npcShops) ? ctx.settings.npcShops : []);
+    const on = new Set(shopsAllowed(ctx.settings));
+    const left = itemContext(ctx.statics || {}, ctx.settings, now).cityLeft;
     return [
         t('lab', 'Shops I can buy from'),
         h(
             'div',
             { class: 'ticks', role: 'group', 'aria-label': 'Shops I can buy from' },
-            list.map((shop) =>
-                h('button', { type: 'button', class: 'tk shop', 'aria-pressed': String(on.has(shop)), onclick: () => { const next = new Set(on); if (next.has(shop)) next.delete(shop); else next.add(shop); ctx.setSettings({ npcShops: [...next] }); } }, [h('i'), shop]),
-            ),
+            list.map((shop) => h('button', { type: 'button', class: 'tk shop', 'aria-pressed': String(on.has(shop)), onclick: () => ctx.setSettings(toggleShop(ctx.settings, shop)) }, [h('i'), shop])),
         ),
-        h('span', { class: 'info', title: 'Torn doesn’t say who may buy at a city shop (Sally’s Sweet Shop is for newbies only). Tick the ones that sell to you and the plan may pick their candy; each row links to the shop. City shop buys count against Torn’s daily items allowance.', text: 'i' }),
+        left !== null ? h('span', { class: 'muted', text: left + ' of ' + CITY_DAILY_ALLOWANCE + ' city-shop items left today' }) : null,
+        h('span', { class: 'info', title: 'Sally’s Sweet Shop counts by default; untick it to leave it out. Other city shops count once ticked. City shop buys share Torn’s daily allowance of ' + CITY_DAILY_ALLOWANCE + ' items (reset at 00:00 Torn time): the plan buys there only up to what’s left today, and the market for the rest.', text: 'i' }),
     ];
 }
 

@@ -16,6 +16,7 @@ import { STRATEGIES, JUMP_STACK, SPECIAL, CONSOLE_STACK, CONSOLE_USES, CONSOLE_E
 import { spendJobPoints, jobHappyWords } from './jobs.js';
 import { HAPPY_CAP, HAPPY_LOSS_PER_ENERGY } from './gain.js';
 import { catchUpLabel } from './turns.js';
+import { fillFromPool, takeFromHeld, fillWords, heldWords, tierWords } from './candy.js';
 
 export const PLAN_TYPES = ['steady', 'goal', 'jump'];
 
@@ -129,10 +130,14 @@ function partsOf(split) {
  *   specialLeft (special refills the plan may still use), energyBooster {id, perDay} (steadyBoost),
  *   holdBooster (an event that needs the booster cooldown is near: no boosters), candyMult, canMult,
  *   toyShop5, adultNovelties10}
- * @param {number} [o.until] - end of the window (default: the next Torn midnight)
+ *   held: {[id]: qty} boosters in the inventory (used first: candy and energy drinks as a pool)
+ * @param {number} [o.until] - end of the window (default: the next Torn midnight; later: the look-ahead, days rolling on)
  * @returns {object[]} steps {id, at, kind, label, items:[{id,qty}], trains:{}, gyms:{}, parts:[] (train steps: the session in gym parts), gain, energy, strict, warnAt, note}
  */
 export function dayTimeline({ state, now, strategy, ctx, until = null }) {
+    // One Torn day by default. With `until` past midnight (the 48 h look-ahead) the days roll on: each new
+    // Torn day brings its refill, its Xanax count and its boost back.
+    const lookAhead = until !== null && until > tornDayStart(now) + DAY;
     const end = until || tornDayStart(now) + DAY;
     const maxE = state.energy.maximum;
     const interval = state.energy.interval * 1000;
@@ -154,6 +159,29 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     let xanN = (ctx.drugsToday || 0) + 1;
     const steps = [];
     let n = 0;
+    let curDay = tornDayStart(now);
+
+    // The booster cooldown (owner, 2026-09-29: "cant do it once per day BECAUSE OF THE COOLDOWN"). A booster can be
+    // used while the cooldown is under the cap, the last one overshooting it: every candy, EDVD, FHC and can here
+    // is counted against the live cooldown and what the plan adds.
+    const capH = ctx.boosterCapH || BOOSTER_CAP_H;
+    const capMs = capH * HOUR;
+    const cdMult = ctx.cdMult || 1;
+    let boosterAt = Math.max(now, boosterFreeAt(state));
+    const fitsAt = (id, at) => boostersThatFit(id, capH, Math.max(0, boosterAt - at) / HOUR, cdMult);
+    const addBooster = (id, qty, at) => {
+        boosterAt = Math.max(boosterAt, at) + qty * boosterHours(id, cdMult) * HOUR;
+    };
+    // The first time `qty` of an item fit under the cap.
+    const roomFor = (id, qty) => boosterAt - capMs + Math.max(0, qty - 1) * boosterHours(id, cdMult) * HOUR;
+    // Boosters you hold go first (candy and energy drinks as a pool): what's left carries to the next boost.
+    const pool = {};
+    for (const [k, v] of Object.entries(ctx.held || {})) if (Number(v) > 0) pool[k] = Math.floor(Number(v));
+    const fillPool = (qty, pickId) => {
+        const f = fillFromPool(qty, pickId, pool);
+        takeFromHeld(pool, f);
+        return f;
+    };
 
     // Natural regeneration from t to t2 (none above the maximum), and happy back up.
     const advance = (t2) => {
@@ -169,6 +197,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         const split = sessionGain(ctx, stats, E - keep, H, happyMax);
         stats = split.statsAfter;
         const step = { id: kind + '-' + ++n, at, kind, label, items, trains: trainsOf(split), gyms: gymsOf(split), parts: partsOf(split), gain: Math.round(split.gain), energy: split.energyUsed, strict: false, warnAt: null, ...extra };
+        if (step.note === undefined) delete step.note;
         if (keep > 0) step.note = (step.note ? step.note + ' · ' : '') + 'keeps ' + keep + ' energy for the war';
         E = split.energyLeft + keep;
         H = split.happyAfter;
@@ -238,8 +267,14 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     };
     const candyMult = ctx.candyMult || 1;
     const candyId = ctx.candyId && ITEMS[ctx.candyId] ? ctx.candyId : CANDY_KISSES;
-    const candyQty = () => ctx.candyCount || boostersThatFit(candyId, ctx.boosterCapH || BOOSTER_CAP_H, 0, ctx.cdMult || 1);
-    const candyName = itemName(candyId);
+    const candyQty = () => ctx.candyCount || boostersThatFit(candyId, capH, 0, cdMult);
+    // A candy boost of `qty`, from what you hold first: the happy, the items, the words and the note.
+    const candyBoost = (qty) => {
+        const f = fillPool(qty, candyId);
+        const planned = candyQty();
+        const notes = [heldWords(f), qty < planned ? 'the booster cooldown has room for ' + qty + ' of ' + planned : null, tierWords(candyId) || null].filter(Boolean);
+        return { f, happy: f.value * candyMult, items: f.alloc.map((a) => ({ id: a.id, qty: a.qty })), words: fillWords(f, candyId), note: notes.join(' · ') };
+    };
     // Job points banked where the player works: happy specials spent in the boosted session.
     let jpBank = ctx.jobHappy ? Math.max(0, Number(ctx.jobHappy.bank) || 0) : 0;
     const jobPoints = () => {
@@ -248,70 +283,11 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         jpBank -= r.jp;
         return { ...r, words: r.jp ? jobHappyWords(ctx.jobHappy, r.jp) : '' };
     };
+    const joinNote = (...parts) => parts.filter(Boolean).join(' · ') || undefined;
 
     const s = STRATEGIES[strategy] ? strategy : 'steady';
     const isConsole = s === 'consoleJump' || s === 'consoleJumpToy';
-
-    if (s === 'chocoJump' || s === 'edvdJump' || s === 'happy99k' || s === 'edvdJumpAN' || isConsole) {
-        const stackTo = isConsole ? CONSOLE_STACK : JUMP_STACK;
-        let stacked = Math.min(stackTo, ctx.stackedSoFar || 0);
-        while (stacked < stackTo) {
-            advance(drugAt);
-            E += ITEMS[XANAX].energy;
-            H += ITEMS[XANAX].happy;
-            stacked++;
-            steps.push({ id: 'stack-' + ++n, at: drugAt, kind: 'stack', label: 'Xanax #' + stacked + ' of ' + stackTo + ' · don\'t train', items: [{ id: XANAX, qty: 1 }], trains: {}, gyms: {}, gain: 0, energy: 0, strict: false, warnAt: null });
-            drugAt += xanCD;
-        }
-        // The boost lands just after a quarter tick, once the drug cooldown allows the Ecstasy.
-        // An event that boosts this plan's items starts soon: the boost waits for it.
-        const tick = nextQuarterTick(Math.max(drugAt, ctx.holdBooster ? ctx.holdUntil || 0 : 0) - 1);
-        const at = tick + MIN;
-        advance(at);
-        const capH = ctx.boosterCapH || BOOSTER_CAP_H;
-        let items;
-        let label;
-        let note = 'Right after the ' + clockOf(tick) + ' tick';
-        const jp = jobPoints();
-        if (isConsole) {
-            // The Game Console's "Hardcore Game": 5 energy for 80–120 happy (×2 with the 5★ Toy/Game Shop "Gamer" perk),
-            // then candy to the booster cap, the Ecstasy, train, refill, train (docs/research-console-jump.md).
-            const uses = Math.min(CONSOLE_USES, Math.floor(E / CONSOLE_ENERGY_EACH));
-            const each = CONSOLE_HAPPY_EACH * (s === 'consoleJumpToy' || ctx.toyShop5 ? 2 : 1);
-            E -= uses * CONSOLE_ENERGY_EACH;
-            const qty = candyQty();
-            H += uses * each + qty * ITEMS[candyId].happy * candyMult;
-            items = [{ id: CONSOLE_ITEM, qty: 0, uses }, { id: candyId, qty }];
-            if (!ctx.consoleOwned) items.push({ id: CONSOLE_ITEM, qty: 1 });
-            label = 'Game Console × ' + uses + ' (Hardcore) + ' + candyName + ' × ' + qty + ' + Ecstasy, then train it all';
-            note += '; the Xanax cooldown must be clear for the Ecstasy' + (ctx.consoleOwned ? '' : '; buy a Game Console first');
-        } else if (s === 'chocoJump') {
-            const qty = candyQty();
-            H += qty * ITEMS[candyId].happy * candyMult;
-            items = [{ id: candyId, qty }];
-            label = candyName + ' × ' + qty + ' + Ecstasy, then train it all';
-        } else {
-            const qty = ctx.edvdCount || (s === 'happy99k' ? boostersThatFit(EDVD, capH) : 5);
-            H += qty * ITEMS[EDVD].happy * (ctx.adultNovelties10 || s === 'edvdJumpAN' ? 2 : 1);
-            items = [{ id: EDVD, qty }];
-            label = 'EDVD × ' + qty + ' + Ecstasy, then train it all';
-        }
-        if (jp.happy) {
-            H += jp.happy;
-            note += '; before the Ecstasy: ' + jp.words;
-        }
-        H = Math.min(HAPPY_CAP, H * ITEMS[ECSTASY].happyMult);
-        items.push({ id: ECSTASY, qty: 1 });
-        const jump = train(at, 'jump', label, items, { strict: true, warnAt: tick - STRICT_WARN_MS, note });
-        jump.tick = tick;
-        if (refillLeft) {
-            refill(at + MIN);
-            refillLeft = false;
-        }
-        special(at + 2 * MIN);
-        drugAt = at + ecsCD;
-        return steps;
-    }
+    const isJump = s === 'chocoJump' || s === 'edvdJump' || s === 'happy99k' || s === 'edvdJumpAN' || isConsole;
 
     // Daily choco: one Xanax a day is held (its energy kept, not trained); at
     // its cooldown end, candy + Ecstasy just after a tick, train it all, refill.
@@ -324,22 +300,128 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     let ebToday = ctx.boostersToday || 0;
     // Steady with Bliss: EDVD with each Xanax whenever the booster cooldown has room (happy never falls back).
     const blissEdvd = s === 'blissSteady';
-    const capMs = (ctx.boosterCapH || BOOSTER_CAP_H) * HOUR;
-    const edvdMs = ITEMS[EDVD].boosterH * HOUR;
-    let boosterAt = Math.max(now, boosterFreeAt(state));
     let boosted = Boolean(ctx.boostedToday);
     let holding = Boolean(ctx.holding);
     let naturalOk = true;
-    for (let guard = 0; guard < 50; guard++) {
+
+    // A new Torn day: its refill (today's, if unused, goes in before midnight), Xanax count, boost and share.
+    const rollDay = (at) => {
+        while (tornDayStart(at) > curDay) {
+            if (refillLeft && !isJump) {
+                const last = Math.max(t, curDay + DAY - REFILL_LAST_CALL_MS);
+                advance(last);
+                refill(last, { note: 'Use before 00:00 Torn time' });
+            }
+            curDay += DAY;
+            refillLeft = true;
+            boosted = false;
+            xanN = 1;
+            ebToday = 0;
+            shareLeft = Math.max(0, Math.floor(ctx.specialPerDay || 0));
+            naturalOk = true;
+        }
+    };
+
+    if (isJump) {
+        const stackTo = isConsole ? CONSOLE_STACK : JUMP_STACK;
+        let stacked = Math.min(stackTo, ctx.stackedSoFar || 0);
+        for (let jumps = 0; jumps < 20; jumps++) {
+            // Today's plan always shows the next jump in full; the look-ahead runs on to its end.
+            if (jumps > 0 && (drugAt >= end || !lookAhead)) break;
+            while (stacked < stackTo) {
+                if (jumps > 0 && drugAt >= end) return steps.sort((a, b) => a.at - b.at);
+                rollDay(drugAt);
+                advance(drugAt);
+                E += ITEMS[XANAX].energy;
+                H += ITEMS[XANAX].happy;
+                stacked++;
+                steps.push({ id: 'stack-' + ++n, at: drugAt, kind: 'stack', label: 'Xanax #' + stacked + ' of ' + stackTo + ' · don\'t train', items: [{ id: XANAX, qty: 1 }], trains: {}, gyms: {}, gain: 0, energy: 0, strict: false, warnAt: null });
+                drugAt += xanCD;
+            }
+            // The boost lands just after a quarter tick, once the drug cooldown allows the Ecstasy and the booster
+            // cooldown has room for the whole boost (a jump is worth its full load). An event that boosts this
+            // plan's items starts soon: the boost waits for it.
+            const candyJump = s === 'chocoJump' || isConsole;
+            const boostItem = candyJump ? candyId : EDVD;
+            const want = candyJump ? candyQty() : ctx.edvdCount || (s === 'happy99k' ? boostersThatFit(EDVD, capH) : 5);
+            const qty = Math.min(want, boostersThatFit(boostItem, capH, 0, cdMult));
+            const room = roomFor(boostItem, qty);
+            const tick = nextQuarterTick(Math.max(drugAt, ctx.holdBooster ? ctx.holdUntil || 0 : 0, room) - 1);
+            const at = tick + MIN;
+            if (jumps > 0 && at >= end) break;
+            rollDay(at);
+            advance(at);
+            let items;
+            let label;
+            let note = 'Right after the ' + clockOf(tick) + ' tick';
+            if (room > drugAt) note += '; it waits for room under the ' + capH + ' h booster cap';
+            note += '; no other boosters before it';
+            const jp = jobPoints();
+            if (isConsole) {
+                // The Game Console's "Hardcore Game": 5 energy for 80–120 happy (×2 with the 5★ Toy/Game Shop "Gamer" perk),
+                // then candy to the booster cap, the Ecstasy, train, refill, train (docs/research-console-jump.md).
+                const uses = Math.min(CONSOLE_USES, Math.floor(E / CONSOLE_ENERGY_EACH));
+                const each = CONSOLE_HAPPY_EACH * (s === 'consoleJumpToy' || ctx.toyShop5 ? 2 : 1);
+                E -= uses * CONSOLE_ENERGY_EACH;
+                const c = candyBoost(qty);
+                H += uses * each + c.happy;
+                items = [{ id: CONSOLE_ITEM, qty: 0, uses }, ...c.items];
+                if (!ctx.consoleOwned) items.push({ id: CONSOLE_ITEM, qty: 1 });
+                label = 'Game Console × ' + uses + ' (Hardcore) + ' + c.words + ' + Ecstasy, then train it all';
+                note += '; the Xanax cooldown must be clear for the Ecstasy' + (ctx.consoleOwned ? '' : '; buy a Game Console first');
+                if (c.note) note += '; ' + c.note;
+            } else if (s === 'chocoJump') {
+                const c = candyBoost(qty);
+                H += c.happy;
+                items = c.items;
+                label = c.words + ' + Ecstasy, then train it all';
+                if (c.note) note += '; ' + c.note;
+            } else {
+                H += qty * ITEMS[EDVD].happy * (ctx.adultNovelties10 || s === 'edvdJumpAN' ? 2 : 1);
+                items = [{ id: EDVD, qty }];
+                label = 'EDVD × ' + qty + ' + Ecstasy, then train it all';
+                takeFromHeld(pool, fillFromPool(qty, EDVD, pool));
+            }
+            addBooster(boostItem, qty, at);
+            if (jp.happy) {
+                H += jp.happy;
+                note += '; before the Ecstasy: ' + jp.words;
+            }
+            H = Math.min(HAPPY_CAP, H * ITEMS[ECSTASY].happyMult);
+            items.push({ id: ECSTASY, qty: 1 });
+            const jump = train(at, 'jump', label, items, { strict: true, warnAt: tick - STRICT_WARN_MS, note });
+            jump.tick = tick;
+            if (refillLeft) {
+                refill(at + MIN);
+                refillLeft = false;
+            }
+            special(at + 2 * MIN);
+            drugAt = at + ecsCD;
+            stacked = 0;
+        }
+        return steps.sort((a, b) => a.at - b.at);
+    }
+
+    // A daily candy boost can still happen today: the next Xanax (before midnight) finds room under the cap.
+    const boostLater = (x) => x + xanCD < curDay + DAY && fitsAt(candyId, x + xanCD) > 0;
+    // When the booster cooldown next has room for one candy (for the step's note).
+    const candyRoomWords = () => {
+        const at = roomFor(candyId, 1);
+        return 'the booster cooldown is full; candy fits again at ' + (tornDayStart(at) > curDay ? 'tomorrow ' : '') + clockOf(at) + ' TCT';
+    };
+    for (let guard = 0; guard < 200; guard++) {
         if (daily && holding) {
             const tick = nextQuarterTick(drugAt - 1);
             const at = tick + MIN;
             if (at >= end && steps.length) break;
+            rollDay(at);
             advance(at);
-            const qty = candyQty();
+            const qty = Math.min(candyQty(), fitsAt(candyId, at));
+            const c = qty > 0 ? candyBoost(qty) : { happy: 0, items: [], words: '', note: candyRoomWords() };
             const jp = jobPoints();
-            H = Math.min(HAPPY_CAP, (H + qty * ITEMS[candyId].happy * candyMult + jp.happy) * ITEMS[ECSTASY].happyMult);
-            train(at, 'boost', candyName + ' × ' + qty + ' + Ecstasy, then train it all', [{ id: candyId, qty }, { id: ECSTASY, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, ...(jp.happy ? { note: 'Before the Ecstasy: ' + jp.words } : {}) });
+            H = Math.min(HAPPY_CAP, (H + c.happy + jp.happy) * ITEMS[ECSTASY].happyMult);
+            if (qty > 0) addBooster(candyId, qty, at);
+            train(at, 'boost', (c.words ? c.words + ' + ' : '') + 'Ecstasy, then train it all', [...c.items, { id: ECSTASY, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, note: joinNote(jp.happy ? 'Before the Ecstasy: ' + jp.words : null, c.note) });
             if (refillLeft) {
                 refill(at + MIN);
                 refillLeft = false;
@@ -353,6 +435,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         // Natural energy fills up before the next drug: train it then, so none is wasted.
         const full = fullAt();
         if (naturalOk && full < drugAt && full < end && maxE >= minTrain) {
+            rollDay(full);
             advance(full);
             const st = train(full, 'natural', 'Natural energy', []);
             if (!st.energy) {
@@ -362,56 +445,75 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             continue;
         }
         if (drugAt >= end && steps.length) break;
+        rollDay(drugAt);
         advance(drugAt);
-        E += ITEMS[XANAX].energy;
-        H += ITEMS[XANAX].happy;
+        // A daily boost waits for room under the booster cap: until then its Xanax is a plain session.
+        let waitNote = null;
         if (daily && !boosted) {
-            steps.push({ id: 'hold-' + ++n, at: drugAt, kind: 'hold', label: 'Xanax #' + xanN++ + ' · keep the energy for the boost', items: [{ id: XANAX, qty: 1 }], trains: {}, gyms: {}, gain: 0, energy: 0, strict: false, warnAt: null });
-            holding = true;
-            drugAt += xanCD;
-            continue;
+            const boostAt = nextQuarterTick(drugAt + xanCD - 1) + MIN;
+            if (fitsAt(candyId, boostAt) > 0) {
+                E += ITEMS[XANAX].energy;
+                H += ITEMS[XANAX].happy;
+                steps.push({ id: 'hold-' + ++n, at: drugAt, kind: 'hold', label: 'Xanax #' + xanN++ + ' · keep the energy for the boost', items: [{ id: XANAX, qty: 1 }], trains: {}, gyms: {}, gain: 0, energy: 0, strict: false, warnAt: null, note: 'no boosters until the boost' });
+                holding = true;
+                drugAt += xanCD;
+                continue;
+            }
+            waitNote = 'No candy boost yet: ' + candyRoomWords();
         }
         if (candyDaily && !boosted) {
             // Wait for the tick (the Xanax energy isn't used until then), candy, then train it all.
             const tick = nextQuarterTick(drugAt - 1);
             const at = tick + MIN;
-            advance(at);
-            const qty = candyQty();
-            const jp = jobPoints();
-            H = Math.min(HAPPY_CAP, H + qty * ITEMS[candyId].happy * candyMult + jp.happy);
-            train(at, 'boost', candyName + ' × ' + qty + ' + Xanax #' + xanN++ + ', then train it all', [{ id: candyId, qty }, { id: XANAX, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, note: 'Right after the ' + clockOf(tick) + ' tick' + (jp.happy ? '; with it: ' + jp.words : '') });
-            if (refillLeft) {
-                refill(at + MIN);
-                refillLeft = false;
+            const fits = fitsAt(candyId, at);
+            if (fits > 0) {
+                advance(at);
+                E += ITEMS[XANAX].energy;
+                H += ITEMS[XANAX].happy;
+                const qty = Math.min(candyQty(), fits);
+                const c = candyBoost(qty);
+                const jp = jobPoints();
+                H = Math.min(HAPPY_CAP, H + c.happy + jp.happy);
+                addBooster(candyId, qty, at);
+                train(at, 'boost', c.words + ' + Xanax #' + xanN++ + ', then train it all', [...c.items, { id: XANAX, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, note: joinNote('Right after the ' + clockOf(tick) + ' tick' + (jp.happy ? '; with it: ' + jp.words : ''), c.note) });
+                if (refillLeft) {
+                    refill(at + MIN);
+                    refillLeft = false;
+                }
+                special(at + 2 * MIN);
+                boosted = true;
+                drugAt = at + xanCD;
+                continue;
             }
-            special(at + 2 * MIN);
-            boosted = true;
-            drugAt = at + xanCD;
-            continue;
+            waitNote = 'No candy with this one: ' + candyRoomWords();
         }
+        E += ITEMS[XANAX].energy;
+        H += ITEMS[XANAX].happy;
         const items = [{ id: XANAX, qty: 1 }];
         let label = 'Xanax #' + xanN++;
         // Steady plans spend the job's banked happy points on the day's first Xanax session.
-        let xNote = null;
+        let xNote = waitNote;
         if (!daily && !candyDaily && ctx.jobHappy && jpBank > 0) {
             const jp = jobPoints();
             if (jp.happy) {
                 H += jp.happy;
-                xNote = 'Just before: ' + jp.words;
+                xNote = joinNote(xNote, 'Just before: ' + jp.words);
             }
         }
         if (blissEdvd) {
-            const qty = Math.floor((capMs - Math.max(0, boosterAt - drugAt)) / edvdMs);
+            const qty = fitsAt(EDVD, drugAt);
             if (qty > 0) {
                 H = Math.min(HAPPY_CAP, H + qty * ITEMS[EDVD].happy * (ctx.adultNovelties10 ? 2 : 1));
                 items.push({ id: EDVD, qty });
                 label += ' + EDVD × ' + qty;
-                boosterAt = Math.max(boosterAt, drugAt) + qty * edvdMs;
+                addBooster(EDVD, qty, drugAt);
+                takeFromHeld(pool, fillFromPool(qty, EDVD, pool));
             }
         }
         train(drugAt, 'xanax', label, items, xNote ? { note: xNote } : {});
-        // The refill is worth most right after a session, when energy is near zero.
-        if (refillLeft && !daily && drugAt + 5 * MIN < end) {
+        // The refill is worth most right after a session, when energy is near zero; a daily boost still to come today keeps it.
+        const boostPending = (daily || candyDaily) && !boosted;
+        if (refillLeft && drugAt + 5 * MIN < Math.min(end, curDay + DAY) && (!boostPending || !boostLater(drugAt))) {
             advance(drugAt + 5 * MIN);
             refill(t);
             refillLeft = false;
@@ -425,16 +527,21 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             const boosterBefore = boosterAt;
             while (ebToday + qty < eb.perDay && boosterAt - at < capMs) {
                 qty++;
-                boosterAt = Math.max(boosterAt, at) + boosterHours(eb.id, ctx.cdMult) * HOUR;
+                boosterAt = Math.max(boosterAt, at) + boosterHours(eb.id, cdMult) * HOUR;
             }
             if (qty > 0) {
                 advance(at);
                 // An FHC sets energy to the maximum (never above): one at a time, train after each.
                 let used = true;
-                if (it.toMax) used = Boolean(trainEach(at, 'booster', itemNameShort(eb.id) + ' × ' + qty + ', train after each', [{ id: eb.id, qty }], qty, {}, it.happy || 0));
-                else {
-                    E += qty * Math.round(it.energy * (ctx.canMult || 1));
-                    train(at, 'booster', itemNameShort(eb.id) + ' × ' + qty + ', train after each', [{ id: eb.id, qty }]);
+                if (it.toMax) {
+                    used = Boolean(trainEach(at, 'booster', itemNameShort(eb.id) + ' × ' + qty + ', train after each', [{ id: eb.id, qty }], qty, {}, it.happy || 0));
+                    if (used) takeFromHeld(pool, fillFromPool(qty, eb.id, pool));
+                } else {
+                    // Cans as a pool: the ones you hold first (the most energy first).
+                    const f = fillPool(qty, eb.id);
+                    E += Math.round(f.value * (ctx.canMult || 1));
+                    const words = f.held ? fillWords(f, eb.id) : itemNameShort(eb.id) + ' × ' + qty;
+                    train(at, 'booster', words + ', train after each', f.alloc.map((a) => ({ id: a.id, qty: a.qty })), f.held ? { note: heldWords(f) } : {});
                 }
                 if (used) ebToday += qty;
                 else boosterAt = boosterBefore;
@@ -445,6 +552,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             // Energy that comes in after the last drug of the day.
             const f = fullAt();
             if (naturalOk && f < end) {
+                rollDay(f);
                 advance(f);
                 const st = train(f, 'natural', 'Natural energy', []);
                 if (!st.energy) steps.pop();
@@ -453,8 +561,8 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         }
     }
     // A refill still unused goes in before midnight.
-    if (refillLeft) {
-        const at = Math.max(now, end - REFILL_LAST_CALL_MS);
+    if (refillLeft && curDay + DAY <= end) {
+        const at = Math.max(now, curDay + DAY - REFILL_LAST_CALL_MS);
         advance(at);
         refill(at, { note: 'Use before 00:00 Torn time' });
     }

@@ -16,13 +16,14 @@ import { totalOf } from '../core/gain.js';
 import { calibrationSample, addCalibration } from '../core/calibration.js';
 import { mergeLiveGyms, GYMS } from '../core/gyms.js';
 import { parsePerks } from '../core/perks.js';
-import { fetchUserState, fetchPerks, fetchProperty, fetchGyms, fetchInventory, fetchMoney, fetchCalendar, fetchKeyInfo, fetchNetworthHistory, fetchJob, fetchJobPoints, fetchItemsInfo, fetchFactionWars } from '../api/torn.js';
+import { fetchUserState, fetchPerks, fetchProperty, fetchGyms, fetchInventory, fetchMoney, fetchCalendar, fetchKeyInfo, fetchNetworthHistory, fetchJob, fetchJobPoints, fetchItemsInfo, fetchFactionWars, fetchPersonalStats, personalStatValues } from '../api/torn.js';
 import { enemiesFromWars } from '../core/eye/war.js';
 import { NETWORTH_STATS, INCOME_DAYS } from '../core/auto.js';
 import { POINTS, CANDY_IDS, GAME_CONSOLE } from '../core/items.js';
 import { TRADING_SEEN_KEY } from '../core/turns.js';
 import { KEY_DEAD_CODES } from '../api/client.js';
 import { receiptChange, recordChange, applyInventory, receiptPriceNow } from '../core/receipts.js';
+import { xanaxCdSample, addXanaxCd } from '../core/drugcd.js';
 
 export const STATE_POLL_MS = 30000;
 
@@ -48,7 +49,12 @@ export const STATIC_EVERY = {
     items: 24 * 60 * 60 * 1000,
     // Your faction's wars (Settings › Keep for war days, and Torn Eye's War mode): one Public call.
     factionWars: 15 * 60 * 1000,
+    // Today's city-shop allowance (Sally's Sweet Shop): `cityitemsbought` now, and once a day at the day's start.
+    cityShop: 10 * 60 * 1000,
 };
+
+/** The personal stat that counts items bought from city shops (docs/research-sallys-xanax.md). */
+export const CITY_STAT = 'cityitemsbought';
 
 /** The items whose Torn data (market price, city shops) the plan reads: every candy and the Game Console. */
 export const ITEMS_INFO_IDS = [...CANDY_IDS, GAME_CONSOLE];
@@ -83,7 +89,7 @@ export class StateFeed {
         this.nextStep = nextStep;
         this.onState = onState;
         this.onError = onError;
-        this.keys = { state: 'userState', static: 'userStatic', log: 'dayLog', leader: 'leader', history: 'statsHistory', dead: 'apiKeyDead', stateError: 'stateError', receipts: 'receipts', ...keys };
+        this.keys = { state: 'userState', static: 'userStatic', log: 'dayLog', leader: 'leader', history: 'statsHistory', dead: 'apiKeyDead', stateError: 'stateError', receipts: 'receipts', xanaxCds: 'xanaxCds', ...keys };
         this.polling = false;
     }
 
@@ -131,6 +137,9 @@ export class StateFeed {
                 if (sample) this.store.set('calibration', addCalibration(this.store.get('calibration', null), sample));
                 // Receipts (Progress): what these two reads trained and used; after a pause, one catch-up change.
                 this.recordReceipt(prev, next, diff, at - last.at > CATCH_UP_GAP_MS && Number(this.store.get(TRADING_SEEN_KEY, 0)) > last.at);
+                // Your own Xanax cooldowns: later Xanax are planned at your median (Torn's is random, 6–8 h).
+                const xs = xanaxCdSample(prev, next, diff, this.nextStep());
+                if (xs) this.store.set(this.keys.xanaxCds, addXanaxCd(this.store.get(this.keys.xanaxCds, []), xs));
             }
             this.store.set(this.keys.state, { at, api });
             if (failed) this.clearStateError();
@@ -162,7 +171,9 @@ export class StateFeed {
         const day = tornDayStart(state.at);
         // Special refills as the day started (how many the plan used today).
         const special = h[day] && h[day].special !== undefined ? h[day].special : state.specialRefills;
-        h[day] = { ...state.stats, total: totalOf(state.stats), ...(special !== null && special !== undefined ? { special } : {}) };
+        // The stats as the day's first read saw them (today's real gain, when yesterday wasn't read).
+        const open = h[day] ? h[day].open : { ...state.stats };
+        h[day] = { ...state.stats, total: totalOf(state.stats), ...(special !== null && special !== undefined ? { special } : {}), ...(open ? { open } : {}) };
         const days = Object.keys(h).map(Number).sort((a, b) => a - b);
         while (days.length > 120) delete h[days.shift()];
         this.store.set(this.keys.history, h);
@@ -253,6 +264,22 @@ export class StateFeed {
                     const ki = (this.store.get(this.keys.static, {}) || {}).keyInfo || {};
                     if (!ki.factionId) return { enemies: [], at: this.now() };
                     return { enemies: enemiesFromWars(await fetchFactionWars(this.client), ki.factionId, Math.floor(this.now() / 1000)), at: this.now() };
+                },
+            ],
+            [
+                'cityShop',
+                async () => {
+                    // Items bought from city shops so far, and (once a Torn day) the count as the day began: Torn keeps a
+                    // daily snapshot, asked for just before 00:00 TCT (the way the Sidekick extension counts today's buys).
+                    const day = tornDayStart(at);
+                    const old = (this.store.get(this.keys.static, {}) || {}).cityShop;
+                    const nowV = personalStatValues(await fetchPersonalStats(this.client, { stat: [CITY_STAT] }))[CITY_STAT];
+                    let start = old && old.day === day && Number.isFinite(old.start) ? old.start : null;
+                    if (start === null) {
+                        const v = personalStatValues(await fetchPersonalStats(this.client, { stat: [CITY_STAT], timestamp: Math.floor(day / 1000) - 1 }))[CITY_STAT];
+                        start = Number.isFinite(v) ? v : null;
+                    }
+                    return { day, start, now: Number.isFinite(nowV) ? nowV : null, at };
                 },
             ],
         ];

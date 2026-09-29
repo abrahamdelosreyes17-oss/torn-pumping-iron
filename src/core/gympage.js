@@ -314,6 +314,40 @@ export function trainInText(m) {
 }
 
 /**
+ * The "why" when the next session mixes stats (owner, 2026-09-29): "STR + DEX this session: +20% toward
+ * Hank's vs STR only". Toward the build = stat points that close a gap to the build's shares (points past a
+ * stat's share count nothing). The one-stat way puts the whole session's energy into the stat the mix trains
+ * most, at its rate in this session. Null for a one-stat session or when the mix isn't ahead by half a percent.
+ */
+export function whyMix(m) {
+    const step = firstTrainStep(m);
+    if (!step || !m.pc || !m.shares) return null;
+    const by = {};
+    const order = [];
+    for (const p of step.parts) {
+        if (!by[p.stat]) {
+            by[p.stat] = { gain: 0, energy: 0 };
+            order.push(p.stat);
+        }
+        by[p.stat].gain += p.gain || 0;
+        by[p.stat].energy += p.energy || 0;
+    }
+    if (order.length < 2) return null;
+    const top = order.reduce((a, b) => (by[b].energy > by[a].energy ? b : a));
+    const total = totalOf(m.pc.stats);
+    const gap = (k) => Math.max(0, (m.shares[k] || 0) * total - (m.pc.stats[k] || 0));
+    const energy = order.reduce((a, k) => a + by[k].energy, 0);
+    const mix = order.reduce((a, k) => a + Math.min(by[k].gain, gap(k)), 0);
+    const one = by[top].energy > 0 ? Math.min((by[top].gain / by[top].energy) * energy, gap(top)) : 0;
+    if (!(one > 0) || !(mix > one)) return null;
+    const pct = (100 * (mix - one)) / one;
+    if (pct < 0.5) return null;
+    const name = (m.build && m.build.base && BUILDS[m.build.base] ? BUILDS[m.build.base].name : (m.build && m.build.name) || 'your build').replace(/, .*$/, '');
+    const text = order.map((k) => STAT_LABEL[k]).join(' + ') + ' this session: +' + (pct < 10 ? pct.toFixed(1) : Math.round(pct)) + '% toward ' + name + ' vs ' + STAT_LABEL[top] + ' only';
+    return { stats: order, top, pct, mix: Math.round(mix), one: Math.round(one), text, title: 'Stat points that close a gap to ' + name + '’s shares (points past a stat’s share don’t count): about ' + fmtSigned(Math.round(mix)) + ' this way, ' + fmtSigned(Math.round(one)) + ' with ' + STAT_LABEL[top] + ' only, the same energy' };
+}
+
+/**
  * The "why" when the next session trains one stat only: "Training STR only:
  * 6 pts under Hank's, about 9 days to catch up". Null when it mixes stats.
  */

@@ -15,9 +15,10 @@ import { itemContext } from '../../core/model.js';
 import { tornDayStart, DAY } from '../../core/bars.js';
 import { itemsUrl, gymUrl, pointsUrl, itemMarketUrl, pointsMarketUrl } from '../../sources/route.js';
 import { stackBars } from '../charts.js';
-import { clock, cd, sectionHead, meta, trainsText, headsList, STAT_COLOR, DAY_NAMES, MONTH_NAMES } from './common.js';
-import { partsText, trainInText } from '../../core/gympage.js';
+import { clock, cd, sectionHead, meta, trainsText, headsList, gainsCard, STAT_COLOR, DAY_NAMES, MONTH_NAMES } from './common.js';
+import { partsText, trainInText, whyMix, whyOneStat } from '../../core/gympage.js';
 import { spentOverDays } from '../../core/receipts.js';
+import { hm } from '../../core/drugcd.js';
 
 const DAYS = DAY_NAMES;
 const MONTHS = MONTH_NAMES;
@@ -76,11 +77,26 @@ function stepLinks(s) {
     return out;
 }
 
-/** Cheapest fill for one need, from stored listings. */
-export function buyRow(need, prices, ic = null) {
+/**
+ * When the Torn day (00:00 TCT) resets in your own time (owner, 2026-09-29: "does this reset per day? at 00:00
+ * torn time?"): "Torn day resets at 08:00 your time". Xanax "today" counts from that reset.
+ */
+export function dayResetWords(m) {
+    const d = new Date(m.dayResetAt || tornDayStart(m.now) + DAY);
+    return 'Torn day resets at ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') + ' your time';
+}
+
+/** "Xanax cooldown ~6h 52m (your last 5: 6h 10m–7h 40m)", or Torn's 6–8 h until three are recorded. */
+export function xanaxCdWords(x) {
+    if (!x || !x.own) return 'Xanax cooldown 6–8 h (planned at 7 h until 3 of yours are seen)';
+    return 'Xanax cooldown ~' + hm(x.min) + ' (your last ' + x.n + (x.lo !== x.hi ? ': ' + hm(x.lo) + '–' + hm(x.hi) : '') + ')';
+}
+
+/** Cheapest fill for one need, from stored listings; `left`: today's city-shop allowance still free. */
+export function buyRow(need, prices, ic = null, left = null) {
     const p = (prices && prices[need.id]) || {};
-    // A city shop you ticked (Buy › Shops I can buy from) joins the listings, as on the Buy tab.
-    const shop = ic && ic.npc && ic.npc[need.id] ? npcListing(ic.npc[need.id], need.buy) : null;
+    // A city shop you may buy from (Sally's by default) joins the listings up to today's allowance, as on the Buy tab.
+    const shop = ic && ic.npc && ic.npc[need.id] ? npcListing(ic.npc[need.id], need.buy, left !== null ? left : ic.cityLeft) : null;
     const listings = (Array.isArray(p.listings) ? p.listings : []).concat(shop ? [shop] : []);
     if (!listings.length) return { need, fill: null, verdict: null };
     const fill = fillCheapest(listings, need.buy, need.id);
@@ -88,18 +104,28 @@ export function buyRow(need, prices, ic = null) {
     return { need, fill, verdict: priceVerdict(cheapest, p.avg7 || null) };
 }
 
+/** buyRow for a list, the city-shop allowance shared between them. */
+export function buyRows(needs, prices, ic) {
+    let left = ic ? ic.cityLeft : null;
+    return needs.map((n) => {
+        const r = buyRow(n, prices, ic, left);
+        if (r.fill && left !== null) left = Math.max(0, left - r.fill.rows.filter((x) => x.source === 'npc').reduce((a, x) => a + x.qty, 0));
+        return r;
+    });
+}
+
 function buyCard(m, ctx) {
     const needs = m.buyToday.filter((n) => n.buy > 0);
     // Home refreshes today's prices too, at most every 5 minutes.
     if (needs.length && ctx.wantPrices) ctx.wantPrices(needs.map((n) => n.id));
-    const ic = itemContext(ctx.statics || {}, ctx.settings || {});
-    const rows = needs.map((n) => buyRow(n, ctx.prices, ic));
+    const ic = itemContext(ctx.statics || {}, ctx.settings || {}, m.now);
+    const rows = buyRows(needs, ctx.prices, ic);
     const total = rows.reduce((a, r) => a + (r.fill ? r.fill.total : 0), 0);
     const trs = rows.map(({ need, fill }) => {
         const first = fill && fill.rows[0];
         const link = first ? first.link : need.id === POINTS ? pointsMarketUrl() : itemMarketUrl(need.id);
         const where = first ? whereText(first) + (fill.rows.length > 1 ? ' + ' + (fill.rows.length - 1) + ' more' : '') : ctx.paused ? 'prices wait while paused' : 'checking prices…';
-        const why = need.id === POINTS ? 'for the refill' : 'have ' + need.have + ', need ' + need.need;
+        const why = need.id === POINTS ? 'for the refill' : 'have ' + need.have + ', need ' + need.need + (need.fromPool ? ' · your ' + need.fromPool.map((x) => x.qty + ' ' + x.name).join(' + ') + ' cover the rest' : '');
         return h('tr', {}, [
             h('td', {}, [h('b', { class: 'w', text: need.name + ' × ' + fmtInt(need.buy) }), h('br'), h('small', { class: 'muted', text: where + ' · ' + why })]),
             h('td', { class: 'r', text: fill ? fmtMoney(fill.total) : '' }),
@@ -114,8 +140,39 @@ function buyCard(m, ctx) {
     ]);
 }
 
+/**
+ * The next 48 hours past today's steps (owner, 2026-09-29: "plan everything ahead for me, when not to take
+ * xanax, when to take candy, when not to take boosters"): drugs, boosts, jumps and refills; natural energy left out.
+ */
+export function nextDays(m, settings) {
+    const rows = (m.later || []).filter((st) => st.kind !== 'natural').slice(0, 12);
+    if (!rows.length) return null;
+    const day = (at) => {
+        const d = Math.round((tornDayStart(at) - tornDayStart(m.now)) / DAY);
+        return d === 1 ? 'Tomorrow' : DAYS[new Date(at).getUTCDay()];
+    };
+    return h('div', {}, [
+        sectionHead('Next 48 h', meta(['the plan runs on past midnight · Torn time']), null, 'h3'),
+        h('table', { class: 'tbl num' }, [
+            h(
+                'tbody',
+                {},
+                rows.map((st) => {
+                    const k = Object.keys(st.trains || {});
+                    return h('tr', {}, [
+                        h('td', { class: 't', style: 'width:130px;white-space:nowrap', text: day(st.at) + ' ' + clock(st.at, settings) }),
+                        h('td', {}, [h('b', { class: 'w', text: st.label }), st.note ? h('br') : null, st.note ? h('small', { class: 'muted', text: st.note }) : null]),
+                        h('td', { style: 'width:150px' }, [h('span', { class: k.length === 1 ? 's-' + k[0] : null, text: trainsText(st.trains) || '—' })]),
+                        h('td', { class: 'r', style: 'width:110px', text: st.gain ? fmtSigned(st.gain) : '' }),
+                    ]);
+                }),
+            ),
+        ]),
+    ]);
+}
+
 /** Share bar against the target, "24.9% → 27.8%", what's left, and today's trains. */
-function youVsBuild(m) {
+function youVsBuild(m, ctx = null) {
     const tot = {};
     for (const st of m.steps) for (const [k, n] of Object.entries(st.trains || {})) tot[k] = (tot[k] || 0) + n;
     const only = Object.keys(tot).length === 1 ? Object.keys(tot)[0] : null;
@@ -137,14 +194,17 @@ function youVsBuild(m) {
     return h('div', {}, [
         sectionHead('You vs ' + m.build.name, meta([...metaParts, only ? ' · today every train goes to ' : '', only ? h('b', { style: 'color:var(--' + only + ')', text: STAT_LABEL[only] }) : ''])),
         h('div', { class: 'sg num' }, rows),
-        buildFoot(m),
+        buildFoot(m, ctx),
     ]);
 }
 
-function buildFoot(m) {
+function buildFoot(m, ctx = null) {
     const foot = [];
     const tin = trainInText(m);
     if (tin) foot.push(h('span', {}, ['Train in ', h('b', { text: tin })]));
+    // Why this session mixes stats (or trains one): "STR + DEX this session: +8.4% toward Hank's vs STR only".
+    const why = ctx && ctx.plan && ctx.plan.goal ? null : whyMix(m) || whyOneStat(m);
+    if (why) foot.push(h('span', { title: why.title || null, text: why.text }));
     if (m.reachedDay !== null && m.reachedDay !== undefined) foot.push(h('span', {}, [m.build.name + ' in ', h('b', { text: m.reachedDay === 0 ? 'now' : 'about ' + m.reachedDay + ' day' + (m.reachedDay === 1 ? '' : 's') })]));
     if (m.nextGym && m.nextGym.gym) foot.push(h('span', {}, [m.nextGym.gym.name + ' ', h('b', { text: m.nextGym.known ? 'in ' + fmtInt(m.nextGym.energyLeft) + ' E' : 'next' }), m.nextGym.known ? ' (about ' + Math.max(1, Math.round(m.nextGym.days)) + ' days)' : ' · open Torn’s gym page once to track it']));
     return foot.length ? h('div', { class: 'sgfoot num' }, foot) : null;
@@ -221,10 +281,7 @@ export function renderHome(m, ctx) {
     const late = next && next.kind === 'xanax' && m.strip.drug.left === 0;
     // "On plan" only while no step is waiting on you (the plan re-times, so a due step is the one sign of being behind).
     const overdue = Boolean(next && next.at <= now - 5 * 60 * 1000);
-    const buyTotal = m.buyToday.reduce((a, n) => {
-        const r = buyRow(n, ctx.prices, itemContext(ctx.statics || {}, ctx.settings || {}));
-        return a + (r.fill ? r.fill.total : 0);
-    }, 0);
+    const buyTotal = buyRows(m.buyToday.filter((n) => n.buy > 0), ctx.prices, itemContext(ctx.statics || {}, ctx.settings || {}, now)).reduce((a, r) => a + (r.fill ? r.fill.total : 0), 0);
 
     const head = sectionHead(
         'Today',
@@ -266,13 +323,13 @@ export function renderHome(m, ctx) {
               h('tbody', {}, rows),
           ])
         : null;
-    const foot = h('div', { class: 'row muted num', style: 'justify-content:space-between;margin-top:6px;font-size:12px' }, [h('span', {}, ['So far ', h('b', { class: 'white', text: fmtSigned(m.gainedToday) }), ' of ' + fmtInt(m.plannedGain) + ' today']), h('span', { text: 'Late for a step? The rest move by themselves.' })]);
+    const foot = h('div', { class: 'row muted num', style: 'justify-content:space-between;margin-top:6px;font-size:12px;gap:12px;flex-wrap:wrap' }, [h('span', {}, ['So far ', h('b', { class: 'white', text: fmtSigned(m.gainedToday) }), ' of ' + fmtInt(m.plannedGain) + ' today']), h('span', { text: dayResetWords(m) + ' · ' + xanaxCdWords(m.xanaxCd) })]);
 
     const lead = h('div', { class: 'lead' }, [head, nowBand, steps, foot]);
     const week = weekChart(m);
     return {
         strip: true,
-        main: [lead, youVsBuild(m), week].filter(Boolean),
-        pane: [buyCard(m, ctx), h('div', {}, [sectionHead('Heads-up', null, null, 'h3'), headsList(m.heads.length ? m.heads : [{ tone: 'good', text: 'Nothing needs you' }], (tab) => ctx.go(tab))]), planLine(m, ctx), weekCard(m, ctx)],
+        main: [lead, nextDays(m, s), youVsBuild(m, ctx), week].filter(Boolean),
+        pane: [gainsCard(m), buyCard(m, ctx), h('div', {}, [sectionHead('Heads-up', null, null, 'h3'), headsList(m.heads.length ? m.heads : [{ tone: 'good', text: 'Nothing needs you' }], (tab) => ctx.go(tab))]), planLine(m, ctx), weekCard(m, ctx)],
     };
 }

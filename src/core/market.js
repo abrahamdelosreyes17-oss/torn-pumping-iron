@@ -6,6 +6,7 @@
 
 import { POINTS, ITEMS, itemName, isCandy } from './items.js';
 import { bazaarUrl, itemMarketUrl, pointsMarketUrl, shopUrl } from '../sources/route.js';
+import { poolOf, fillFromPool, takeFromHeld } from './candy.js';
 
 export const SOURCE_BAZAAR = 'bazaar';
 export const SOURCE_ITEM_MARKET = 'itemmarket';
@@ -47,6 +48,49 @@ export function candyShopsFrom(info) {
     return [...set].sort();
 }
 
+/** Sally's Sweet Shop: counted by default (owner, 2026-09-29), the Buy tick switches it off. */
+export const SALLYS = "Sally's Sweet Shop";
+export const DEFAULT_SHOPS = [SALLYS];
+
+/**
+ * Torn's Daily Items Allowance: 100 items a day from the city shops, all of them together, reset at 00:00 TCT
+ * (docs/research-sallys-xanax.md, 4 sources). Read from the personal stat `cityitemsbought`.
+ */
+export const CITY_DAILY_ALLOWANCE = 100;
+
+/** The city shops the plan may buy from: Sally's unless switched off, plus any other shop ticked. */
+export function shopsAllowed(settings = {}) {
+    const off = new Set(Array.isArray(settings.npcShopsOff) ? settings.npcShopsOff : []);
+    const on = new Set([...DEFAULT_SHOPS, ...(Array.isArray(settings.npcShops) ? settings.npcShops : [])]);
+    return [...on].filter((x) => !off.has(x)).sort();
+}
+
+/** A shop's tick clicked: the settings patch ({npcShops, npcShopsOff}). */
+export function toggleShop(settings = {}, shop) {
+    const onNow = shopsAllowed(settings).includes(shop);
+    const on = new Set(Array.isArray(settings.npcShops) ? settings.npcShops : []);
+    const off = new Set(Array.isArray(settings.npcShopsOff) ? settings.npcShopsOff : []);
+    if (onNow) {
+        on.delete(shop);
+        off.add(shop);
+    } else {
+        off.delete(shop);
+        on.add(shop);
+    }
+    return { npcShops: [...on], npcShopsOff: [...off] };
+}
+
+/**
+ * Today's city-shop allowance left: 100 less what `cityitemsbought` rose since the Torn day began. Null
+ * until both reads are in (and for a read from an earlier Torn day).
+ * @param {object} cs - {day, start, now} stored by the feed
+ */
+export function allowanceLeft(cs, now) {
+    if (!cs || !(Number.isFinite(cs.start) && Number.isFinite(cs.now))) return null;
+    if (Math.floor(now / 86400e3) * 86400e3 !== cs.day) return CITY_DAILY_ALLOWANCE;
+    return Math.max(0, CITY_DAILY_ALLOWANCE - Math.max(0, cs.now - cs.start));
+}
+
 /**
  * NPC prices the player may use: only shops they ticked (Torn's API can't
  * tell who may buy there; the owner: Sally's is for newbies only).
@@ -65,10 +109,16 @@ export function npcPricesFrom(info, allowed = []) {
     return out;
 }
 
-/** A shop "listing" for the Buy list: as many as needed at the shop's price. */
-export function npcListing(npc, qty) {
+/**
+ * A shop "listing" for the Buy list: as many as needed at the shop's price, up to what's left of today's
+ * city-shop allowance (`left`; null = not read yet, 100 at most). None once the allowance is used up.
+ */
+export function npcListing(npc, qty, left = null) {
     if (!npc || !(npc.price > 0)) return null;
-    return { source: SOURCE_NPC, shop: npc.shop, sellerName: npc.shop, price: npc.price, qty: Math.max(1, Math.floor(qty || 1)) };
+    const cap = left === null || left === undefined ? CITY_DAILY_ALLOWANCE : Math.max(0, Math.floor(left));
+    const n = Math.min(Math.max(1, Math.floor(qty || 1)), cap);
+    if (!(n > 0)) return null;
+    return { source: SOURCE_NPC, shop: npc.shop, sellerName: npc.shop, price: npc.price, qty: n };
 }
 
 /** Verdict thresholds vs the 7-day average of the lowest price. */
@@ -89,7 +139,7 @@ export const WINDOWS = { today: 1, three: 3, week: 7 };
  */
 export function needList(needed, inventory = {}) {
     const order = (id) => (id === POINTS ? 3 : ITEMS[id] && ITEMS[id].kind === 'drug' ? 1 : 2);
-    return Object.entries(needed || {})
+    const rows = Object.entries(needed || {})
         .map(([k, q]) => {
             const id = k === POINTS ? POINTS : Number(k);
             const have = Math.max(0, Number(inventory[id]) || 0);
@@ -97,6 +147,24 @@ export function needList(needed, inventory = {}) {
         })
         .filter((r) => r.need > 0)
         .sort((a, b) => order(a.id) - order(b.id) || String(a.id).localeCompare(String(b.id)));
+    // Candy and energy drinks are pools (owner: "it should exhaust my inventory first"): held ones the plan doesn't
+    // use yet cover a need for another with as much or less happy (energy), so nothing held is bought again.
+    const spare = {};
+    for (const [k, q] of Object.entries(inventory || {})) {
+        const id = Number(k);
+        if (!poolOf(id) || !(Number(q) > 0)) continue;
+        const used = rows.find((r) => r.id === id);
+        spare[id] = Math.max(0, Math.floor(Number(q)) - (used ? used.need : 0));
+    }
+    for (const r of rows) {
+        if (!(r.buy > 0) || !poolOf(r.id)) continue;
+        const f = fillFromPool(r.buy, r.id, Object.fromEntries(Object.entries(spare).filter(([id]) => Number(id) !== r.id)));
+        if (!f.held) continue;
+        takeFromHeld(spare, f);
+        r.fromPool = f.alloc.filter((a) => a.held > 0).map((a) => ({ id: a.id, name: itemName(a.id), qty: a.held }));
+        r.buy = f.buy;
+    }
+    return rows;
 }
 
 /** Where a row sends you: the exact bazaar, Item Market search or the points market. */

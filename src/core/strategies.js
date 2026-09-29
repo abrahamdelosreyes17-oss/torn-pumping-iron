@@ -10,7 +10,7 @@
 
 import { STATS, STAT_LABEL, gainPerTrain, HAPPY_CAP, HAPPY_LOSS_PER_ENERGY, totalOf } from './gain.js';
 import { XANAX, ECSTASY, EDVD, FHC, CANDY_KISSES, POINTS, REFILL_POINTS, XANAX_CD_MIN, ECSTASY_CD_MIN, ITEMS, boostersThatFit, boosterHours, BOOSTER_CAP_H, GAME_CONSOLE } from './items.js';
-import { candyWords } from './candy.js';
+import { candyWords, fillFromPool, takeFromHeld } from './candy.js';
 import { pickStat } from './builds.js';
 
 export const STRATEGY_IDS = ['steady', 'dailyChoco', 'chocoJump', 'edvdJump', 'happy99k', 'blissSteady', 'steadyBoost', 'steadyMax', 'candyXanax', 'consoleJump', 'consoleJumpToy', 'edvdJumpAN'];
@@ -134,6 +134,9 @@ export const TICK_OFFSET_MIN = 5;
  *   spent in each boosted session (steady plans: the first Xanax session of a day), before the Ecstasy
  * @param {number} [o.freeEdvdPerDay] - Adult Novelties 3★ "Voyeur" (20 JP → 1 EDVD): EDVD the job pays for, a day
  * @param {string} [o.splitRule] - builds.js SPLIT_RULE (default) or 'deficit' (the old split, for the simulator check)
+ * @param {number} [o.boosterCdMin] - booster cooldown already running at the start, minutes (the live one)
+ * @param {object} [o.held] - {[itemId]: qty} boosters in the inventory: used first and free (candy and energy
+ *   drinks as a pool, the most happy or energy first; EDVD and FHC as themselves). `used.held` counts them.
  * @returns {{id, gained:number, perStat:object, cost:number, energyTrained:number, daily:number[], used:object}}
  * Refills (points or special) set energy to the maximum, never above it: anything over is wasted (O2, owner).
  */
@@ -148,7 +151,6 @@ export function simulateStrategy(id, o) {
     const cdMult = o.cdMult || 1;
     const candyId = o.candyId && ITEMS[o.candyId] ? o.candyId : CANDY_KISSES;
     const candyN = o.candyCount || boostersThatFit(candyId, capH, 0, cdMult);
-    const candyHappy = ITEMS[candyId].happy * (o.candyMult || 1);
     let edvdN = o.edvdCount || 5;
     if (id === 'happy99k' && !o.edvdCount) edvdN = boostersThatFit(EDVD, capH);
     const edvdHappy = ITEMS[EDVD].happy * (o.adultNovelties10 || id === 'edvdJumpAN' ? 2 : 1);
@@ -164,7 +166,15 @@ export function simulateStrategy(id, o) {
     let cost = 0;
     let trainedE = 0;
     let drugFree = 0;
-    let boosterFree = 0; // minute the booster cooldown reaches 0
+    // Minute the booster cooldown reaches 0. Every booster (candy, EDVD, FHC, cans) goes in only while the cooldown
+    // is under the cap (the last one overshoots it): 49 candy take 24.5 h, so a full load can't happen every day.
+    let boosterFree = Math.max(0, Number(o.boosterCdMin) || 0);
+    const fitsAt = (itemId, t) => boostersThatFit(itemId, capH, Math.max(0, boosterFree - t) / 60, cdMult);
+    const addBooster = (itemId, n, t) => {
+        boosterFree = Math.max(boosterFree, t) + n * boosterHours(itemId, cdMult) * 60;
+    };
+    // A daily candy boost still to come today: the next Xanax (before midnight) will find room under the cap.
+    const boostLaterToday = (t, day) => t + xanCD < (day + 1) * 1440 && boosterFree - (t + xanCD) < capH * 60;
     let refillDay = -1;
     let stacked = 0;
     let phase = id === 'dailyChoco' ? 'free' : 'stack';
@@ -216,6 +226,21 @@ export function simulateStrategy(id, o) {
         used[item] = (used[item] || 0) + n;
         cost += price(item) * n;
     };
+    // Boosters held: used first, free (owner, 2026-09-29: "it should exhaust my inventory first").
+    const stock = {};
+    for (const [k, v] of Object.entries(o.held || {})) if (ITEMS[k] && ITEMS[k].kind === 'booster' && Number(v) > 0) stock[k] = Math.floor(Number(v));
+    const useBoosters = (item, n) => {
+        const f = fillFromPool(n, item, stock);
+        takeFromHeld(stock, f);
+        for (const a of f.alloc) {
+            used[a.id] = (used[a.id] || 0) + a.qty;
+            if (a.held) used.held = { ...(used.held || {}), [a.id]: ((used.held && used.held[a.id]) || 0) + a.held };
+        }
+        cost += price(item) * f.buy;
+        return f;
+    };
+    // A candy boost of `n`: the happy it adds (held candy may give more than the pick).
+    const eatCandy = (n) => useBoosters(candyId, n).value * (o.candyMult || 1);
     // Special refills: in a boosted session as many as keep happy above the maximum (it resets there anyway);
     // otherwise a day's share. Each train costs happy, so dumping them all at the maximum drains it for days.
     const specialPerDay = Math.ceil(Math.max(0, Math.floor(o.special || 0)) / days);
@@ -277,7 +302,7 @@ export function simulateStrategy(id, o) {
                 n -= free;
             }
         }
-        if (n > 0) buy(EDVD, n);
+        if (n > 0) useBoosters(EDVD, n);
     };
     // Energy boosters on the booster cooldown, only once energy is spent (FHC fills to max; cans add theirs).
     const energyBoost = (t, day) => {
@@ -286,13 +311,13 @@ export function simulateStrategy(id, o) {
             ebDay = day;
             ebToday = 0;
         }
-        while (ebToday < eb.perDay && boosterFree - t < capH * 60 && E < 10) {
+        while (ebToday < eb.perDay && fitsAt(eb.id, t) > 0 && E < 10) {
+            const f = useBoosters(eb.id, 1);
             if (ebItem.toMax) {
                 E = Math.max(E, maxE);
                 H += ebItem.happy || 0;
-            } else E += Math.round(ebItem.energy * canMult);
-            buy(eb.id);
-            boosterFree = Math.max(boosterFree, t) + boosterHours(eb.id, cdMult) * 60;
+            } else E += Math.round(f.value * canMult);
+            addBooster(eb.id, 1, t);
             ebToday++;
             train();
         }
@@ -332,10 +357,10 @@ export function simulateStrategy(id, o) {
             if (took) xanax(t);
             // Job-point happy: once a day, on that day's first Xanax session.
             if (took && jh && day !== jpDay) H += jobHappy(day);
-            if (id === 'blissSteady' && boosterFree - t < capH * 60) {
+            if (id === 'blissSteady' && fitsAt(EDVD, t) > 0) {
                 H = Math.min(HAPPY_CAP, H + edvdHappy);
                 buyEdvd(1, day);
-                boosterFree = Math.max(boosterFree, t) + ITEMS[EDVD].boosterH * 60;
+                addBooster(EDVD, 1, t);
             }
             if (day !== refillDay && E < 20) refill(day);
             train();
@@ -343,11 +368,13 @@ export function simulateStrategy(id, o) {
             energyBoost(t, day);
         } else if (id === 'candyXanax') {
             // Once a day the Xanax waits for a tick, then candy + Xanax and train it (no Ecstasy: the candy happy lasts one session).
-            if (t >= drugFree && doneDay !== day) {
+            // The candy is what fits under the booster cap then; none fits, and it's a plain Xanax session (the boost waits).
+            if (t >= drugFree && doneDay !== day && fitsAt(candyId, t) > 0) {
                 if (t % 15 === TICK_OFFSET_MIN) {
-                    H = Math.min(HAPPY_CAP, H + candyN * candyHappy + jobHappy(day));
-                    buy(candyId, candyN);
-                    boosterFree = Math.max(boosterFree, t) + candyN * boosterHours(candyId, cdMult) * 60;
+                    const qty = Math.min(candyN, fitsAt(candyId, t));
+                    H = Math.min(HAPPY_CAP, H + eatCandy(qty) + jobHappy(day));
+                    addBooster(candyId, qty, t);
+                    used.candyBoosts = (used.candyBoosts || 0) + 1;
                     xanax(t);
                     train();
                     if (day !== refillDay) {
@@ -359,14 +386,18 @@ export function simulateStrategy(id, o) {
                 }
             } else {
                 if (t >= drugFree) xanax(t);
-                if (day !== refillDay && E < 20 && doneDay === day) refill(day);
+                // The day's refill after its boost; with no boost left today (the booster cooldown is full), after this session.
+                if (day !== refillDay && E < 20 && (doneDay === day || !boostLaterToday(t, day))) refill(day);
                 train();
             }
         } else if (id === 'dailyChoco') {
-            // Hold one Xanax's worth of cooldown, then candy + Ecstasy in its place.
+            // Hold one Xanax's worth of cooldown, then candy + Ecstasy in its place. A Xanax is held only when candy
+            // will fit under the booster cap at its end; the candy is what fits then.
             if (phase === 'hold' && t >= drugFree && t % 15 === TICK_OFFSET_MIN) {
-                H = Math.min(HAPPY_CAP, (H + candyN * candyHappy + jobHappy(day)) * 2);
-                buy(candyId, candyN);
+                const qty = Math.min(candyN, fitsAt(candyId, t));
+                H = Math.min(HAPPY_CAP, (H + eatCandy(qty) + jobHappy(day)) * 2);
+                addBooster(candyId, qty, t);
+                used.candyBoosts = (used.candyBoosts || 0) + 1;
                 buy(ECSTASY);
                 drugFree = t + ecsCD;
                 train();
@@ -377,9 +408,13 @@ export function simulateStrategy(id, o) {
                 doneDay = day;
             } else if (phase !== 'hold' && t >= drugFree) {
                 xanax(t);
-                if (doneDay !== day) phase = 'hold';
+                if (doneDay !== day && fitsAt(candyId, t + xanCD) > 0) phase = 'hold';
             }
-            if (phase !== 'hold') train();
+            if (phase !== 'hold') {
+                // No boost left today (the booster cooldown is full): the day's refill after this session.
+                if (day !== refillDay && E < 20 && doneDay !== day && !boostLaterToday(t, day)) refill(day);
+                train();
+            }
         } else {
             // Jumps: stack Xanax without training, then boost just after a tick and train it all.
             if (phase === 'stack' && t >= drugFree) {
@@ -387,7 +422,10 @@ export function simulateStrategy(id, o) {
                 stacked++;
                 if (stacked === stackTo) phase = 'wait';
             }
-            if (phase === 'wait' && t >= drugFree && t % 15 === TICK_OFFSET_MIN) {
+            // The boost waits until the whole of it fits under the booster cap (a jump is worth its full load).
+            const boostItem = id === 'chocoJump' || isConsole ? candyId : EDVD;
+            const boostN = Math.min(boostItem === EDVD ? edvdN : candyN, boostersThatFit(boostItem, capH, 0, cdMult));
+            if (phase === 'wait' && t >= drugFree && t % 15 === TICK_OFFSET_MIN && fitsAt(boostItem, t) >= boostN) {
                 const jp = jobHappy(day);
                 if (isConsole) {
                     // 300 energy on the console for happy, candy to the booster cap, then the Ecstasy doubles it.
@@ -397,15 +435,14 @@ export function simulateStrategy(id, o) {
                     }
                     const uses = Math.min(CONSOLE_USES, Math.floor(E / CONSOLE_ENERGY_EACH));
                     E -= uses * CONSOLE_ENERGY_EACH;
-                    H = (H + uses * consoleHappy + candyN * candyHappy + jp) * 2;
-                    buy(candyId, candyN);
+                    H = (H + uses * consoleHappy + eatCandy(boostN) + jp) * 2;
                 } else if (id === 'chocoJump') {
-                    H = (H + candyN * candyHappy + jp) * 2;
-                    buy(candyId, candyN);
+                    H = (H + eatCandy(boostN) + jp) * 2;
                 } else {
-                    H = (H + edvdN * edvdHappy + jp) * 2;
-                    buyEdvd(edvdN, day);
+                    H = (H + boostN * edvdHappy + jp) * 2;
+                    buyEdvd(boostN, day);
                 }
+                addBooster(boostItem, boostN, t);
                 H = Math.min(HAPPY_CAP, H);
                 buy(ECSTASY);
                 drugFree = t + ecsCD;

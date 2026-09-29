@@ -61,7 +61,7 @@ export function statusStrip(m, settings) {
     const drugTxt = s.drug.left > 0 ? countdown(s.drug.left) : 'Ready';
     const drugPct = s.drug.left > 0 && s.drug.total > 0 ? (100 * s.drug.left) / s.drug.total : 0;
     const boosterTxt = s.booster.left > 0 ? countdown(s.booster.left) : 'Ready';
-    const withBooster = s.booster.used || s.booster.left > 0;
+    const withBooster = s.booster.used || s.booster.left > 0 || Boolean(s.booster.next);
     return h('div', { class: 'strip num' + (withBooster ? '' : ' four') }, [
         stCell('Energy', s.energy.current + ' / ' + s.energy.max, null, (100 * s.energy.current) / Math.max(1, s.energy.max), 'var(--chalk)', s.energy.fullAt ? 'Full at ' + clock(s.energy.fullAt, settings) : 'Full'),
         stCell('Happy', fmtInt(s.happy.current), null, (100 * Math.min(s.happy.current, s.happy.max)) / Math.max(1, s.happy.max), 'var(--good)', 'Max ' + fmtInt(s.happy.max) + (s.happy.property ? ' · ' + s.happy.property : '')),
@@ -70,9 +70,19 @@ export function statusStrip(m, settings) {
             if (s.drug.left > 0) c.querySelector('b').setAttribute('data-cd', String(now + s.drug.left));
             return c;
         })(),
-        withBooster ? stCell('Booster', boosterTxt, s.booster.left > 0 ? null : 'good', 0, 'var(--chalk)', s.booster.used ? 'Used by this plan' : 'Not used by this plan') : null,
+        withBooster ? stCell('Booster', boosterTxt, s.booster.left > 0 ? null : 'good', s.booster.capH ? (100 * Math.min(s.booster.left, s.booster.capH * 3600e3)) / (s.booster.capH * 3600e3) : 0, 'var(--chalk)', boosterWords(s.booster, now)) : null,
         stCell('Refill', s.refill.free ? 'Unused' : 'Used', null, s.refill.free ? 0 : 100, 'var(--chalk)', s.refill.free ? (s.refill.plannedAt ? 'Planned ' + clock(s.refill.plannedAt, settings) : 'Use before 00:00') : 'Next at 00:00 Torn time'),
     ]);
+}
+
+/**
+ * The Booster cell's line (owner, 2026-09-29: "Not used by this plan" showed after the day's candy was taken):
+ * the plan's next booster step, or when the cooldown is back under the cap.
+ */
+export function boosterWords(b, now) {
+    if (b.next) return 'Next ' + (b.next.kind === 'jump' ? 'jump' : b.next.kind === 'boost' ? 'candy boost' : 'booster') + (b.next.at > now ? ' in ' + countdown(b.next.at - now) : ' now');
+    if (b.left > 0) return b.underCapIn > 0 ? 'Used · room again in ' + countdown(b.underCapIn) : 'Used · room under the cap now';
+    return 'Not used by this plan';
 }
 
 /** The four stat rows against the build (Home and Plan). */
@@ -97,6 +107,27 @@ export function statRowsBlock(m, { todayCol = 'gain' } = {}) {
             ]);
         }),
     );
+}
+
+/** "+305,123 (STR +169,900 · DEX +135,223)": a real gain in words. */
+export function gainWords(g) {
+    if (!g) return '—';
+    const per = Object.entries(g.perStat || {}).filter(([, v]) => v > 0).map(([k, v]) => STAT_LABEL[k] + ' ' + fmtSigned(v));
+    return fmtSigned(g.total) + (per.length ? ' (' + per.join(' · ') + ')' : '');
+}
+
+/**
+ * Your real gains (owner, 2026-09-29: "the progress also only shows progression not my actual stat
+ * increase"): what Torn's stats rose today, in 7 and in 30 days (Home and Progress).
+ */
+export function gainsCard(m) {
+    const g = m.gains || {};
+    const row = (label, x, n) => [h('dt', { text: label }), h('dd', { text: gainWords(x) + (x && n > 1 && x.days < n ? ' · ' + x.days + ' day' + (x.days === 1 ? '' : 's') + ' recorded' : '') })];
+    return h('div', {}, [
+        sectionHead('Your gains', meta(['what Torn’s stats rose']), null, 'h3'),
+        h('dl', { class: 'facts num' }, [...row('Today', g.today, 1), ...row('7 days', g.week, 7), ...row('30 days', g.month, 30)]),
+        g.today && g.today.fromLog ? h('div', { class: 'note2', text: 'Today from the trains seen since you opened Pumping Iron; from tomorrow, from the day’s first read.' }) : null,
+    ]);
 }
 
 /** A dot-and-line list (Heads-up). */

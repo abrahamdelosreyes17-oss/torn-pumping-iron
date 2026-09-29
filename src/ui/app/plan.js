@@ -12,6 +12,7 @@ import { h, t } from '../dom.js';
 import { STATS, STAT_LABEL } from '../../core/gain.js';
 import { fmtInt, fmtShort, fmtMoney, fmtPct } from '../../core/format.js';
 import { STRATEGIES, SPECIAL, planWhat } from '../../core/strategies.js';
+import { tierWords } from '../../core/candy.js';
 import { pickWarning, perMillion, PICK_BY } from '../../core/recommend.js';
 import { budgetOf } from '../../core/auto.js';
 import { BUILDS, BUILD_ORDER, BUILD_ALIASES, resolveBuild, highStatOf } from '../../core/builds.js';
@@ -19,7 +20,7 @@ import { GEORGES, gymById } from '../../core/gyms.js';
 import { XANAX, EDVD, FHC, POINTS, REFILL_POINTS, ITEMS, CANDY_KISSES, CANDY_IDS, itemName } from '../../core/items.js';
 import { lineChart, chartNum } from '../charts.js';
 import { sectionHead, meta, STAT_COLOR } from './common.js';
-import { trainInText, whyOneStat } from '../../core/gympage.js';
+import { trainInText, whyOneStat, whyMix } from '../../core/gympage.js';
 
 const KIND_TAG = { steady: 'Steady', boost: 'Boost', jump: 'Jump' };
 
@@ -223,7 +224,7 @@ function recommendedCard(m, ctx, rec, compare, days) {
     const kids = [
         sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + money + ' · ' + days + ' days'])),
         h('div', { class: 'prime num' }, [
-            h('div', {}, [h('span', { class: 'pill-tag chalk', text: kindOf(rec.recommended) }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: planWhat(rec.recommended, best) })]),
+            h('div', {}, [h('span', { class: 'pill-tag chalk', text: kindOf(rec.recommended) }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: planWhat(rec.recommended, best) }), best && best.candy && tierWords(best.candy.id) ? h('div', { class: 'd muted', style: 'margin-top:2px;font-size:12px', text: 'Candy: ' + tierWords(best.candy.id) + '; what you hold goes first' }) : null]),
             h('div', { class: 'figs' }, figs),
             h('div', { class: 'why' }, [
                 'Wins because: ' + reasons + (autoOn && a.afford ? ' ' + a.afford : spend) + ' ',
@@ -326,7 +327,7 @@ function otherPlans(m, ctx, rec, compare, days) {
             }, [
                 h('td', {}, [h('small', { text: kindOf(a.id) })]),
                 h('td', {}, [h('b', { class: 'w', text: st.name }), current ? h('span', { class: 'tag chalk', style: 'margin-left:6px', text: 'current plan' }) : null, pending ? h('span', { class: 'tag warn', style: 'margin-left:6px', text: 'picked · see the warning' }) : null]),
-                h('td', { class: 'muted', text: planWhat(a.id, compare[a.id]) }),
+                h('td', { class: 'muted', title: compare[a.id] && compare[a.id].candy ? tierWords(compare[a.id].candy.id) || null : null, text: planWhat(a.id, compare[a.id]) }),
                 h('td', { class: 'r ' + (a.deltaStatsPct >= 0 ? 'c-good' : 'c-bad'), text: fmtPct(a.deltaStatsPct) }),
                 h('td', { class: 'r ' + (a.deltaCost > 0 ? 'c-bad' : 'c-good'), text: (a.deltaCost >= 0 ? '+' : '−') + fmtMoney(Math.abs(a.deltaCost)) }),
                 h('td', { class: 'r', text: a.cost > 0 ? chartNum(a.perM) : '—' }),
@@ -444,7 +445,7 @@ function buildCard(m, ctx) {
     // Where the next session trains, why it's one stat (when it is), and the next gym to unlock.
     const tin = trainInText(m);
     // With a goal (stat numbers, a gym) the shares aren't the build's: no "under Hank's" line then.
-    const why = plan.goal ? null : whyOneStat(m);
+    const why = plan.goal ? null : whyOneStat(m) || whyMix(m);
     const focusBuild = (e) => {
         e.preventDefault();
         const sel = e.currentTarget.getRootNode().querySelector('select[aria-label="Build to train toward"]');
@@ -456,7 +457,7 @@ function buildCard(m, ctx) {
     const ng = m.nextGym && m.nextGym.gym ? m.nextGym : null;
     const lines = [
         tin ? h('div', { class: 'note2' }, ['Train in ', h('b', { class: 'white', text: tin })]) : null,
-        why ? h('div', { class: 'note2' }, [why.text + ' · ', h('a', { href: '#plan', onclick: focusBuild, text: 'Change build' })]) : null,
+        why ? h('div', { class: 'note2', title: why.title || null }, [why.text + ' · ', h('a', { href: '#plan', onclick: focusBuild, text: 'Change build' })]) : null,
         ng ? h('div', { class: 'note2' }, ['Next gym unlock: ', h('b', { class: 'white', text: ng.gym.name }), ng.known && ng.days !== null ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' day' + (Math.max(1, Math.round(ng.days)) === 1 ? '' : 's') : ' · open Torn’s gym page once to track it', ng.cost ? ' · ' + fmtMoney(ng.cost) + ' to buy once it opens' : '']) : null,
     ].filter(Boolean);
     return h('div', {}, [

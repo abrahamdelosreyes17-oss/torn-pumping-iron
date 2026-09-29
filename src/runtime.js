@@ -12,7 +12,9 @@ import { focusFrom, FOCUS_FRESH_MS } from './core/lanes.js';
 import { TornApiClient } from './api/client.js';
 import { StateFeed } from './feed/state.js';
 import { normalizeState, tornDayStart } from './core/bars.js';
-import { buildModel, compareStrategies, compareStrategiesAsync, blissWhatIf, companyWhatIf, playerContext, buildOf, isDrugEntry, specialLeft } from './core/model.js';
+import { buildModel, compareStrategies, compareStrategiesAsync, blissWhatIf, companyWhatIf, playerContext, buildOf, isDrugEntry, specialLeft, heldBoosters } from './core/model.js';
+import { shopsAllowed } from './core/market.js';
+import { xanaxCdOf } from './core/drugcd.js';
 import { recommend } from './core/recommend.js';
 import { targetShares } from './core/plan.js';
 import { upcomingEvents } from './core/events.js';
@@ -216,7 +218,7 @@ function comparisonFor(state, statics, plan, settings) {
     const perkSig = JSON.stringify([learnedNow().mode, pc.perks.mult, pc.perks.happyLossMult, pc.perks.canMult, pc.perks.candyMult, pc.perks.consoleMult, pc.perks.edvdMult, pc.perks.boosterCapExtraH]);
     // Items and job: the candy rule (Plan dropdown), shops ticked, Torn's item data, a console held, the job, specials held.
     const pickBy = plan.pickBy || 'most';
-    const itemSig = JSON.stringify([pickBy, settings.npcShops || [], statics.itemsAt || 0, Number((statics.inventory || {})[104]) > 0, statics.job || null, statics.jobPoints || null, state.specialRefills || 0]);
+    const itemSig = JSON.stringify([pickBy, shopsAllowed(settings), statics.itemsAt || 0, Number((statics.inventory || {})[104]) > 0, statics.job || null, statics.jobPoints || null, state.specialRefills || 0, Math.round((state.boosterCd || 0) / 3600), heldBoosters(statics.inventory), statics.candyPick || null, xanaxCdOf(statics.xanaxCds).min]);
     const keyNoPrice = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, pc.unlocked.join(','), special, itemSig].join('|');
     const key = keyNoPrice + '|' + priceSig;
     if (key !== pi.compareKey) {
@@ -230,6 +232,11 @@ function comparisonFor(state, statics, plan, settings) {
             pi.jobWhatIf = companyWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy, compare: pi.compare, recommended: rec.recommended });
             pi.compareKey = key;
             pi.compareKeyNoPrice = keyNoPrice;
+            // Today's candy stays named unless another is clearly cheaper (owner: it flipped on every price load).
+            const mine = compare && compare[plan.strategy] && compare[plan.strategy].candy;
+            const kept = get(K.candyPick, null);
+            const day = tornDayStart(Date.now());
+            if (mine && !(kept && kept.day === day && kept.id === mine.id)) set(K.candyPick, { day, id: mine.id });
         };
         const run = () => finish(compareStrategies({ state, pc, shares, settings, prices, special, statics, pickBy }));
         if (!pi.compare) run();
@@ -257,7 +264,8 @@ export function currentModel(now = Date.now()) {
     const s = get(K.userState, null);
     const state = s && s.api ? normalizeState(s.api, s.at) : null;
     if (!state) return { ready: false, hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)) };
-    const statics = getShared(K.userStatic, {}) || {};
+    // Your Xanax cooldowns and today's candy pick ride along with the stored data (the plan and the comparison read them).
+    const statics = { ...(getShared(K.userStatic, {}) || {}), xanaxCds: get(K.xanaxCds, []) || [], candyPick: get(K.candyPick, null) };
     let plan = getPlan();
     const auto = autoFor(plan, getSettings(), statics);
     // Auto: the plans run inside what your income affords; without its Full key it's "most stats in my budget".

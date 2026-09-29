@@ -15,7 +15,8 @@ import { STRATEGIES } from '../../core/strategies.js';
 import { gymById, GEORGES, GYMS, gymAccess } from '../../core/gyms.js';
 import { tornDayStart, DAY } from '../../core/bars.js';
 import { lineChart, planBars } from '../charts.js';
-import { clock, sectionHead, meta, STAT_COLOR, MONTH_NAMES, DAY_NAMES } from './common.js';
+import { clock, sectionHead, meta, gainsCard, STAT_COLOR, MONTH_NAMES, DAY_NAMES } from './common.js';
+import { sessionsOf } from '../../core/gains.js';
 import { summarizeReceipts, spentOverDays, itemsWords, receiptDays, readReceipts, whatIfPeriod, whatIfLines, runWhatIf } from '../../core/receipts.js';
 
 const dayLabel = (d) => new Date(d).getUTCDate() + ' ' + MONTH_NAMES[new Date(d).getUTCMonth()];
@@ -131,23 +132,33 @@ function dayBars(m, ctx) {
 }
 
 function lastTrains(m, ctx) {
-    const samples = ((ctx.calibration && ctx.calibration.samples) || []).slice(-6).reverse();
-    const rows = samples.map((x) => {
-        const off = x.predicted > 0 ? (100 * (x.actual - x.predicted)) / x.predicted : 0;
+    // One row a session (owner: "my 15 trains = +305,123 showed as three rows"), its reads added up.
+    const sessions = sessionsOf((ctx.calibration && ctx.calibration.samples) || []).slice(0, 6);
+    const offOf = (p, a) => (p > 0 ? (100 * (a - p)) / p : 0);
+    const rows = sessions.map((x) => {
+        const off = offOf(x.predicted, x.actual);
+        const stats = Object.keys(x.trains);
         return h('tr', {}, [
-            h('td', { class: 't', text: x.at ? clock(x.at, ctx.settings) : '' }),
-            h('td', { class: 's-' + x.stat, text: STAT_LABEL[x.stat] + ' × ' + x.trains }),
-            h('td', { text: x.gym || '' }),
+            h('td', { class: 't', text: clock(x.at, ctx.settings) }),
+            h('td', { class: stats.length === 1 ? 's-' + stats[0] : null, text: stats.map((k) => STAT_LABEL[k] + ' × ' + x.trains[k]).join(' · ') }),
+            h('td', { text: x.gyms.join(' / ') }),
             h('td', { class: 'r', text: fmtSigned(x.predicted) }),
             h('td', { class: 'r', text: fmtSigned(x.actual) }),
             h('td', { class: 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn'), text: fmtPct(off, 1) }),
         ]);
     });
+    if (rows.length > 1) {
+        const p = sessions.reduce((a, x) => a + x.predicted, 0);
+        const a = sessions.reduce((s, x) => s + x.actual, 0);
+        const off = offOf(p, a);
+        rows.push(h('tr', { class: 'total' }, [h('td'), h('td', {}, [h('b', { text: 'Total' })]), h('td'), h('td', { class: 'r', text: fmtSigned(p) }), h('td', { class: 'r' }, [h('b', { text: fmtSigned(a) })]), h('td', { class: 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn'), text: fmtPct(off, 1) })]));
+    }
     return h('div', {}, [
         sectionHead('Last trains', meta(['what the plan said, what Torn showed']), null, 'h3'),
         rows.length
-            ? h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Train' }), h('th', { text: 'Gym' }), h('th', { class: 'r', text: 'Plan said' }), h('th', { class: 'r', text: 'You got' }), h('th', { class: 'r', style: 'width:80px', text: 'Off by' })])]), h('tbody', {}, rows)])
-            : h('p', { class: 'muted', style: 'margin:0', text: 'Your next train shows here: one stat trained between two reads, with no drug, booster or refill in between, is compared with what the plan said.' }),
+            ? h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Session' }), h('th', { text: 'Gym' }), h('th', { class: 'r', text: 'Plan said' }), h('th', { class: 'r', text: 'You got' }), h('th', { class: 'r', style: 'width:80px', text: 'Off by' })])]), h('tbody', {}, rows)])
+            : null,
+        h('p', { class: 'muted', style: rows.length ? 'margin:6px 0 0;font-size:12px' : 'margin:0', text: 'Only the reads with one stat trained and nothing taken in between (no drug, booster or refill): they check the gain maths, so a session’s total here can be less than what you really gained. Your real gains are under “Your gains”.' }),
     ]);
 }
 
@@ -477,7 +488,7 @@ export function renderProgress(m, ctx) {
     return {
         ctl: [ctl],
         main: [lead, statCharts(m, ctx, s), dayBars(m, ctx), receiptsCard(m, ctx), whatIfCard(m, ctx), lastTrains(m, ctx)],
-        pane: [weekFacts(m, ctx), budgetFacts(m, ctx, s), buildFacts(m, ctx, s), milestones(m, ctx), gymFacts(m)].filter(Boolean),
+        pane: [gainsCard(m), weekFacts(m, ctx), budgetFacts(m, ctx, s), buildFacts(m, ctx, s), milestones(m, ctx), gymFacts(m)].filter(Boolean),
     };
 }
 

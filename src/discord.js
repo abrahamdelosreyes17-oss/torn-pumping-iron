@@ -105,7 +105,7 @@ export function discordState() {
 
 function planPayload(m) {
     if (!m || !m.ready) return null;
-    return { type: m.steps.some((s) => s.kind === 'stack' || s.kind === 'jump') ? 'jump' : 'steady', steps: stepsForWorker(m.steps), ...(m.noRefill ? { noRefill: true } : {}) };
+    return { type: m.steps.some((s) => s.kind === 'stack' || s.kind === 'jump') ? 'jump' : 'steady', steps: stepsForWorker(m.upcoming || m.steps), ...(m.noRefill ? { noRefill: true } : {}) };
 }
 
 /** Your Discord id, if linked in Torn (/user/discord). */

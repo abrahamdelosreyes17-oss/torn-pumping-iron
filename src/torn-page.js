@@ -192,14 +192,19 @@ function chosenFills(m) {
     const needs = needList(needsForWindow(m, m.compare, getPlan(), s.buyWindow || 'three', s.horizonDays), statics.inventory || {});
     // The same list as the Buy tab: its type ticks, and a city shop you ticked joins the listings.
     const show = shownTypes(s, [...new Set(needs.map((n) => typeOf(n.id)))]);
-    const ic = itemContext(statics, s);
+    const ic = itemContext(statics, s, m.now);
     const out = [];
+    // Today's city-shop allowance, shared by every item bought there.
+    let left = ic.cityLeft;
     for (const n of needs) {
         if (!(n.buy > 0) || !show.has(typeOf(n.id))) continue;
         const p = prices[n.id] || {};
-        const shop = ic.npc[n.id] ? npcListing(ic.npc[n.id], n.buy) : null;
+        const shop = ic.npc[n.id] ? npcListing(ic.npc[n.id], n.buy, left) : null;
         const listings = (Array.isArray(p.listings) ? p.listings : []).concat(shop ? [shop] : []);
-        if (listings.length) out.push({ id: n.id, fill: fillCheapest(listings, n.buy, n.id) });
+        if (!listings.length) continue;
+        const fill = fillCheapest(listings, n.buy, n.id);
+        if (left !== null) left = Math.max(0, left - fill.rows.filter((r) => r.source === 'npc').reduce((a, r) => a + r.qty, 0));
+        out.push({ id: n.id, fill });
     }
     return out;
 }

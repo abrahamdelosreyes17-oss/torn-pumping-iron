@@ -62,15 +62,18 @@ test('the plan picks the candy for every candy plan, by the Plan’s rule, and n
     assert.equal(bare.chocoJump.candy.id, CANDY_KISSES);
 });
 
-test('NPC shop candy counts only when the shop is ticked (and Torn’s item data lists it)', () => {
+test('Sally’s Sweet Shop counts by default (owner, 2026-09-29); its tick switches it off; other shops only when ticked', () => {
     const { state, pc, shares } = setup('friend');
-    const items = { [LOLLIPOP]: { market: 399, shops: [{ shop: "Sally's Sweet Shop", buy: 25 }] } };
-    const off = compareStrategies({ state, pc, shares, settings: SETTINGS, prices: { ...PRICES, [BOX_CHOC]: 5000 }, statics: { items } });
-    const on = compareStrategies({ state, pc, shares, settings: { ...SETTINGS, npcShops: ["Sally's Sweet Shop"] }, prices: { ...PRICES, [BOX_CHOC]: 5000 }, statics: { items } });
+    const items = { [LOLLIPOP]: { market: 399, shops: [{ shop: "Sally's Sweet Shop", buy: 25 }] }, [BOX_CHOC]: { market: 5000, shops: [{ shop: 'Bits n Bobs', buy: 20 }] } };
+    const off = compareStrategies({ state, pc, shares, settings: { ...SETTINGS, npcShopsOff: ["Sally's Sweet Shop"] }, prices: { ...PRICES, [BOX_CHOC]: 5000 }, statics: { items } });
+    const on = compareStrategies({ state, pc, shares, settings: SETTINGS, prices: { ...PRICES, [BOX_CHOC]: 5000 }, statics: { items } });
     assert.notEqual(off.candyXanax.candy.source, 'npc');
     assert.equal(on.candyXanax.candy.id, LOLLIPOP);
     assert.equal(on.candyXanax.candy.source, 'npc');
-    assert.equal(itemContext({ items }, {}).npc[LOLLIPOP], undefined);
+    assert.equal(itemContext({ items }, {}).npc[LOLLIPOP].price, 25, 'on by default');
+    assert.equal(itemContext({ items }, { npcShopsOff: ["Sally's Sweet Shop"] }).npc[LOLLIPOP], undefined);
+    assert.equal(itemContext({ items }, {}).npc[BOX_CHOC], undefined, 'another shop only once ticked');
+    assert.equal(itemContext({ items }, { npcShops: ['Bits n Bobs'] }).npc[BOX_CHOC].price, 20);
 });
 
 test('console jump: on for stats under 250k in what it trains; the owner never gets it recommended', () => {

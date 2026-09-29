@@ -96,8 +96,8 @@ test('#6 Steady with Bliss adds EDVD to the Xanax steps while the booster has ro
     const ctx = { shares: BUILDS.balanced.shares, unlocked: unlockedGyms(18), active: 18, drugsToday: 1, bliss: true };
     const steps = dayTimeline({ state: friend(), now: T0, strategy: 'blissSteady', ctx });
     const x = steps.filter((s) => s.kind === 'xanax');
-    assert.deepEqual(x[0].items, [{ id: XANAX, qty: 1 }, { id: EDVD, qty: 4 }]);
-    assert.equal(x[0].label, 'Xanax #2 + EDVD × 4');
+    assert.deepEqual(x[0].items, [{ id: XANAX, qty: 1 }, { id: EDVD, qty: 5 }], 'the last one may overshoot the 24 h cap');
+    assert.equal(x[0].label, 'Xanax #2 + EDVD × 5');
     const plain = dayTimeline({ state: friend(), now: T0, strategy: 'steady', ctx });
     assert.ok(x[0].gain > plain.find((s) => s.kind === 'xanax').gain * 1.3, 'trained at the boosted happy');
 });

@@ -9,17 +9,19 @@ import { STATS, totalOf } from './gain.js';
 import { parsePerks } from './perks.js';
 import { mergeLiveGyms, unlockedGyms, bestGymFor, gymAccess, gymById, nextGym, GYMS } from './gyms.js';
 import { buildGaps, projectBuild, resolveBuild } from './builds.js';
-import { energyAt, happyAt, drugFreeAt, boosterFreeAt, refillAvailable, tornDayStart, msToTornMidnight, DAY } from './bars.js';
+import { energyAt, happyAt, drugFreeAt, boosterFreeAt, refillAvailable, tornDayStart, msToTornMidnight, DAY, countdown, tornClock } from './bars.js';
 import { dayTimeline, targetShares, drugsToday, itemsNeeded, strictWarnings, REFILL_WARN_MS } from './plan.js';
 import { simulateStrategy, feasibleStrategies, STRATEGIES, CANDY_PLANS, consoleBlocked } from './strategies.js';
 import { recommend, pickWarning } from './recommend.js';
-import { needList, livePrices, marketPricesFrom, npcPricesFrom } from './market.js';
+import { needList, livePrices, marketPricesFrom, npcPricesFrom, shopsAllowed, allowanceLeft } from './market.js';
 import { bestCandy } from './candy.js';
 import { companyJob, jobHappyOf, freeEdvdPerDayOf, worksAt, VOYEUR_JP, JOB_LOCK_H } from './jobs.js';
 import { energyLadder, boosterChoice, priceFor } from './ladder.js';
 import { upcomingEvents, holdBoosterFor, eventHeadsUp, eventMults } from './events.js';
 import { PICK_BY } from './recommend.js';
 import { XANAX, SAMPLE_PRICES, ITEMS, XANAX_CD_MIN, GAME_CONSOLE, POINTS } from './items.js';
+import { xanaxCdOf } from './drugcd.js';
+import { realGains } from './gains.js';
 import { HAPPY_CAP } from './gain.js';
 import { JUMP_STACK } from './strategies.js';
 import { budgetOf, effectivePickBy, eventSwitchHeads, affordLine, autoWaitLine, unlockDays, unlockEnergyLeft } from './auto.js';
@@ -30,6 +32,16 @@ import { budgetOf, effectivePickBy, eventSwitchHeads, affordLine, autoWaitLine, 
  * the last one is kept.
  */
 const projectionMemo = { key: '', value: null };
+
+/** How far the look-ahead runs (Home's "Next 48 h" and the bot). */
+export const LOOK_AHEAD_MS = 48 * 3600e3;
+
+/** "14:15", "tomorrow 06:15" or "Thu 06:15" (Torn time). */
+export function whenWords(at, now) {
+    const days = Math.round((tornDayStart(at) - tornDayStart(now)) / DAY);
+    const day = days <= 0 ? '' : days === 1 ? 'tomorrow ' : ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(at).getUTCDay()] + ' ';
+    return day + tornClock(at);
+}
 
 /** Energy above the maximum that isn't counted as a stacked or held Xanax (a can or two). */
 export const STRAY_ENERGY = 50;
@@ -95,16 +107,19 @@ export function specialLeft(plan, state) {
  * What the player's items, job and shop ticks add to the plan (candy choice,
  * the console, job points, NPC prices). Pure; read from the stored statics.
  * @param {object} statics - {inventory, items (Torn item data), job, jobPoints}
- * @param {object} settings - {npcShops: the city shops the player ticked}
+ * @param {object} settings - {npcShops: city shops ticked, npcShopsOff: default shops switched off}
+ * @param {number} [now] - for today's city-shop allowance (a read from an earlier Torn day leaves all 100)
  */
-export function itemContext(statics = {}, settings = {}) {
+export function itemContext(statics = {}, settings = {}, now = null) {
     const info = (statics && statics.items) || {};
     const inv = (statics && statics.inventory) || {};
     const cj = companyJob(statics && statics.job, statics && statics.jobPoints);
     return {
         // Torn's own market price: a candy's price until its listings load (never over a live listing).
         marketPrices: marketPricesFrom(info),
-        npc: npcPricesFrom(info, settings.npcShops),
+        // City shops: Sally's by default (the tick switches it off), and today's allowance left of 100 items.
+        npc: npcPricesFrom(info, shopsAllowed(settings)),
+        cityLeft: allowanceLeft(statics && statics.cityShop, now !== null ? now : (statics && statics.cityShop && statics.cityShop.at) || 0),
         consoleOwned: Number(inv[GAME_CONSOLE]) > 0,
         job: cj,
         jobHappy: jobHappyOf(cj),
@@ -132,6 +147,8 @@ function simInputs({ state, pc, shares, settings, prices, special = 0, statics =
         bliss: pc.perks.bliss,
         happyLossMult: pc.perks.happyLossMult,
         boosterCapH: boosterCapOf(pc, settings),
+        // The booster cooldown running now: the first boosts wait for it (a full candy load takes 24.5 h).
+        boosterCdMin: Math.max(0, Number(state.boosterCd) || 0) / 60,
         special,
         // Special refills held: the daily refill uses them while any are left (the points refill waits) [verify].
         specialHeld: Math.max(0, Number(state.specialRefills) || 0),
@@ -143,7 +160,20 @@ function simInputs({ state, pc, shares, settings, prices, special = 0, statics =
         consoleOwned: ic.consoleOwned,
         jobHappy: ic.jobHappy,
         freeEdvdPerDay: ic.freeEdvdPerDay,
+        // Boosters you hold go first and cost nothing new (candy and energy drinks as a pool).
+        held: heldBoosters(statics.inventory),
+        // Later Xanax at your own median cooldown once a few are recorded (else 7 h).
+        xanaxCdMin: xanaxCdOf(statics.xanaxCds).min,
+        // Today's candy pick, kept unless another is clearly cheaper.
+        candyPrefer: statics.candyPick && statics.candyPick.day === tornDayStart(state.at) ? statics.candyPick.id : null,
     };
+}
+
+/** The boosters in the inventory (candy, energy drinks, EDVD, FHC): {[id]: qty}. */
+export function heldBoosters(inventory) {
+    const out = {};
+    for (const [k, v] of Object.entries(inventory || {})) if (ITEMS[k] && ITEMS[k].kind === 'booster' && Number(v) > 0) out[k] = Math.floor(Number(v));
+    return out;
 }
 
 /**
@@ -155,7 +185,7 @@ function simInputs({ state, pc, shares, settings, prices, special = 0, statics =
 function withBestCandy(id, base, { budget = Infinity, pickBy = 'most' } = {}) {
     const runs = {};
     const evaluate = (cid, n) => (runs[cid] = runs[cid] || simulateStrategy(id, { ...base, special: 0, candyId: cid, candyCount: n }));
-    const pick = bestCandy({ prices: base.prices, npc: base.npc, capH: base.boosterCapH, cdCuts: base.cdMult, happyMult: base.candyMult, budget, pickBy, evaluate });
+    const pick = bestCandy({ prices: base.prices, npc: base.npc, capH: base.boosterCapH, cdCuts: base.cdMult, happyMult: base.candyMult, budget, pickBy, evaluate, prefer: base.candyPrefer });
     if (!pick) return { result: withBestSpecial(id, base), candy: null };
     const input = { ...base, candyId: pick.id, candyCount: pick.count };
     const result = base.special > 0 ? withBestSpecial(id, input) : runs[pick.id];
@@ -332,10 +362,10 @@ export function withoutSkipped(steps, skipped = []) {
 /** Drug steps skipped today: the next drug is planned from the cooldown that would have followed. */
 export const DRUG_STEP_KINDS = new Set(['xanax', 'stack', 'hold', 'boost', 'jump']);
 
-export function drugNotBefore(skipped, now) {
+export function drugNotBefore(skipped, now, cdMin = XANAX_CD_MIN) {
     const today = (skipped || []).filter((x) => DRUG_STEP_KINDS.has(x.kind) && tornDayStart(x.stepAt || 0) === tornDayStart(now));
     if (!today.length) return 0;
-    return Math.max(...today.map((x) => x.stepAt)) + XANAX_CD_MIN * 60 * 1000;
+    return Math.max(...today.map((x) => x.stepAt)) + cdMin * 60 * 1000;
 }
 
 export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, autoSwitch = null, warOn = null, now }) {
@@ -378,6 +408,9 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         toyShop5: Boolean(pc.perks.toyShop5),
         adultNovelties10: Boolean(pc.perks.adultNovelties10),
     };
+    // Later Xanax at your own median cooldown (recorded from your real ones) once there are a few.
+    const xcd = xanaxCdOf(statics.xanaxCds);
+    ctx.xanaxCdMin = xcd.min;
     // Items: the plan's candy (picked in the comparison), cooldown cuts, the console, specials held, job points.
     const ic = itemContext(statics, settings);
     const mineR = compare && compare[plan.strategy];
@@ -388,6 +421,8 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     ctx.cdMult = pc.perks.consumableCdMult || 1;
     ctx.specialHeld = Math.max(0, Number(state.specialRefills) || 0);
     ctx.consoleOwned = ic.consoleOwned;
+    // Boosters you hold go first (owner: "it should exhaust my inventory first").
+    ctx.held = heldBoosters(statics.inventory);
     ctx.toyShop5 = ctx.toyShop5 || worksAt(ic.job, 'Toy Shop', 5) || worksAt(ic.job, 'Game Shop', 5);
     ctx.adultNovelties10 = ctx.adultNovelties10 || worksAt(ic.job, 'Adult Novelties', 10);
     if (ic.jobHappy) ctx.jobHappy = ic.jobHappy;
@@ -398,7 +433,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         ctx.holdBooster = hold.id;
         ctx.holdUntil = hold.start;
     }
-    ctx.drugNotBefore = drugNotBefore(skipped, now);
+    ctx.drugNotBefore = drugNotBefore(skipped, now, xcd.min);
     // A faction war on (your faction's wars, read by Torn Eye) and energy kept for it: the day plan trains above it.
     const warKeep = warOn && settings.warReserve > 0 ? Math.min(settings.warReserve, 1000) : 0;
     if (warKeep) ctx.keepEnergy = warKeep;
@@ -408,9 +443,20 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     ctx.candyMult = (ctx.candyMult || 1) * em.candyMult;
     const steps = withoutSkipped(dayTimeline({ state, now, strategy: plan.strategy, ctx }), skipped);
     const next = steps[0] || null;
+    // The next 48 hours (owner: "plan everything ahead for me, when not to take xanax, when to take candy, when not
+    // to take boosters"): the same plan with the days rolling on, for Home's "Next 48 h" and the bot.
+    const lookAhead = withoutSkipped(dayTimeline({ state, now, strategy: plan.strategy, ctx, until: now + LOOK_AHEAD_MS }), skipped);
     // Buy: the next boost or jump in full, whatever day it lands (today's steps stop at Torn midnight).
     const kindNow = (STRATEGIES[plan.strategy] || {}).kind;
-    const ahead = (kindNow === 'boost' || kindNow === 'jump') && !steps.some((s) => s.kind === 'boost' || s.kind === 'jump') ? withoutSkipped(dayTimeline({ state, now, strategy: plan.strategy, ctx, until: tornDayStart(now) + 3 * DAY }), skipped) : steps;
+    const boostStep = (s) => s.kind === 'boost' || s.kind === 'jump';
+    const ahead = (kindNow === 'boost' || kindNow === 'jump') && !steps.some(boostStep) ? (lookAhead.some(boostStep) ? lookAhead : withoutSkipped(dayTimeline({ state, now, strategy: plan.strategy, ctx, until: tornDayStart(now) + 3 * DAY }), skipped)) : steps;
+    // Past today's steps: what the look-ahead adds (Home's "Next 48 h"); `upcoming` is both, for the bot.
+    const lastToday = steps.length ? Math.max(...steps.map((x) => x.at)) : now;
+    const later = lookAhead.filter((x) => x.at > lastToday && x.at >= tornDayStart(now) + DAY);
+    const upcoming = steps.concat(later);
+    // The next step that uses a booster (candy, EDVD, FHC, cans), today or in the look-ahead.
+    const usesBooster = (s) => (s.items || []).some((it) => ITEMS[it.id] && ITEMS[it.id].kind === 'booster' && it.qty > 0);
+    const nextBoost = lookAhead.find(usesBooster) || ahead.find(usesBooster) || null;
 
     // Status strip
     const energy = energyAt(state, now);
@@ -425,7 +471,8 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         energy: { current: energy, max: e.maximum, fullAt },
         happy: { current: happyAt(state, now, { bliss: pc.perks.bliss }), max: state.happy.maximum, property: statics.property && statics.property.property ? statics.property.property.name : null },
         drug: { left: drugLeft, total: drugLeft > 0 ? Math.max(drugLeft, state.drugCd * 1000) : 0, xanaxDone: ctx.drugsToday, xanaxPlanned },
-        booster: { left: boosterLeft, used: steps.some((s) => (s.items || []).some((it) => it.id !== XANAX && it.id !== 'points' && it.id !== 197)) },
+        // The cooldown left, when it's back under the cap (a booster can be used again), and the plan's next booster step.
+        booster: { left: boosterLeft, capH: ctx.boosterCapH, underCapIn: Math.max(0, boosterLeft - ctx.boosterCapH * 3600e3), used: steps.some(usesBooster), next: nextBoost ? { at: nextBoost.at, label: nextBoost.label, kind: nextBoost.kind } : null },
         refill: { free: refillFree, plannedAt: refillStep ? refillStep.at : null },
     };
 
@@ -448,6 +495,9 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         plannedTrains: plannedToday[k] || 0,
     }));
     const gainedToday = today.reduce((a, x) => a + (x.gain || 0), 0);
+    // What Torn's stats really rose: today, 7 and 30 days (today from the day log until a day's opening read exists).
+    const gains = realGains(history, pc.stats, now);
+    if (!gains.today) gains.today = { total: Math.round(STATS.reduce((a, k) => a + (trainedToday[k] || 0), 0)), perStat: { ...trainedToday }, since: tornDayStart(now), days: 1, fromLog: true };
     const plannedGain = gainedToday + steps.filter((s) => s.at < tornDayStart(now) + DAY).reduce((a, s) => a + (s.gain || 0), 0);
 
     // Build ETA and next gym
@@ -480,6 +530,14 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         heads.push({ tone: e.active ? 'good' : 'plain', text: hu.text, sub: hu.sub, event: e.id, go: 'plan' });
     }
     if (warKeep) heads.push({ tone: 'warn', text: 'War: keeping ' + warKeep + ' energy', sub: 'against ' + (warOn.name || 'the enemy faction') + ' · Settings › Keep for war days', go: 'eye' });
+    // A candy plan with no candy today (the booster cooldown is full): say so, and when the next boost is.
+    const candyPlan = CANDY_PLANS.has(plan.strategy);
+    const todayEnd = tornDayStart(now) + DAY;
+    if (candyPlan && !hold && !steps.some((s) => s.at < todayEnd && usesBooster(s)) && boosterLeft > 0) {
+        heads.push({ tone: 'warn', text: 'No candy today · booster cooldown ' + countdown(boosterLeft), sub: nextBoost ? 'next candy boost ' + whenWords(nextBoost.at, now) + ' TCT' : 'the plan trains as steady until it has room', go: null });
+    } else if (nextBoost && nextBoost.at - now > 30 * 60e3 && (boostStep(nextBoost) || candyPlan)) {
+        heads.push({ tone: 'plain', text: 'No boosters before ' + whenWords(nextBoost.at, now) + ' TCT', sub: 'the ' + (nextBoost.kind === 'jump' ? 'jump' : 'candy boost') + ' then needs room under the ' + ctx.boosterCapH + ' h booster cap' });
+    }
     if (hold) heads.push({ tone: 'warn', text: 'Booster cooldown kept free', sub: hold.name + ' starts within a day: your plan’s ' + (hold.id === 'diabetes' ? 'candy' : 'cans and FHC') + ' count ' + (hold.canMult || hold.candyMult || 1) + '× then' });
     let rec = null;
     let ladder = null;
@@ -531,12 +589,16 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         keep,
         steps,
         ahead,
+        lookAhead,
+        later,
+        upcoming,
         next,
         done: today,
         strip,
         statRows,
         total: totalOf(pc.stats),
         gainedToday,
+        gains,
         plannedGain,
         reachedDay: proj.reachedDay,
         projection: proj.days.slice(0, 7),
@@ -561,6 +623,9 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         noRefill: Boolean(ctx.noRefill),
         auto: auto ? { ...auto, afford: affordLine(auto, recRow ? recRow.cost / horizon : 0), wait: autoWaitLine(auto), switch: autoSwitch } : null,
         unlock,
+        // Your Xanax cooldown (median of the ones recorded, the range) and when the Torn day resets.
+        xanaxCd: xcd,
+        dayResetAt: tornDayStart(now) + DAY,
         // held: while any are held the daily refill is a special (Torn blocks the points refill until they're spent [verify]).
         special: { have: state.specialRefills, left: specialLeft(plan, state), use: plan.specialUse || 0, held: ctx.specialHeld },
         prices,

@@ -46,6 +46,9 @@ export const K = {
     eyePredictions: 'eyePredictions',
     devUnlocked: 'devUnlocked',
     skipped: 'skippedSteps',
+    // Your real Xanax cooldowns (core/drugcd.js) and the candy picked today (kept steady: core/candy.js).
+    xanaxCds: 'xanaxCds',
+    candyPick: 'candyPick',
 };
 
 /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */
@@ -68,8 +71,9 @@ export const DEFAULT_SETTINGS = {
     w3b: true,
     // Auto mode: energy kept for a faction war (0 = you decide).
     warReserve: 0,
-    // Buy › Shops I can buy from: city shops whose prices the plan may use (none until ticked; Sally's is for newbies only).
+    // Buy › Shops I can buy from: city shops ticked (Sally's Sweet Shop counts by default; npcShopsOff switches it off).
     npcShops: [],
+    npcShopsOff: [],
 };
 
 /**
