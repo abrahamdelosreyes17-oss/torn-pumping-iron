@@ -11,7 +11,7 @@ crons = ["* * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "pumping-iron"
-database_id = "PASTE-THE-ID-FROM-wrangler-d1-create"
+database_id = "e1ff3c05-3813-4d46-bd4e-fbaecc6c075a"
 
 # Secrets (not here; `npx wrangler secret put NAME`):
 #   INVITE_CODE          the word a first connect needs

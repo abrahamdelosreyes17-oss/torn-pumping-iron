@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { handle } from '../src/index.js';
 import { handleInteraction } from '../src/interactions.js';
+import { SCHEMA_VERSION } from '../src/db.js';
 import { botEnv, signed, recorder, ctx, command, keyPair, req } from './helpers.js';
 
 const noFetch = recorder(() => {
@@ -78,7 +79,7 @@ test('the schema is checked once per Worker instance, not on every request', asy
     await handle(req('PUT', '/plan', { invite: 'x', body: { plan: null } }), env, noFetch, ctx());
     const first = env.DB.log.length;
     assert.ok(env.DB.log.some((s) => s.startsWith('ALTER TABLE users ADD COLUMN')), 'a 1.0 database gets the new columns');
-    assert.equal(env.DB.meta.get('schema'), '2');
+    assert.equal(env.DB.meta.get('schema'), String(SCHEMA_VERSION));
     await handle(req('PUT', '/plan', { body: { plan: null } }), env, noFetch, ctx());
     const again = env.DB.log.slice(first);
     assert.ok(!again.some((s) => /^(CREATE|ALTER)|FROM meta/.test(s)), 'no schema work on the second request');

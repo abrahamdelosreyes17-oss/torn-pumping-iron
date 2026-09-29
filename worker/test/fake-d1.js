@@ -14,6 +14,7 @@ export function fakeD1() {
     const watches = new Map(); // user|item → row
     const prices = new Map();
     const meta = new Map();
+    const logins = new Map();
     const outbox = [];
     const log = [];
 
@@ -80,6 +81,19 @@ export function fakeD1() {
             return {};
         },
 
+        [Q.loginPut]: ([id, user, at, state]) => (logins.set(id, { id, user, at, discord_id: null, name: null, state }), {}),
+        [Q.loginGet]: ([id]) => ({ first: logins.get(id) || null }),
+        [Q.loginSet]: ([discord_id, name, state, id]) => patch(logins, id, { discord_id, name, state }),
+        [Q.loginsCount]: () => ({ first: { n: logins.size } }),
+        [Q.loginDeleteUser]: ([u]) => {
+            for (const [k, r] of [...logins]) if (r.user === u) logins.delete(k);
+            return {};
+        },
+        [Q.loginClean]: ([t]) => {
+            for (const [k, r] of [...logins]) if (r.at < t) logins.delete(k);
+            return {};
+        },
+
         [Q.ackPut]: ([id, user, kind, alert, step, at]) => (acks.set(user + '|' + id, { id, user, kind, alert, step, at }), {}),
         [Q.ackList]: ([u]) => ({ all: byUser(acks, u) }),
         [Q.ackDeleteUser]: ([u]) => (dropUser(acks, u), {}),
@@ -128,5 +142,5 @@ export function fakeD1() {
         first: async () => exec(sql, args).first ?? null,
         all: async () => ({ results: exec(sql, args).all || [] }),
     });
-    return { prepare: (sql) => stmt(sql), users, sent, links, acks, watches, prices, meta, outbox, log };
+    return { prepare: (sql) => stmt(sql), users, sent, links, logins, acks, watches, prices, meta, outbox, log };
 }

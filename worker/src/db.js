@@ -8,7 +8,7 @@
 
 import { BudgetError } from './net.js';
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /** Free plan: 50 D1 queries per invocation. Keep a few spare. */
 export const QUERY_BUDGET = 45;
@@ -51,6 +51,14 @@ export const Q = {
     linkDelete: 'DELETE FROM link_codes WHERE hash = ?',
     linkClean: 'DELETE FROM link_codes WHERE expires < ?',
 
+    // "Log in with Discord": one open login per browser secret, 15 minutes.
+    loginPut: 'INSERT OR REPLACE INTO logins (id, user, at, discord_id, name, state) VALUES (?, ?, ?, NULL, NULL, ?)',
+    loginGet: 'SELECT * FROM logins WHERE id = ?',
+    loginSet: 'UPDATE logins SET discord_id = ?, name = ?, state = ? WHERE id = ?',
+    loginsCount: 'SELECT COUNT(*) AS n FROM logins',
+    loginDeleteUser: 'DELETE FROM logins WHERE user = ?',
+    loginClean: 'DELETE FROM logins WHERE at < ?',
+
     ackPut: 'INSERT OR REPLACE INTO acks (id, user, kind, alert, step, at) VALUES (?, ?, ?, ?, ?, ?)',
     ackList: 'SELECT * FROM acks WHERE user = ?',
     ackDeleteUser: 'DELETE FROM acks WHERE user = ?',
@@ -83,6 +91,7 @@ export const SCHEMA = [
     'CREATE TABLE IF NOT EXISTS watches (user TEXT, item INTEGER, price INTEGER, fired INTEGER DEFAULT 0, PRIMARY KEY (user, item))',
     'CREATE TABLE IF NOT EXISTS prices (k TEXT PRIMARY KEY, user TEXT, price INTEGER, qty INTEGER, seller TEXT, at INTEGER)',
     'CREATE TABLE IF NOT EXISTS outbox (n INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, route TEXT, body TEXT)',
+    'CREATE TABLE IF NOT EXISTS logins (id TEXT PRIMARY KEY, user TEXT, at INTEGER, discord_id TEXT, name TEXT, state TEXT)',
     'ALTER TABLE users ADD COLUMN plan_at INTEGER',
     'ALTER TABLE users ADD COLUMN settings TEXT',
     'ALTER TABLE users ADD COLUMN linked INTEGER DEFAULT 0',

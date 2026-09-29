@@ -7,6 +7,7 @@
 - Repo: https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron (public; `main` + `gh-pages`)
 
 **Next session, start here:**
+0. **Round 4 plan: `docs/ROUND4-PLAN.md`** (Torn Eye fix, the friend's feedback, Discord login paused mid-build). Waiting for the owner's pick.
 1. Read this file (§2 how the owner works, §3 settled decisions, the newest session entry at the bottom), then **`docs/ROUND3-PLAN.md` §5 "Auto mode"**: the owner's next feature (plan the days around events, faction wars, chains and income; the player just follows). No machine learning needed: a schedule search on the existing simulator. **Ask the owner first** (not answered yet):
    - how much energy and Xanax to keep for a war day;
    - whether saving days may stop natural-energy training;
@@ -31,7 +32,7 @@ Research and background: `docs/research-events-perks.md` (events, job perks, the
   - **Torn Eye**: whether you beat a player and how much HP you keep, plus war mode;
   - a **webpage** the script opens (GitHub Pages host page);
   - an optional **Discord pinger** (a Cloudflare Worker).
-- **Users:** the owner (13B networth, ~1B total stats, Private Island) and a returning friend (low stats, under $200M liquid, Private Island).
+- **Users:** the owner (13B networth, 142M total stats (STR 35M, SPD 4M, DEF 82M, DEX 20.5M; level 50; checked 2026-09-29, the old "~1B" was wrong), Private Island) and a returning friend (low stats, under $200M liquid, Private Island).
 - **Where it stands (2026-09-29, end of the build session):** M0–M8 built and **1.0.0 released** on the owner's yes ("commit and publish the page"): `main` and `gh-pages` pushed, links at the top. Next: the owner's live check (§8), then fixes as a 1.0.x.
 - **Releases from now on:** only when the owner asks ("asking for the link means release", trading's rule): bump the version, `npm run check` + both browser checks, commit, push `main`, verify the pinned raw file's `@version`, give the pinned link. `gh-pages` only changes if `site/` does.
 - **Release repo:** https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron. Release like the trading app (one file at the repo root, `@updateURL` on `main`, a `gh-pages` host page, pinned `<sha>` install links). Not like the poker app: the owner says poker "uninstalls itself from Tampermonkey every release". Its headers were stable, so the cause is unknown. Never change `@name`/`@namespace`.

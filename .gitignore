@@ -9,3 +9,4 @@ reference/
 
 # Build output; the released copy lives at torn-pumping-iron.user.js
 dist/
+worker/.wrangler/
