@@ -2915,10 +2915,13 @@
             t = t2;
         };
         const train = (at, kind, label, items, extra = {}) => {
-            const split = sessionGain(ctx, stats, E, H);
+            // A faction war (Settings › Keep for war days): never train below the energy kept for it.
+            const keep = Math.max(0, Math.min(E, ctx.keepEnergy || 0));
+            const split = sessionGain(ctx, stats, E - keep, H);
             stats = split.statsAfter;
             const step = { id: kind + '-' + ++n, at, kind, label, items, trains: trainsOf(split), gyms: gymsOf(split), gain: Math.round(split.gain), energy: split.energyUsed, strict: false, warnAt: null, ...extra };
-            E = split.energyLeft;
+            if (keep > 0) step.note = (step.note ? step.note + ' · ' : '') + 'keeps ' + keep + ' energy for the war';
+            E = split.energyLeft + keep;
             H = split.happyAfter;
             steps.push(step);
             return step;
@@ -5337,7 +5340,7 @@
         return Math.max(...today.map((x) => x.stepAt)) + XANAX_CD_MIN * 60 * 1000;
     }
 
-    function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, autoSwitch = null, now }) {
+    function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, autoSwitch = null, warOn = null, now }) {
         if (!state) return { ready: false };
         // One player context per refresh: the comparison's, when the caller has it.
         const pc = pcIn || playerContext(state, statics, { unlockedKnown, learnedMult });
@@ -5396,6 +5399,9 @@
             ctx.holdUntil = hold.start;
         }
         ctx.drugNotBefore = drugNotBefore(skipped, now);
+        // A faction war on (your faction's wars, read by Torn Eye) and energy kept for it: the day plan trains above it.
+        const warKeep = warOn && settings.warReserve > 0 ? Math.min(settings.warReserve, 1000) : 0;
+        if (warKeep) ctx.keepEnergy = warKeep;
         // During CaffeineCon / World Diabetes Day the day plan counts the event's cans or candy.
         const em = eventMults(events);
         ctx.canMult = (ctx.canMult || 1) * em.canMult;
@@ -5469,6 +5475,7 @@
             const hu = eventHeadsUp(e, now);
             heads.push({ tone: e.active ? 'good' : 'plain', text: hu.text, sub: hu.sub, event: e.id, go: 'plan' });
         }
+        if (warKeep) heads.push({ tone: 'warn', text: 'War: keeping ' + warKeep + ' energy', sub: 'against ' + (warOn.name || 'the enemy faction') + ' · Settings › Keep for war days', go: 'eye' });
         if (hold) heads.push({ tone: 'warn', text: 'Booster cooldown kept free', sub: hold.name + ' starts within a day: your plan’s ' + (hold.id === 'diabetes' ? 'candy' : 'cans and FHC') + ' count ' + (hold.canMult || hold.candyMult || 1) + '× then' });
         let rec = null;
         let ladder = null;
@@ -7009,6 +7016,14 @@
         return auto;
     }
 
+    /** Your faction's war, as Torn Eye last read it (its wars every 5 minutes): on now or within a day, read in the last 6 hours. */
+    function warOnNow(now = Date.now()) {
+        const w = get('eyeWarAuto', null);
+        if (!w || !Array.isArray(w.enemies) || !w.enemies.length || !(now - (w.at || 0) < 6 * 3600e3)) return null;
+        const nowS = Math.floor(now / 1000);
+        return w.enemies.find((e) => (!e.start || e.start - nowS <= 86400) && (!e.end || e.end > nowS)) || null;
+    }
+
     /** The comparison over a coming event's days, with and without its multiplier (cached per event and inputs). */
     function eventComparisonFor(event, state, pc, shares, settings, budgetPerDay) {
         const days = Math.max(1, Math.round((event.end - event.start) / (24 * 3600e3)));
@@ -7087,7 +7102,7 @@
             // The plan follows Auto's pick (saved, so the day plan, Discord and Progress all see the same plan).
             if (strategy && strategy !== plan.strategy) plan = setPlan({ ...plan, strategy, strategyPicked: false, createdAt: now });
         }
-        return buildModel({ state, statics, plan, settings, auto, autoSwitch, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, whatIf: pi.whatIf || null, jobWhatIf: pi.jobWhatIf || null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+        return buildModel({ state, statics, plan, settings, auto, autoSwitch, warOn: warOnNow(now), log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, whatIf: pi.whatIf || null, jobWhatIf: pi.jobWhatIf || null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
     }
 
     /**
@@ -8756,6 +8771,16 @@
         return s ? KIND_TAG[s.kind] || 'Steady' : '';
     }
 
+    /**
+     * Picking a plan yourself. In Auto the plan follows your income, so a pick
+     * of your own switches the Plan dropdown to a manual rule (Most stats in my
+     * budget) instead of being undone at the next refresh.
+     */
+    function pickPlan(ctx, id) {
+        const manual = ctx.plan.pickBy === 'auto' ? { pickBy: 'most', pickByPicked: true } : {};
+        ctx.setPlan({ strategy: id, strategyPicked: true, ...manual });
+    }
+
     /** The Plan dropdown: stands out, chalk-edged. */
     function planChooser(ctx) {
         const cur = PICK_BY[ctx.plan.pickBy] ? ctx.plan.pickBy : 'most';
@@ -8933,10 +8958,10 @@
             kids.push(
                 h('div', { class: 'warnb num', style: 'margin-top:12px' }, [
                     h('b', { text: w.title }),
-                    h('p', { text: w.text + ' ' + w.reasons.join(' ') }),
+                    h('p', { text: w.text + ' ' + w.reasons.join(' ') + (ctx.plan.pickBy === 'auto' ? ' Using it yourself turns Auto off (Plan: Most stats in my budget).' : '') }),
                     h('div', { class: 'acts' }, [
                         h('button', { class: 'btn primary', type: 'button', onclick: () => { ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Keep ' + S.short.toLowerCase() }),
-                        h('button', { class: 'btn', type: 'button', onclick: () => { ctx.ui.planPick = null; ctx.setPlan({ strategy: pick, strategyPicked: true }); }, text: 'Use it anyway' }),
+                        h('button', { class: 'btn', type: 'button', onclick: () => { ctx.ui.planPick = null; pickPlan(ctx, pick); }, text: 'Use it anyway' }),
                     ]),
                 ]),
             );
@@ -9002,7 +9027,7 @@
                             ctx.rerender();
                         } else {
                             ctx.ui.planPick = null;
-                            ctx.setPlan({ strategy: a.id, strategyPicked: true });
+                            pickPlan(ctx, a.id);
                         }
                     },
                 }, [

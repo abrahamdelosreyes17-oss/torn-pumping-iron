@@ -53,6 +53,16 @@ function kindOf(id) {
     return s ? KIND_TAG[s.kind] || 'Steady' : '';
 }
 
+/**
+ * Picking a plan yourself. In Auto the plan follows your income, so a pick
+ * of your own switches the Plan dropdown to a manual rule (Most stats in my
+ * budget) instead of being undone at the next refresh.
+ */
+export function pickPlan(ctx, id) {
+    const manual = ctx.plan.pickBy === 'auto' ? { pickBy: 'most', pickByPicked: true } : {};
+    ctx.setPlan({ strategy: id, strategyPicked: true, ...manual });
+}
+
 /** The Plan dropdown: stands out, chalk-edged. */
 function planChooser(ctx) {
     const cur = PICK_BY[ctx.plan.pickBy] ? ctx.plan.pickBy : 'most';
@@ -230,10 +240,10 @@ function recommendedCard(m, ctx, rec, compare, days) {
         kids.push(
             h('div', { class: 'warnb num', style: 'margin-top:12px' }, [
                 h('b', { text: w.title }),
-                h('p', { text: w.text + ' ' + w.reasons.join(' ') }),
+                h('p', { text: w.text + ' ' + w.reasons.join(' ') + (ctx.plan.pickBy === 'auto' ? ' Using it yourself turns Auto off (Plan: Most stats in my budget).' : '') }),
                 h('div', { class: 'acts' }, [
                     h('button', { class: 'btn primary', type: 'button', onclick: () => { ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Keep ' + S.short.toLowerCase() }),
-                    h('button', { class: 'btn', type: 'button', onclick: () => { ctx.ui.planPick = null; ctx.setPlan({ strategy: pick, strategyPicked: true }); }, text: 'Use it anyway' }),
+                    h('button', { class: 'btn', type: 'button', onclick: () => { ctx.ui.planPick = null; pickPlan(ctx, pick); }, text: 'Use it anyway' }),
                 ]),
             ]),
         );
@@ -299,7 +309,7 @@ function otherPlans(m, ctx, rec, compare, days) {
                         ctx.rerender();
                     } else {
                         ctx.ui.planPick = null;
-                        ctx.setPlan({ strategy: a.id, strategyPicked: true });
+                        pickPlan(ctx, a.id);
                     }
                 },
             }, [

@@ -210,3 +210,17 @@ test('the plan sync carries Torn Eye’s war and watch lists when they change, a
         gmDel('apiKey');
     }
 });
+
+test('war days: the day plan never trains below the energy kept for a war (Settings › Keep for war days)', async () => {
+    const { dayTimeline } = await import('../src/core/plan.js');
+    const { BUILDS } = await import('../src/core/builds.js');
+    const now = Date.UTC(2026, 8, 29, 10, 0);
+    const state = { at: now, energy: { current: 150, maximum: 150, increment: 5, interval: 600, fullTime: 0 }, happy: { current: 5000, maximum: 5000, increment: 5, interval: 900, fullTime: 0 }, cooldowns: { drug: 0, booster: 0, medical: 0 }, drugCd: 0, boosterCd: 0, refillUsed: true, stats: { str: 1e6, spd: 1e6, def: 1e6, dex: 1e6 }, gymId: 1, specialRefills: 0 };
+    const ctx = { shares: BUILDS.balanced.shares, unlocked: [1], perks: { str: 1, spd: 1, def: 1, dex: 1 }, keep: [], active: 1 };
+    const free = dayTimeline({ state, now, strategy: 'steady', ctx, until: now + 3600e3 });
+    const kept = dayTimeline({ state, now, strategy: 'steady', ctx: { ...ctx, keepEnergy: 100 }, until: now + 3600e3 });
+    const e0 = free.reduce((a, s) => a + (s.energy || 0), 0);
+    const e1 = kept.reduce((a, s) => a + (s.energy || 0), 0);
+    assert.ok(e1 <= e0 - 100 + 5, 'about 100 energy fewer trained (' + e0 + ' → ' + e1 + ')');
+    assert.ok(kept.some((s) => /keeps 100 energy for the war/.test(s.note || '')));
+});

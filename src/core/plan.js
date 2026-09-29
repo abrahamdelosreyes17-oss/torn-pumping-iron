@@ -158,10 +158,13 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         t = t2;
     };
     const train = (at, kind, label, items, extra = {}) => {
-        const split = sessionGain(ctx, stats, E, H);
+        // A faction war (Settings › Keep for war days): never train below the energy kept for it.
+        const keep = Math.max(0, Math.min(E, ctx.keepEnergy || 0));
+        const split = sessionGain(ctx, stats, E - keep, H);
         stats = split.statsAfter;
         const step = { id: kind + '-' + ++n, at, kind, label, items, trains: trainsOf(split), gyms: gymsOf(split), gain: Math.round(split.gain), energy: split.energyUsed, strict: false, warnAt: null, ...extra };
-        E = split.energyLeft;
+        if (keep > 0) step.note = (step.note ? step.note + ' · ' : '') + 'keeps ' + keep + ' energy for the war';
+        E = split.energyLeft + keep;
         H = split.happyAfter;
         steps.push(step);
         return step;

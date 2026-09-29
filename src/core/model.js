@@ -291,7 +291,7 @@ export function drugNotBefore(skipped, now) {
     return Math.max(...today.map((x) => x.stepAt)) + XANAX_CD_MIN * 60 * 1000;
 }
 
-export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, autoSwitch = null, now }) {
+export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, autoSwitch = null, warOn = null, now }) {
     if (!state) return { ready: false };
     // One player context per refresh: the comparison's, when the caller has it.
     const pc = pcIn || playerContext(state, statics, { unlockedKnown, learnedMult });
@@ -350,6 +350,9 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         ctx.holdUntil = hold.start;
     }
     ctx.drugNotBefore = drugNotBefore(skipped, now);
+    // A faction war on (your faction's wars, read by Torn Eye) and energy kept for it: the day plan trains above it.
+    const warKeep = warOn && settings.warReserve > 0 ? Math.min(settings.warReserve, 1000) : 0;
+    if (warKeep) ctx.keepEnergy = warKeep;
     // During CaffeineCon / World Diabetes Day the day plan counts the event's cans or candy.
     const em = eventMults(events);
     ctx.canMult = (ctx.canMult || 1) * em.canMult;
@@ -423,6 +426,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         const hu = eventHeadsUp(e, now);
         heads.push({ tone: e.active ? 'good' : 'plain', text: hu.text, sub: hu.sub, event: e.id, go: 'plan' });
     }
+    if (warKeep) heads.push({ tone: 'warn', text: 'War: keeping ' + warKeep + ' energy', sub: 'against ' + (warOn.name || 'the enemy faction') + ' · Settings › Keep for war days', go: 'eye' });
     if (hold) heads.push({ tone: 'warn', text: 'Booster cooldown kept free', sub: hold.name + ' starts within a day: your plan’s ' + (hold.id === 'diabetes' ? 'candy' : 'cans and FHC') + ' count ' + (hold.canMult || hold.candyMult || 1) + '× then' });
     let rec = null;
     let ladder = null;

@@ -112,6 +112,14 @@ function autoFor(plan, settings, statics) {
     return auto;
 }
 
+/** Your faction's war, as Torn Eye last read it (its wars every 5 minutes): on now or within a day, read in the last 6 hours. */
+export function warOnNow(now = Date.now()) {
+    const w = get('eyeWarAuto', null);
+    if (!w || !Array.isArray(w.enemies) || !w.enemies.length || !(now - (w.at || 0) < 6 * 3600e3)) return null;
+    const nowS = Math.floor(now / 1000);
+    return w.enemies.find((e) => (!e.start || e.start - nowS <= 86400) && (!e.end || e.end > nowS)) || null;
+}
+
 /** The comparison over a coming event's days, with and without its multiplier (cached per event and inputs). */
 function eventComparisonFor(event, state, pc, shares, settings, budgetPerDay) {
     const days = Math.max(1, Math.round((event.end - event.start) / (24 * 3600e3)));
@@ -190,7 +198,7 @@ export function currentModel(now = Date.now()) {
         // The plan follows Auto's pick (saved, so the day plan, Discord and Progress all see the same plan).
         if (strategy && strategy !== plan.strategy) plan = setPlan({ ...plan, strategy, strategyPicked: false, createdAt: now });
     }
-    return buildModel({ state, statics, plan, settings, auto, autoSwitch, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, whatIf: pi.whatIf || null, jobWhatIf: pi.jobWhatIf || null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+    return buildModel({ state, statics, plan, settings, auto, autoSwitch, warOn: warOnNow(now), log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, whatIf: pi.whatIf || null, jobWhatIf: pi.jobWhatIf || null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
 }
 
 /**
