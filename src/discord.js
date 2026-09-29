@@ -347,6 +347,13 @@ export function maybeSyncPlan(m, now = Date.now()) {
             set(K.worker, { ...(get(K.worker, {}) || {}), lastError: pausedText(r), ready: Boolean(r.ready), linked: Boolean(r.linked), bot: Boolean(r.bot), pendingAcks: acked });
         })
         // Failed: the plan counts as unsent (next minute tries again); the acks wait too.
-        .catch((e) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks, lastSig: w.lastSig, ...(keyDue ? { keyTag: w.keyTag } : {}), ...(eyeDue ? { eyeSig: w.eyeSig } : {}) }));
+        .catch((e) => {
+            // The service forgot this browser (Disconnect elsewhere, /unlink in Discord, or 30 days without a sync): disconnected here too.
+            if (e && e.http === 403 && w.discordName) {
+                set(K.worker, { base: w.base, secret: w.secret, login: null, lastError: 'The Pumping Iron service no longer knows this browser (/unlink, or 30 days without a sync). Log in with Discord again.' });
+                return;
+            }
+            set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks, lastSig: w.lastSig, ...(keyDue ? { keyTag: w.keyTag } : {}), ...(eyeDue ? { eyeSig: w.eyeSig } : {}) });
+        });
     return true;
 }

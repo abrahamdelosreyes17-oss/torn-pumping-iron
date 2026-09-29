@@ -241,7 +241,8 @@ function discordSection(ctx) {
             ]),
             msg,
             result,
-            h('p', { class: 'muted', text: 'Your Torn key goes to the Pumping Iron service, encrypted, so it can read your timers while you’re away. Disconnect removes it.' }),
+            st && st.lastError && !waiting ? h('p', { class: 'msg bad', text: st.lastError }) : null,
+            h('p', { class: 'muted', text: 'Your Torn key goes to the Pumping Iron service, encrypted, so it can read your timers while you’re away. Disconnect (or /unlink in Discord) removes it.' }),
             h('details', { class: 'dis' }, [h('summary', { text: 'How your Torn key is used there' }), tosTable(TOS_TORN)]),
             h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.discordAdvanced = true; ctx.rerender(); }, text: 'Advanced: your own service' }),
         ]);
