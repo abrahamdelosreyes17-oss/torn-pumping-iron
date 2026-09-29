@@ -13,6 +13,9 @@ import { decideLeader } from '../core/leader.js';
 import { normalizeState, diffStates, tornDayStart } from '../core/bars.js';
 import { logFromDiff } from '../core/plan.js';
 import { totalOf } from '../core/gain.js';
+import { calibrationSample, addCalibration } from '../core/calibration.js';
+import { mergeLiveGyms, GYMS } from '../core/gyms.js';
+import { parsePerks } from '../core/perks.js';
 import { fetchUserState, fetchPerks, fetchProperty, fetchGyms, fetchInventory, fetchKeyInfo } from '../api/torn.js';
 import { KEY_DEAD_CODES } from '../api/client.js';
 
@@ -86,6 +89,10 @@ export class StateFeed {
                 const diff = diffStates(prev, next);
                 const log = logFromDiff(this.store.get(this.keys.log, []), diff, { at, nextStep: this.nextStep() });
                 this.store.set(this.keys.log, log);
+                // The gain model checks itself against your own trains.
+                const st = this.store.get(this.keys.static, {}) || {};
+                const sample = calibrationSample(prev, next, diff, { table: st.gyms && st.gyms.length ? mergeLiveGyms(st.gyms) : GYMS, perks: parsePerks(st.perks || {}).mult });
+                if (sample) this.store.set('calibration', addCalibration(this.store.get('calibration', null), sample));
             }
             this.store.set(this.keys.state, { at, api });
             this.recordDaily(next);
