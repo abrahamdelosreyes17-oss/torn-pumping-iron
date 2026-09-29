@@ -122,7 +122,19 @@ Links:
      3. **A 48 h look-ahead timeline** (the plan's steps past Torn midnight) for Home's "next" list and the bot, so "when not to take Xanax / candy / boosters" is planned ahead.
      4. **Strip:** "Used today · free again in 31h 40m" or "Next candy boost in …" instead of "Not used by this plan".
      5. **Tests:** the owner's case (Candy + Xanax, booster 31h 40m → no candy step today, the next boost when the cooldown allows); the simulator's candy cadence against the 24 h cap; the jumps with a non-empty cooldown.
-13. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
+13. **Show real gains plainly (owner, 2026-09-29):**
+   - **Owner's words:** "i do not think this is correct. im pretty sure i got like 300k … the progress also only shows progression not my actual stat increase". Screenshot: Progress › Last trains, 3 rows (STR × 10 The Edge +169,900; DEX × 1 Balboas +27,115; DEX × 4 Balboas +108,108), each "off by 0.0%".
+   - **Checked:**
+     - The rows sum to +305,123, so the owner's ~300k is right.
+     - The 0.0% is genuine, not circular (`calibration.js`: trains from the energy bar's drop, prediction from the formula, actual from Torn's stats). The gain model is accurate for the owner.
+   - **What's wrong is presentation:**
+     - "Last trains" lists only clean reads (one stat, no drug, booster or refill in between) without saying so.
+     - Nothing shows today's or this week's real stat gain plainly.
+   - **Build:**
+     1. Progress and Home: "Today +305,123 (STR +169,900 · DEX +135,223)", plus 7 and 30 days, from real stats (statsHistory / receipts).
+     2. The "Last trains" note: "reads with one stat and nothing taken in between, used to check the gain maths", plus a total row.
+     3. Optionally a per-day "gained" bar next to "planned".
+14. **Ideas recorded:** the learned HP-kept model, timing habits, happy loss per train.
 Research and background: `docs/research-events-perks.md` (events, job perks, the console), `docs/review-fable-2026-09-29.md` (the three-pass review, all fixed), `docs/research-learning.md`, `docs/discord-bot-design.md`, `worker/USERSCRIPT-INTERFACE.md`, `docs/ENGINE-SPEC.md`, `docs/DESIGN.md` + `mockups/round3/` (the look every page follows now).
 
 ---
