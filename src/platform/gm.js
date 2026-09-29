@@ -42,6 +42,27 @@ export function gmGet(key, fallback = null) {
     }
 }
 
+const gmParsed = new Map();
+
+/**
+ * Read a big, read-only value (prices): parsed once per stored version, not
+ * on every read. Callers must not change what it returns (copy first).
+ */
+export function gmGetShared(key, fallback = null) {
+    const full = gmKey(key);
+    const raw = gmHasStorage ? GM_getValue(full, null) : gmMemoryStore.has(full) ? gmMemoryStore.get(full) : null;
+    if (raw === null || raw === undefined || raw === '') return fallback;
+    const hit = gmParsed.get(full);
+    if (hit && hit.raw === raw) return hit.value;
+    try {
+        const value = JSON.parse(raw);
+        gmParsed.set(full, { raw, value });
+        return value;
+    } catch {
+        return fallback;
+    }
+}
+
 /** Write a JSON-serialisable value. */
 export function gmSet(key, value) {
     const full = gmKey(key);

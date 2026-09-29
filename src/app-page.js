@@ -5,7 +5,7 @@
  */
 
 import { gmOnChange } from './platform/gm.js';
-import { K, get, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup } from './platform/store.js';
+import { K, get, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup, getPrices, PRICE_LISTINGS_KEPT } from './platform/store.js';
 import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE } from './runtime.js';
 import { PiApp } from './ui/app/app.js';
 import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, fetchFactionMembers, keyIsEnough } from './api/torn.js';
@@ -50,7 +50,7 @@ export function ffsClient() {
 export async function loadPrices(ids) {
     // Nothing from Torn or TornW3B while Torn Trading runs (the two take turns).
     if (!getKey(K.apiKey) || isPaused()) return;
-    const prices = { ...(get(K.prices, {}) || {}) };
+    const prices = { ...(getPrices()) };
     const now = Date.now();
     const due = [...new Set(ids.map(String))].filter((id) => !page.loading.has(id) && !(prices[id] && now - (prices[id].at || 0) < PRICE_FRESH_MS));
     if (!due.length) return;
@@ -88,7 +88,9 @@ export async function loadPrices(ids) {
             }
             row.error = redactKey(String((error && error.message) || error), getKey(K.apiKey));
         }
-        const cheapest = row.listings.length ? Math.min(...row.listings.map((l) => l.price)) : null;
+        // Kept small: the cheapest listings only (GM storage is read on every Torn page).
+        row.listings = row.listings.sort((a, b) => a.price - b.price).slice(0, PRICE_LISTINGS_KEPT);
+        const cheapest = row.listings.length ? row.listings[0].price : null;
         if (cheapest) hist = recordPrice(hist, id, Date.now(), cheapest);
         const avg = average7(hist, id, Date.now());
         row.avg7 = avg.days >= 2 ? avg.avg : null;
@@ -97,7 +99,7 @@ export async function loadPrices(ids) {
         page.loading.delete(id);
     }
     set(K.priceHistory, hist);
-    const merged = { ...(get(K.prices, {}) || {}), ...Object.fromEntries(due.filter((id) => prices[id] && prices[id].at >= now).map((id) => [id, prices[id]])) };
+    const merged = { ...(getPrices()), ...Object.fromEntries(due.filter((id) => prices[id] && prices[id].at >= now).map((id) => [id, prices[id]])) };
     set(K.prices, merged);
     refresh();
     if (page.app) page.app.render(true);
@@ -236,7 +238,7 @@ function getCtx() {
     const settings = getSettings();
     const plan = getPlan();
     const statics = get(K.userStatic, {}) || {};
-    const prices = get(K.prices, {}) || {};
+    const prices = getPrices();
     const ffsState = get(K.ffsState, null);
     const S = STRATEGIES[plan.strategy] || STRATEGIES.steady;
     return {

@@ -182,9 +182,10 @@ export function withoutSkipped(steps, skipped = []) {
     return steps.filter((s) => !skipped.some((x) => x.kind === s.kind && (Math.abs((x.stepAt || 0) - s.at) <= 10 * 60 * 1000 || (x.label && x.label === s.label))));
 }
 
-export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], now }) {
+export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, now }) {
     if (!state) return { ready: false };
-    const pc = playerContext(state, statics, { unlockedKnown, learnedMult });
+    // One player context per refresh: the comparison's, when the caller has it.
+    const pc = pcIn || playerContext(state, statics, { unlockedKnown, learnedMult });
     const build = buildOf(plan.build);
     const shares = targetShares(plan, pc.stats, build.shares);
     const keep = (build.gyms || []).filter((id) => pc.unlocked.includes(id) && gymAccess(gymById(id, pc.table), pc.stats).ok);

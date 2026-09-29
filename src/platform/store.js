@@ -5,7 +5,7 @@
  * IndexedDB so it doesn't slow every Torn page (the trading app's lesson).
  */
 
-import { gmGet, gmSet, gmDel } from './gm.js';
+import { gmGet, gmSet, gmDel, gmGetShared } from './gm.js';
 
 export const K = {
     apiKey: 'apiKey',
@@ -115,6 +115,14 @@ export function setKey(name, value) {
 export function get(name, fallback = null) {
     return gmGet(name, fallback);
 }
+
+/** Prices, parsed once per change (read-only: copy before changing). */
+export function getPrices() {
+    return gmGetShared(K.prices, {}) || {};
+}
+
+/** Listings kept per item: the cheapest, enough to fill a week's plan from many sellers. */
+export const PRICE_LISTINGS_KEPT = 60;
 
 export function set(name, value) {
     gmSet(name, value);

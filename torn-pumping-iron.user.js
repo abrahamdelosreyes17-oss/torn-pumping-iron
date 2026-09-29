@@ -95,6 +95,27 @@
         }
     }
 
+    const gmParsed = new Map();
+
+    /**
+     * Read a big, read-only value (prices): parsed once per stored version, not
+     * on every read. Callers must not change what it returns (copy first).
+     */
+    function gmGetShared(key, fallback = null) {
+        const full = gmKey(key);
+        const raw = gmHasStorage ? GM_getValue(full, null) : gmMemoryStore.has(full) ? gmMemoryStore.get(full) : null;
+        if (raw === null || raw === undefined || raw === '') return fallback;
+        const hit = gmParsed.get(full);
+        if (hit && hit.raw === raw) return hit.value;
+        try {
+            const value = JSON.parse(raw);
+            gmParsed.set(full, { raw, value });
+            return value;
+        } catch {
+            return fallback;
+        }
+    }
+
     /** Write a JSON-serialisable value. */
     function gmSet(key, value) {
         const full = gmKey(key);
@@ -325,6 +346,14 @@
     function get(name, fallback = null) {
         return gmGet(name, fallback);
     }
+
+    /** Prices, parsed once per change (read-only: copy before changing). */
+    function getPrices() {
+        return gmGetShared(K.prices, {}) || {};
+    }
+
+    /** Listings kept per item: the cheapest, enough to fill a week's plan from many sellers. */
+    const PRICE_LISTINGS_KEPT = 60;
 
     function set(name, value) {
         gmSet(name, value);
@@ -4390,9 +4419,10 @@
         return steps.filter((s) => !skipped.some((x) => x.kind === s.kind && (Math.abs((x.stepAt || 0) - s.at) <= 10 * 60 * 1000 || (x.label && x.label === s.label))));
     }
 
-    function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], now }) {
+    function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, now }) {
         if (!state) return { ready: false };
-        const pc = playerContext(state, statics, { unlockedKnown, learnedMult });
+        // One player context per refresh: the comparison's, when the caller has it.
+        const pc = pcIn || playerContext(state, statics, { unlockedKnown, learnedMult });
         const build = buildOf(plan.build);
         const shares = targetShares(plan, pc.stats, build.shares);
         const keep = (build.gyms || []).filter((id) => pc.unlocked.includes(id) && gymAccess(gymById(id, pc.table), pc.stats).ok);
@@ -5147,6 +5177,7 @@
         compare: null,
         whatIf: null,
         compareKey: '',
+        compareWanted: '',
         listeners: [],
     };
 
@@ -5188,7 +5219,7 @@
     function comparisonFor(state, statics, plan, settings) {
         const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult });
         const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
-        const prices = get(K.prices, {}) || {};
+        const prices = getPrices();
         // Every input that moves the answer: all four stats (in ~2% steps), prices (2 significant digits), perks, gyms.
         const statsSig = Object.values(pc.stats).map((v) => Math.round(Math.log1p(v) * 50)).join(',');
         const priceSig = Object.entries(livePrices(prices)).map(([id, p]) => id + ':' + Number(p.toPrecision(2))).join(',');
@@ -5196,12 +5227,24 @@
         const perkSig = JSON.stringify([learnedNow().mode, pc.perks.mult, pc.perks.happyLossMult, pc.perks.canMult, pc.perks.candyMult, pc.perks.consoleMult, pc.perks.edvdMult, pc.perks.boosterCapExtraH]);
         const key = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, priceSig, pc.unlocked.join(','), special].join('|');
         if (key !== pi.compareKey) {
-            pi.compare = compareStrategies({ state, pc, shares, settings, prices, special });
-            // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
-            pi.whatIf = pc.perks.bliss ? null : blissWhatIf({ state, pc, shares, settings, prices, special });
-            pi.compareKey = key;
+            const run = () => {
+                pi.compare = compareStrategies({ state, pc, shares, settings, prices, special });
+                // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
+                pi.whatIf = pc.perks.bliss ? null : blissWhatIf({ state, pc, shares, settings, prices, special });
+                pi.compareKey = key;
+            };
+            if (!pi.compare) run();
+            else if (pi.compareWanted !== key) {
+                // A click (build, budget, days) redraws at once; the 15 plan runs follow a moment later, off the click.
+                pi.compareWanted = key;
+                setTimeout(() => {
+                    if (pi.compareWanted !== key) return;
+                    run();
+                    refresh();
+                }, 0);
+            }
         }
-        return pi.compare;
+        return { compare: pi.compare, pc };
     }
 
     /** The model every surface renders from. */
@@ -5212,8 +5255,8 @@
         const statics = get(K.userStatic, {}) || {};
         const plan = getPlan();
         const settings = getSettings();
-        const compare = comparisonFor(state, statics, plan, settings);
-        return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: get(K.prices, {}) || {}, compare, whatIf: pi.whatIf || null, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+        const { compare, pc } = comparisonFor(state, statics, plan, settings);
+        return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, whatIf: pi.whatIf || null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
     }
 
     /**
@@ -5247,6 +5290,8 @@
      */
     function recordPlanLine(m) {
         if (!m || !m.ready || !m.compare) return;
+        // Not while a new comparison is still coming (a click just changed the build).
+        if (pi.compareWanted && pi.compareWanted !== pi.compareKey) return;
         const plan = getPlan();
         const r = m.compare[plan.strategy];
         if (!r) return;
@@ -5364,8 +5409,10 @@
         gmOnChange(K.settings, refresh);
         gmOnChange(K.stateError, refresh);
         gmOnChange(K.apiKeyDead, refresh);
-        // Countdowns tick by themselves every second; the model itself is worked out again every 5 s.
-        setInterval(refresh, 5000);
+        // Countdowns tick by themselves every second; the model itself is worked out again every 5 s, in a tab you can see.
+        setInterval(() => {
+            if (isVisible()) refresh();
+        }, 5000);
         refresh();
     }
 
@@ -10490,7 +10537,7 @@
     async function loadPrices(ids) {
         // Nothing from Torn or TornW3B while Torn Trading runs (the two take turns).
         if (!getKey(K.apiKey) || isPaused()) return;
-        const prices = { ...(get(K.prices, {}) || {}) };
+        const prices = { ...(getPrices()) };
         const now = Date.now();
         const due = [...new Set(ids.map(String))].filter((id) => !page.loading.has(id) && !(prices[id] && now - (prices[id].at || 0) < PRICE_FRESH_MS));
         if (!due.length) return;
@@ -10528,7 +10575,9 @@
                 }
                 row.error = redactKey(String((error && error.message) || error), getKey(K.apiKey));
             }
-            const cheapest = row.listings.length ? Math.min(...row.listings.map((l) => l.price)) : null;
+            // Kept small: the cheapest listings only (GM storage is read on every Torn page).
+            row.listings = row.listings.sort((a, b) => a.price - b.price).slice(0, PRICE_LISTINGS_KEPT);
+            const cheapest = row.listings.length ? row.listings[0].price : null;
             if (cheapest) hist = recordPrice(hist, id, Date.now(), cheapest);
             const avg = average7(hist, id, Date.now());
             row.avg7 = avg.days >= 2 ? avg.avg : null;
@@ -10537,7 +10586,7 @@
             page.loading.delete(id);
         }
         set(K.priceHistory, hist);
-        const merged = { ...(get(K.prices, {}) || {}), ...Object.fromEntries(due.filter((id) => prices[id] && prices[id].at >= now).map((id) => [id, prices[id]])) };
+        const merged = { ...(getPrices()), ...Object.fromEntries(due.filter((id) => prices[id] && prices[id].at >= now).map((id) => [id, prices[id]])) };
         set(K.prices, merged);
         refresh();
         if (page.app) page.app.render(true);
@@ -10676,7 +10725,7 @@
         const settings = getSettings();
         const plan = getPlan();
         const statics = get(K.userStatic, {}) || {};
-        const prices = get(K.prices, {}) || {};
+        const prices = getPrices();
         const ffsState = get(K.ffsState, null);
         const S = STRATEGIES[plan.strategy] || STRATEGIES.steady;
         return {
@@ -11590,7 +11639,7 @@
     function chosenFills(m) {
         const s = getSettings();
         const statics = get(K.userStatic, {}) || {};
-        const prices = get(K.prices, {}) || {};
+        const prices = getPrices();
         const needs = needList(needsForWindow(m, m.compare, getPlan(), s.buyWindow || 'three', s.horizonDays), statics.inventory || {});
         const out = [];
         for (const n of needs) {
@@ -11680,7 +11729,7 @@
                 return;
             }
             const p = detectPage(location.href);
-            const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), Object.values(get(K.prices, {}) || {}).map((x) => x.at).join(), pageRowsCount(p)].join('|');
+            const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), Object.values(getPrices()).map((x) => x.at).join(), pageRowsCount(p)].join('|');
             if (sig !== lastSig) {
                 lastSig = sig;
                 if (p === PAGE_GYM) {

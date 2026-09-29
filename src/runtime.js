@@ -5,7 +5,7 @@
  */
 
 import { gmOnChange } from './platform/gm.js';
-import { K, get, set, del, getKey, getSettings, getPlan } from './platform/store.js';
+import { K, get, set, del, getKey, getSettings, getPlan, getPrices } from './platform/store.js';
 import { tabWindow } from './platform/tab-window.js';
 import { makeTabId, LEADER_HEARTBEAT_MS } from './core/leader.js';
 import { TornApiClient } from './api/client.js';
@@ -27,6 +27,7 @@ export const pi = {
     compare: null,
     whatIf: null,
     compareKey: '',
+    compareWanted: '',
     listeners: [],
 };
 
@@ -68,7 +69,7 @@ export function tornClient() {
 function comparisonFor(state, statics, plan, settings) {
     const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult });
     const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
-    const prices = get(K.prices, {}) || {};
+    const prices = getPrices();
     // Every input that moves the answer: all four stats (in ~2% steps), prices (2 significant digits), perks, gyms.
     const statsSig = Object.values(pc.stats).map((v) => Math.round(Math.log1p(v) * 50)).join(',');
     const priceSig = Object.entries(livePrices(prices)).map(([id, p]) => id + ':' + Number(p.toPrecision(2))).join(',');
@@ -76,12 +77,24 @@ function comparisonFor(state, statics, plan, settings) {
     const perkSig = JSON.stringify([learnedNow().mode, pc.perks.mult, pc.perks.happyLossMult, pc.perks.canMult, pc.perks.candyMult, pc.perks.consoleMult, pc.perks.edvdMult, pc.perks.boosterCapExtraH]);
     const key = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, priceSig, pc.unlocked.join(','), special].join('|');
     if (key !== pi.compareKey) {
-        pi.compare = compareStrategies({ state, pc, shares, settings, prices, special });
-        // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
-        pi.whatIf = pc.perks.bliss ? null : blissWhatIf({ state, pc, shares, settings, prices, special });
-        pi.compareKey = key;
+        const run = () => {
+            pi.compare = compareStrategies({ state, pc, shares, settings, prices, special });
+            // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
+            pi.whatIf = pc.perks.bliss ? null : blissWhatIf({ state, pc, shares, settings, prices, special });
+            pi.compareKey = key;
+        };
+        if (!pi.compare) run();
+        else if (pi.compareWanted !== key) {
+            // A click (build, budget, days) redraws at once; the 15 plan runs follow a moment later, off the click.
+            pi.compareWanted = key;
+            setTimeout(() => {
+                if (pi.compareWanted !== key) return;
+                run();
+                refresh();
+            }, 0);
+        }
     }
-    return pi.compare;
+    return { compare: pi.compare, pc };
 }
 
 /** The model every surface renders from. */
@@ -92,8 +105,8 @@ export function currentModel(now = Date.now()) {
     const statics = get(K.userStatic, {}) || {};
     const plan = getPlan();
     const settings = getSettings();
-    const compare = comparisonFor(state, statics, plan, settings);
-    return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: get(K.prices, {}) || {}, compare, whatIf: pi.whatIf || null, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+    const { compare, pc } = comparisonFor(state, statics, plan, settings);
+    return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, whatIf: pi.whatIf || null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
 }
 
 /**
@@ -127,6 +140,8 @@ function recordDayTotals(m) {
  */
 function recordPlanLine(m) {
     if (!m || !m.ready || !m.compare) return;
+    // Not while a new comparison is still coming (a click just changed the build).
+    if (pi.compareWanted && pi.compareWanted !== pi.compareKey) return;
     const plan = getPlan();
     const r = m.compare[plan.strategy];
     if (!r) return;
@@ -244,8 +259,10 @@ export function startFeed() {
     gmOnChange(K.settings, refresh);
     gmOnChange(K.stateError, refresh);
     gmOnChange(K.apiKeyDead, refresh);
-    // Countdowns tick by themselves every second; the model itself is worked out again every 5 s.
-    setInterval(refresh, 5000);
+    // Countdowns tick by themselves every second; the model itself is worked out again every 5 s, in a tab you can see.
+    setInterval(() => {
+        if (isVisible()) refresh();
+    }, 5000);
     refresh();
 }
 

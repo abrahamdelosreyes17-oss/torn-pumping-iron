@@ -5,7 +5,7 @@
  */
 
 import { gmMenu, gmOpenTab } from './platform/gm.js';
-import { K, get, set, getKey, getSettings, getPlan } from './platform/store.js';
+import { K, get, set, getKey, getSettings, getPlan, getPrices } from './platform/store.js';
 import { keyProblem } from './ui/key-status.js';
 import { onModel, isVisible, refresh } from './runtime.js';
 import { isPaused, onPauseChange } from './turns.js';
@@ -179,7 +179,7 @@ function drawItems(m) {
 function chosenFills(m) {
     const s = getSettings();
     const statics = get(K.userStatic, {}) || {};
-    const prices = get(K.prices, {}) || {};
+    const prices = getPrices();
     const needs = needList(needsForWindow(m, m.compare, getPlan(), s.buyWindow || 'three', s.horizonDays), statics.inventory || {});
     const out = [];
     for (const n of needs) {
@@ -269,7 +269,7 @@ export function bootTornPage() {
             return;
         }
         const p = detectPage(location.href);
-        const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), Object.values(get(K.prices, {}) || {}).map((x) => x.at).join(), pageRowsCount(p)].join('|');
+        const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), Object.values(getPrices()).map((x) => x.at).join(), pageRowsCount(p)].join('|');
         if (sig !== lastSig) {
             lastSig = sig;
             if (p === PAGE_GYM) {
