@@ -13,7 +13,7 @@ import { ensureSchema } from './db.js';
 import { HELP } from './commands.js';
 import { BUTTON_HANDLERS } from './buttons.js';
 import { needsLink, statusCmd, planCmd, nextCmd, linkCmd, unlinkCmd, snoozeCmd, settingsCmd } from './cmd-core.js';
-import { timersCmd } from './cmd-torn.js';
+import { timersCmd, buyCmd, watchCmd, targetsCmd, targetCmd } from './cmd-torn.js';
 
 const COMMANDS = {
     help: async () => reply(HELP),
@@ -25,6 +25,10 @@ const COMMANDS = {
     snooze: needsLink(snoozeCmd),
     settings: needsLink(settingsCmd),
     timers: needsLink(timersCmd),
+    buy: needsLink(buyCmd),
+    watch: needsLink(watchCmd),
+    targets: needsLink(targetsCmd),
+    target: needsLink(targetCmd),
 };
 
 const BUTTONS = { ...BUTTON_HANDLERS };

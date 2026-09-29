@@ -22,6 +22,10 @@ import { runCron, sendAlerts } from './cron.js';
 import { canDeliver } from './deliver.js';
 import { pendingAcks } from './buttons.js';
 import { sealKey, openKey } from './keys.js';
+import { cleanTargets } from './cmd-torn.js';
+
+/** A plan, its targets and bands fit easily in this. */
+const MAX_BODY = 100000;
 import { Q, SCHEMA, ensureSchema } from './db.js';
 import { guard } from './net.js';
 import { interactionsRoute } from './interactions.js';
@@ -68,8 +72,11 @@ async function putPlan(req, env) {
     if (error) return error;
     if (!row && !(env.INVITE_CODE && (await sameSecret(req.headers.get('x-invite'), env.INVITE_CODE)))) return json({ ok: false, error: 'Unknown secret: the first sync needs the invite code' }, 403);
     let body;
+    const text = await req.text();
+    if (text.length > MAX_BODY) return json({ ok: false, error: 'Too much data in one sync' }, 413);
     try {
-        body = await req.json();
+        body = JSON.parse(text);
+        if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('not an object');
     } catch {
         return json({ ok: false, error: 'Body is not JSON' }, 400);
     }
@@ -103,9 +110,12 @@ async function putPlan(req, env) {
     const lastError = newKey ? null : row ? row.last_error || null : null;
     const nowS = Math.floor(Date.now() / 1000);
     const planAt = body.plan !== undefined ? nowS : row ? row.plan_at || null : null;
-    const targets = row ? row.targets || null : null;
-    const factionId = row ? row.faction_id || null : null;
-    const playerId = row ? row.player_id || null : null;
+    // Torn Eye's list, and whose faction the war commands look at (from the userscript).
+    const cleaned = body.targets !== undefined ? cleanTargets(body.targets, nowS) : undefined;
+    const targets = cleaned !== undefined ? (cleaned ? JSON.stringify(cleaned) : null) : row ? row.targets || null : null;
+    const idOrKeep = (v, old) => (v === undefined ? old || null : Number.isInteger(Number(v)) && Number(v) > 0 ? Number(v) : null);
+    const factionId = idOrKeep(body.factionId, row && row.faction_id);
+    const playerId = idOrKeep(body.playerId, row && row.player_id);
     if (row) await env.DB.prepare(Q.userSync).bind(tornKey, discordId, webhook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId, id).run();
     else await env.DB.prepare(Q.userInsert).bind(id, tornKey, discordId, webhook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId).run();
     // Acks (Done / Skip in Discord): the userscript says which it applied; the rest go back to it.

@@ -12,6 +12,7 @@ import { userState, pauseUser, TornError } from './torn.js';
 import { deliver, canDeliver, bodyOf, editAlertMessage, PER_MESSAGE } from './deliver.js';
 import { clock, DAY_S } from './format.js';
 import { keyFor, KeyError } from './keys.js';
+import { watchAlerts, WATCH_EVERY_S } from './market.js';
 import { kindsOn, settingsOf, muted, inQuiet, planStale, planAge } from './settings.js';
 
 export const SENT_KEEP_S = 2 * 86400;
@@ -31,6 +32,7 @@ const chunks = (list, n) => {
 export async function sendAlerts(env, f, db, user, alerts, nowS) {
     let sent = 0;
     let messages = 0;
+    const ids = [];
     const sorted = [...alerts].sort((a, b) => (a.id < b.id ? -1 : 1));
     for (const group of chunks(sorted, PER_MESSAGE)) {
         const rows = group.map((a) => ({ user: user.id, alert: a.id, at: nowS, state: 'sent', until: null, body: { title: a.title, text: a.text, kind: a.kind, link: a.link || null, step: a.step && a.skip !== false ? { at: a.step.at, kind: a.step.kind, label: a.step.label } : null } }));
@@ -39,8 +41,9 @@ export async function sendAlerts(env, f, db, user, alerts, nowS) {
         for (const r of rows) await db.prepare(Q.sentPut).bind(user.id, r.alert, nowS, 'sent', null, d.channel, d.message, JSON.stringify(r.body), d.via).run();
         sent += rows.length;
         messages++;
+        ids.push(...rows.map((r) => r.alert));
     }
-    return { sent, messages };
+    return { sent, messages, ids };
 }
 
 /** Messages (not pings: a grouped message counts once) sent since a time. */
@@ -94,7 +97,20 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
     }
     const st = settingsOf(row);
     const prev = parse(row.prev, null);
-    const alerts = dueAlerts(state, parse(row.plan, null), nowS, kindsOn(row), { prev, planStale: planStale(row, nowS), planAge: planAge(row, nowS) });
+    const on = kindsOn(row);
+    const alerts = dueAlerts(state, parse(row.plan, null), nowS, on, { prev, planStale: planStale(row, nowS), planAge: planAge(row, nowS) });
+    // Price watches, every 5 minutes.
+    if (on.watch && Math.floor(nowS / 60) % (WATCH_EVERY_S / 60) === 0) {
+        try {
+            alerts.push(...(await watchAlerts(f, db, key, row, nowS)).alerts);
+        } catch (e) {
+            if (e instanceof TornError && e.dead) {
+                await pauseUser(db, row.id, e);
+                return { sent: 0, error: 'Torn error ' + e.code };
+            }
+            if (e instanceof BudgetError) throw e;
+        }
+    }
     const { results } = await db.prepare(Q.sentList).bind(row.id).all();
     const rows = results || [];
     const seen = new Map(rows.map((r) => [r.alert, r]));
@@ -121,7 +137,8 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
     if (inQuiet(st, nowS) || room <= 0) fresh = fresh.filter((a) => a.kind === 'jump');
     else if (fresh.length > room * PER_MESSAGE) fresh = fresh.slice(0, room * PER_MESSAGE);
 
-    const { sent } = await sendAlerts(env, f, db, row, fresh, nowS);
+    const { sent, ids } = await sendAlerts(env, f, db, row, fresh, nowS);
+    for (const a of fresh) if (a.kind === 'watch' && ids.includes(a.id)) await db.prepare(Q.watchMark).bind(1, row.id, a.item).run();
     await db.prepare(Q.userRan).bind(nowS, JSON.stringify(nextPrev(prev, state, nowS)), row.war || null, row.id).run();
     return { sent, resolved };
 }
