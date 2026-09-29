@@ -143,7 +143,8 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     let H = happyAt(state, now, { bliss });
     // A drug step skipped in Discord moves the next one to the cooldown that would have followed it.
     let drugAt = Math.max(now, drugFreeAt(state), ctx.drugNotBefore || 0);
-    let refillLeft = refillAvailable(state, now);
+    // While specials are held the day's refill is a special: one already used today counts as it.
+    let refillLeft = refillAvailable(state, now) && !(ctx.specialHeld > 0 && (ctx.specialToday || 0) >= 1);
     let xanN = (ctx.drugsToday || 0) + 1;
     const steps = [];
     let n = 0;

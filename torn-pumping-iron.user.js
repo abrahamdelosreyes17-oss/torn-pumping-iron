@@ -1797,26 +1797,10 @@
     const EDVD = 366;
     const FHC = 367;
     const LOLLIPOP = 310;
-    const CHOC_KISSES = 210;
-    const SWEET_HEARTS = 209;
     const BOX_CHOC = 35;
-    const BAG_BON_BONS = 37;
-    const BOX_BON_BONS = 38;
-    const MINTS = 39;
     const BIG_BOX_CHOC = 36;
     const CANDY_KISSES = 527;
-    const CHOC_EGG = 1312;
-    const TOOTSIE = 528;
-    const EYEBALLS = 634;
-    const TRUFFLES = 529;
-    const REINDEER = 556;
     const PIXIE_STICKS = 151;
-    const JAWBREAKER = 586;
-    const SHERBET = 587;
-    const HUMBUGS = 1039;
-    const CUPCAKE = 1028;
-    /** The Game Console (type Special): "Converts 1, 3 or 5 energy into happiness" (the console jump). */
-    const GAME_CONSOLE = 104;
     const MUNSTER = 530;
     const RED_COW = 532;
     const TAURINE = 533;
@@ -1847,46 +1831,15 @@
         [LSD]: { id: LSD, name: 'LSD', kind: 'drug', category: 'Drug', energy: 50, happy: 350, cdMin: LSD_CD_MIN },
         [EDVD]: { id: EDVD, name: 'Erotic DVD', short: 'EDVD', kind: 'booster', category: 'Booster', happy: 2500, boosterH: 6 },
         [FHC]: { id: FHC, name: 'Feathery Hotel Coupon', short: 'FHC', kind: 'booster', category: 'Booster', toMax: true, happy: 500, boosterH: 6 },
-        // Every candy: "Increases happiness by N and booster cooldown by 30 minutes." (checked against the items dump, 2026-09-29).
-        [LOLLIPOP]: candy(LOLLIPOP, 'Lollipop', 25),
-        [CHOC_KISSES]: candy(CHOC_KISSES, 'Bag of Chocolate Kisses', 25, 'Chocolate Kisses'),
-        [SWEET_HEARTS]: candy(SWEET_HEARTS, 'Box of Sweet Hearts', 25, 'Sweet Hearts'),
-        [BOX_CHOC]: candy(BOX_CHOC, 'Box of Chocolate Bars', 25),
-        [BAG_BON_BONS]: candy(BAG_BON_BONS, 'Bag of Bon Bons', 25),
-        [BOX_BON_BONS]: candy(BOX_BON_BONS, 'Box of Bon Bons', 25),
-        [MINTS]: candy(MINTS, 'Box of Extra Strong Mints', 25, 'Extra Strong Mints'),
-        [BIG_BOX_CHOC]: candy(BIG_BOX_CHOC, 'Big Box of Chocolate Bars', 35),
-        [CANDY_KISSES]: candy(CANDY_KISSES, 'Bag of Candy Kisses', 50, 'Candy Kisses'),
-        [CHOC_EGG]: candy(CHOC_EGG, 'Chocolate Egg', 50),
-        [TOOTSIE]: candy(TOOTSIE, 'Bag of Tootsie Rolls', 75, 'Tootsie Rolls'),
-        [EYEBALLS]: candy(EYEBALLS, 'Bag of Bloody Eyeballs', 75, 'Bloody Eyeballs'),
-        [TRUFFLES]: candy(TRUFFLES, 'Bag of Chocolate Truffles', 100, 'Chocolate Truffles'),
-        [REINDEER]: candy(REINDEER, 'Bag of Reindeer Droppings', 100, 'Reindeer Droppings'),
-        [PIXIE_STICKS]: candy(PIXIE_STICKS, 'Pixie Sticks', 150),
-        [JAWBREAKER]: candy(JAWBREAKER, 'Jawbreaker', 150),
-        [SHERBET]: candy(SHERBET, 'Bag of Sherbet', 150, 'Sherbet'),
-        [HUMBUGS]: candy(HUMBUGS, 'Bag of Humbugs', 150, 'Humbugs'),
-        [CUPCAKE]: candy(CUPCAKE, 'Birthday Cupcake', 250),
-        [GAME_CONSOLE]: { id: GAME_CONSOLE, name: 'Game Console', kind: 'special', category: 'Special' },
+        [LOLLIPOP]: { id: LOLLIPOP, name: 'Lollipop', kind: 'booster', category: 'Candy', happy: 25, boosterH: 0.5 },
+        [BOX_CHOC]: { id: BOX_CHOC, name: 'Box of Chocolate Bars', kind: 'booster', category: 'Candy', happy: 25, boosterH: 0.5 },
+        [BIG_BOX_CHOC]: { id: BIG_BOX_CHOC, name: 'Big Box of Chocolate Bars', kind: 'booster', category: 'Candy', happy: 35, boosterH: 0.5 },
+        [CANDY_KISSES]: { id: CANDY_KISSES, name: 'Bag of Candy Kisses', kind: 'booster', category: 'Candy', happy: 50, boosterH: 0.5 },
+        [PIXIE_STICKS]: { id: PIXIE_STICKS, name: 'Pixie Sticks', kind: 'booster', category: 'Candy', happy: 150, boosterH: 0.5 },
         [MUNSTER]: { id: MUNSTER, name: 'Can of Munster', kind: 'booster', category: 'Energy Drink', energy: 20, boosterH: 2 },
         [RED_COW]: { id: RED_COW, name: 'Can of Red Cow', kind: 'booster', category: 'Energy Drink', energy: 25, boosterH: 2 },
         [TAURINE]: { id: TAURINE, name: 'Can of Taurine Elite', kind: 'booster', category: 'Energy Drink', energy: 30, boosterH: 2 },
     };
-
-    function candy(id, name, happy, short = null) {
-        return { id, name, ...(short ? { short } : {}), kind: 'booster', category: 'Candy', happy, boosterH: 0.5 };
-    }
-
-    /** Every candy, fewest happy first (the plan picks one of them: core/candy.js). */
-    const CANDY_IDS = Object.values(ITEMS)
-        .filter((it) => it.category === 'Candy')
-        .sort((a, b) => a.happy - b.happy || a.id - b.id)
-        .map((it) => it.id);
-
-    function isCandy(id) {
-        const it = ITEMS[id];
-        return Boolean(it && it.category === 'Candy');
-    }
 
     /** Sample prices (docs/sims) used until live prices arrive, and in tests. */
     const SAMPLE_PRICES = {
@@ -1896,8 +1849,6 @@
         [CANDY_KISSES]: 32000,
         [FHC]: 12400000,
         [POINTS]: 45000,
-        // The items dump's market value (2024); Torn's own market price replaces it once /torn/items answers.
-        [GAME_CONSOLE]: 170,
     };
 
     function itemName(id) {
@@ -1906,146 +1857,15 @@
         return it ? it.short || it.name : 'Item ' + id;
     }
 
-    /**
-     * The consumable cooldown cuts (Grocery 3★ −10%, Restaurant 10★ −25%, the book
-     * Self Control Is For Losers −50%: docs/research-events-perks.md §2) shorten
-     * the booster cooldown of candy, energy drinks and alcohol, not EDVD or FHC.
-     */
-    function isConsumable(id) {
-        const it = ITEMS[id];
-        return Boolean(it && (it.category === 'Candy' || it.category === 'Energy Drink'));
-    }
-
-    /** Booster cooldown one use adds, hours, after the consumable cuts (`cdMult`, e.g. 0.9 × 0.75). */
-    function boosterHours(itemId, cdMult = 1) {
+    /** Candy that fills the booster cap: how many of an item fit under `capH` from `cdH` already used. */
+    function boostersThatFit(itemId, capH = BOOSTER_CAP_H, cdH = 0) {
         const it = ITEMS[itemId];
         if (!it || !(it.boosterH > 0)) return 0;
-        return it.boosterH * (isConsumable(itemId) ? Math.max(0.05, cdMult || 1) : 1);
-    }
-
-    /** Candy that fills the booster cap: how many of an item fit under `capH` from `cdH` already used. */
-    function boostersThatFit(itemId, capH = BOOSTER_CAP_H, cdH = 0, cdMult = 1) {
-        const each = boosterHours(itemId, cdMult);
-        if (!(each > 0)) return 0;
         // An item can be used while the cooldown is below the cap, and the cooldown
         // ticks down between uses, so the last one overshoots it: 5 EDVD or 49 candy
         // on an empty 24 h cooldown (research-gym.md).
         if (cdH >= capH) return 0;
-        return Math.floor((capH - cdH) / each + 1e-9) + 1;
-    }
-
-    /* ===== src/core/candy.js ===== */
-    /*
-     * Which candy a boost or jump uses, and how many. Pure.
-     *
-     * The owner: "we're defaulting to whatever Pumping Iron says we should take,
-     * it should just tell us what we should take/buy." So there is no default
-     * candy: every candy with a known price is weighed under the Plan's rule
-     * (most stats in the budget, best value for money, or max gains) and the
-     * winner is named everywhere (steps, Plan, Buy, Discord).
-     *
-     * Every candy costs the same booster cooldown (30 min, less with the
-     * consumable cuts), so a boost holds the same number of any of them; what
-     * differs is the happy each gives and its price.
-     */
-
-
-
-    /**
-     * The cheapest known price of each candy: the market (item market and
-     * bazaars, as the app loaded them) or an NPC shop the player ticked.
-     * @param {object} prices - {[id]: $ per unit} (market)
-     * @param {object} [npc] - {[id]: {price, shop}} NPC shop prices the player may use
-     * @returns {object} {[id]: {id, price, source:'market'|'npc', shop}}
-     */
-    function candyPrices(prices = {}, npc = {}) {
-        const out = {};
-        for (const id of CANDY_IDS) {
-            const m = Number(prices && prices[id]);
-            const n = npc && npc[id] && Number(npc[id].price);
-            if (n > 0 && !(m > 0 && m <= n)) out[id] = { id, price: n, source: 'npc', shop: npc[id].shop || null };
-            else if (m > 0) out[id] = { id, price: m, source: 'market', shop: null };
-        }
-        return out;
-    }
-
-    /**
-     * Candy worth weighing: a candy another beats on both happy and price is
-     * dropped (Lollipop vs Box of Chocolate Bars: the cheaper 25-happy one stays).
-     * @param {object} priced - candyPrices() output
-     * @returns {object[]} fewest happy first
-     */
-    function candyCandidates(priced) {
-        const list = Object.values(priced || {}).filter((c) => c && c.price > 0 && ITEMS[c.id]);
-        return list
-            .filter((c) => !list.some((o) => o !== c && ITEMS[o.id].happy >= ITEMS[c.id].happy && o.price <= c.price && (ITEMS[o.id].happy > ITEMS[c.id].happy || o.price < c.price || o.id < c.id)))
-            .sort((a, b) => ITEMS[a.id].happy - ITEMS[b.id].happy || a.price - b.price);
-    }
-
-    /** How many candy fit one boost: the booster cap from `cdH` already used, each 30 min × the cuts. */
-    function candyCount({ capH = BOOSTER_CAP_H, cdH = 0, cdMult = 1 } = {}) {
-        return boostersThatFit(CANDY_IDS[0], capH, cdH, cdMult);
-    }
-
-    /**
-     * The candy that gives the most stats under the Plan's rule.
-     *
-     * Without `evaluate`, each candy is scored by the happy it adds (a stand-in
-     * for stats: more happy, more stats) and the cost of `boosts` boosts. With
-     * `evaluate(id, count)` returning the whole plan's {gained, cost} (the
-     * engine passes a simulation), the scores are real stats and money, and
-     * `budget` is the plan's budget.
-     *
-     * @param {object} o
-     * @param {object} o.prices - {[id]: $} market unit prices
-     * @param {object} [o.npc] - {[id]: {price, shop}} NPC shop prices the player may use (ticked shops only)
-     * @param {number} [o.capH] - booster cooldown cap, hours (24; faction Voracity up to 48)
-     * @param {number} [o.cdH] - booster cooldown already used, hours
-     * @param {number} [o.cdCuts] - the consumable cooldown cuts as one multiplier (0.9 × 0.75 × 0.5 …)
-     * @param {number} [o.happyMult] - candy happy perks and events (Voracity +50%, a book ×2, World Diabetes Day ×3)
-     * @param {number} [o.budget] - money the candy may cost: over `boosts` boosts (proxy), or the whole plan (evaluate)
-     * @param {number} [o.boosts] - boosts the budget covers (Auto mode: boosts a day with a daily budget)
-     * @param {string} [o.pickBy] - 'most' (most stats in the budget) | 'value' (most stats per $) | 'max' (no budget)
-     * @param {object} [o.base] - {gained, cost} of the rest of the plan (proxy scores, for 'value')
-     * @param {function} [o.evaluate] - (id, count) => {gained, cost} of the whole plan with that candy
-     * @param {number} [o.count] - a fixed count per boost instead of filling the booster cap
-     * @returns {null|{id, name, count, happyEach, unit, source, shop, perBoost, gained, cost, fits, options:object[]}}
-     */
-    function bestCandy({ prices = {}, npc = {}, capH = BOOSTER_CAP_H, cdH = 0, cdCuts = 1, happyMult = 1, budget = Infinity, boosts = 1, pickBy = 'most', base = null, evaluate = null, count = null } = {}) {
-        const cands = candyCandidates(candyPrices(prices, npc));
-        if (!cands.length) return null;
-        const n = count > 0 ? Math.floor(count) : candyCount({ capH, cdH, cdMult: cdCuts });
-        if (!(n > 0)) return null;
-        const limit = pickBy === 'max' ? Infinity : budget;
-        const options = cands.map((c) => {
-            const happyEach = ITEMS[c.id].happy * (happyMult || 1);
-            const perBoost = n * c.price;
-            let gained;
-            let cost;
-            if (evaluate) {
-                const r = evaluate(c.id, n) || {};
-                gained = Number(r.gained) || 0;
-                cost = Number(r.cost) || 0;
-            } else {
-                gained = (base ? Number(base.gained) || 0 : 0) + boosts * n * happyEach;
-                cost = (base ? Number(base.cost) || 0 : 0) + boosts * perBoost;
-            }
-            const own = evaluate ? cost : boosts * perBoost;
-            return { id: c.id, name: itemName(c.id), count: n, happyEach, unit: c.price, source: c.source, shop: c.shop, perBoost, gained, cost, fits: own <= limit };
-        });
-        const perM = (o) => (o.cost > 0 ? o.gained / o.cost : Infinity);
-        const pool = options.filter((o) => o.fits);
-        let best;
-        if (!pool.length) best = options.reduce((a, b) => (b.cost < a.cost ? b : a));
-        else if (pickBy === 'value') best = pool.reduce((a, b) => (perM(b) > perM(a) || (perM(b) === perM(a) && b.gained > a.gained) ? b : a));
-        else best = pool.reduce((a, b) => (b.gained > a.gained || (b.gained === a.gained && b.cost < a.cost) ? b : a));
-        return { ...best, options };
-    }
-
-    /** "Lollipop × 49" (the words steps, Plan and Buy use). */
-    function candyWords(c) {
-        if (!c || !c.id) return 'Candy';
-        return itemName(c.id) + (c.count ? ' × ' + c.count : '');
+        return Math.floor((capH - cdH) / it.boosterH + 1e-9) + 1;
     }
 
     /* ===== src/core/strategies.js ===== */
@@ -2062,7 +1882,6 @@
 
 
 
-
     const STRATEGY_IDS = ['steady', 'dailyChoco', 'chocoJump', 'edvdJump', 'happy99k', 'blissSteady', 'steadyBoost', 'steadyMax', 'candyXanax', 'consoleJump', 'consoleJumpToy', 'edvdJumpAN'];
 
     /** Special refills, counted like an item (free: they come with the account). */
@@ -2072,38 +1891,15 @@
      * The console jump (the friend's guide, docs/research-console-jump.md;
      * docs/research-events-perks.md §3): the Game Console (item 104), "Hardcore
      * Game" 5 energy for 80–120 happy, doubled by the 5★ Toy/Game Shop "Gamer"
-     * perk (the wiki confirms both). Happy above the maximum resets at the next
-     * quarter tick, so it all happens in one tick window: 60 × Hardcore, candy
-     * to the booster cap (the plan's candy), Ecstasy, train, refill, train.
+     * perk. Happy above the maximum resets at the next quarter tick, so it all
+     * happens in one tick window. [verify] in game; named exports to replace.
      */
-    const CONSOLE_ITEM = GAME_CONSOLE;
+    const CONSOLE_ITEM = 104;
     const CONSOLE_USES = 60;
     const CONSOLE_ENERGY_EACH = 5;
     const CONSOLE_HAPPY_EACH = 100;
     const CONSOLE_STACK = 3;
-
-    /**
-     * Owner (2026-09-29): the console jump is "only for low stat players (below
-     * 250k per stat)". Decided: every stat the plan trains (a stat its days add
-     * to) must be under 250,000 when the plan is worked out. One stat at or over
-     * it and the plan is never recommended; it shows only behind "plans that
-     * don't fit you".
-     */
-    const CONSOLE_MAX_STAT = 250000;
-
-    /** Why the console jump doesn't fit these stats, or null when it does. */
-    function consoleBlocked(stats, perStat = null) {
-        const trained = STATS.filter((k) => perStat && perStat[k] > 0);
-        const over = (trained.length ? trained : STATS).filter((k) => (Number(stats && stats[k]) || 0) >= CONSOLE_MAX_STAT);
-        if (!over.length) return null;
-        return 'for stats under 250k; your ' + over.map((k) => STAT_LABEL[k]).join(', ') + (over.length > 1 ? ' are' : ' is') + ' over it';
-    }
-
-    /** Special refills Torn allows a week (O2, ROUND4-PLAN §D7). */
-    const SPECIAL_WEEK_MAX = 100;
-
-    /** Plans that eat candy: the plan picks which one (core/candy.js). */
-    const CANDY_PLANS = new Set(['dailyChoco', 'chocoJump', 'candyXanax', 'consoleJump', 'consoleJumpToy']);
+    const CONSOLE_CANDY = 10;
 
     const STRATEGIES = {
         steady: { id: 'steady', kind: 'steady', name: 'Steady training', short: 'Steady', what: 'Xanax on cooldown, daily refill, natural energy as it comes' },
@@ -2115,29 +1911,10 @@
         steadyBoost: { id: 'steadyBoost', kind: 'steady', name: 'Steady + energy boosters', short: 'Steady + boosters', what: 'Steady, plus FHC or cans on the booster cooldown as far as the budget goes' },
         steadyMax: { id: 'steadyMax', kind: 'steady', name: 'Steady + FHC, max', short: 'Steady + FHC max', what: 'Steady, plus an FHC every time the booster cooldown allows' },
         candyXanax: { id: 'candyXanax', kind: 'boost', name: 'Candy + Xanax', short: 'Candy + Xanax', what: 'Candy just after a tick, then a Xanax session, once a day (no Ecstasy)' },
-        consoleJump: { id: 'consoleJump', kind: 'jump', name: 'Console jump', short: 'Console jump', what: 'Stack 3 Xanax, 300 energy on the Game Console for happy, candy + Ecstasy, train it all' },
-        consoleJumpToy: { id: 'consoleJumpToy', kind: 'jump', name: 'Console jump, 5★ Toy/Game Shop', short: 'Console jump 5★', what: 'The console jump with your job’s doubled console happy' },
+        consoleJump: { id: 'consoleJump', kind: 'jump', name: 'Console jump', short: 'Console jump', what: 'Stack 3 Xanax, 300 energy on the Game Console for happy, candy + Ecstasy, train it all', unverified: true },
+        consoleJumpToy: { id: 'consoleJumpToy', kind: 'jump', name: 'Console jump, 5★ Toy/Game Shop', short: 'Console jump 5★', what: 'The console jump with your job’s doubled console happy', unverified: true },
         edvdJumpAN: { id: 'edvdJumpAN', kind: 'jump', name: 'EDVD jump, 10★ Adult Novelties', short: 'EDVD jump AN', what: 'Stack 4 Xanax, then 5 EDVD (doubled by your job) + Ecstasy' },
     };
-
-    /**
-     * What a plan does, in words, with its candy named (Plan's "What you do"):
-     * "Stack 4 Xanax, then Lollipop × 49 + Ecstasy, train it all".
-     * @param {string} id
-     * @param {object} [r] - its simulateStrategy result (r.candy from the comparison)
-     */
-    function planWhat(id, r = null) {
-        const s = STRATEGIES[id];
-        if (!s) return '';
-        const c = r && r.candy ? candyWords(r.candy) : null;
-        if (!c) return s.what;
-        if (id === 'dailyChoco') return c + ' + Ecstasy once a day on top of a Xanax';
-        if (id === 'chocoJump') return 'Stack 4 Xanax, then ' + c + ' + Ecstasy, train it all';
-        if (id === 'candyXanax') return c + ' just after a tick, then a Xanax session, once a day (no Ecstasy)';
-        if (id === 'consoleJump') return 'Stack 3 Xanax, 300 energy on the Game Console, ' + c + ' + Ecstasy, train it all';
-        if (id === 'consoleJumpToy') return 'Stack 3 Xanax, 300 energy on the Game Console (doubled by your job), ' + c + ' + Ecstasy, train it all';
-        return s.what;
-    }
 
     /** Minutes per simulation step. */
     const STEP_MIN = 5;
@@ -2175,16 +1952,7 @@
      * @param {number} [o.canMult] - energy-drink perks (faction): × can energy
      * @param {boolean} [o.toyShop5] - 5★ Toy/Game Shop: console happy × 2 [verify]
      * @param {number} [o.candyMult] - candy perks (faction Voracity, a book, Absorption): × candy happy
-     * @param {number} [o.cdMult] - consumable cooldown cuts (Grocery 3★, Restaurant 10★, Self Control Is For Losers): × candy/can cooldown
-     * @param {number} [o.specialHeld] - special refills the account holds. When given, the daily refill is a special
-     *   while any are held (Torn blocks the points refill until they're spent [verify, 1 source]); extras (o.special)
-     *   come from the same stock. At most SPECIAL_WEEK_MAX a week either way.
-     * @param {boolean} [o.consoleOwned] - a Game Console in the inventory (else the console jump buys one)
-     * @param {object} [o.jobHappy] - job-point happy specials where the player works: {specials:[{jp, happy}], jpPerDay, bank}
-     *   spent in each boosted session (steady plans: the first Xanax session of a day), before the Ecstasy
-     * @param {number} [o.freeEdvdPerDay] - Adult Novelties 3★ "Voyeur" (20 JP → 1 EDVD): EDVD the job pays for, a day
      * @returns {{id, gained:number, perStat:object, cost:number, energyTrained:number, daily:number[], used:object}}
-     * Refills (points or special) set energy to the maximum, never above it: anything over is wasted (O2, owner).
      */
     function simulateStrategy(id, o) {
         const days = o.days || 30;
@@ -2194,9 +1962,8 @@
         const xanCD = o.xanaxCdMin || XANAX_CD_MIN;
         const ecsCD = o.ecstasyCdMin || ECSTASY_CD_MIN;
         const capH = o.boosterCapH || BOOSTER_CAP_H;
-        const cdMult = o.cdMult || 1;
-        const candyId = o.candyId && ITEMS[o.candyId] ? o.candyId : CANDY_KISSES;
-        const candyN = o.candyCount || boostersThatFit(candyId, capH, 0, cdMult);
+        const candyId = o.candyId || CANDY_KISSES;
+        const candyN = o.candyCount || boostersThatFit(candyId, capH);
         const candyHappy = ITEMS[candyId].happy * (o.candyMult || 1);
         let edvdN = o.edvdCount || 5;
         if (id === 'happy99k' && !o.edvdCount) edvdN = boostersThatFit(EDVD, capH);
@@ -2220,17 +1987,6 @@
         let doneDay = -1;
         const used = { [XANAX]: 0, [ECSTASY]: 0, [EDVD]: 0, [candyId]: 0, [POINTS]: 0, [SPECIAL]: 0 };
         let specialLeft = Math.max(0, Math.floor(o.special || 0));
-        // Special refills held: when the caller says how many, the daily refill uses them first (the points refill waits).
-        const heldRule = o.specialHeld !== undefined && o.specialHeld !== null;
-        let heldLeft = heldRule ? Math.max(0, Math.floor(o.specialHeld)) : Infinity;
-        let spWeek = -1;
-        let spWeekN = 0;
-        // Job points: happy specials where the player works, and Adult Novelties' EDVD for 20 JP.
-        const jh = o.jobHappy && Array.isArray(o.jobHappy.specials) && o.jobHappy.specials.length ? o.jobHappy : null;
-        let jpBank = jh ? Math.max(0, Number(jh.bank) || 0) : 0;
-        let jpDay = -1;
-        let edvdBank = 0;
-        let consoleBought = Boolean(o.consoleOwned);
         const eb = id === 'steadyMax' ? { id: FHC, perDay: Infinity } : id === 'steadyBoost' && o.energyBooster && ITEMS[o.energyBooster.id] ? o.energyBooster : null;
         const ebItem = eb ? ITEMS[eb.id] : null;
         const canMult = o.canMult || 1;
@@ -2278,63 +2034,19 @@
         const specialPerDay = Math.ceil(Math.max(0, Math.floor(o.special || 0)) / days);
         let spDay = -1;
         let spToday = 0;
-        // One special refill: energy to the maximum (never above), within the week's 100 and what's held.
-        const specialOk = (day) => {
-            const w = Math.floor(day / 7);
-            if (w !== spWeek) {
-                spWeek = w;
-                spWeekN = 0;
-            }
-            return heldLeft > 0 && spWeekN < SPECIAL_WEEK_MAX;
-        };
-        const useSpecial = () => {
-            E = Math.max(E, maxE);
-            heldLeft--;
-            spWeekN++;
-            used[SPECIAL]++;
-        };
         const spendSpecial = (day) => {
             if (day !== spDay) {
                 spDay = day;
                 spToday = 0;
             }
             const drain = HAPPY_LOSS_PER_ENERGY * maxE * lossMult;
-            // One at a time, each once energy is spent: a refill can't stack above the maximum.
-            while (specialLeft > 0 && specialOk(day) && (spToday < specialPerDay || H - drain > maxH)) {
-                useSpecial();
+            while (specialLeft > 0 && (spToday < specialPerDay || H - drain > maxH)) {
+                E += maxE;
                 specialLeft--;
+                used[SPECIAL]++;
                 spToday++;
                 train();
             }
-        };
-        // Job points arrive daily (1 per company star); happy specials spend them best-rate first.
-        const jobHappy = (day) => {
-            if (!jh) return 0;
-            if (day !== jpDay) {
-                if (jpDay >= 0) jpBank += (jh.jpPerDay || 0) * (day - jpDay);
-                jpDay = day;
-            }
-            let add = 0;
-            for (const sp of jh.specials) {
-                const n = Math.floor(jpBank / sp.jp);
-                if (n > 0) {
-                    add += n * sp.happy;
-                    jpBank -= n * sp.jp;
-                }
-            }
-            return add;
-        };
-        const buyEdvd = (n, day) => {
-            // EDVD the job has paid for so far (edvdBank: the ones already taken).
-            if (o.freeEdvdPerDay > 0) {
-                const free = Math.min(n, Math.floor(o.freeEdvdPerDay * (day + 1) + 1e-9) - edvdBank);
-                if (free > 0) {
-                    edvdBank += free;
-                    used.freeEdvd = (used.freeEdvd || 0) + free;
-                    n -= free;
-                }
-            }
-            if (n > 0) buy(EDVD, n);
         };
         // Energy boosters on the booster cooldown, only once energy is spent (FHC fills to max; cans add theirs).
         const energyBoost = (t, day) => {
@@ -2349,22 +2061,15 @@
                     H += ebItem.happy || 0;
                 } else E += Math.round(ebItem.energy * canMult);
                 buy(eb.id);
-                boosterFree = Math.max(boosterFree, t) + boosterHours(eb.id, cdMult) * 60;
+                boosterFree = Math.max(boosterFree, t) + ebItem.boosterH * 60;
                 ebToday++;
                 train();
             }
         };
-        // The day's refill sets energy to the maximum (never above). While specials are held it is a special.
         const refill = (day) => {
-            refillDay = day;
-            if (heldRule && specialOk(day)) {
-                useSpecial();
-                specialLeft = Math.min(specialLeft, heldLeft);
-                used.dailySpecial = (used.dailySpecial || 0) + 1;
-                return;
-            }
-            E = Math.max(E, maxE);
+            E += maxE;
             buy(POINTS, REFILL_POINTS);
+            refillDay = day;
         };
         const xanax = (t) => {
             E += ITEMS[XANAX].energy;
@@ -2385,11 +2090,9 @@
             if (id === 'steady' || id === 'blissSteady' || id === 'steadyBoost' || id === 'steadyMax') {
                 const took = t >= drugFree;
                 if (took) xanax(t);
-                // Job-point happy: once a day, on that day's first Xanax session.
-                if (took && jh && day !== jpDay) H += jobHappy(day);
                 if (id === 'blissSteady' && boosterFree - t < capH * 60) {
                     H = Math.min(HAPPY_CAP, H + edvdHappy);
-                    buyEdvd(1, day);
+                    buy(EDVD);
                     boosterFree = Math.max(boosterFree, t) + ITEMS[EDVD].boosterH * 60;
                 }
                 if (day !== refillDay && E < 20) refill(day);
@@ -2400,9 +2103,9 @@
                 // Once a day the Xanax waits for a tick, then candy + Xanax and train it (no Ecstasy: the candy happy lasts one session).
                 if (t >= drugFree && doneDay !== day) {
                     if (t % 15 === TICK_OFFSET_MIN) {
-                        H += candyN * candyHappy + jobHappy(day);
+                        H += candyN * candyHappy;
                         buy(candyId, candyN);
-                        boosterFree = Math.max(boosterFree, t) + candyN * boosterHours(candyId, cdMult) * 60;
+                        boosterFree = Math.max(boosterFree, t) + candyN * ITEMS[candyId].boosterH * 60;
                         xanax(t);
                         train();
                         if (day !== refillDay) {
@@ -2420,7 +2123,7 @@
             } else if (id === 'dailyChoco') {
                 // Hold one Xanax's worth of cooldown, then candy + Ecstasy in its place.
                 if (phase === 'hold' && t >= drugFree && t % 15 === TICK_OFFSET_MIN) {
-                    H = (H + candyN * candyHappy + jobHappy(day)) * 2;
+                    H = (H + candyN * candyHappy) * 2;
                     buy(candyId, candyN);
                     buy(ECSTASY);
                     drugFree = t + ecsCD;
@@ -2443,23 +2146,18 @@
                     if (stacked === stackTo) phase = 'wait';
                 }
                 if (phase === 'wait' && t >= drugFree && t % 15 === TICK_OFFSET_MIN) {
-                    const jp = jobHappy(day);
                     if (isConsole) {
-                        // 300 energy on the console for happy, candy to the booster cap, then the Ecstasy doubles it.
-                        if (!consoleBought) {
-                            buy(GAME_CONSOLE);
-                            consoleBought = true;
-                        }
+                        // 300 energy on the console for happy, a little candy, then the Ecstasy doubles it [verify].
                         const uses = Math.min(CONSOLE_USES, Math.floor(E / CONSOLE_ENERGY_EACH));
                         E -= uses * CONSOLE_ENERGY_EACH;
-                        H = (H + uses * consoleHappy + candyN * candyHappy + jp) * 2;
-                        buy(candyId, candyN);
+                        H = (H + uses * consoleHappy + CONSOLE_CANDY * candyHappy) * 2;
+                        buy(candyId, CONSOLE_CANDY);
                     } else if (id === 'chocoJump') {
-                        H = (H + candyN * candyHappy + jp) * 2;
+                        H = (H + candyN * candyHappy) * 2;
                         buy(candyId, candyN);
                     } else {
-                        H = (H + edvdN * edvdHappy + jp) * 2;
-                        buyEdvd(edvdN, day);
+                        H = (H + edvdN * edvdHappy) * 2;
+                        buy(EDVD, edvdN);
                     }
                     H = Math.min(HAPPY_CAP, H);
                     buy(ECSTASY);
@@ -2496,143 +2194,6 @@
             if (id === 'edvdJump') return !adultNovelties10;
             return true;
         });
-    }
-
-    /* ===== src/core/jobs.js ===== */
-    /*
-     * The player's company job and what it does for a gym plan. Pure.
-     *
-     * Sources: docs/research-events-perks.md §2a (TornTools' table of company
-     * specials, built from /torn/companies), the wiki's Company page (1 job
-     * point per company star per day, points kept until spent, specials locked
-     * 72 h after joining). Shapes: /v2/user/job (Public) answers
-     * {job: {type:'company', id, type_id, name, rating, position, days_in_company}}
-     * or a city job or null; /v2/user/jobpoints (Minimal) answers
-     * {jobpoints: {jobs:{...}, companies:[{company:{id: typeId, name}, points}]}}.
-     */
-
-    /**
-     * Company type ids → names [verify: the ids are the usual /torn/companies
-     * numbering; the job-points answer carries the name, which wins when present].
-     */
-    const COMPANY_TYPES = {
-        1: 'Hair Salon',
-        2: 'Law Firm',
-        3: 'Flower Shop',
-        4: 'Car Dealership',
-        5: 'Clothing Store',
-        6: 'Gun Shop',
-        7: 'Game Shop',
-        8: 'Candle Shop',
-        9: 'Toy Shop',
-        10: 'Adult Novelties',
-        11: 'Cyber Cafe',
-        12: 'Grocery Store',
-        13: 'Theater',
-        14: 'Sweet Shop',
-        15: 'Cruise Line',
-        16: 'Television Network',
-        18: 'Zoo',
-        19: 'Firework Stand',
-        20: 'Property Broker',
-        21: 'Furniture Store',
-        22: 'Gas Station',
-        23: 'Music Store',
-        24: 'Nightclub',
-        25: 'Pub',
-        26: 'Gents Strip Club',
-        27: 'Restaurant',
-        28: 'Oil Rig',
-        29: 'Fitness Center',
-        30: 'Mechanic Shop',
-        31: 'Amusement Park',
-        32: 'Lingerie Store',
-        33: 'Meat Warehouse',
-        34: 'Farm',
-        35: 'Software Corporation',
-        36: 'Ladies Strip Club',
-        37: 'Private Security Firm',
-        38: 'Mining Corporation',
-        39: 'Detective Agency',
-        40: 'Logistics Management',
-    };
-
-    /**
-     * Job-point specials that give happy (research-events-perks.md §2a): 1★
-     * "50 happiness" for 1 JP at several companies; Sweet Shop 5★ Gluttony
-     * 10 JP → 1,000 and 10★ Voracious 30 JP → 4,500.
-     */
-    const JOB_HAPPY = {
-        'Toy Shop': [{ stars: 1, jp: 1, happy: 50 }],
-        'Candle Shop': [{ stars: 1, jp: 1, happy: 50 }],
-        'Sweet Shop': [
-            { stars: 10, jp: 30, happy: 4500 },
-            { stars: 5, jp: 10, happy: 1000 },
-            { stars: 1, jp: 1, happy: 50 },
-        ],
-    };
-
-    /** Adult Novelties 3★ "Voyeur": 20 JP → 1 Erotic DVD. */
-    const VOYEUR_JP = 20;
-
-    /** Job specials are locked this long after joining a company (wiki). */
-    const JOB_LOCK_H = 72;
-
-    /**
-     * The player's company job in one shape.
-     * @param {object|null} job - /user/job's `job`
-     * @param {object|null} points - /user/jobpoints' `jobpoints`
-     * @returns {null|{typeId:number, type:string, stars:number, name:string, days:number, jp:number}}
-     */
-    function companyJob(job, points = null) {
-        if (!job || job.type !== 'company') return null;
-        const typeId = Number(job.type_id) || 0;
-        const row = points && Array.isArray(points.companies) ? points.companies.find((c) => c && c.company && Number(c.company.id) === typeId) : null;
-        const type = (row && row.company && row.company.name) || COMPANY_TYPES[typeId] || 'Company ' + typeId;
-        return { typeId, type, stars: Math.max(0, Math.min(10, Number(job.rating) || 0)), name: job.name || '', days: Number(job.days_in_company) || 0, jp: row ? Number(row.points) || 0 : 0 };
-    }
-
-    /**
-     * Happy the job's points buy for the plan: the specials this company and
-     * its stars unlock, best happy per point first, 1 JP a star a day.
-     * @returns {null|{specials:{jp,happy}[], jpPerDay:number, bank:number, type:string, stars:number}}
-     */
-    function jobHappyOf(cj) {
-        if (!cj || !JOB_HAPPY[cj.type]) return null;
-        const specials = JOB_HAPPY[cj.type].filter((s) => cj.stars >= s.stars).map(({ jp, happy }) => ({ jp, happy }));
-        if (!specials.length) return null;
-        specials.sort((a, b) => b.happy / b.jp - a.happy / a.jp);
-        return { specials, jpPerDay: cj.stars, bank: cj.jp, type: cj.type, stars: cj.stars };
-    }
-
-    /** Adult Novelties from 3★: the EDVD the job's points pay for, a day (1 JP a star a day ÷ 20). */
-    function freeEdvdPerDayOf(cj) {
-        if (!cj || cj.type !== 'Adult Novelties' || cj.stars < 3) return 0;
-        return cj.stars / VOYEUR_JP;
-    }
-
-    /** Is the player in this company type with at least these stars? */
-    function worksAt(cj, type, stars) {
-        return Boolean(cj && cj.type === type && cj.stars >= stars);
-    }
-
-    /** "Sweet Shop special: 30 job points → 4,500 happy" for the step that spends them. */
-    function jobHappyWords(jh, jp) {
-        if (!jh || !(jp > 0)) return '';
-        const best = jh.specials[0];
-        return jh.type + ' special (' + jp + ' job point' + (jp === 1 ? '' : 's') + ', ' + (best.jp === 1 ? best.happy + ' happy each' : best.jp + ' → ' + best.happy.toLocaleString('en-US') + ' happy') + ')';
-    }
-
-    /** Happy the banked points buy now, and the points it takes: {happy, jp}. */
-    function spendJobPoints(jh, bank) {
-        let left = Math.max(0, Math.floor(bank || 0));
-        let happy = 0;
-        for (const sp of (jh && jh.specials) || []) {
-            const n = Math.floor(left / sp.jp);
-            happy += n * sp.happy;
-            left -= n * sp.jp;
-        }
-        return { happy, jp: Math.max(0, Math.floor(bank || 0)) - left };
     }
 
     /* ===== src/core/format.js ===== */
@@ -2749,7 +2310,6 @@
      * of the tick they depend on. Steps are marked done from state changes
      * (a drug cooldown that jumped, a stat that rose), never from a click.
      */
-
 
 
 
@@ -2908,67 +2468,22 @@
             return step;
         };
         const fullAt = () => (E >= maxE ? t : t + Math.ceil((maxE - E) / inc) * interval);
-        // A refill (points or special) or an FHC sets energy to the maximum, never above it (O2): `qty` of them are
-        // used one at a time, each once the last is trained, and shown as one step.
-        const trainEach = (at, kind, label, items, qty, extra = {}, happyEach = 0) => {
-            const first = steps.length;
-            for (let i = 0; i < qty; i++) {
-                E = Math.max(E, maxE);
-                H += happyEach;
-                train(at, kind, label, items, extra);
-            }
-            const parts = steps.splice(first);
-            if (!parts.length) return null;
-            const one = parts[0];
-            for (const p of parts.slice(1)) {
-                for (const [k, v] of Object.entries(p.trains || {})) one.trains[k] = (one.trains[k] || 0) + v;
-                Object.assign(one.gyms, p.gyms || {});
-                one.gain += p.gain || 0;
-                one.energy += p.energy || 0;
-                if (Array.isArray(one.parts) && Array.isArray(p.parts)) one.parts = one.parts.concat(p.parts);
-            }
-            steps.push(one);
-            return one;
-        };
         // Special refills the plan may use: all in the session that gains most (a jump or boost; else the next Xanax session).
         // In a boosted session: as many as keep happy above the maximum; otherwise what's left of today's share.
-        // While specials are held the day's refill is one of them (Torn blocks the points refill until they're spent [verify]).
-        let heldLeft = Math.max(0, Math.floor(ctx.specialHeld || 0));
-        let specialLeft = Math.min(Math.max(0, Math.floor(ctx.specialLeft || 0)), ctx.specialHeld === undefined || ctx.specialHeld === null ? Infinity : heldLeft);
+        let specialLeft = Math.max(0, Math.floor(ctx.specialLeft || 0));
         let shareLeft = Math.max(0, Math.floor((ctx.specialPerDay || 0) - (ctx.specialToday || 0)));
         const special = (at) => {
-            specialLeft = Math.min(specialLeft, ctx.specialHeld === undefined || ctx.specialHeld === null ? Infinity : heldLeft);
             if (!specialLeft) return;
             const drain = HAPPY_LOSS_PER_ENERGY * maxE * (ctx.happyLossMult || 1);
             let qty = Math.min(specialLeft, shareLeft);
             while (qty < specialLeft && H - drain * (qty + 1) > happyMax) qty++;
             shareLeft = Math.max(0, shareLeft - qty);
             if (!qty) return;
-            trainEach(at, 'special', 'Special refills × ' + qty + ', train after each', [{ id: SPECIAL, qty }], qty, { note: 'free: they come with your account · each fills energy to ' + maxE + ', never above' });
+            E += qty * maxE;
+            train(at, 'special', 'Special refills × ' + qty, [{ id: SPECIAL, qty }], { note: 'free: they come with your account' });
             specialLeft -= qty;
-            heldLeft = Math.max(0, heldLeft - qty);
-        };
-        // The day's refill: a special while any are held (never both on one day), else 30 points.
-        const refill = (at, extra = {}) => {
-            if (heldLeft > 0) {
-                heldLeft--;
-                specialLeft = Math.min(specialLeft, heldLeft);
-                return trainEach(at, 'refill', 'Special refill (instead of the points refill)', [{ id: SPECIAL, qty: 1 }], 1, { ...extra, note: 'Torn lets you use the points refill only once your special refills are spent [1 source]' });
-            }
-            return trainEach(at, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }], 1, extra);
         };
         const candyMult = ctx.candyMult || 1;
-        const candyId = ctx.candyId && ITEMS[ctx.candyId] ? ctx.candyId : CANDY_KISSES;
-        const candyQty = () => ctx.candyCount || boostersThatFit(candyId, ctx.boosterCapH || BOOSTER_CAP_H, 0, ctx.cdMult || 1);
-        const candyName = itemName(candyId);
-        // Job points banked where the player works: happy specials spent in the boosted session.
-        let jpBank = ctx.jobHappy ? Math.max(0, Number(ctx.jobHappy.bank) || 0) : 0;
-        const jobPoints = () => {
-            if (!ctx.jobHappy) return { happy: 0, jp: 0, words: '' };
-            const r = spendJobPoints(ctx.jobHappy, jpBank);
-            jpBank -= r.jp;
-            return { ...r, words: r.jp ? jobHappyWords(ctx.jobHappy, r.jp) : '' };
-        };
 
         const s = STRATEGIES[strategy] ? strategy : 'steady';
         const isConsole = s === 'consoleJump' || s === 'consoleJumpToy';
@@ -2992,41 +2507,34 @@
             const capH = ctx.boosterCapH || BOOSTER_CAP_H;
             let items;
             let label;
-            let note = 'Right after the ' + clockOf(tick) + ' tick';
-            const jp = jobPoints();
             if (isConsole) {
-                // The Game Console's "Hardcore Game": 5 energy for 80–120 happy (×2 with the 5★ Toy/Game Shop "Gamer" perk),
-                // then candy to the booster cap, the Ecstasy, train, refill, train (docs/research-console-jump.md).
+                // The Game Console's "Hardcore Game" turns energy into happy [verify: the friend's guide].
                 const uses = Math.min(CONSOLE_USES, Math.floor(E / CONSOLE_ENERGY_EACH));
                 const each = CONSOLE_HAPPY_EACH * (s === 'consoleJumpToy' || ctx.toyShop5 ? 2 : 1);
                 E -= uses * CONSOLE_ENERGY_EACH;
-                const qty = candyQty();
-                H += uses * each + qty * ITEMS[candyId].happy * candyMult;
-                items = [{ id: CONSOLE_ITEM, qty: 0, uses }, { id: candyId, qty }];
-                if (!ctx.consoleOwned) items.push({ id: CONSOLE_ITEM, qty: 1 });
-                label = 'Game Console × ' + uses + ' (Hardcore) + ' + candyName + ' × ' + qty + ' + Ecstasy, then train it all';
-                note += '; the Xanax cooldown must be clear for the Ecstasy' + (ctx.consoleOwned ? '' : '; buy a Game Console first');
+                const candyId = ctx.candyId || CANDY_KISSES;
+                H += uses * each + CONSOLE_CANDY * ITEMS[candyId].happy * candyMult;
+                items = [{ id: CONSOLE_ITEM, qty: 0, uses }, { id: candyId, qty: CONSOLE_CANDY }];
+                label = 'Game Console × ' + uses + ' (Hardcore), candy × ' + CONSOLE_CANDY + ' + Ecstasy, then train it all';
             } else if (s === 'chocoJump') {
-                const qty = candyQty();
+                const candyId = ctx.candyId || CANDY_KISSES;
+                const qty = ctx.candyCount || boostersThatFit(candyId, capH);
                 H += qty * ITEMS[candyId].happy * candyMult;
                 items = [{ id: candyId, qty }];
-                label = candyName + ' × ' + qty + ' + Ecstasy, then train it all';
+                label = 'Candy × ' + qty + ' + Ecstasy, then train it all';
             } else {
                 const qty = ctx.edvdCount || (s === 'happy99k' ? boostersThatFit(EDVD, capH) : 5);
                 H += qty * ITEMS[EDVD].happy * (ctx.adultNovelties10 || s === 'edvdJumpAN' ? 2 : 1);
                 items = [{ id: EDVD, qty }];
                 label = 'EDVD × ' + qty + ' + Ecstasy, then train it all';
             }
-            if (jp.happy) {
-                H += jp.happy;
-                note += '; before the Ecstasy: ' + jp.words;
-            }
             H = Math.min(HAPPY_CAP, H * ITEMS[ECSTASY].happyMult);
             items.push({ id: ECSTASY, qty: 1 });
-            const jump = train(at, 'jump', label, items, { strict: true, warnAt: tick - STRICT_WARN_MS, note });
+            const jump = train(at, 'jump', label, items, { strict: true, warnAt: tick - STRICT_WARN_MS, note: 'Right after the ' + clockOf(tick) + ' tick' });
             jump.tick = tick;
             if (refillLeft) {
-                refill(at + MIN);
+                E += Math.max(0, maxE - E);
+                train(at + MIN, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }]);
                 refillLeft = false;
             }
             special(at + 2 * MIN);
@@ -3057,12 +2565,13 @@
                 const at = tick + MIN;
                 if (at >= end && steps.length) break;
                 advance(at);
-                const qty = candyQty();
-                const jp = jobPoints();
-                H = Math.min(HAPPY_CAP, (H + qty * ITEMS[candyId].happy * candyMult + jp.happy) * ITEMS[ECSTASY].happyMult);
-                train(at, 'boost', candyName + ' × ' + qty + ' + Ecstasy, then train it all', [{ id: candyId, qty }, { id: ECSTASY, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, ...(jp.happy ? { note: 'Before the Ecstasy: ' + jp.words } : {}) });
+                const candyId = ctx.candyId || CANDY_KISSES;
+                const qty = ctx.candyCount || boostersThatFit(candyId, ctx.boosterCapH || BOOSTER_CAP_H);
+                H = Math.min(HAPPY_CAP, (H + qty * ITEMS[candyId].happy * candyMult) * ITEMS[ECSTASY].happyMult);
+                train(at, 'boost', 'Candy × ' + qty + ' + Ecstasy, then train it all', [{ id: candyId, qty }, { id: ECSTASY, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick });
                 if (refillLeft) {
-                    refill(at + MIN);
+                    E += Math.max(0, maxE - E);
+                    train(at + MIN, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }]);
                     refillLeft = false;
                 }
                 special(at + 2 * MIN);
@@ -3097,12 +2606,13 @@
                 const tick = nextQuarterTick(drugAt - 1);
                 const at = tick + MIN;
                 advance(at);
-                const qty = candyQty();
-                const jp = jobPoints();
-                H = Math.min(HAPPY_CAP, H + qty * ITEMS[candyId].happy * candyMult + jp.happy);
-                train(at, 'boost', candyName + ' × ' + qty + ' + Xanax #' + xanN++ + ', then train it all', [{ id: candyId, qty }, { id: XANAX, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, note: 'Right after the ' + clockOf(tick) + ' tick' + (jp.happy ? '; with it: ' + jp.words : '') });
+                const candyId = ctx.candyId || CANDY_KISSES;
+                const qty = ctx.candyCount || boostersThatFit(candyId, ctx.boosterCapH || BOOSTER_CAP_H);
+                H = Math.min(HAPPY_CAP, H + qty * ITEMS[candyId].happy * candyMult);
+                train(at, 'boost', 'Candy × ' + qty + ' + Xanax #' + xanN++ + ', then train it all', [{ id: candyId, qty }, { id: XANAX, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, note: 'Right after the ' + clockOf(tick) + ' tick' });
                 if (refillLeft) {
-                    refill(at + MIN);
+                    E += Math.max(0, maxE - E);
+                    train(at + MIN, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }]);
                     refillLeft = false;
                 }
                 special(at + 2 * MIN);
@@ -3112,15 +2622,6 @@
             }
             const items = [{ id: XANAX, qty: 1 }];
             let label = 'Xanax #' + xanN++;
-            // Steady plans spend the job's banked happy points on the day's first Xanax session.
-            let xNote = null;
-            if (!daily && !candyDaily && ctx.jobHappy && jpBank > 0) {
-                const jp = jobPoints();
-                if (jp.happy) {
-                    H += jp.happy;
-                    xNote = 'Just before: ' + jp.words;
-                }
-            }
             if (blissEdvd) {
                 const qty = Math.floor((capMs - Math.max(0, boosterAt - drugAt)) / edvdMs);
                 if (qty > 0) {
@@ -3130,11 +2631,12 @@
                     boosterAt = Math.max(boosterAt, drugAt) + qty * edvdMs;
                 }
             }
-            train(drugAt, 'xanax', label, items, xNote ? { note: xNote } : {});
+            train(drugAt, 'xanax', label, items);
             // The refill is worth most right after a session, when energy is near zero.
             if (refillLeft && !daily && drugAt + 5 * MIN < end) {
                 advance(drugAt + 5 * MIN);
-                refill(t);
+                E += Math.max(0, maxE - E);
+                train(t, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }]);
                 refillLeft = false;
             }
             if (!daily && !candyDaily) special(t + MIN);
@@ -3149,12 +2651,11 @@
                 }
                 if (qty > 0) {
                     advance(at);
-                    // An FHC sets energy to the maximum (never above): one at a time, train after each.
-                    if (it.toMax) trainEach(at, 'booster', itemNameShort(eb.id) + ' × ' + qty + ', train after each', [{ id: eb.id, qty }], qty, {}, it.happy || 0);
-                    else {
-                        E += qty * Math.round(it.energy * (ctx.canMult || 1));
-                        train(at, 'booster', itemNameShort(eb.id) + ' × ' + qty + ', train after each', [{ id: eb.id, qty }]);
-                    }
+                    if (it.toMax) {
+                        E += qty * maxE;
+                        H += qty * (it.happy || 0);
+                    } else E += qty * Math.round(it.energy * (ctx.canMult || 1));
+                    train(at, 'booster', itemNameShort(eb.id) + ' × ' + qty + ', train after each', [{ id: eb.id, qty }]);
                     ebToday += qty;
                 }
             }
@@ -3174,7 +2675,8 @@
         if (refillLeft) {
             const at = Math.max(now, end - REFILL_LAST_CALL_MS);
             advance(at);
-            refill(at, { note: 'Use before 00:00 Torn time' });
+            E += Math.max(0, maxE - E);
+            train(at, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }], { note: 'Use before 00:00 Torn time' });
         }
         return steps.sort((a, b) => a.at - b.at);
     }
@@ -3189,13 +2691,10 @@
         return (steps || []).filter((s) => s.strict && s.warnAt !== null && now >= s.warnAt && now < s.at).map((s) => ({ stepId: s.id, at: s.at, text: 'In ' + Math.max(1, Math.ceil((s.at - now) / MIN)) + ' min: ' + s.label }));
     }
 
-    /**
-     * Items a list of steps uses, summed: {[itemId]: qty}. Special refills aren't bought; the Game Console
-     * is (once) only when the player has none (its uses ride along with qty 0).
-     */
+    /** Items a list of steps uses, summed: {[itemId]: qty}. Special refills and the console aren't bought. */
     function itemsNeeded(steps) {
         const out = {};
-        for (const s of steps || []) for (const it of s.items || []) if (it.id !== SPECIAL && it.qty > 0) out[it.id] = it.id === CONSOLE_ITEM ? 1 : (out[it.id] || 0) + it.qty;
+        for (const s of steps || []) for (const it of s.items || []) if (it.id !== SPECIAL && it.id !== CONSOLE_ITEM && it.qty > 0) out[it.id] = (out[it.id] || 0) + it.qty;
         return out;
     }
 
@@ -3618,436 +3117,6 @@
         return { text: e.name + ' ' + when + (e.exact ? '' : ' (about)'), sub: e.effect + ' ' + e.advice, at: e.start, active: e.active, id: e.id, until: e.end };
     }
 
-    /* ===== src/sources/route.js ===== */
-    /*
-     * Which page are we on? Pure string work, so it is testable.
-     *
-     * Every page the script marks is one the user opened; nothing here loads a
-     * page. The harness stands in for Torn's pages with `?page=<name>` on its own
-     * host (never on torn.com), the way the trading app's harness does.
-     */
-
-    const PAGE_GYM = 'gym';
-    const PAGE_ITEMS = 'items';
-    const PAGE_ITEM_MARKET = 'itemmarket';
-    const PAGE_BAZAAR = 'bazaar';
-    const PAGE_POINTS = 'points';
-    const PAGE_PROFILE = 'profile';
-    const PAGE_FACTION = 'faction';
-    const PAGE_ATTACK = 'attack';
-    const PAGE_OTHER = 'other';
-
-    /** The webpage the script draws over (GitHub Pages, gh-pages branch). */
-    const APP_PAGE_URL = 'https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html';
-
-    /** Torn Trading's Torn Bids page: we only note that Torn Trading runs there (read only). */
-    const TRADING_PAGE_URL = 'https://abrahamdelosreyes17-oss.github.io/torn-moneymaker-releases/traders.html';
-
-    function isTradingPageUrl(href) {
-        return String(href || '').split(/[?#]/)[0] === TRADING_PAGE_URL;
-    }
-
-    /** The harness boots the webpage on its own host with this marker. */
-    const APP_PAGE_PARAM = 'pi';
-    const APP_PAGE_VALUE = 'app';
-
-    function queryOf(href) {
-        try {
-            return new URL(href).searchParams;
-        } catch {
-            return new URLSearchParams();
-        }
-    }
-
-    function hostOf(href) {
-        try {
-            return new URL(href).hostname.toLowerCase();
-        } catch {
-            return '';
-        }
-    }
-
-    function isTornHost(href) {
-        return /(^|\.)torn\.com$/.test(hostOf(href));
-    }
-
-    /** A query value whatever its spelling (Torn's own links vary: XID, userId, userID). */
-    function param(href, name) {
-        const want = name.toLowerCase();
-        for (const [k, v] of queryOf(href)) if (k.toLowerCase() === want) return v;
-        // Some Torn pages keep their parameters in the hash (#/p=...&ID=5).
-        const hash = String(href || '').split('#')[1] || '';
-        for (const part of hash.replace(/^\/+/, '').split(/[&?]/)) {
-            const [k, v] = part.split('=');
-            if (k && k.toLowerCase() === want) return v || '';
-        }
-        return null;
-    }
-
-    function numParam(href, name) {
-        const v = param(href, name);
-        return v && /^\d+$/.test(v) ? v : null;
-    }
-
-    /**
-     * @param {string} href - normally location.href
-     * @returns {string} one of the PAGE_* constants
-     */
-    function detectPage(href) {
-        if (typeof href !== 'string' || !href) return PAGE_OTHER;
-        const url = href.toLowerCase();
-
-        // The harness: ?page=gym etc. on a host that is not Torn.
-        if (!isTornHost(href)) {
-            const p = (queryOf(href).get('page') || '').toLowerCase();
-            const known = [PAGE_GYM, PAGE_ITEMS, PAGE_ITEM_MARKET, PAGE_BAZAAR, PAGE_POINTS, PAGE_PROFILE, PAGE_FACTION, PAGE_ATTACK];
-            return known.includes(p) ? p : PAGE_OTHER;
-        }
-
-        if (url.includes('/gym.php')) return PAGE_GYM;
-        if (url.includes('/item.php')) return PAGE_ITEMS;
-        if (url.includes('sid=itemmarket') || url.includes('/imarket.php')) return PAGE_ITEM_MARKET;
-        if (url.includes('/bazaar.php')) return PAGE_BAZAAR;
-        if (url.includes('/pmarket.php')) return PAGE_POINTS;
-        if (url.includes('/profiles.php')) return PAGE_PROFILE;
-        if (url.includes('/factions.php')) return PAGE_FACTION;
-        if (/[?&]sid=attack(&|#|$)/.test(url) && (url.includes('loader.php') || url.includes('page.php'))) return PAGE_ATTACK;
-        return PAGE_OTHER;
-    }
-
-    /** The player a profile page shows (profiles.php?XID=), or null. */
-    function profileIdOf(href) {
-        return detectPage(href) === PAGE_PROFILE ? numParam(href, 'XID') : null;
-    }
-
-    /** The defender on the attack page (loader.php?sid=attack&user2ID=), or null. */
-    function attackTargetOf(href) {
-        return detectPage(href) === PAGE_ATTACK ? numParam(href, 'user2ID') : null;
-    }
-
-    /** Whose bazaar this is (bazaar.php?userId=), or null for your own. */
-    function bazaarOwnerId(href) {
-        return detectPage(href) === PAGE_BAZAAR ? numParam(href, 'userId') : null;
-    }
-
-    /** The faction a faction page shows (factions.php?step=profile&ID=), or null (your own). */
-    function factionIdOf(href) {
-        return detectPage(href) === PAGE_FACTION ? numParam(href, 'ID') : null;
-    }
-
-    /** The item the Item Market page is showing (#/market/view=search&itemID=), or null. */
-    function itemMarketItemOf(href) {
-        return detectPage(href) === PAGE_ITEM_MARKET ? numParam(href, 'itemID') : null;
-    }
-
-    function isAppPageUrl(href) {
-        if (String(href || '').split(/[?#]/)[0] === APP_PAGE_URL) return true;
-        // The harness boots the webpage on its own page with the marker.
-        return queryOf(href).get(APP_PAGE_PARAM) === APP_PAGE_VALUE && !isTornHost(href);
-    }
-
-    /* ---------------------------------------------------------- Torn links */
-
-    /*
-     * Every action in the app is a link to the exact Torn page (owner rule 6).
-     * One click, one navigation: nothing is bought, used or trained.
-     */
-
-    const TORN = 'https://www.torn.com/';
-
-    function gymUrl() {
-        return TORN + 'gym.php';
-    }
-
-    function itemsUrl() {
-        return TORN + 'item.php';
-    }
-
-    /** Energy refills are bought on the Points page. */
-    function pointsUrl() {
-        return TORN + 'points.php';
-    }
-
-    function pointsMarketUrl() {
-        return TORN + 'pmarket.php';
-    }
-
-    function bazaarUrl(userId) {
-        return TORN + 'bazaar.php?userId=' + encodeURIComponent(String(userId)) + '#/';
-    }
-
-    function itemMarketUrl(itemId) {
-        return TORN + 'page.php?sid=ItemMarket#/market/view=search&itemID=' + encodeURIComponent(String(itemId));
-    }
-
-    /**
-     * City shops by the name /torn/items gives them (value.shops[].shop), as
-     * shops.php?step= pages (TornTools links the Pharmacy as step=pharmacy).
-     * Sally's Sweet Shop is step=candy [verify]; a shop not listed opens the city map.
-     */
-    const SHOP_STEPS = {
-        "Sally's Sweet Shop": 'candy',
-        Pharmacy: 'pharmacy',
-        "Bits 'n' Bobs": 'bitsnbobs',
-        'Super Store': 'super',
-        'Cyber Force': 'cyberforce',
-        'Jewelry Store': 'jewelry',
-        'Nikeh Sports': 'nikeh',
-        'TC Clothing': 'clothes',
-        Docks: 'docks',
-        'Post Office': 'postoffice',
-        'Pawn Shop': 'pawnshop',
-        'Recycling Center': 'recyclingcenter',
-        'Print Shop': 'printstore',
-    };
-
-    function shopUrl(shop) {
-        const step = SHOP_STEPS[shop];
-        return step ? TORN + 'shops.php?step=' + step : TORN + 'city.php';
-    }
-
-    function profileUrl(userId) {
-        return TORN + 'profiles.php?XID=' + encodeURIComponent(String(userId));
-    }
-
-    function attackUrl(userId) {
-        return TORN + 'loader.php?sid=attack&user2ID=' + encodeURIComponent(String(userId));
-    }
-
-    function factionUrl(factionId) {
-        return TORN + 'factions.php?step=profile&ID=' + encodeURIComponent(String(factionId));
-    }
-
-    function apiKeyPageUrl() {
-        return TORN + 'preferences.php#tab=api';
-    }
-
-    /* ===== src/core/market.js ===== */
-    /*
-     * What to buy and where: the need list from the plan, the cheapest fill
-     * across the Item Market, every bazaar (TornW3B) and the points market, and
-     * a verdict against our own 7-day history. Pure. ENGINE-SPEC §8.
-     */
-
-
-
-
-    const SOURCE_BAZAAR = 'bazaar';
-    const SOURCE_ITEM_MARKET = 'itemmarket';
-    const SOURCE_POINTS = 'points';
-    /** A city (NPC) shop: Sally's Sweet Shop and the like. */
-    const SOURCE_NPC = 'npc';
-
-    /**
-     * The slice of /v2/torn/{ids}/items the plan keeps: Torn's market price and
-     * the city shops that sell each item (only shops in Torn: abroad needs a flight).
-     * @param {object[]} items - the `items` array
-     * @returns {object} {[id]: {market:number|null, shops:[{shop, buy}]}}
-     */
-    function itemsInfoFrom(items) {
-        const out = {};
-        for (const it of Array.isArray(items) ? items : []) {
-            const id = Number(it && it.id);
-            if (!id) continue;
-            const v = it.value || {};
-            const shops = (Array.isArray(v.shops) ? v.shops : [])
-                .filter((s) => s && (s.country === undefined || s.country === 'Torn') && Number(s.buy_price) > 0)
-                .map((s) => ({ shop: String(s.shop), buy: Number(s.buy_price) }));
-            out[id] = { market: Number(v.market_price) > 0 ? Number(v.market_price) : null, shops };
-        }
-        return out;
-    }
-
-    /** Torn's own market price per item (a price to weigh a candy by until listings load). */
-    function marketPricesFrom(info) {
-        const out = {};
-        for (const [id, v] of Object.entries(info || {})) if (v && v.market > 0) out[id] = v.market;
-        return out;
-    }
-
-    /** The city shops that sell candy (Buy › Shops I can buy from lists these). */
-    function candyShopsFrom(info) {
-        const set = new Set();
-        for (const [id, v] of Object.entries(info || {})) if (isCandy(Number(id))) for (const s of (v && v.shops) || []) set.add(s.shop);
-        return [...set].sort();
-    }
-
-    /**
-     * NPC prices the player may use: only shops they ticked (Torn's API can't
-     * tell who may buy there; the owner: Sally's is for newbies only).
-     * @returns {object} {[id]: {price, shop}} the cheapest ticked shop per item
-     */
-    function npcPricesFrom(info, allowed = []) {
-        const ok = new Set(Array.isArray(allowed) ? allowed : []);
-        const out = {};
-        if (!ok.size) return out;
-        for (const [id, v] of Object.entries(info || {})) {
-            for (const s of (v && v.shops) || []) {
-                if (!ok.has(s.shop)) continue;
-                if (!out[id] || s.buy < out[id].price) out[id] = { price: s.buy, shop: s.shop };
-            }
-        }
-        return out;
-    }
-
-    /** A shop "listing" for the Buy list: as many as needed at the shop's price. */
-    function npcListing(npc, qty) {
-        if (!npc || !(npc.price > 0)) return null;
-        return { source: SOURCE_NPC, shop: npc.shop, sellerName: npc.shop, price: npc.price, qty: Math.max(1, Math.floor(qty || 1)) };
-    }
-
-    /** Verdict thresholds vs the 7-day average of the lowest price. */
-    const BUY_NOW_MAX_PCT = 1;
-    const WAIT_OVER_PCT = 3;
-    const BULK_UNDER_PCT = 3;
-
-    /** Bazaar listings TornW3B hasn't re-checked in this long are dropped (Torn Trading's rule). */
-    const BAZAAR_MAX_AGE_MS = 2 * 60 * 1000;
-
-    /** Buy windows (Buy tab switch). */
-    const WINDOWS = { today: 1, three: 3, week: 7 };
-
-    /**
-     * @param {object} needed - {[itemId]: qty} for the window (plan.itemsNeeded over those days)
-     * @param {object} inventory - {[itemId]: qty held}
-     * @returns {{id, need:number, have:number, buy:number}[]} in a stable order (drugs, boosters, points)
-     */
-    function needList(needed, inventory = {}) {
-        const order = (id) => (id === POINTS ? 3 : ITEMS[id] && ITEMS[id].kind === 'drug' ? 1 : 2);
-        return Object.entries(needed || {})
-            .map(([k, q]) => {
-                const id = k === POINTS ? POINTS : Number(k);
-                const have = Math.max(0, Number(inventory[id]) || 0);
-                return { id, name: itemName(id), need: q, have, buy: Math.max(0, q - have) };
-            })
-            .filter((r) => r.need > 0)
-            .sort((a, b) => order(a.id) - order(b.id) || String(a.id).localeCompare(String(b.id)));
-    }
-
-    /** Where a row sends you: the exact bazaar, Item Market search or the points market. */
-    function linkFor(row, itemId) {
-        if (row.source === SOURCE_BAZAAR && row.sellerId) return bazaarUrl(row.sellerId);
-        if (row.source === SOURCE_POINTS) return pointsMarketUrl();
-        if (row.source === SOURCE_NPC) return shopUrl(row.shop);
-        return itemMarketUrl(itemId);
-    }
-
-    /**
-     * Take `qty` from the cheapest listings upward, whatever the source.
-     * Listings: {source, sellerId?, sellerName?, price, qty}. Ties keep the
-     * given order (callers list the Item Market first: no trip to a bazaar for
-     * the same price).
-     * @returns {{rows:object[], total:number, filled:number, short:number}}
-     */
-    function fillCheapest(listings, qty, itemId) {
-        const sorted = (listings || [])
-            .filter((l) => l && Number(l.price) > 0 && Number(l.qty) > 0)
-            .map((l, i) => ({ ...l, i }))
-            .sort((a, b) => a.price - b.price || a.i - b.i);
-        const rows = [];
-        let left = Math.max(0, qty);
-        let total = 0;
-        for (const l of sorted) {
-            if (left <= 0) break;
-            const take = Math.min(left, l.qty);
-            const row = { source: l.source, sellerId: l.sellerId || null, sellerName: l.sellerName || null, listingId: l.listingId || null, listed: l.qty, qty: take, price: l.price, subtotal: take * l.price, dataAt: l.dataAt || null, ...(l.shop ? { shop: l.shop } : {}) };
-            row.link = linkFor(row, itemId);
-            rows.push(row);
-            total += row.subtotal;
-            left -= take;
-        }
-        return { rows, total, filled: qty - left, short: left };
-    }
-
-    /**
-     * Buy now, fine, wait or stock up, from the cheapest price against the
-     * 7-day average of daily lows.
-     * @param {number} price - the cheapest price now
-     * @param {number|null} avg7
-     * @param {object} [o] - {slack: the plan can wait a day (enough in inventory for today)}
-     */
-    function priceVerdict(price, avg7, { slack = false } = {}) {
-        if (!(avg7 > 0) || !(price > 0)) return { kind: 'unknown', pct: null, text: 'No 7-day history yet' };
-        const pct = (100 * (price - avg7)) / avg7;
-        const vs = Math.abs(pct) < 0.05 ? 'at the 7-day average' : Math.abs(pct).toFixed(1) + '% ' + (pct < 0 ? 'under' : 'over') + ' the 7-day average';
-        if (pct <= -BULK_UNDER_PCT) return { kind: 'bulk', pct, text: 'Stock up · ' + vs };
-        if (pct <= BUY_NOW_MAX_PCT) return { kind: 'buy', pct, text: 'Buy now · ' + vs };
-        if (pct > WAIT_OVER_PCT && slack) return { kind: 'wait', pct, text: 'Wait · ' + vs };
-        return { kind: 'fine', pct, text: 'Fine · ' + vs };
-    }
-
-    /**
-     * Listings from each source in one shape.
-     * - Item Market (/v2/market/{id}/itemmarket): itemmarket.listings[{price, amount}]
-     * - TornW3B (/api/marketplace/{id}): listings[{player_id, player_name, price, quantity}]
-     * - Points market (/v2/market/pointsmarket): pointsmarket[{id, cost, quantity}] (cost per point)
-     */
-    function listingsFromItemMarket(api) {
-        const im = api && (api.itemmarket || api);
-        const list = im && Array.isArray(im.listings) ? im.listings : [];
-        return list.map((l) => ({ source: SOURCE_ITEM_MARKET, price: Number(l.price), qty: Number(l.amount ?? l.quantity) || 0 }));
-    }
-
-    /**
-     * TornW3B's bazaar listings. With `now`, only listings re-checked within
-     * BAZAAR_MAX_AGE_MS stay (Torn Trading's rule: an older one is often gone),
-     * and never a $1 listing (locked, one person's).
-     */
-    function listingsFromW3b(api, { now = null, maxAgeMs = BAZAAR_MAX_AGE_MS } = {}) {
-        const list = api && Array.isArray(api.listings) ? api.listings : [];
-        const rows = list.map((l) => ({ source: SOURCE_BAZAAR, sellerId: l.player_id ? String(l.player_id) : null, sellerName: l.player_name || null, price: Number(l.price), qty: Number(l.quantity) || 0, dataAt: toMs(l.last_checked) || toMs(l.content_updated) }));
-        if (now === null) return rows;
-        return rows.filter((r) => r.sellerId && r.price > 1 && r.dataAt && now - r.dataAt <= maxAgeMs);
-    }
-
-    /** Seconds or milliseconds → milliseconds (TornW3B sends seconds). */
-    function toMs(v) {
-        const n = Number(v);
-        if (!Number.isFinite(n) || n <= 0) return null;
-        return n < 1e12 ? n * 1000 : n;
-    }
-
-    /**
-     * The price a plan should count for an item: what `qty` units cost from the
-     * cheapest listings up, per unit. Stored price rows are objects
-     * ({at, listings, avg7}), sample prices plain numbers; anything else is null
-     * (never $0: a free item would win every comparison).
-     */
-    function unitPrice(row, qty = 10) {
-        if (typeof row === 'number') return row > 0 ? row : null;
-        if (!row || typeof row !== 'object') return null;
-        const ls = Array.isArray(row.listings) ? row.listings : [];
-        if (ls.length) {
-            const f = fillCheapest(ls, qty, null);
-            if (f.filled > 0) return f.total / f.filled;
-        }
-        return row.avg7 > 0 ? row.avg7 : null;
-    }
-
-    /** {itemId: price row} → {itemId: $ per unit}, only the ones known (points: per point, 300 at a time; candy: a boost's 50). */
-    function livePrices(rows) {
-        const out = {};
-        for (const [id, row] of Object.entries(rows || {})) {
-            const p = unitPrice(row, id === POINTS ? 300 : isCandy(Number(id)) ? 50 : 10);
-            if (p) out[id] = p;
-        }
-        return out;
-    }
-
-    function listingsFromPoints(api) {
-        const raw = api && api.pointsmarket;
-        const list = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? Object.entries(raw).map(([id, v]) => ({ id, ...v })) : [];
-        return list.map((l) => ({ source: SOURCE_POINTS, listingId: l.id ? String(l.id) : null, price: Number(l.cost ?? l.price), qty: Number(l.quantity) || 0 }));
-    }
-
-    /** A seller line: "Iron_Monk's bazaar", "Item Market", "Points market". */
-    function whereText(row) {
-        if (row.source === SOURCE_BAZAAR) return (row.sellerName ? row.sellerName + "'s" : 'A') + ' bazaar';
-        if (row.source === SOURCE_POINTS) return 'Points market';
-        if (row.source === SOURCE_NPC) return row.shop || 'City shop';
-        return 'Item Market';
-    }
-
     /* ===== src/api/torn.js ===== */
     /*
      * Torn API v2 calls the app makes, each a thin wrapper over TornApiClient
@@ -4055,7 +3124,6 @@
      * Shapes: docs/research-api-shapes.md. Every function returns plain data the
      * core can read; none of them retries on its own beyond the client.
      */
-
 
 
 
@@ -4068,8 +3136,8 @@
     /** The one call Home and the overlay live on, every 30 s while visible (Limited key). */
     const USER_STATE_SELECTIONS = 'bars,cooldowns,refills,battlestats,gym';
 
-    /** Inventory categories a gym plan cares about (always sent: no-cat answers 21). Special: the Game Console. */
-    const INVENTORY_CATS = ['Drug', 'Booster', 'Candy', 'Energy Drink', 'Special'];
+    /** Inventory categories a gym plan cares about (always sent: no-cat answers 21). */
+    const INVENTORY_CATS = ['Drug', 'Booster', 'Candy', 'Energy Drink'];
 
     /** key/info access levels (v1 numbering, assumed the same in v2). */
     const ACCESS_CUSTOM = 0;
@@ -4286,38 +3354,6 @@
         return missing === null ? null : missing.length === 0;
     }
 
-    /**
-     * Your job (Public): a company {type:'company', id, type_id, name, rating (stars),
-     * position, days_in_company}, a city job, or null. Company what-ifs read it.
-     */
-    async function fetchJob(client) {
-        const d = await client.get('v2/user/job');
-        return (d && d.job) || null;
-    }
-
-    /**
-     * Job points (Minimal): {jobs:{army,...}, companies:[{company:{id: type id, name}, points}]}.
-     * A key that can't read it answers null, not an error.
-     */
-    async function fetchJobPoints(client) {
-        try {
-            const d = await client.get('v2/user/jobpoints');
-            return (d && d.jobpoints) || null;
-        } catch (error) {
-            if (error instanceof TornApiError && (error.code === TORN_ERROR_ACCESS_LEVEL || error.code === TORN_ERROR_WRONG_FIELDS)) return null;
-            throw error;
-        }
-    }
-
-    /**
-     * Torn's data for the items the plan may buy (candy, the Game Console): Torn's
-     * market price and the city shops that sell each (`value.shops`), kept small.
-     * @returns {Promise<object>} {[id]: {market, shops:[{shop, buy}]}}
-     */
-    async function fetchItemsInfo(client, itemIds) {
-        return itemsInfoFrom(await fetchItems(client, itemIds));
-    }
-
     /* ===== src/feed/state.js ===== */
     /*
      * The live state feed. Exactly one VISIBLE Torn/app tab (the leader) asks
@@ -4358,14 +3394,7 @@
         inventory: 30 * 60 * 1000,
         keyInfo: 24 * 60 * 60 * 1000,
         calendar: 12 * 60 * 60 * 1000,
-        // Your company job and its job points (company what-ifs, job-point happy); Torn's item data (NPC shop prices).
-        job: 6 * 60 * 60 * 1000,
-        jobPoints: 6 * 60 * 60 * 1000,
-        items: 24 * 60 * 60 * 1000,
     };
-
-    /** The items whose Torn data (market price, city shops) the plan reads: every candy and the Game Console. */
-    const ITEMS_INFO_IDS = [...CANDY_IDS, GAME_CONSOLE];
 
     /** A slow part that failed is asked again after this long (not after its whole period). */
     const STATIC_RETRY_MS = 5 * 60 * 1000;
@@ -4521,9 +3550,6 @@
                     },
                 ],
                 ['calendar', () => fetchCalendar(this.client)],
-                ['job', () => fetchJob(this.client)],
-                ['jobPoints', () => fetchJobPoints(this.client)],
-                ['items', () => fetchItemsInfo(this.client, ITEMS_INFO_IDS)],
             ];
             for (const [k, fn] of jobs) {
                 if (!due(k)) continue;
@@ -4607,8 +3633,8 @@
         const list = Object.values(results).filter(Boolean);
         if (!list.length) return { recommended: null, pickBy, alternatives: [], reasons: [] };
         const limit = pickBy === 'max' ? Infinity : budget;
-        // A plan that doesn't fit the player (the console jump over 250k in a stat it trains) is shown, never picked.
-        const pickable = list.filter((r) => !r.blocked);
+        // A plan whose numbers aren't checked in game yet (the console jump) is shown, never picked.
+        const pickable = list.filter((r) => !(STRATEGIES[r.id] && STRATEGIES[r.id].unverified));
         const inBudget = (pickable.length ? pickable : list).filter((r) => r.cost <= limit);
         const pool = inBudget.length ? inBudget : [(pickable.length ? pickable : list).reduce((a, b) => (b.cost < a.cost ? b : a))];
         const perM = perMillion;
@@ -4626,7 +3652,7 @@
                 if (overBudget && r.gained > best.gained) verdict = 'overBudget';
                 else if (Math.abs(deltaStatsPct) < 1 && Math.abs(deltaCost) < 1e6) verdict = 'same';
                 else if (deltaStatsPct > 0 && !overBudget) verdict = 'better';
-                const alt = { id: r.id, gained: r.gained, cost: r.cost, perM: perM(r), deltaStatsPct, deltaCost, overBudget, verdict, fits: !r.blocked && fitsPlayer(r, best), blocked: r.blocked || null, buysConsole: Boolean(r.used && r.used[104] > 0) };
+                const alt = { id: r.id, gained: r.gained, cost: r.cost, perM: perM(r), deltaStatsPct, deltaCost, overBudget, verdict, fits: fitsPlayer(r, best) };
                 return { ...alt, why: whyNot(best, alt, { bliss, budget, pickBy }) };
             })
             .sort((a, b) => b.gained - a.gained);
@@ -4660,10 +3686,9 @@
         if (pickBy === 'value' && pct > 0) return '+' + pct + '% stats but fewer per $1M (' + fmtShort(alt.perM || 0) + ' vs ' + fmtShort(perMillion(best)) + ').';
         // Over budget is the reason only when it would otherwise win; a worse plan leads with what it loses.
         if (alt.overBudget && alt.gained > best.gained) return 'Over your ' + fmtMoney(budget) + ' budget (it would gain +' + pct + '% more).';
-        if (alt.blocked) return 'Doesn’t fit you: ' + alt.blocked + '.';
         if (alt.verdict === 'same') return 'The same stats for the same money: nothing to gain by switching.';
         const why = [];
-        if (alt.buysConsole) why.push('the cost includes a Game Console (you have none)');
+        if (STRATEGIES[alt.id] && STRATEGIES[alt.id].unverified) why.push('from a player’s guide, not checked in game yet (needs a Game Console)');
         if (JUMP_LIKE.has(alt.id)) why.push('holding Xanax for the jump stops natural energy');
         if (HAPPY_BOUGHT.has(alt.id)) why.push('the Ecstasy takes a drug cooldown a Xanax would fill');
         if (alt.id === 'dailyChoco' || alt.id === 'candyXanax') why.push('the candy lifts happy for one session a day');
@@ -4685,7 +3710,7 @@
         const dCost = picked.cost - recommended.cost;
         const warn = dPct < -WARN_STATS_PCT || (dCost > 0 && dPct < WARN_STATS_PCT);
         const reasons = [];
-        if (JUMP_LIKE.has(picked.id)) reasons.push('Holding ' + (picked.id === 'consoleJump' || picked.id === 'consoleJumpToy' ? 'three' : 'four') + ' Xanax stops natural energy.');
+        if (JUMP_LIKE.has(picked.id)) reasons.push('Holding four Xanax stops natural energy.');
         if (HAPPY_BOUGHT.has(picked.id)) reasons.push('The Ecstasy uses a drug cooldown a Xanax would have filled.');
         if (picked.id === 'dailyChoco') reasons.push('The candy lifts happy for one session a day only.');
         if (HAPPY_BOUGHT.has(picked.id) && !bliss) reasons.push('Worth it only if you read Ignorance Is Bliss.');
@@ -4723,6 +3748,348 @@
         const due = day + DAILY_CHECK_HOUR * 3600000;
         if (now < due) return lastAt < due - 86400000;
         return !(lastAt >= due);
+    }
+
+    /* ===== src/sources/route.js ===== */
+    /*
+     * Which page are we on? Pure string work, so it is testable.
+     *
+     * Every page the script marks is one the user opened; nothing here loads a
+     * page. The harness stands in for Torn's pages with `?page=<name>` on its own
+     * host (never on torn.com), the way the trading app's harness does.
+     */
+
+    const PAGE_GYM = 'gym';
+    const PAGE_ITEMS = 'items';
+    const PAGE_ITEM_MARKET = 'itemmarket';
+    const PAGE_BAZAAR = 'bazaar';
+    const PAGE_POINTS = 'points';
+    const PAGE_PROFILE = 'profile';
+    const PAGE_FACTION = 'faction';
+    const PAGE_ATTACK = 'attack';
+    const PAGE_OTHER = 'other';
+
+    /** The webpage the script draws over (GitHub Pages, gh-pages branch). */
+    const APP_PAGE_URL = 'https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html';
+
+    /** Torn Trading's Torn Bids page: we only note that Torn Trading runs there (read only). */
+    const TRADING_PAGE_URL = 'https://abrahamdelosreyes17-oss.github.io/torn-moneymaker-releases/traders.html';
+
+    function isTradingPageUrl(href) {
+        return String(href || '').split(/[?#]/)[0] === TRADING_PAGE_URL;
+    }
+
+    /** The harness boots the webpage on its own host with this marker. */
+    const APP_PAGE_PARAM = 'pi';
+    const APP_PAGE_VALUE = 'app';
+
+    function queryOf(href) {
+        try {
+            return new URL(href).searchParams;
+        } catch {
+            return new URLSearchParams();
+        }
+    }
+
+    function hostOf(href) {
+        try {
+            return new URL(href).hostname.toLowerCase();
+        } catch {
+            return '';
+        }
+    }
+
+    function isTornHost(href) {
+        return /(^|\.)torn\.com$/.test(hostOf(href));
+    }
+
+    /** A query value whatever its spelling (Torn's own links vary: XID, userId, userID). */
+    function param(href, name) {
+        const want = name.toLowerCase();
+        for (const [k, v] of queryOf(href)) if (k.toLowerCase() === want) return v;
+        // Some Torn pages keep their parameters in the hash (#/p=...&ID=5).
+        const hash = String(href || '').split('#')[1] || '';
+        for (const part of hash.replace(/^\/+/, '').split(/[&?]/)) {
+            const [k, v] = part.split('=');
+            if (k && k.toLowerCase() === want) return v || '';
+        }
+        return null;
+    }
+
+    function numParam(href, name) {
+        const v = param(href, name);
+        return v && /^\d+$/.test(v) ? v : null;
+    }
+
+    /**
+     * @param {string} href - normally location.href
+     * @returns {string} one of the PAGE_* constants
+     */
+    function detectPage(href) {
+        if (typeof href !== 'string' || !href) return PAGE_OTHER;
+        const url = href.toLowerCase();
+
+        // The harness: ?page=gym etc. on a host that is not Torn.
+        if (!isTornHost(href)) {
+            const p = (queryOf(href).get('page') || '').toLowerCase();
+            const known = [PAGE_GYM, PAGE_ITEMS, PAGE_ITEM_MARKET, PAGE_BAZAAR, PAGE_POINTS, PAGE_PROFILE, PAGE_FACTION, PAGE_ATTACK];
+            return known.includes(p) ? p : PAGE_OTHER;
+        }
+
+        if (url.includes('/gym.php')) return PAGE_GYM;
+        if (url.includes('/item.php')) return PAGE_ITEMS;
+        if (url.includes('sid=itemmarket') || url.includes('/imarket.php')) return PAGE_ITEM_MARKET;
+        if (url.includes('/bazaar.php')) return PAGE_BAZAAR;
+        if (url.includes('/pmarket.php')) return PAGE_POINTS;
+        if (url.includes('/profiles.php')) return PAGE_PROFILE;
+        if (url.includes('/factions.php')) return PAGE_FACTION;
+        if (/[?&]sid=attack(&|#|$)/.test(url) && (url.includes('loader.php') || url.includes('page.php'))) return PAGE_ATTACK;
+        return PAGE_OTHER;
+    }
+
+    /** The player a profile page shows (profiles.php?XID=), or null. */
+    function profileIdOf(href) {
+        return detectPage(href) === PAGE_PROFILE ? numParam(href, 'XID') : null;
+    }
+
+    /** The defender on the attack page (loader.php?sid=attack&user2ID=), or null. */
+    function attackTargetOf(href) {
+        return detectPage(href) === PAGE_ATTACK ? numParam(href, 'user2ID') : null;
+    }
+
+    /** Whose bazaar this is (bazaar.php?userId=), or null for your own. */
+    function bazaarOwnerId(href) {
+        return detectPage(href) === PAGE_BAZAAR ? numParam(href, 'userId') : null;
+    }
+
+    /** The faction a faction page shows (factions.php?step=profile&ID=), or null (your own). */
+    function factionIdOf(href) {
+        return detectPage(href) === PAGE_FACTION ? numParam(href, 'ID') : null;
+    }
+
+    /** The item the Item Market page is showing (#/market/view=search&itemID=), or null. */
+    function itemMarketItemOf(href) {
+        return detectPage(href) === PAGE_ITEM_MARKET ? numParam(href, 'itemID') : null;
+    }
+
+    function isAppPageUrl(href) {
+        if (String(href || '').split(/[?#]/)[0] === APP_PAGE_URL) return true;
+        // The harness boots the webpage on its own page with the marker.
+        return queryOf(href).get(APP_PAGE_PARAM) === APP_PAGE_VALUE && !isTornHost(href);
+    }
+
+    /* ---------------------------------------------------------- Torn links */
+
+    /*
+     * Every action in the app is a link to the exact Torn page (owner rule 6).
+     * One click, one navigation: nothing is bought, used or trained.
+     */
+
+    const TORN = 'https://www.torn.com/';
+
+    function gymUrl() {
+        return TORN + 'gym.php';
+    }
+
+    function itemsUrl() {
+        return TORN + 'item.php';
+    }
+
+    /** Energy refills are bought on the Points page. */
+    function pointsUrl() {
+        return TORN + 'points.php';
+    }
+
+    function pointsMarketUrl() {
+        return TORN + 'pmarket.php';
+    }
+
+    function bazaarUrl(userId) {
+        return TORN + 'bazaar.php?userId=' + encodeURIComponent(String(userId)) + '#/';
+    }
+
+    function itemMarketUrl(itemId) {
+        return TORN + 'page.php?sid=ItemMarket#/market/view=search&itemID=' + encodeURIComponent(String(itemId));
+    }
+
+    function profileUrl(userId) {
+        return TORN + 'profiles.php?XID=' + encodeURIComponent(String(userId));
+    }
+
+    function attackUrl(userId) {
+        return TORN + 'loader.php?sid=attack&user2ID=' + encodeURIComponent(String(userId));
+    }
+
+    function factionUrl(factionId) {
+        return TORN + 'factions.php?step=profile&ID=' + encodeURIComponent(String(factionId));
+    }
+
+    function apiKeyPageUrl() {
+        return TORN + 'preferences.php#tab=api';
+    }
+
+    /* ===== src/core/market.js ===== */
+    /*
+     * What to buy and where: the need list from the plan, the cheapest fill
+     * across the Item Market, every bazaar (TornW3B) and the points market, and
+     * a verdict against our own 7-day history. Pure. ENGINE-SPEC §8.
+     */
+
+
+
+
+    const SOURCE_BAZAAR = 'bazaar';
+    const SOURCE_ITEM_MARKET = 'itemmarket';
+    const SOURCE_POINTS = 'points';
+
+    /** Verdict thresholds vs the 7-day average of the lowest price. */
+    const BUY_NOW_MAX_PCT = 1;
+    const WAIT_OVER_PCT = 3;
+    const BULK_UNDER_PCT = 3;
+
+    /** Bazaar listings TornW3B hasn't re-checked in this long are dropped (Torn Trading's rule). */
+    const BAZAAR_MAX_AGE_MS = 2 * 60 * 1000;
+
+    /** Buy windows (Buy tab switch). */
+    const WINDOWS = { today: 1, three: 3, week: 7 };
+
+    /**
+     * @param {object} needed - {[itemId]: qty} for the window (plan.itemsNeeded over those days)
+     * @param {object} inventory - {[itemId]: qty held}
+     * @returns {{id, need:number, have:number, buy:number}[]} in a stable order (drugs, boosters, points)
+     */
+    function needList(needed, inventory = {}) {
+        const order = (id) => (id === POINTS ? 3 : ITEMS[id] && ITEMS[id].kind === 'drug' ? 1 : 2);
+        return Object.entries(needed || {})
+            .map(([k, q]) => {
+                const id = k === POINTS ? POINTS : Number(k);
+                const have = Math.max(0, Number(inventory[id]) || 0);
+                return { id, name: itemName(id), need: q, have, buy: Math.max(0, q - have) };
+            })
+            .filter((r) => r.need > 0)
+            .sort((a, b) => order(a.id) - order(b.id) || String(a.id).localeCompare(String(b.id)));
+    }
+
+    /** Where a row sends you: the exact bazaar, Item Market search or the points market. */
+    function linkFor(row, itemId) {
+        if (row.source === SOURCE_BAZAAR && row.sellerId) return bazaarUrl(row.sellerId);
+        if (row.source === SOURCE_POINTS) return pointsMarketUrl();
+        return itemMarketUrl(itemId);
+    }
+
+    /**
+     * Take `qty` from the cheapest listings upward, whatever the source.
+     * Listings: {source, sellerId?, sellerName?, price, qty}. Ties keep the
+     * given order (callers list the Item Market first: no trip to a bazaar for
+     * the same price).
+     * @returns {{rows:object[], total:number, filled:number, short:number}}
+     */
+    function fillCheapest(listings, qty, itemId) {
+        const sorted = (listings || [])
+            .filter((l) => l && Number(l.price) > 0 && Number(l.qty) > 0)
+            .map((l, i) => ({ ...l, i }))
+            .sort((a, b) => a.price - b.price || a.i - b.i);
+        const rows = [];
+        let left = Math.max(0, qty);
+        let total = 0;
+        for (const l of sorted) {
+            if (left <= 0) break;
+            const take = Math.min(left, l.qty);
+            const row = { source: l.source, sellerId: l.sellerId || null, sellerName: l.sellerName || null, listingId: l.listingId || null, listed: l.qty, qty: take, price: l.price, subtotal: take * l.price, dataAt: l.dataAt || null };
+            row.link = linkFor(row, itemId);
+            rows.push(row);
+            total += row.subtotal;
+            left -= take;
+        }
+        return { rows, total, filled: qty - left, short: left };
+    }
+
+    /**
+     * Buy now, fine, wait or stock up, from the cheapest price against the
+     * 7-day average of daily lows.
+     * @param {number} price - the cheapest price now
+     * @param {number|null} avg7
+     * @param {object} [o] - {slack: the plan can wait a day (enough in inventory for today)}
+     */
+    function priceVerdict(price, avg7, { slack = false } = {}) {
+        if (!(avg7 > 0) || !(price > 0)) return { kind: 'unknown', pct: null, text: 'No 7-day history yet' };
+        const pct = (100 * (price - avg7)) / avg7;
+        const vs = Math.abs(pct) < 0.05 ? 'at the 7-day average' : Math.abs(pct).toFixed(1) + '% ' + (pct < 0 ? 'under' : 'over') + ' the 7-day average';
+        if (pct <= -BULK_UNDER_PCT) return { kind: 'bulk', pct, text: 'Stock up · ' + vs };
+        if (pct <= BUY_NOW_MAX_PCT) return { kind: 'buy', pct, text: 'Buy now · ' + vs };
+        if (pct > WAIT_OVER_PCT && slack) return { kind: 'wait', pct, text: 'Wait · ' + vs };
+        return { kind: 'fine', pct, text: 'Fine · ' + vs };
+    }
+
+    /**
+     * Listings from each source in one shape.
+     * - Item Market (/v2/market/{id}/itemmarket): itemmarket.listings[{price, amount}]
+     * - TornW3B (/api/marketplace/{id}): listings[{player_id, player_name, price, quantity}]
+     * - Points market (/v2/market/pointsmarket): pointsmarket[{id, cost, quantity}] (cost per point)
+     */
+    function listingsFromItemMarket(api) {
+        const im = api && (api.itemmarket || api);
+        const list = im && Array.isArray(im.listings) ? im.listings : [];
+        return list.map((l) => ({ source: SOURCE_ITEM_MARKET, price: Number(l.price), qty: Number(l.amount ?? l.quantity) || 0 }));
+    }
+
+    /**
+     * TornW3B's bazaar listings. With `now`, only listings re-checked within
+     * BAZAAR_MAX_AGE_MS stay (Torn Trading's rule: an older one is often gone),
+     * and never a $1 listing (locked, one person's).
+     */
+    function listingsFromW3b(api, { now = null, maxAgeMs = BAZAAR_MAX_AGE_MS } = {}) {
+        const list = api && Array.isArray(api.listings) ? api.listings : [];
+        const rows = list.map((l) => ({ source: SOURCE_BAZAAR, sellerId: l.player_id ? String(l.player_id) : null, sellerName: l.player_name || null, price: Number(l.price), qty: Number(l.quantity) || 0, dataAt: toMs(l.last_checked) || toMs(l.content_updated) }));
+        if (now === null) return rows;
+        return rows.filter((r) => r.sellerId && r.price > 1 && r.dataAt && now - r.dataAt <= maxAgeMs);
+    }
+
+    /** Seconds or milliseconds → milliseconds (TornW3B sends seconds). */
+    function toMs(v) {
+        const n = Number(v);
+        if (!Number.isFinite(n) || n <= 0) return null;
+        return n < 1e12 ? n * 1000 : n;
+    }
+
+    /**
+     * The price a plan should count for an item: what `qty` units cost from the
+     * cheapest listings up, per unit. Stored price rows are objects
+     * ({at, listings, avg7}), sample prices plain numbers; anything else is null
+     * (never $0: a free item would win every comparison).
+     */
+    function unitPrice(row, qty = 10) {
+        if (typeof row === 'number') return row > 0 ? row : null;
+        if (!row || typeof row !== 'object') return null;
+        const ls = Array.isArray(row.listings) ? row.listings : [];
+        if (ls.length) {
+            const f = fillCheapest(ls, qty, null);
+            if (f.filled > 0) return f.total / f.filled;
+        }
+        return row.avg7 > 0 ? row.avg7 : null;
+    }
+
+    /** {itemId: price row} → {itemId: $ per unit}, only the ones known (points: per point, 300 at a time). */
+    function livePrices(rows) {
+        const out = {};
+        for (const [id, row] of Object.entries(rows || {})) {
+            const p = unitPrice(row, id === POINTS ? 300 : 10);
+            if (p) out[id] = p;
+        }
+        return out;
+    }
+
+    function listingsFromPoints(api) {
+        const raw = api && api.pointsmarket;
+        const list = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? Object.entries(raw).map(([id, v]) => ({ id, ...v })) : [];
+        return list.map((l) => ({ source: SOURCE_POINTS, listingId: l.id ? String(l.id) : null, price: Number(l.cost ?? l.price), qty: Number(l.quantity) || 0 }));
+    }
+
+    /** A seller line: "Iron_Monk's bazaar", "Item Market", "Points market". */
+    function whereText(row) {
+        if (row.source === SOURCE_BAZAAR) return (row.sellerName ? row.sellerName + "'s" : 'A') + ' bazaar';
+        if (row.source === SOURCE_POINTS) return 'Points market';
+        return 'Item Market';
     }
 
     /* ===== src/core/ladder.js ===== */
@@ -4880,22 +4247,20 @@
             rows.push({ id: can.id, name: 'Cans (' + ITEMS[can.id].name.replace(/^Can of /, '') + ')', cooldown: 'booster · 2 h each', energy: String(can.energy), costPerStat: perStat(can.price, can.energy), perDay: 'up to ' + (boostersThatFit(can.id, capH) - 1), inPlan: canIn, note: canIn ? null : 'FHC fills the booster better (' + maxE + ' E per 6 h vs ' + can.energy * 3 + ' E)' });
         }
 
-        // The candy the Candy + Xanax plan picked (by name), else Candy Kisses.
-        const cx = compare && compare.candyXanax;
-        const candyId = cx && cx.candy ? cx.candy.id : CANDY_KISSES;
-        const candyP = cx && cx.candy ? cx.candy.unit : priceFor(CANDY_KISSES, prices);
+        const candyP = priceFor(CANDY_KISSES, prices);
         if (candyP) {
-            const n = cx && cx.candy ? cx.candy.count : boostersThatFit(candyId, capH, 0, perks.consumableCdMult || 1);
-            const add = Math.round(n * ITEMS[candyId].happy * (perks.candyMult || 1));
+            const n = boostersThatFit(CANDY_KISSES, capH);
+            const add = Math.round(n * ITEMS[CANDY_KISSES].happy * (perks.candyMult || 1));
+            const cx = compare && compare.candyXanax;
             const extra = cx && steady ? cx.gained - steady.gained : null;
             rows.push({
                 id: 'candy',
-                name: 'Candy (' + (ITEMS[candyId].short || ITEMS[candyId].name) + '), no Ecstasy',
+                name: 'Candy, no Ecstasy',
                 cooldown: 'booster · 30 min each',
                 energy: '0 (+' + add.toLocaleString('en-US') + ' happy)',
                 costPerStat: extra > 0 && cx.cost > steady.cost ? (cx.cost - steady.cost) / extra : null,
                 perDay: String(n - 1),
-                inPlan: usedIn(candyId) && recommended === 'candyXanax',
+                inPlan: usedIn(CANDY_KISSES) && recommended === 'candyXanax',
                 note: extra === null ? null : extra > 0 ? 'tops up happy your trains use up: +' + fmtShort(extra) + ' stats in ' + days + ' days for ' + fmtMoney(cx.cost - steady.cost) : 'adds nothing at your stats',
             });
         }
@@ -4918,8 +4283,6 @@
      * plan, the day's log and settings. The webpage and the overlay both render
      * from this, so they can never disagree.
      */
-
-
 
 
 
@@ -5004,32 +4367,10 @@
         return Math.max(0, Math.min(state.specialRefills, use - spent));
     }
 
-    /**
-     * What the player's items, job and shop ticks add to the plan (candy choice,
-     * the console, job points, NPC prices). Pure; read from the stored statics.
-     * @param {object} statics - {inventory, items (Torn item data), job, jobPoints}
-     * @param {object} settings - {npcShops: the city shops the player ticked}
-     */
-    function itemContext(statics = {}, settings = {}) {
-        const info = (statics && statics.items) || {};
-        const inv = (statics && statics.inventory) || {};
-        const cj = companyJob(statics && statics.job, statics && statics.jobPoints);
-        return {
-            // Torn's own market price: a candy's price until its listings load (never over a live listing).
-            marketPrices: marketPricesFrom(info),
-            npc: npcPricesFrom(info, settings.npcShops),
-            consoleOwned: Number(inv[GAME_CONSOLE]) > 0,
-            job: cj,
-            jobHappy: jobHappyOf(cj),
-            freeEdvdPerDay: freeEdvdPerDayOf(cj),
-        };
-    }
-
     /** The simulation inputs every strategy shares. */
-    function simInputs({ state, pc, shares, settings, prices, special = 0, statics = {} }) {
+    function simInputs({ state, pc, shares, settings, prices, special = 0 }) {
         const gyms = {};
         for (const k of STATS) if (pc.best[k]) gyms[k] = { dots: pc.best[k].dots[k], energy: pc.best[k].energy };
-        const ic = itemContext(statics, settings);
         return {
             stats: pc.stats,
             target: shares,
@@ -5040,67 +4381,31 @@
             fastEnergy: state.energy.interval <= 600,
             days: settings.horizonDays || 30,
             // Stored price rows are objects: count what 10 units cost from the cheapest up (never $0).
-            prices: { ...SAMPLE_PRICES, ...ic.marketPrices, ...livePrices(prices) },
-            npc: ic.npc,
+            prices: { ...SAMPLE_PRICES, ...livePrices(prices) },
             bliss: pc.perks.bliss,
             happyLossMult: pc.perks.happyLossMult,
             boosterCapH: boosterCapOf(pc, settings),
             special,
-            // Special refills held: the daily refill uses them while any are left (the points refill waits) [verify].
-            specialHeld: Math.max(0, Number(state.specialRefills) || 0),
             canMult: pc.perks.canMult || 1,
             candyMult: pc.perks.candyMult || 1,
-            cdMult: pc.perks.consumableCdMult || 1,
-            toyShop5: Boolean(pc.perks.toyShop5) || worksAt(ic.job, 'Toy Shop', 5) || worksAt(ic.job, 'Game Shop', 5),
-            adultNovelties10: Boolean(pc.perks.adultNovelties10) || worksAt(ic.job, 'Adult Novelties', 10),
-            consoleOwned: ic.consoleOwned,
-            jobHappy: ic.jobHappy,
-            freeEdvdPerDay: ic.freeEdvdPerDay,
+            toyShop5: Boolean(pc.perks.toyShop5),
+            adultNovelties10: Boolean(pc.perks.adultNovelties10),
         };
-    }
-
-    /**
-     * The candy a plan uses, picked by the Plan's rule: every candy with a known
-     * price is run through the plan (the dominated ones skipped), and the one
-     * with the most stats in the budget (or per $1M, or no budget) wins.
-     * @returns {{result:object, candy:object|null}}
-     */
-    function withBestCandy(id, base, { budget = Infinity, pickBy = 'most' } = {}) {
-        const runs = {};
-        const evaluate = (cid, n) => (runs[cid] = runs[cid] || simulateStrategy(id, { ...base, special: 0, candyId: cid, candyCount: n }));
-        const pick = bestCandy({ prices: base.prices, npc: base.npc, capH: base.boosterCapH, cdCuts: base.cdMult, happyMult: base.candyMult, budget, pickBy, evaluate });
-        if (!pick) return { result: withBestSpecial(id, base), candy: null };
-        const input = { ...base, candyId: pick.id, candyCount: pick.count };
-        const result = base.special > 0 ? withBestSpecial(id, input) : runs[pick.id];
-        const candy = { id: pick.id, count: pick.count, unit: pick.unit, source: pick.source, shop: pick.shop, perBoost: pick.perBoost, options: pick.options.length };
-        return { result: { ...result, candy }, candy };
     }
 
     /**
      * Run every feasible strategy for the horizon (cached by the caller). Also
      * "Steady + energy boosters": what's left of the budget each day, spent on
      * FHC or cans on the booster cooldown (the ladder's next rung).
-     * Candy plans name their candy (result.candy), picked under the Plan's rule
-     * (`pickBy`). The console jump carries `blocked` when a stat it trains is at
-     * or over 250k (never recommended then).
-     * @param {object} o - {state, pc, shares, settings, prices, special, statics, pickBy}
+     * @param {object} o - {state, pc, shares, settings, prices, special}
      */
-    function compareStrategies({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most' }) {
-        const base = simInputs({ state, pc, shares, settings, prices, special, statics });
+    function compareStrategies({ state, pc, shares, settings, prices, special = 0 }) {
+        const base = simInputs({ state, pc, shares, settings, prices, special });
         const results = {};
-        const budget = settings.budget || Infinity;
         for (const id of feasibleStrategies({ bliss: pc.perks.bliss, boosterCapH: base.boosterCapH, toyShop5: base.toyShop5, adultNovelties10: base.adultNovelties10 })) {
-            if (id === 'consoleJump' || id === 'consoleJumpToy') {
-                // Low-stat players only: over 250k in a stat it trains, it's shown (behind the tick) and never picked.
-                const probe = simulateStrategy(id, { ...base, special: 0 });
-                const blocked = consoleBlocked(pc.stats, probe.perStat);
-                if (blocked) {
-                    results[id] = { ...probe, blocked };
-                    continue;
-                }
-            }
-            results[id] = CANDY_PLANS.has(id) ? withBestCandy(id, base, { budget, pickBy }).result : withBestSpecial(id, base);
+            results[id] = withBestSpecial(id, base);
         }
+        const budget = settings.budget || Infinity;
         if (results.steady && Number.isFinite(budget)) {
             const choice = boosterChoice({ perDay: (budget - results.steady.cost) / base.days, maxE: base.energyMax, prices: base.prices, canMult: base.canMult, capH: base.boosterCapH });
             // Only a real middle rung: fewer than steadyMax's FHC every time.
@@ -5135,41 +4440,9 @@
      * Ignorance Is Bliss, what if (Plan's Bliss card): the plans the book
      * changes most, run as if it were active. Not recommended from; shown.
      */
-    function blissWhatIf({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most' }) {
-        const base = { ...simInputs({ state, pc, shares, settings, prices, special, statics }), bliss: true };
-        return { blissSteady: { ...simulateStrategy('blissSteady', base), whatIf: true }, dailyChoco: { ...withBestCandy('dailyChoco', base, { budget: settings.budget || Infinity, pickBy }).result, whatIf: true } };
-    }
-
-    /**
-     * Company what-ifs (Plan, beside the Bliss what-if): the jump variants a job
-     * makes better, run as if the player were hired there. Only the ones that
-     * beat the recommended plan are kept (within the budget unless "Max gains").
-     * - 10★ Adult Novelties: EDVD happy ×2, and 3★ "Voyeur" 20 JP → 1 EDVD (10 JP a day: a free EDVD every 2 days);
-     * - 5★ Toy Shop or Game Shop "Gamer": the console jump's happy ×2 (low stats only, like the console jump).
-     * @param {object} o - as compareStrategies, plus `compare` (the real plans) and `recommended` (its id)
-     * @returns {object[]} [{id, strategy, company, stars, title, result, deltaPct, note}]
-     */
-    function companyWhatIf({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', compare = null, recommended = null }) {
-        const best = compare && recommended ? compare[recommended] : null;
-        if (!best) return [];
-        const base = simInputs({ state, pc, shares, settings, prices, special, statics });
-        const cj = companyJob(statics.job, statics.jobPoints);
-        const limit = pickBy === 'max' ? Infinity : settings.budget || Infinity;
-        const out = [];
-        const note = 'It means being hired by that company (its director hires you), and job specials are locked for ' + JOB_LOCK_H + ' h after joining.';
-        const add = (key, strategy, company, stars, r) => {
-            if (!r || !(r.gained > best.gained) || r.cost > limit) return;
-            const deltaPct = best.gained > 0 ? (100 * (r.gained - best.gained)) / best.gained : 0;
-            out.push({ id: key, strategy, company, stars, title: 'Hired at a ' + stars + '★ ' + company, result: { ...r, whatIf: true }, deltaPct, note });
-        };
-        if (!worksAt(cj, 'Adult Novelties', 10) && !base.adultNovelties10) {
-            add('an10', 'edvdJumpAN', 'Adult Novelties', 10, withBestSpecial('edvdJumpAN', { ...base, adultNovelties10: true, freeEdvdPerDay: 10 / VOYEUR_JP, jobHappy: null }));
-        }
-        if (!base.toyShop5) {
-            const probe = simulateStrategy('consoleJumpToy', { ...base, special: 0, toyShop5: true, jobHappy: null });
-            if (!consoleBlocked(pc.stats, probe.perStat)) add('toy5', 'consoleJumpToy', 'Toy Shop or Game Shop', 5, withBestCandy('consoleJumpToy', { ...base, toyShop5: true, jobHappy: null }, { budget: settings.budget || Infinity, pickBy }).result);
-        }
-        return out.sort((a, b) => b.result.gained - a.result.gained);
+    function blissWhatIf({ state, pc, shares, settings, prices, special = 0 }) {
+        const base = { ...simInputs({ state, pc, shares, settings, prices, special }), bliss: true };
+        return { blissSteady: { ...simulateStrategy('blissSteady', base), whatIf: true }, dailyChoco: { ...simulateStrategy('dailyChoco', base), whatIf: true } };
     }
 
     /**
@@ -5204,7 +4477,7 @@
         return Math.max(...today.map((x) => x.stepAt)) + XANAX_CD_MIN * 60 * 1000;
     }
 
-    function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, now }) {
+    function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, now }) {
         if (!state) return { ready: false };
         // One player context per refresh: the comparison's, when the caller has it.
         const pc = pcIn || playerContext(state, statics, { unlockedKnown, learnedMult });
@@ -5242,19 +4515,6 @@
             toyShop5: Boolean(pc.perks.toyShop5),
             adultNovelties10: Boolean(pc.perks.adultNovelties10),
         };
-        // Items: the plan's candy (picked in the comparison), cooldown cuts, the console, specials held, job points.
-        const ic = itemContext(statics, settings);
-        const mineR = compare && compare[plan.strategy];
-        if (mineR && mineR.candy) {
-            ctx.candyId = mineR.candy.id;
-            ctx.candyCount = mineR.candy.count;
-        }
-        ctx.cdMult = pc.perks.consumableCdMult || 1;
-        ctx.specialHeld = Math.max(0, Number(state.specialRefills) || 0);
-        ctx.consoleOwned = ic.consoleOwned;
-        ctx.toyShop5 = ctx.toyShop5 || worksAt(ic.job, 'Toy Shop', 5) || worksAt(ic.job, 'Game Shop', 5);
-        ctx.adultNovelties10 = ctx.adultNovelties10 || worksAt(ic.job, 'Adult Novelties', 10);
-        if (ic.jobHappy) ctx.jobHappy = ic.jobHappy;
         // Torn events that change training: a heads-up, and no boosters in the day before one that needs the booster cooldown.
         const events = statics.calendar ? upcomingEvents(statics.calendar.calendar, now, { startTime: statics.calendar.startTime }) : [];
         const hold = holdBoosterFor(events, now, plan.strategy);
@@ -5269,9 +4529,6 @@
         ctx.candyMult = (ctx.candyMult || 1) * em.candyMult;
         const steps = withoutSkipped(dayTimeline({ state, now, strategy: plan.strategy, ctx }), skipped);
         const next = steps[0] || null;
-        // Buy: the next boost or jump in full, whatever day it lands (today's steps stop at Torn midnight).
-        const kindNow = (STRATEGIES[plan.strategy] || {}).kind;
-        const ahead = (kindNow === 'boost' || kindNow === 'jump') && !steps.some((s) => s.kind === 'boost' || s.kind === 'jump') ? withoutSkipped(dayTimeline({ state, now, strategy: plan.strategy, ctx, until: tornDayStart(now) + 3 * DAY }), skipped) : steps;
 
         // Status strip
         const energy = energyAt(state, now);
@@ -5366,7 +4623,6 @@
             shares,
             keep,
             steps,
-            ahead,
             next,
             done: today,
             strip,
@@ -5384,16 +4640,11 @@
             recommendation: rec,
             compare,
             whatIf,
-            // Company what-ifs that still beat the recommended plan (the runtime works them out with the comparison).
-            jobWhatIf: rec && compare && compare[rec.recommended] ? (jobWhatIf || []).filter((w) => w && w.result && w.result.gained > compare[rec.recommended].gained) : [],
-            job: ic.job,
-            consoleOwned: ic.consoleOwned,
             ladder,
             spend,
             events,
             pickBy,
-            // held: while any are held the daily refill is a special (Torn blocks the points refill until they're spent [verify]).
-            special: { have: state.specialRefills, left: specialLeft(plan, state), use: plan.specialUse || 0, held: ctx.specialHeld },
+            special: { have: state.specialRefills, left: specialLeft(plan, state), use: plan.specialUse || 0 },
             prices,
         };
     }
@@ -6008,7 +5259,6 @@
 
 
 
-
     const pi = {
         tabId: makeTabId(),
         client: null,
@@ -6065,18 +5315,12 @@
         const priceSig = Object.entries(livePrices(prices)).map(([id, p]) => id + ':' + Number(p.toPrecision(2))).join(',');
         const special = specialLeft(plan, state);
         const perkSig = JSON.stringify([learnedNow().mode, pc.perks.mult, pc.perks.happyLossMult, pc.perks.canMult, pc.perks.candyMult, pc.perks.consoleMult, pc.perks.edvdMult, pc.perks.boosterCapExtraH]);
-        // Items and job: the candy rule (Plan dropdown), shops ticked, Torn's item data, a console held, the job, specials held.
-        const pickBy = plan.pickBy || 'most';
-        const itemSig = JSON.stringify([pickBy, settings.npcShops || [], statics.itemsAt || 0, Number((statics.inventory || {})[104]) > 0, statics.job || null, statics.jobPoints || null, state.specialRefills || 0]);
-        const key = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, priceSig, pc.unlocked.join(','), special, itemSig].join('|');
+        const key = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, priceSig, pc.unlocked.join(','), special].join('|');
         if (key !== pi.compareKey) {
             const run = () => {
-                pi.compare = compareStrategies({ state, pc, shares, settings, prices, special, statics, pickBy });
+                pi.compare = compareStrategies({ state, pc, shares, settings, prices, special });
                 // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
-                pi.whatIf = pc.perks.bliss ? null : blissWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy });
-                // Company what-ifs: hired where a jump variant would beat the recommended plan.
-                const rec = recommend(pi.compare, { budget: settings.budget || Infinity, bliss: pc.perks.bliss, pickBy });
-                pi.jobWhatIf = companyWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy, compare: pi.compare, recommended: rec.recommended });
+                pi.whatIf = pc.perks.bliss ? null : blissWhatIf({ state, pc, shares, settings, prices, special });
                 pi.compareKey = key;
             };
             if (!pi.compare) run();
@@ -6102,7 +5346,7 @@
         const plan = getPlan();
         const settings = getSettings();
         const { compare, pc } = comparisonFor(state, statics, plan, settings);
-        return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, whatIf: pi.whatIf || null, jobWhatIf: pi.jobWhatIf || null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+        return buildModel({ state, statics, plan, settings, log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, whatIf: pi.whatIf || null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
     }
 
     /**
@@ -6703,8 +5947,6 @@
     .tbl tr.now .t { color: var(--chalk); }
     .tbl tr.sel td { background: #202428; }
     .tbl tr.sel td:first-child { box-shadow: inset 2px 0 0 var(--chalk); }
-    .tbl tr.pending td { background: #26221c; }
-    .tbl tr.pending td:first-child { box-shadow: inset 2px 0 0 var(--warn); }
     .tbl tr.click { cursor: pointer; }
     .tbl tr.click:hover td { background: #1f2326; }
     .tbl .when { color: var(--muted); font-size: 12px; }
@@ -7606,9 +6848,7 @@
         if (per(EDVD)) parts.push(n(per(EDVD)) + ' EDVD');
         if (per(FHC)) parts.push(n(per(FHC)) + ' FHC');
         for (const id of [530, 532, 533]) if (per(id)) parts.push(n(per(id)) + ' ' + ITEMS[id].name.replace(/^Can of /, ''));
-        // The candy the plan picked, by name.
-        const candyId = r.candy ? r.candy.id : CANDY_KISSES;
-        if (per(candyId) && !per(EDVD)) parts.push(r.candy ? itemName(candyId) : 'candy');
+        if (per(CANDY_KISSES) && !per(EDVD)) parts.push('candy');
         if (((r.used && r.used[POINTS]) || 0) >= REFILL_POINTS * days * 0.9) parts.push('refill');
         return parts.join(' + ') || '—';
     }
@@ -7718,8 +6958,7 @@
                 h('span', { class: 'muted' }, ['you have ', h('b', { class: 'white', text: fmtInt(sp.have) }), ' · use']),
                 numberInput(sp.use || 0, 58, (v) => ctx.setPlan({ specialUse: Math.min(v, sp.have), specialStart: sp.have, specialSetAt: Date.now() }), { label: 'Special refills to use' }),
                 h('span', { class: 'muted', text: 'in this plan · each adds ' + each + ' energy' + (perE ? ' (about +' + fmtShort(perE * each) + ' stats for you)' : '') + (sp.use ? ' · ' + sp.left + ' left' : ' · set how many to use') }),
-                h('span', { class: 'info', title: 'Shown because Torn says your account has special refills. They aren’t limited to one a day (at most 100 a week): the plan puts them where they add the most (in a happy jump or boost, where the happy they cost resets anyway) and keeps the rest. A refill fills energy to the maximum, never above it, so each is used once the last is trained. While you hold any, Torn lets you use the points refill only once they’re spent (one source), so the plan’s daily refill is a special until then.', text: 'i' }),
-                h('span', { class: 'muted', text: '· daily refill: a special while you hold any' }),
+                h('span', { class: 'info', title: 'Shown because Torn says your account has special refills. They aren’t limited to one a day: the plan puts them where they add the most (in a happy jump or boost, where the happy they cost resets anyway) and keeps the rest.', text: 'i' }),
                 h('span', { class: 'sep' }),
             );
         }
@@ -7768,7 +7007,7 @@
         const kids = [
             sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + (pickBy === 'max' || !(ctx.settings.budget > 0) ? 'no budget' : fmtMoney(ctx.settings.budget)) + ' · ' + days + ' days'])),
             h('div', { class: 'prime num' }, [
-                h('div', {}, [h('span', { class: 'pill-tag chalk', text: kindOf(rec.recommended) }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: planWhat(rec.recommended, best) })]),
+                h('div', {}, [h('span', { class: 'pill-tag chalk', text: kindOf(rec.recommended) }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: S.what })]),
                 h('div', { class: 'figs' }, figs),
                 h('div', { class: 'why' }, [
                     'Wins because: ' + reasons + spend + ' ',
@@ -7804,12 +7043,10 @@
         for (const a of rec.alternatives) {
             if (!a.fits && !showAll) continue;
             const st = STRATEGIES[a.id];
-            // The plan you're really on is marked whatever you're picking; a pick still waiting on its warning has its own look.
-            const current = a.id === using;
-            const pending = ctx.ui.planPick === a.id && !current;
+            const sel = (ctx.ui.planPick || using) === a.id;
             rows.push(
                 h('tr', {
-                    class: 'click' + (current ? ' sel' : '') + (pending ? ' pending' : ''),
+                    class: 'click' + (sel ? ' sel' : ''),
                     tabindex: '0',
                     role: 'button',
                     'aria-label': 'Pick ' + st.name,
@@ -7831,8 +7068,8 @@
                     },
                 }, [
                     h('td', {}, [h('small', { text: kindOf(a.id) })]),
-                    h('td', {}, [h('b', { class: 'w', text: st.name }), current ? h('span', { class: 'tag chalk', style: 'margin-left:6px', text: 'current plan' }) : null, pending ? h('span', { class: 'tag warn', style: 'margin-left:6px', text: 'picked · see the warning' }) : null]),
-                    h('td', { class: 'muted', text: planWhat(a.id, compare[a.id]) }),
+                    h('td', {}, [h('b', { class: 'w', text: st.name }), st.unverified ? h('span', { class: 'tag warn', style: 'margin-left:6px', text: 'unverified' }) : null, sel && a.id === using ? h('span', { class: 'tag chalk', style: 'margin-left:6px', text: 'yours' }) : null]),
+                    h('td', { class: 'muted', text: st.what }),
                     h('td', { class: 'r ' + (a.deltaStatsPct >= 0 ? 'c-good' : 'c-bad'), text: fmtPct(a.deltaStatsPct) }),
                     h('td', { class: 'r ' + (a.deltaCost > 0 ? 'c-bad' : 'c-good'), text: (a.deltaCost >= 0 ? '+' : '−') + fmtMoney(Math.abs(a.deltaCost)) }),
                     h('td', { class: 'r', text: a.cost > 0 ? chartNum(a.perM) : '—' }),
@@ -7848,27 +7085,11 @@
                 h('tr', { class: 'whatif' }, [
                     h('td', {}, [h('small', { text: 'Book' })]),
                     h('td', {}, [h('b', { class: 'w', text: st.name === 'Steady with Bliss' ? st.name : st.name + ' with Bliss' }), ' ', h('span', { class: 'tag', text: 'what-if' })]),
-                    h('td', { text: planWhat(w.id, w) }),
+                    h('td', { text: st.what }),
                     h('td', { class: 'r', text: fmtPct(d) }),
                     h('td', { class: 'r', text: (w.cost - best.cost >= 0 ? '+' : '−') + fmtMoney(Math.abs(w.cost - best.cost)) }),
                     h('td', { class: 'r', text: chartNum(perMillion(w)) }),
                     h('td', { class: 'why ok', text: 'Needs Ignorance Is Bliss active; see the Bliss card' }),
-                ]),
-            );
-        }
-        // Company what-ifs: only the ones that beat your plan ("Hired at a 10★ Adult Novelties: +X% stats this month").
-        for (const w of m.jobWhatIf || []) {
-            const r = w.result;
-            const d = best.gained > 0 ? (100 * (r.gained - best.gained)) / best.gained : 0;
-            rows.push(
-                h('tr', { class: 'whatif job' }, [
-                    h('td', {}, [h('small', { text: 'Job' })]),
-                    h('td', {}, [h('b', { class: 'w', text: w.title }), ' ', h('span', { class: 'tag', text: 'what-if' })]),
-                    h('td', { text: planWhat(w.strategy, r) }),
-                    h('td', { class: 'r', text: fmtPct(d) }),
-                    h('td', { class: 'r', text: (r.cost - best.cost >= 0 ? '+' : '−') + fmtMoney(Math.abs(r.cost - best.cost)) }),
-                    h('td', { class: 'r', text: r.cost > 0 ? chartNum(perMillion(r)) : '—' }),
-                    h('td', { class: 'why ok', title: w.note, text: w.title + ': ' + fmtPct(d) + ' stats this ' + (days === 30 ? 'month' : days + ' days') + '. ' + w.note }),
                 ]),
             );
         }
@@ -7977,8 +7198,6 @@
         const compare = ctx.compare || {};
         const rec = m.recommendation;
         const days = ctx.settings.horizonDays || 30;
-        // Every candy a plan might pick is priced (a few listings, every 30 min), so the candy choice follows prices.
-        if (ctx.wantPrices) ctx.wantPrices([], CANDY_IDS);
         if (!rec || !rec.recommended || !compare[rec.recommended]) return { ctl: controls(m, ctx), main: [h('div', { class: 'lead' }, [h('p', { class: 'muted', style: 'margin:0', text: 'Working out the plans…' })])], pane: [] };
         return {
             ctl: controls(m, ctx),
@@ -8321,8 +7540,6 @@
 
 
 
-
-
     const WINDOW_LABEL = { today: 'Today', three: '3 days', week: 'Week' };
 
     /** Items Buy keeps an eye on for deals, plan or not. */
@@ -8348,68 +7565,21 @@
         return 'booster';
     }
 
-    /**
-     * The plan's needs for a window: the real schedule (today's steps, and the
-     * next boost or jump in full whatever day it lands, with its Xanax stack),
-     * then the days after it at the plan's daily average.
-     * @param {object} m - the model ({now, steps, ahead}: `ahead` runs on to the next boost)
-     */
+    /** The plan's needs for a window: today's steps, plus later days at the plan's daily average. */
     function needsForWindow(m, compare, plan, windowKey, horizonDays) {
         const days = WINDOWS[windowKey] || 1;
-        const dayStart = tornDayStart(m.now);
-        const steps = (m.ahead && m.ahead.length ? m.ahead : m.steps) || [];
-        const boostAt = steps.findIndex((s) => s.kind === 'jump' || s.kind === 'boost');
-        const real = steps.filter((s, i) => s.at < dayStart + DAY || (boostAt >= 0 && i <= boostAt));
-        const out = itemsNeeded(real);
-        if (days <= 1) return out;
-        // Days the real schedule already covers (at least today); the rest at the 30-day average.
-        const last = real.length ? Math.max(...real.map((s) => s.at)) : m.now;
-        const covered = Math.max(1, Math.ceil((last + 1 - dayStart) / DAY));
-        const rest = days - covered;
+        const today = itemsNeeded(m.steps.filter((s) => s.at < tornDayStart(m.now) + DAY));
+        if (days <= 1) return today;
         const r = compare && compare[plan.strategy];
-        if (r && rest > 0) {
+        const out = { ...today };
+        if (r) {
             for (const [id, n] of Object.entries(r.used || {})) {
-                // Not bought: special refills (and their counters), EDVD the job pays for; the console is bought once.
-                if (id !== POINTS && !/^\d+$/.test(id)) continue;
-                if (Number(id) === GAME_CONSOLE) continue;
-                const extra = ((n || 0) / (horizonDays || 30)) * rest;
+                if (id === 'special') continue;
+                const extra = ((n || 0) / (horizonDays || 30)) * (days - 1);
                 if (extra > 0) out[id] = Math.ceil((out[id] || 0) + extra - 1e-9);
             }
         }
         return out;
-    }
-
-    /**
-     * The item-type ticks: what the player chose, plus every type the plan uses
-     * (candy was hidden by default), unless the player turned that one off.
-     */
-    function shownTypes(settings, planTypes = []) {
-        const show = new Set(Array.isArray(settings.buyTypes) ? settings.buyTypes : DEFAULT_BUY_TYPES);
-        const off = new Set(Array.isArray(settings.buyTypesOff) ? settings.buyTypesOff : []);
-        for (const k of planTypes) if (!off.has(k)) show.add(k);
-        return show;
-    }
-
-    /** A tick clicked: the settings patch ({buyTypes, buyTypesOff}). */
-    function toggleType(settings, planTypes, k) {
-        const show = shownTypes(settings, planTypes);
-        const off = new Set(Array.isArray(settings.buyTypesOff) ? settings.buyTypesOff : []);
-        const on = new Set(Array.isArray(settings.buyTypes) ? settings.buyTypes : DEFAULT_BUY_TYPES);
-        if (show.has(k)) {
-            on.delete(k);
-            off.add(k);
-        } else {
-            on.add(k);
-            off.delete(k);
-        }
-        return { buyTypes: [...on], buyTypesOff: [...off] };
-    }
-
-    /** "Lollipop · the plan’s pick: most stats in your budget, of 6 candy weighed". */
-    function candyNote(candy, pickBy = 'most') {
-        if (!candy) return '';
-        const rule = pickBy === 'value' ? 'the most stats per $1M' : pickBy === 'max' ? 'the most stats, no budget' : 'the most stats in your budget';
-        return 'the plan’s pick: ' + rule + (candy.options > 1 ? ', of ' + candy.options + ' candy weighed' : '');
     }
 
     function agoShort(at, now) {
@@ -8437,7 +7607,6 @@
     }
 
     function checkedText(row, p, now) {
-        if (row.source === SOURCE_NPC) return 'Torn item data';
         if (row.source === SOURCE_BAZAAR) return 'TornW3B · ' + agoShort(row.dataAt || p.w3bAt, now);
         return 'Torn API · ' + agoShort(p.imAt, now);
     }
@@ -8450,18 +7619,11 @@
         const s = ctx.settings;
         const now = m.now;
         const win = s.buyWindow || 'three';
+        const show = new Set(Array.isArray(s.buyTypes) ? s.buyTypes : DEFAULT_BUY_TYPES);
         const inv = ctx.statics.inventory || {};
         const needs = needList(needsForWindow(m, ctx.compare, ctx.plan, win, s.horizonDays), inv);
-        const planTypes = [...new Set(needs.map((n) => typeOf(n.id)))];
-        const show = shownTypes(s, planTypes);
         const toBuy = needs.filter((n) => n.buy > 0 && show.has(typeOf(n.id)));
-        // The plan's candy (picked in the comparison), and the city shops the player may buy from.
-        const mine = ctx.compare && ctx.compare[ctx.plan.strategy];
-        const candy = mine && mine.candy ? mine.candy : null;
-        const ic = itemContext(ctx.statics, s);
-        const tracked = TRACKED.map((id) => (id === CANDY_KISSES && candy ? candy.id : id));
-        // Every candy the plan might pick is priced too (fewer listings, every 30 min), so the pick can change with prices.
-        ctx.wantPrices([...new Set(toBuy.map((n) => n.id).concat(tracked.filter((id) => show.has(typeOf(id)))))], CANDY_PLANS.has(ctx.plan.strategy) ? CANDY_IDS : []);
+        ctx.wantPrices([...new Set(toBuy.map((n) => n.id).concat(TRACKED.filter((id) => show.has(typeOf(id)))))]);
         const prices = ctx.prices || {};
         let total = 0;
         const firstOpen = { done: false };
@@ -8469,20 +7631,17 @@
         const rows = [];
         for (const n of toBuy) {
             const p = prices[n.id] || {};
-            // A city shop the player ticked sells it: its price joins the listings (as many as needed).
-            const shop = ic.npc[n.id] ? npcListing(ic.npc[n.id], n.buy) : null;
-            const listings = (Array.isArray(p.listings) ? p.listings : []).concat(shop ? [shop] : []);
+            const listings = Array.isArray(p.listings) ? p.listings : [];
             const fill = listings.length ? fillCheapest(listings, n.buy, n.id) : null;
             if (fill) total += fill.total;
             const days = WINDOWS[win] || 1;
-            const perDay = n.id === GAME_CONSOLE ? 'once, for the console jump' : days > 1 ? Math.round((n.need / days) * 10) / 10 + ' a day' : n.need + ' today';
+            const perDay = days > 1 ? Math.round((n.need / days) * 10) / 10 + ' a day' : n.need + ' today';
             const side = listings.length ? sideLine(listings) : null;
-            const picked = candy && Number(n.id) === candy.id ? candyNote(candy, ctx.plan.pickBy) : '';
             rows.push(
                 h('tr', { class: 'ih' }, [
                     h('td', { colspan: '6' }, [
                         h('b', { text: n.name + ' × ' + fmtInt(n.buy) }),
-                        h('span', { class: 'muted', text: ' · ' + (n.id === POINTS ? refillWords() : perDay) + ' · you have ' + fmtInt(n.have) + (fill ? ' · ' + fmtMoney(fill.total) : '') + (picked ? ' · ' + picked : '') }),
+                        h('span', { class: 'muted', text: ' · ' + (n.id === POINTS ? refillWords() : perDay) + ' · you have ' + fmtInt(n.have) + (fill ? ' · ' + fmtMoney(fill.total) : '') }),
                         side ? h('span', { class: 'verdict c-good', style: 'margin-left:10px', text: side.text }) : null,
                     ]),
                 ]),
@@ -8504,7 +7663,6 @@
                         h('td', { class: 'r' }, [openBtn(r.link, primary)]),
                     ]),
                 );
-                if (r.source === SOURCE_NPC) rows.push(h('tr', { class: 'sub' }, [h('td', { colspan: '6', class: 'muted', text: 'City shop purchases count against Torn’s daily items allowance. Shown because you ticked ' + r.shop + ' under “Shops I can buy from”.' })]));
             }
             if (fill.short > 0) rows.push(h('tr', { class: 'sub' }, [h('td', { colspan: '6', class: 'c-bad', text: 'Only ' + fmtInt(fill.filled) + ' listed at these prices' })]));
             // The Item Market's cheapest, when the fill didn't need it: a check that bazaars really are cheaper.
@@ -8525,7 +7683,7 @@
         const deals = [];
         let hiddenDeals = 0;
         const planIds = new Set(needs.map((n) => String(n.id)));
-        for (const id of tracked) {
+        for (const id of TRACKED) {
             const p = prices[id];
             if (!p || !Array.isArray(p.listings) || !p.listings.length) continue;
             const best = p.listings.slice().sort((a, b) => a.price - b.price)[0];
@@ -8548,7 +7706,7 @@
                 ]),
             );
         }
-        const notInPlan = tracked.filter((id) => !planIds.has(String(id)) && show.has(typeOf(id)));
+        const notInPlan = TRACKED.filter((id) => !planIds.has(String(id)) && show.has(typeOf(id)));
         const cheapestRows = notInPlan.map((id) => {
             const p = prices[id];
             const best = p && Array.isArray(p.listings) && p.listings.length ? p.listings.slice().sort((a, b) => a.price - b.price)[0] : null;
@@ -8564,13 +7722,13 @@
         ]);
 
         // Pane: 7-day prices, what you hold, where prices come from.
-        const spark = tracked.filter((id) => show.has(typeOf(id))).map((id) => {
+        const spark = TRACKED.filter((id) => show.has(typeOf(id))).map((id) => {
             const p = prices[id] || {};
             const cheapest = p.listings && p.listings.length ? Math.min(...p.listings.map((l) => l.price)) : null;
             const pct = cheapest && p.avg7 ? (100 * (cheapest - p.avg7)) / p.avg7 : null;
             return h('tr', {}, [h('td', {}, [h('b', { class: 'w', text: itemName(id) })]), h('td', { style: 'width:96px' }, [sparkline(p.lows7 || [], { w: 90, h: 22, color: planIds.has(String(id)) ? '#efebe2' : '#6c737a' })]), h('td', { class: 'r' + (cheapest ? '' : ' muted'), text: cheapest ? '$' + fmtInt(cheapest) : ctx.paused ? 'paused' : p.error ? 'no answer' : 'loading…' }), h('td', { class: 'r ' + (pct !== null && pct < -1 ? 'c-good' : 'muted'), text: pct === null ? '' : (pct >= 0 ? '+' : '−') + Math.abs(pct).toFixed(1) + '%' })]);
         });
-        const heldIds = [...new Set([XANAX, POINTS, ECSTASY, EDVD, candy ? candy.id : CANDY_KISSES, FHC, MUNSTER].map(String))];
+        const heldIds = [...new Set([XANAX, POINTS, ECSTASY, EDVD, CANDY_KISSES, FHC, MUNSTER].map(String))];
         const held = heldIds.map((id) => [id === POINTS ? 'Points' : itemName(Number(id)), Number(inv[id === POINTS ? POINTS : Number(id)]) || 0]);
         const im = Object.values(prices).map((p) => p.imAt || 0);
         const bz = Object.values(prices).map((p) => p.w3bAt || 0);
@@ -8590,36 +7748,12 @@
             'div',
             { class: 'ticks', role: 'group', 'aria-label': 'Show' },
             BUY_TYPES.map(([k, label]) =>
-                h('button', { type: 'button', class: 'tk', 'aria-pressed': String(show.has(k)), onclick: () => ctx.setSettings(toggleType(s, planTypes, k)) }, [h('i'), label]),
+                h('button', { type: 'button', class: 'tk', 'aria-pressed': String(show.has(k)), onclick: () => { const next = new Set(show); if (next.has(k)) next.delete(k); else next.add(k); ctx.setSettings({ buyTypes: [...next] }); } }, [h('i'), label]),
             ),
         );
         const ctl = [t('lab', 'Buy for'), seg, h('span', { class: 'muted' }, [summary ? summary + ' · ' : 'Nothing to buy · ', h('b', { class: 'white', text: fmtMoney(total) })]), h('span', { class: 'sep' }), t('lab', 'Show'), ticks];
         const newest = Math.max(0, ...Object.values(prices).map((p) => p.at || 0));
-        const shops = shopsControl(ctx);
-        return { ctl: shops ? [ctl, shops] : [ctl], upd: newest ? 'prices ' + agoShort(newest, now) + ' ago' : 'prices load now', main: [listCard, dealsCard], pane };
-    }
-
-    /**
-     * "Shops I can buy from": a tick per city shop Torn's item data lists for
-     * candy, all off until ticked. Torn's API can't tell who may buy there (the
-     * owner: Sally's Sweet Shop is for newbies only), so the plan uses a shop's
-     * price only once it's ticked.
-     */
-    function shopsControl(ctx) {
-        const list = candyShopsFrom((ctx.statics && ctx.statics.items) || {});
-        if (!list.length) return null;
-        const on = new Set(Array.isArray(ctx.settings.npcShops) ? ctx.settings.npcShops : []);
-        return [
-            t('lab', 'Shops I can buy from'),
-            h(
-                'div',
-                { class: 'ticks', role: 'group', 'aria-label': 'Shops I can buy from' },
-                list.map((shop) =>
-                    h('button', { type: 'button', class: 'tk shop', 'aria-pressed': String(on.has(shop)), onclick: () => { const next = new Set(on); if (next.has(shop)) next.delete(shop); else next.add(shop); ctx.setSettings({ npcShops: [...next] }); } }, [h('i'), shop]),
-                ),
-            ),
-            h('span', { class: 'info', title: 'Torn doesn’t say who may buy at a city shop (Sally’s Sweet Shop is for newbies only). Tick the ones that sell to you and the plan may pick their candy; each row links to the shop. City shop buys count against Torn’s daily items allowance.', text: 'i' }),
-        ];
+        return { ctl: [ctl], upd: newest ? 'prices ' + agoShort(newest, now) + ' ago' : 'prices load now', main: [listCard, dealsCard], pane };
     }
 
     function refillWords() {
@@ -11684,29 +10818,14 @@
         return page.ffs;
     }
 
-    /**
-     * Listings kept for an item priced only so the plan can weigh it (every candy
-     * the plan might pick): the cheapest few, enough for a boost's 49.
-     */
-    const PRICE_LISTINGS_SLIM = 15;
-
-    /** ...and are asked again every 30 minutes, not 5 (about 19 candy: Torn's own market price fills in between). */
-    const PRICE_SLIM_FRESH_MS = 30 * 60 * 1000;
-
-    /**
-     * Fetch listings for the items the Buy list shows, if older than 5 minutes.
-     * `slim` ids (priced only to weigh them: the candy the plan might pick) keep fewer listings.
-     */
-    async function loadPrices(ids, slim = []) {
+    /** Fetch listings for the items the Buy list shows, if older than 5 minutes. */
+    async function loadPrices(ids) {
         // Nothing from Torn or TornW3B while Torn Trading runs (the two take turns).
         if (!getKey(K.apiKey) || isPaused() || get(K.apiKeyDead, false)) return;
         const prices = { ...(getPrices()) };
         const skip = new Set();
         const now = Date.now();
-        const full = new Set(ids.map(String));
-        const slimSet = new Set(slim.map(String).filter((id) => !full.has(id)));
-        const fresh = (id) => (slimSet.has(id) ? PRICE_SLIM_FRESH_MS : PRICE_FRESH_MS);
-        const due = [...new Set([...full, ...slimSet])].filter((id) => !page.loading.has(id) && !(prices[id] && now - (prices[id].at || 0) < fresh(id)));
+        const due = [...new Set(ids.map(String))].filter((id) => !page.loading.has(id) && !(prices[id] && now - (prices[id].at || 0) < PRICE_FRESH_MS));
         if (!due.length) return;
         for (const id of due) page.loading.add(id);
         let hist = readPriceHistory(get(K.priceHistory, null));
@@ -11754,7 +10873,7 @@
                 row.at = retryAt;
             }
             // Kept small: the cheapest listings only (GM storage is read on every Torn page).
-            row.listings = row.listings.sort((a, b) => a.price - b.price).slice(0, slimSet.has(id) ? PRICE_LISTINGS_SLIM : PRICE_LISTINGS_KEPT);
+            row.listings = row.listings.sort((a, b) => a.price - b.price).slice(0, PRICE_LISTINGS_KEPT);
             const cheapest = row.listings.length ? row.listings[0].price : null;
             if (cheapest) hist = recordPrice(hist, id, Date.now(), cheapest);
             const avg = average7(hist, id, Date.now());
@@ -11939,8 +11058,8 @@
                 refresh();
                 page.app.render(true);
             },
-            wantPrices: (ids, slim = []) => {
-                if (isVisible()) setTimeout(() => loadPrices(ids, slim).catch(() => {}), 0);
+            wantPrices: (ids) => {
+                if (isVisible()) setTimeout(() => loadPrices(ids).catch(() => {}), 0);
             },
             saveTornKey,
             saveFfsKey,

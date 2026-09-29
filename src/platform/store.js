@@ -62,6 +62,8 @@ export const DEFAULT_SETTINGS = {
     donator: true,
     odRisk: 0,
     w3b: true,
+    // Buy › Shops I can buy from: city shops whose prices the plan may use (none until ticked; Sally's is for newbies only).
+    npcShops: [],
 };
 
 /**

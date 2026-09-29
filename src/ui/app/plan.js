@@ -33,7 +33,8 @@ export function planPerDay(r, days) {
     // The candy the plan picked, by name.
     const candyId = r.candy ? r.candy.id : CANDY_KISSES;
     if (per(candyId) && !per(EDVD)) parts.push(r.candy ? itemName(candyId) : 'candy');
-    if (((r.used && r.used[POINTS]) || 0) >= REFILL_POINTS * days * 0.9) parts.push('refill');
+    // A refill a day, points or (while specials are held) a special.
+    if (((r.used && r.used[POINTS]) || 0) / REFILL_POINTS + ((r.used && r.used.dailySpecial) || 0) >= days * 0.9) parts.push('refill');
     return parts.join(' + ') || '—';
 }
 
