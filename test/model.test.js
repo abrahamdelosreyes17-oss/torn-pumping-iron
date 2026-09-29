@@ -95,5 +95,6 @@ test('the projection is kept while nothing it depends on changes', () => {
 
 test('a build with its high stat moved ("baldr:dex")', () => {
     assert.equal(buildOf('baldr:dex').shares.dex, 0.309);
-    assert.equal(buildOf('nonsense').id, 'balanced');
+    assert.equal(buildOf('baldr:dex').name, "Baldr's, DEX high");
+    assert.equal(buildOf('nonsense').base, 'baldr', 'unknown ids fall back to the default specialist build');
 });

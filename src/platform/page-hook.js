@@ -59,7 +59,8 @@ export function installAttackHook(win, onData) {
             }
             return promise;
         };
-        win.fetch = wrapped;
+        // Firefox's script sandbox can't give the page a plain function: export it, or leave fetch alone.
+        win.fetch = typeof exportFunction === 'function' ? exportFunction(wrapped, win) : wrapped;
         win[HOOK_FLAG] = true;
         return true;
     } catch {

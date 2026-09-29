@@ -91,6 +91,7 @@ function buyPane(m, ctx) {
         }),
         needs.length ? null : h('div', { class: 'bi' }, [h('div', {}, [h('b', { text: 'Nothing to buy today' })]), h('span'), h('span'), h('small', { text: 'Your inventory covers the plan' })]),
         h('div', { class: 'buyfoot' }, [h('span', { text: held.length ? held.map((n) => n.have + ' ' + n.name + ' in inventory').join(' · ') : 'Nothing held yet' }), h('b', { text: total ? fmtMoney(total) : '' })]),
+        ctx.settings.w3b !== false ? h('small', { class: 'muted', style: 'font-size:11px;margin-top:4px' }, ['Bazaar prices: ', h('a', { href: 'https://weav3r.dev', target: '_blank', rel: 'noopener', text: 'TornW3B' })]) : null,
     ]);
     return h('div', {}, [sectionHead('Buy today', h('span', { class: 'meta' }, [h('a', { href: '#buy', onclick: (e) => { e.preventDefault(); ctx.go('buy'); }, text: 'Next 3 days' })])), list]);
 }

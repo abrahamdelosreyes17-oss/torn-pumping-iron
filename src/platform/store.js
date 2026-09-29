@@ -53,9 +53,10 @@ export const DEFAULT_SETTINGS = {
     bands: DEFAULT_BANDS,
     donator: true,
     odRisk: 0,
+    w3b: true,
 };
 
-export const DEFAULT_PLAN = { type: 'steady', strategy: 'steady', build: 'balanced', goal: null, createdAt: 0, strategyPicked: false };
+export const DEFAULT_PLAN = { type: 'steady', strategy: 'steady', build: 'baldr', buildPicked: false, goal: null, createdAt: 0, strategyPicked: false };
 
 function merged(stored, defaults) {
     return stored && typeof stored === 'object' && !Array.isArray(stored) ? { ...defaults, ...stored } : { ...defaults };

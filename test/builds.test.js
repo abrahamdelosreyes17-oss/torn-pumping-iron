@@ -7,21 +7,29 @@ import { unlockedGyms, gymById, GYM_3000, BALBOAS, ELITES, ISOYAMAS, GEORGES } f
 const FRIEND = { str: 118400, spd: 110900, def: 96200, dex: 82700 };
 const BAL = BUILDS.balanced.shares;
 
-test('seven presets, shares adding to 100%, Balanced by default', () => {
-    assert.equal(BUILD_ORDER.length, 7);
-    assert.equal(DEFAULT_BUILD, 'balanced');
-    for (const id of BUILD_ORDER) {
+test('the presets add to 100%; specialist first, Balanced last and not the default', () => {
+    assert.equal(BUILD_ORDER.length, 5);
+    assert.equal(DEFAULT_BUILD, 'baldr');
+    assert.equal(BUILD_ORDER[BUILD_ORDER.length - 1], 'balanced');
+    for (const id of Object.keys(BUILDS)) {
         const s = BUILDS[id].shares;
         assert.ok(Math.abs(s.str + s.spd + s.def + s.dex - 1) < 0.002, id);
     }
     assert.deepEqual(BUILDS.hank.gyms, [GYM_3000, BALBOAS]);
 });
 
-test('a preset\'s high stat can move: Baldr\'s on DEX uses Elites', () => {
+test('a preset\'s high stat can move and keeps its shape: Baldr\'s on DEX is DEX + DEF, Elites + Balboas', () => {
     const b = withHighStat('baldr', 'dex');
     assert.equal(b.shares.dex, BUILDS.baldr.shares.str);
+    assert.equal(b.shares.def, BUILDS.baldr.shares.spd, 'its partner follows');
     assert.equal(b.shares.str, BUILDS.baldr.shares.dex);
     assert.ok(b.gyms.includes(ELITES));
+    assert.ok(b.gyms.includes(BALBOAS));
+    assert.deepEqual(withHighStat('hank', 'def').shares, BUILDS.hankDef.shares, "Hank's on DEF is Hank's defensive");
+    assert.deepEqual(withHighStat('hank', 'def').gyms, BUILDS.hankDef.gyms);
+    const spd = withHighStat('baldr', 'spd');
+    assert.equal(spd.shares.spd, 0.309);
+    assert.equal(spd.shares.str, 0.247);
     assert.equal(withHighStat('baldr', 'str'), BUILDS.baldr);
     assert.equal(withHighStat('nope', 'str'), null);
 });
@@ -85,4 +93,18 @@ test('gaps and on-build', () => {
     assert.ok(Math.abs(g.dex.gap - (0.25 * 408200 - 82700)) < 1e-6);
     assert.equal(onBuild(FRIEND, BAL), false);
     assert.equal(onBuild({ str: 100, spd: 100, def: 100, dex: 101 }, BAL), true);
+});
+
+test('high stats: only builds with a clear leader take one; names say it', async () => {
+    const { highStatOf, resolveBuild } = await import('../src/core/builds.js');
+    assert.equal(highStatOf('baldr'), 'str');
+    assert.equal(highStatOf('hank:dex'), 'dex');
+    assert.equal(highStatOf('tank'), null);
+    assert.equal(highStatOf('offense'), null);
+    assert.equal(highStatOf('balanced'), null);
+    assert.equal(highStatOf('baldrDef'), 'def');
+    assert.equal(resolveBuild('hank:def').name, "Hank's, DEF high");
+    assert.deepEqual(resolveBuild('hankDef').shares, BUILDS.hankDef.shares);
+    assert.equal(resolveBuild('tank').name, 'Tank');
+    assert.equal(resolveBuild('nope').base, 'baldr');
 });

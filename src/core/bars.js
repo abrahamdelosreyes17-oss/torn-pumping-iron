@@ -67,11 +67,15 @@ export function normalizeState(api, at) {
     const bars = a.bars || {};
     const cd = a.cooldowns || {};
     let stats = null;
+    let statMods = null;
     if (a.battlestats && typeof a.battlestats === 'object') {
         stats = {};
+        statMods = {};
         for (const [k, short] of Object.entries(API_STAT)) {
             const v = a.battlestats[k];
             stats[short] = Number(v && typeof v === 'object' ? v.value : v) || 0;
+            // Merits, faction and passive bonuses on that stat, in % (what counts in a fight).
+            statMods[short] = Number(v && typeof v === 'object' ? v.modifier : 0) || 0;
         }
     }
     return {
@@ -84,6 +88,7 @@ export function normalizeState(api, at) {
         medicalCd: Number(cd.medical) || 0,
         refillUsed: a.refills ? Boolean(a.refills.energy) : null,
         stats,
+        statMods,
         gymId: a.gym && a.gym.id ? Number(a.gym.id) : null,
         gymName: a.gym && a.gym.name ? String(a.gym.name) : null,
     };

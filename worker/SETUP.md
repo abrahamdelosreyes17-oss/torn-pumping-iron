@@ -27,7 +27,7 @@ Deploy:
 npx wrangler deploy
 ```
 
-It prints your service address, like `https://pumping-iron.<you>.workers.dev`. Open `<address>/health` in a browser: it should say `{"ok":true,"users":0}`.
+It prints your service address, like `https://pumping-iron.<you>.workers.dev`. Open `<address>/health` in a browser: it should say `{"ok":true}`.
 
 The free plan is enough: one cron run a minute, a few requests per user per minute, one small database.
 

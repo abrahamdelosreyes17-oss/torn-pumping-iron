@@ -32,7 +32,7 @@ const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(
 
 function clients() {
     if (!eye.ffs) eye.ffs = makeFfsClient({ getKey: () => getKey(K.ffsKey), isVisible, loadShared: () => get('ffsWindow', {}), saveShared: (s) => set('ffsWindow', s) });
-    if (!eye.ts) eye.ts = makeTsClient({ getKey: () => getKey(K.tsKey), isVisible });
+    if (!eye.ts) eye.ts = makeTsClient({ getKey: () => getKey(K.tsKey), isVisible, loadShared: () => get('tsWindow', {}), saveShared: (s) => set('tsWindow', s) });
     return eye;
 }
 
@@ -234,7 +234,9 @@ export function eyeView(id, extra = {}, { war = false } = {}) {
     const prof = r.profile || {};
     const level = prof.level || extra.level || null;
     const life = prof.life || extra.life || lifeFromLevel(level);
-    const meStats = m.pc.stats;
+    // Your stats as they fight: merits and passives (Torn's battlestats modifier) included.
+    const mods = m.state.statMods || {};
+    const meStats = Object.fromEntries(Object.entries(m.pc.stats).map(([k, v]) => [k, v * (1 + (mods[k] || 0) / 100)]));
     const attacks = (get('myAttacks', null) || {}).list || [];
     const fights = attacks.filter((a) => Number(a.def) === Number(id)).sort((a, b) => b.ended - a.ended);
     const pub = r.pub && (prof.rank || extra.rank) ? { rank: prof.rank || extra.rank, level, crimes: r.pub.crimes, networth: r.pub.networth } : null;

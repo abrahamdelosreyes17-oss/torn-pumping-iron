@@ -8,7 +8,8 @@ import { STATS, STAT_LABEL } from '../../core/gain.js';
 import { fmtInt, fmtShort, fmtMoney, fmtPct, fmtSigned } from '../../core/format.js';
 import { STRATEGIES } from '../../core/strategies.js';
 import { pickWarning } from '../../core/recommend.js';
-import { BUILDS, BUILD_ORDER } from '../../core/builds.js';
+import { BUILDS, BUILD_ORDER, BUILD_ALIASES, resolveBuild, highStatOf } from '../../core/builds.js';
+import { GEORGES } from '../../core/gyms.js';
 import { gymById } from '../../core/gyms.js';
 import { XANAX, EDVD, ECSTASY, POINTS, REFILL_POINTS } from '../../core/items.js';
 import { sectionHead, meta, statRowsBlock, headsList, STAT_COLOR } from './common.js';
@@ -151,11 +152,17 @@ export function renderPlan(m, ctx) {
         );
     }
 
+    // The build is yours to pick (specialist builds first); the high stat decides where the specialist gym and merits go.
+    const current = BUILD_ALIASES[plan.build] || String(plan.build || 'baldr');
+    const curBase = current.split(':')[0];
+    const high = highStatOf(current) || 'str';
+    const buildFor = (id) => (highStatOf(id) ? resolveBuild(id + ':' + high) : BUILDS[id]);
+    const buildIdFor = (id) => (highStatOf(id) ? id + ':' + high : id);
     const buildRows = BUILD_ORDER.map((id) => {
-        const b = BUILDS[id];
-        const sel = String(plan.build || 'balanced').split(':')[0] === id;
-        return h('div', { class: 'brow' + (sel ? ' sel' : ''), tabindex: '0', role: 'button', onclick: () => ctx.setPlan({ build: id }) }, [
-            h('b', {}, [b.name, sel ? h('span', { class: 'pill-tag chalk', style: 'margin-left:6px', text: 'Now' }) : null]),
+        const b = buildFor(id);
+        const sel = curBase === id;
+        return h('div', { class: 'brow' + (sel ? ' sel' : ''), tabindex: '0', role: 'button', onclick: () => ctx.setPlan({ build: buildIdFor(id), buildPicked: true }) }, [
+            h('b', {}, [BUILDS[id].name, sel ? h('span', { class: 'pill-tag chalk', style: 'margin-left:6px', text: plan.buildPicked ? 'Yours' : 'Pick one' }) : null]),
             h('div', { class: 'ratio' }, STATS.map((k) => h('i', { style: 'width:' + (b.shares[k] * 100).toFixed(1) + '%;background:' + STAT_COLOR[k] }))),
             t('', b.line),
             t('', b.gyms.map((g) => (gymById(g) || { name: '' }).name.replace(' Gym', '').replace('Mr. ', '')).join(' + ')),
@@ -193,5 +200,12 @@ export function renderPlan(m, ctx) {
         h('div', {}, [sectionHead('When you’re late', null, null, 'h3'), headsList([{ tone: 'plain', text: 'Steady and goal plans', sub: 're-time by themselves; later steps move' }, { tone: 'warn', text: 'Jump plans', sub: 'warn 5 min before the tick or cooldown, then re-time' }])]),
     ];
 
-    return { main: [recCard, h('div', {}, blocks), h('div', {}, [sectionHead('Build', meta(['how your total splits across the four stats · the plan picks where each train goes'])), h('div', { class: 'builds num' }, buildRows)]), youVs], pane };
+    const highSeg = h('div', { class: 'row', style: 'margin:0 0 8px' }, [
+        t('lab', 'High stat'),
+        h('div', { class: 'seg', role: 'group', 'aria-label': 'High stat' }, STATS.map((k) => h('button', { type: 'button', 'aria-pressed': String(k === high), onclick: () => ctx.setPlan({ build: (highStatOf(curBase) ? curBase : 'baldr') + ':' + k, buildPicked: true }), text: STAT_LABEL[k] }))),
+        h('span', { class: 'muted', style: 'font-size:12px', text: highStatOf(curBase) ? 'where the single-stat gym and your merits go (DEF or DEX high = the defensive version)' : 'for Baldr\u2019s and Hank\u2019s' }),
+    ]);
+    const georges = m.pc.unlocked.includes(GEORGES);
+    const buildNote = georges ? null : h('p', { class: 'muted', style: 'margin:8px 0 0;font-size:12px', text: 'Specialist gyms open after George\u2019s. Until then every train still moves you toward this build, so you qualify the day they open.' });
+    return { main: [recCard, h('div', {}, blocks), h('div', {}, [sectionHead('Build', meta([plan.buildPicked ? 'the plan trains toward your build' : 'pick your build type: the plan trains toward it'])), highSeg, h('div', { class: 'builds num' }, buildRows), buildNote]), youVs], pane };
 }

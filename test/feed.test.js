@@ -148,3 +148,22 @@ test('slower parts refresh on their own clocks, not every poll', async () => {
     await feed.tick();
     assert.equal(perksCalls(), 2);
 });
+
+test('no key yet is not a refused key: nothing is marked dead, nothing is sent', async () => {
+    let t = 1_790_000_000_000;
+    const store = memStore();
+    const f = fakeTorn(() => ({}));
+    const client = new TornApiClient({ getKey: () => '', fetchImpl: f, maxRetries: 0, dedupTtlMs: 0 });
+    const feed = new StateFeed({ client, store, tabId: 'A', now: () => t });
+    await feed.tick();
+    await feed.tick();
+    assert.equal(store.get('apiKeyDead', false), false);
+    assert.equal(f.calls.length, 0);
+});
+
+test('a key Torn refuses on ANY call is reported dead (onDeadKey), not only in the feed', async () => {
+    const dead = [];
+    const client = new TornApiClient({ getKey: () => 'k'.repeat(16), fetchImpl: fakeTorn(() => ({ error: { code: 13, error: 'Key disabled' } })), maxRetries: 0, onDeadKey: (c) => dead.push(c) });
+    await assert.rejects(client.get('v2/market/pointsmarket'));
+    assert.deepEqual(dead, [13]);
+});

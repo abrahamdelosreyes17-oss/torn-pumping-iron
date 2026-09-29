@@ -118,8 +118,8 @@ async function checkTab(page, tab, errors, want) {
 }
 
 const TABS = {
-    home: ['Today', 'Take Xanax #1, then train DEX × 27', 'Refill · 30 points', 'Buy today', 'Heads-up', 'Steady training is still best', 'against Balanced build'],
-    plan: ['Recommended', 'Steady training', 'Other plans', 'Choco jump', 'Build', "Hank's", 'You vs Balanced'],
+    home: ['Today', 'Take Xanax #1, then train', 'Refill · 30 points', 'Buy today', 'Heads-up', 'Pick your build type', "against Baldr's, STR high build"],
+    plan: ['Recommended', 'Steady training', 'Other plans', 'Choco jump', 'Build', 'High stat', "Hank's", "You vs Baldr's, STR high", 'Pick one'],
     buy: ['Buy for', 'Xanax', 'Iron_Monk', 'Points market', '7-day prices', 'TornW3B'],
     progress: ['Stats', 'Gyms', 'Force Training', 'This week'],
     eye: ['Targets', 'Colours', 'Sources', 'FFScouter', 'Gear seen'],
@@ -147,6 +147,19 @@ if (!only.length || only.includes('plan')) {
     await page.waitForTimeout(300);
     m = await measure(page);
     ok(!m.text.includes("isn't worth it"), 'plan: keeping steady closes the warning');
+    // Build type is yours: pick DEF as the high stat, then Hank's.
+    await page.locator('#pi-app .seg[aria-label="High stat"] button', { hasText: 'DEF' }).click();
+    await page.waitForTimeout(300);
+    let plan = await page.evaluate(() => JSON.parse(_store['pumpingIron.v1.plan']));
+    ok(plan.build === 'baldr:def' && plan.buildPicked === true, 'build: DEF as the high stat is saved (' + plan.build + ')');
+    await page.locator('#pi-app .brow', { hasText: "Hank's" }).first().click();
+    await page.waitForTimeout(300);
+    plan = await page.evaluate(() => JSON.parse(_store['pumpingIron.v1.plan']));
+    ok(plan.build === 'hank:def', "build: Hank's with DEF high picked (" + plan.build + ')');
+    const shown = await measure(page);
+    ok(shown.text.includes("You vs Hank's, DEF high"), 'build: the plan names it');
+    m = await measure(page);
+    ok(m.text.toLowerCase().includes('yours') && m.text.includes('the plan trains toward your build'), 'build: marked as yours');
     // The density switch applies app-wide.
     await page.locator('#pi-app .top button', { hasText: 'Comfortable' }).click();
     await page.waitForTimeout(300);

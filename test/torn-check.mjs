@@ -61,7 +61,7 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
 
 /* Gym page: the friend right after Xanax #2 (275 energy) at Gun Shop. */
 {
-    const { page, errors, tornHits } = await open('page=gym&fixture=gym-friend&energy=275');
+    const { page, errors, tornHits } = await open('page=gym&fixture=gym-friend&energy=275&build=balanced');
     const strip = (await text(page, '.pi-strip'))[0] || '';
     ok(strip.includes('Balanced') && strip.includes('DEX is furthest behind'), 'gym: strip names the build and the stat behind (' + strip + ')');
     ok(/Force Training in [\d,]+ E/.test(strip), 'gym: next gym from the page\'s 80% (' + strip + ')');
@@ -158,7 +158,7 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
         const c = document.getElementById('pi-overlay').shadowRoot.querySelector('.card');
         return { hidden: c.hidden, text: c.textContent };
     });
-    ok(!card.hidden && /Take Xanax #1, then train DEX/.test(card.text) && /Open Pumping Iron/.test(card.text), 'card: opens on hover with the step and the link');
+    ok(!card.hidden && /Take Xanax #1, then train (STR|SPD|DEF|DEX)/.test(card.text) && /Open Pumping Iron/.test(card.text), 'card: opens on hover with the step and the link');
     await page.locator('#pi-overlay .open').click();
     const opened = await page.evaluate(() => window.__opened || []);
     ok(opened[0] === 'https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html', 'card: Open Pumping Iron opens the webpage in a new tab');
@@ -191,7 +191,10 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
 }
 {
     const { page, errors } = await open('page=faction&ID=7777&fixture=faction&ffs=1&who=owner', { wait: 6500 });
-    const order = await page.evaluate(() => [...document.querySelectorAll('#faction_war_list_id li.enemy .member a[href*="XID"]')].map((a) => a.getAttribute('aria-label').replace('View profile of ', '')));
+    // Shown order (CSS order on Torn's rows; the DOM itself is untouched).
+    const order = await page.evaluate(() => [...document.querySelectorAll('#faction_war_list_id li.enemy')].sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top).map((li) => li.querySelector('.member a[href*="XID"]').getAttribute('aria-label').replace('View profile of ', '')));
+    const domOrder = await page.evaluate(() => [...document.querySelectorAll('#faction_war_list_id li.enemy .member a[href*="XID"]')].map((a) => a.getAttribute('aria-label').replace('View profile of ', '')));
+    ok(JSON.stringify(domOrder) === JSON.stringify(['Flyer', 'Mira_Vex', 'Rival', 'Brix']), "war: Torn's rows are not moved in the page");
     ok(JSON.stringify(order) === JSON.stringify(['Rival', 'Brix', 'Mira_Vex', 'Flyer']), 'war: Okay first, then Hospital by time out, then Traveling (' + order + ')');
     const sum = (await text(page, '.pi-warsum'))[0] || '';
     ok(/1 attackable now/.test(sum) && /0:4\d until the next one is out/.test(sum) && /1 traveling/.test(sum), 'war: summary line (' + sum + ')');

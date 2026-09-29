@@ -8,7 +8,7 @@ import { gymAccess, gymById, bestGymFor, GYMS, BALBOAS, FRONTLINE, GYM_3000, ISO
 
 /** Share of the total, per stat. The first listed gyms are the ones the build relies on. */
 export const BUILDS = {
-    balanced: { id: 'balanced', name: 'Balanced', shares: { str: 0.25, spd: 0.25, def: 0.25, dex: 0.25 }, gyms: [GEORGES], line: 'Strong everywhere, best at defending. Stay until George\'s.' },
+    balanced: { id: 'balanced', name: 'Balanced', shares: { str: 0.25, spd: 0.25, def: 0.25, dex: 0.25 }, gyms: [GEORGES], line: 'Even split. No specialist gym, no stat for merits to lift.' },
     baldr: { id: 'baldr', name: "Baldr's", shares: { str: 0.309, spd: 0.247, def: 0.222, dex: 0.222 }, gyms: [GYM_3000, FRONTLINE], line: 'One stat high, its partner close. Easy to leave.' },
     baldrDef: { id: 'baldrDef', name: "Baldr's defensive", shares: { str: 0.222, spd: 0.222, def: 0.309, dex: 0.247 }, gyms: [ISOYAMAS, BALBOAS], line: 'Hard to hit and hard to hurt.' },
     hank: { id: 'hank', name: "Hank's", shares: { str: 0.347, spd: 0.097, def: 0.278, dex: 0.278 }, gyms: [GYM_3000, BALBOAS], line: 'Fastest total growth, weakest in a fight.' },
@@ -17,9 +17,34 @@ export const BUILDS = {
     offense: { id: 'offense', name: 'Offense', shares: { str: 0.31, spd: 0.31, def: 0.19, dex: 0.19 }, gyms: [FRONTLINE], line: 'Hits often and hard; takes hits badly.' },
 };
 
-export const BUILD_ORDER = ['balanced', 'baldr', 'baldrDef', 'hank', 'hankDef', 'tank', 'offense'];
+/**
+ * The builds you pick from. Baldr's and Hank's take a high stat you choose
+ * (their defensive versions are DEF or DEX high), then the pair builds, and
+ * Balanced last.
+ */
+export const BUILD_ORDER = ['baldr', 'hank', 'tank', 'offense', 'balanced'];
 
-export const DEFAULT_BUILD = 'balanced';
+/** Old ids of the defensive presets, as a base + high stat. */
+export const BUILD_ALIASES = { baldrDef: 'baldr:def', hankDef: 'hank:def' };
+
+/**
+ * Until you pick, plans work toward Baldr's with STR high (a specialist build
+ * that stays close to even), and Home asks you to pick. The owner's rule:
+ * specialist builds are the meta; the plan follows the build you choose.
+ */
+export const DEFAULT_BUILD = 'baldr';
+
+/** Builds with a high stat you choose (the single-stat specialist gym and your merits go there). */
+export function highStatOf(buildId) {
+    const id = BUILD_ALIASES[buildId] || String(buildId || DEFAULT_BUILD);
+    const [base, high] = id.split(':');
+    const b = BUILDS[base];
+    if (!b) return null;
+    const sorted = [...STATS].sort((x, y) => b.shares[y] - b.shares[x]);
+    // A single high stat only when it clearly leads (Tank, Offense and Balanced have none).
+    if (!(b.shares[sorted[0]] - b.shares[sorted[1]] > 0.02)) return null;
+    return STATS.includes(high) ? high : sorted[0];
+}
 
 /** Within this many percentage points of the target counts as "on build". */
 export const ON_BUILD_PP = 0.5;
@@ -27,18 +52,53 @@ export const ON_BUILD_PP = 0.5;
 const SINGLE = { str: GYM_3000, def: ISOYAMAS, spd: TOTAL_REBOUND, dex: ELITES };
 const PAIR_OF = { str: FRONTLINE, spd: FRONTLINE, def: BALBOAS, dex: BALBOAS };
 
+/** The same-side partner of each stat (STR+SPD attack, DEF+DEX defence). */
+const PARTNER = { str: 'spd', spd: 'str', def: 'dex', dex: 'def' };
+
 /**
- * A preset with its high stat moved (e.g. Baldr's on DEX uses Elites +
- * Balboas): the shares of `from` and `to` swap, and so do the gyms.
+ * A preset with its high stat moved, keeping its shape: Baldr's on DEX is
+ * DEX high with DEF (its partner) close behind, using Elites + Balboas;
+ * Hank's on DEF is Hank's defensive. The stat's partner follows it, the
+ * other pair swaps sides when needed, and the gyms follow the stats.
  */
 export function withHighStat(buildId, stat) {
     const b = BUILDS[buildId];
-    if (!b) return null;
+    if (!b || !STATS.includes(stat)) return null;
     const high = STATS.reduce((a, k) => (b.shares[k] > b.shares[a] ? k : a), 'str');
     if (high === stat) return b;
-    const shares = { ...b.shares, [high]: b.shares[stat], [stat]: b.shares[high] };
-    const gyms = b.gyms.map((id) => (id === SINGLE[high] ? SINGLE[stat] : id === PAIR_OF[high] && PAIR_OF[high] !== PAIR_OF[stat] ? PAIR_OF[stat] : id));
+    const to = {};
+    if (PARTNER[high] === stat) {
+        to[high] = stat;
+        to[stat] = high;
+        for (const k of STATS) if (!(k in to)) to[k] = k;
+    } else {
+        to[high] = stat;
+        to[PARTNER[high]] = PARTNER[stat];
+        to[stat] = high;
+        to[PARTNER[stat]] = PARTNER[high];
+    }
+    const shares = {};
+    for (const k of STATS) shares[to[k]] = b.shares[k];
+    const gymOf = {};
+    for (const k of STATS) {
+        gymOf[SINGLE[k]] = SINGLE[to[k]];
+        gymOf[PAIR_OF[k]] = PAIR_OF[to[k]];
+    }
+    const gyms = b.gyms.map((id) => gymOf[id] || id);
     return { ...b, id: buildId + ':' + stat, shares, gyms };
+}
+
+const HIGH_WORD = { str: 'STR', spd: 'SPD', def: 'DEF', dex: 'DEX' };
+
+/** A build id ("hank", "hank:def", "baldrDef") as the build the plan uses, named with its high stat. */
+export function resolveBuild(buildId) {
+    const id = BUILD_ALIASES[buildId] || String(buildId || DEFAULT_BUILD);
+    const [base] = id.split(':');
+    if (!BUILDS[base]) return resolveBuild(DEFAULT_BUILD);
+    const high = highStatOf(id);
+    if (!high) return BUILDS[base];
+    const b = withHighStat(base, high) || BUILDS[base];
+    return { ...b, base, high, name: BUILDS[base].name + ', ' + HIGH_WORD[high] + ' high' };
 }
 
 /** Each stat's share of the total, and its gap to the build (in stat points). */

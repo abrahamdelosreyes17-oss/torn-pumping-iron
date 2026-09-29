@@ -5,7 +5,7 @@
  */
 
 import { gmOnChange } from './platform/gm.js';
-import { K, get, set, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup } from './platform/store.js';
+import { K, get, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup } from './platform/store.js';
 import { pi, tornClient, refresh, onModel, isVisible } from './runtime.js';
 import { PiApp } from './ui/app/app.js';
 import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, keyIsEnough } from './api/torn.js';
@@ -30,7 +30,7 @@ const page = { app: null, w3b: null, ffs: null, loading: new Set(), eye: { loadi
 
 function w3bClient() {
     if (!page.w3b) {
-        const win = tabWindow('w3bWindow', pi.tabId, { get: (k, fb) => get(k, fb), set: (k, v) => set(k, v), del: (k) => set(k, null) });
+        const win = tabWindow('w3bWindow', pi.tabId, { get: (k, fb) => get(k, fb), set: (k, v) => set(k, v), del: (k) => del(k) });
         page.w3b = new W3bClient({ isVisible, addShared: (at) => win.add(at), loadShared: () => ({ recent: win.load(), cooldownUntil: get('w3bCooldown', 0) }), saveShared: (s) => set('w3bCooldown', s.cooldownUntil || 0) });
     }
     return page.w3b;
@@ -60,6 +60,7 @@ export async function loadPrices(ids) {
                 row.listings = listingsFromItemMarket(await fetchItemMarket(tornClient(), id));
                 row.imAt = Date.now();
                 try {
+                    if (getSettings().w3b === false) throw new Error('TornW3B is off');
                     const w = await fetchW3bListings(w3bClient(), id);
                     row.listings = row.listings.concat(listingsFromW3b(w).filter((l) => l.sellerId && l.price > 1));
                     row.w3bAt = Date.now();

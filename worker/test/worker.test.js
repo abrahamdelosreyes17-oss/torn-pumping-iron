@@ -92,7 +92,7 @@ test('PUT /plan: the first sync needs the invite code; the secret is stored hash
     assert.equal(r.status, 403);
     r = await handle(req('PUT', '/plan', { invite: 'letmein', body: { tornKey: KEY, webhookUrl: HOOK, discordId: DISCORD, plan } }), env);
     assert.equal(r.status, 200);
-    assert.deepEqual(await r.json(), { ok: true, created: true, ready: true });
+    assert.deepEqual(await r.json(), { ok: true, created: true, ready: true, paused: false, lastError: null });
     const [id] = env.DB.users.keys();
     assert.notEqual(id, SECRET);
     assert.equal(id.length, 64, 'sha-256 hex');
@@ -122,10 +122,26 @@ test('POST /test sends one ping to the saved webhook', async () => {
     assert.match(JSON.parse(f.calls[0].init.body).content, new RegExp('^<@' + DISCORD + '> test ping'));
 });
 
-test('GET /health counts users', async () => {
+test('GET /health says only that it is up (no user count), with no CORS header', async () => {
     const env = { DB: fakeD1(), INVITE_CODE: 'x' };
     await handle(req('PUT', '/plan', { invite: 'x', body: { tornKey: KEY, webhookUrl: HOOK } }), env);
-    assert.deepEqual(await (await handle(req('GET', '/health', { secret: null }), env)).json(), { ok: true, users: 1 });
+    const r = await handle(req('GET', '/health', { secret: null }), env);
+    assert.deepEqual(await r.json(), { ok: true });
+    assert.equal(r.headers.get('access-control-allow-origin'), null);
+});
+
+test('a plan sync does not undo a dead-key pause; a new key does', async () => {
+    const env = { DB: fakeD1(), INVITE_CODE: 'x' };
+    await handle(req('PUT', '/plan', { invite: 'x', body: { tornKey: KEY, webhookUrl: HOOK, plan } }), env);
+    await runCron(env, T, recorder(() => new Response(JSON.stringify({ error: { code: 2, error: 'Incorrect key' } }))));
+    let r = await (await handle(req('PUT', '/plan', { body: { plan } }), env)).json();
+    assert.equal(r.paused, true);
+    assert.match(r.lastError, /Torn error 2/);
+    r = await (await handle(req('PUT', '/plan', { body: { tornKey: KEY, plan } }), env)).json();
+    assert.equal(r.paused, true, 'the same key again changes nothing');
+    r = await (await handle(req('PUT', '/plan', { body: { tornKey: 'NewCustomKey1234', plan } }), env)).json();
+    assert.equal(r.paused, false);
+    assert.equal(r.lastError, null);
 });
 
 test('cron: one Torn read per user with the Worker key in a header, one ping per alert, deduped', async () => {

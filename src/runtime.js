@@ -5,7 +5,7 @@
  */
 
 import { gmOnChange } from './platform/gm.js';
-import { K, get, set, getKey, getSettings, getPlan } from './platform/store.js';
+import { K, get, set, del, getKey, getSettings, getPlan } from './platform/store.js';
 import { tabWindow } from './platform/tab-window.js';
 import { makeTabId, LEADER_HEARTBEAT_MS } from './core/leader.js';
 import { TornApiClient } from './api/client.js';
@@ -28,7 +28,7 @@ export function isVisible() {
     return typeof document === 'undefined' || document.visibilityState !== 'hidden';
 }
 
-export const storeApi = { get: (k, fb) => get(k, fb), set: (k, v) => set(k, v), del: (k) => set(k, null) };
+export const storeApi = { get: (k, fb) => get(k, fb), set: (k, v) => set(k, v), del: (k) => del(k) };
 
 /** The one Torn client every part of this tab uses: 70/min across tabs, visible only. */
 export function tornClient() {
@@ -42,6 +42,7 @@ export function tornClient() {
         loadPause: () => get(K.apiPause, null),
         savePause: (p) => set(K.apiPause, p),
         isVisible,
+        onDeadKey: () => set(K.apiKeyDead, true),
     });
     return pi.client;
 }
@@ -123,6 +124,11 @@ export function startFeed() {
         nextStep: () => (pi.model && pi.model.next) || null,
         onState: () => refresh(),
         onError: (error) => set(K.lastError, { at: Date.now(), where: 'feed', code: error && error.code, message: String((error && error.message) || error) }),
+    });
+    // Leaving the page hands the lead to another tab at once, instead of after the 10 s timeout.
+    window.addEventListener('pagehide', () => {
+        const rec = get(K.leader, null);
+        if (rec && rec.id === pi.tabId) set(K.leader, { id: null, ts: 0 });
     });
     const tick = () => pi.feed.tick().catch(() => {});
     tick();

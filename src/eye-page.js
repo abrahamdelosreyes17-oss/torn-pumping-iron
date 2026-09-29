@@ -106,10 +106,15 @@ function drawWar() {
     try {
         removeChips(list.parentNode);
         const byId = new Map(rows.map((r) => [r.id, r]));
+        // Shown in our order with CSS (flex order); Torn's rows stay where React put them.
+        list.classList.add('pi-warlist');
+        sorted.forEach((s, i) => {
+            const r = byId.get(s.id);
+            if (r) r.el.style.order = String(i);
+        });
         for (const s of sorted) {
             const r = byId.get(s.id);
             if (!r) continue;
-            list.appendChild(r.el); // Torn's own row, moved: nothing clicked, nothing changed inside it
             r.cell.appendChild(chipEl(view(s.id), { mini: true, id: s.id }));
             if (s.state === 'early') {
                 r.el.classList.add('pi-early');
@@ -117,7 +122,11 @@ function drawWar() {
                 if (st) st.appendChild(Object.assign(document.createElement('span'), { className: 'pi-mark pi-earlytag', textContent: 'out early' }));
             }
         }
-        list.parentNode.insertBefore(warSummaryEl(warSummary(sorted, nowS), ep.war.at ? Math.round((Date.now() - ep.war.at) / 1000) : null), list);
+        const fromFfs = sorted.some((s) => {
+            const v = view(s.id);
+            return v && v.est && v.est.source === 'ffscouter';
+        });
+        list.parentNode.insertBefore(warSummaryEl(warSummary(sorted, nowS), ep.war.at ? Math.round((Date.now() - ep.war.at) / 1000) : null, fromFfs), list);
     } finally {
         ep.drawing = false;
     }

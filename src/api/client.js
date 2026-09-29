@@ -116,7 +116,9 @@ export class TornApiClient {
         savePause = null,
         isVisible = () => true,
         addToWindow = null,
+        onDeadKey = null,
     } = {}) {
+        this.onDeadKey = onDeadKey;
         this.addToWindow = addToWindow;
         this.loadPause = loadPause;
         this.savePause = savePause;
@@ -258,9 +260,10 @@ export class TornApiClient {
 
         const key = this.getKey ? this.getKey() : '';
         if (!key) {
-            throw new TornApiError('No API key set.', {
-                code: TORN_ERROR_KEY_INVALID,
-            });
+            // Nothing to send with: not a key Torn refused (no code, so nothing marks a key dead).
+            const e = new TornApiError('No API key set.');
+            e.noKey = true;
+            throw e;
         }
 
         let attempt = 0;
@@ -279,6 +282,14 @@ export class TornApiClient {
                 return await this.requestOnce(path, params, key);
             } catch (error) {
                 lastError = error;
+                // Torn refused this key (2, 13, 18): every part of every tab stops using it.
+                if (error instanceof TornApiError && KEY_DEAD_CODES.has(error.code) && this.onDeadKey) {
+                    try {
+                        this.onDeadKey(error.code);
+                    } catch {
+                        // best-effort
+                    }
+                }
                 mine = Math.max(mine, this.pauseFor(error));
 
                 if (!this.isRetryable(error) || attempt === this.maxRetries) {
@@ -379,7 +390,7 @@ export class TornApiClient {
          * on its own; this is the assertion that actually enforces "one
          * destination".
          */
-        if (url.hostname !== 'api.torn.com') {
+        if (url.hostname !== 'api.torn.com' || url.protocol !== 'https:') {
             throw new TornApiError(
                 'Refusing to send the API key to ' + url.hostname + '.',
             );

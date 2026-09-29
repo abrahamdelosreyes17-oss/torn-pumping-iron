@@ -16,11 +16,11 @@ import { sectionHead, headsList } from './common.js';
 /** Torn's API ToS disclosure for the userscript's Torn key. */
 export const TOS_TORN = [
     ['Data storage', 'Only locally, in this browser'],
-    ['Data sharing', 'Nobody'],
+    ['Data sharing', 'Nobody. (Other data, never this key: player ids you look at go to FFScouter and TornStats if you connect them; your plan\u2019s next steps go to your own Discord service if you set one up; item ids go to TornW3B.)'],
     ['Purpose of use', 'Personal gain: gym planning and fight estimates'],
     ['Key storage & sharing', 'Stored locally / Not shared'],
     ['Key access level', 'Limited (user: bars, cooldowns, refills, battlestats, gym, perks, property, equipment, inventory, attacks, personalstats, discord, profile; torn: gyms, items, itemdetails, attacklog; market: itemmarket, pointsmarket; faction: members; key: info)'],
-    ['Other services', 'None. FFScouter, TornStats, TornW3B and your Discord service never receive this key.'],
+    ['Other services', 'This key goes only to api.torn.com. FFScouter and TornStats use the key you give them in their own sections (it may be the same Torn key, which they already hold). TornW3B and your Discord service never receive it.'],
 ];
 
 export const TOS_FFS = [
@@ -120,11 +120,16 @@ function discordSection(ctx) {
     };
     const connect = () =>
         run(async () => {
-            let discordId = f.discordId.value.trim();
-            if (!discordId) discordId = (await d.linkedId()) || '';
-            await d.connect({ base: f.base.value, invite: f.invite.value.trim(), webhookUrl: f.hook.value, tornKey: f.key.value, discordId });
-            f.hook.value = '';
-            f.key.value = '';
+            try {
+                let discordId = f.discordId.value.trim();
+                if (!discordId) discordId = (await d.linkedId()) || '';
+                await d.connect({ base: f.base.value, invite: f.invite.value.trim(), webhookUrl: f.hook.value, tornKey: f.key.value, discordId });
+            } finally {
+                // Secrets never stay in the boxes, whether it worked or not.
+                f.hook.value = '';
+                f.key.value = '';
+                f.invite.value = '';
+            }
             ctx.rerender();
         }, 'Connected. Your plan syncs by itself when it changes.');
     const rows = [
@@ -173,7 +178,8 @@ export function renderSettings(m, ctx) {
     const overlaySec = settingsSection('Overlay on Torn', null, [
         h('div', { class: 'opts' }, [settingsCheck('Pill on every page', s.pill, (v) => ctx.setSettings({ pill: v })), settingsCheck('Marks on the gym page', s.gymMarks, (v) => ctx.setSettings({ gymMarks: v })), settingsCheck('Marks on items and markets', s.marketMarks, (v) => ctx.setSettings({ marketMarks: v })), settingsCheck('Torn Eye chips', s.eyeChips, (v) => ctx.setSettings({ eyeChips: v }))]),
         h('p', { class: 'num' }, ['Hide the pill: ', h('b', { class: 'white', text: 'Alt+P' }), ' · drag it anywhere; it stays out of Torn’s content.']),
-        h('p', {}, ['Bazaar prices come from ', h('a', { href: W3B_SITE_URL, target: '_blank', rel: 'noopener', text: 'TornW3B' }), ' (item ids only, never a key; ', h('a', { href: W3B_TERMS_URL, target: '_blank', rel: 'noopener', text: 'their terms' }), ').']),
+        h('div', { class: 'opts' }, [settingsCheck('Bazaar prices from TornW3B', s.w3b !== false, (v) => ctx.setSettings({ w3b: v }))]),
+        h('p', {}, ['Bazaar prices come from ', h('a', { href: W3B_SITE_URL, target: '_blank', rel: 'noopener', text: 'TornW3B' }), ' (item ids only, never a key; ', h('a', { href: W3B_TERMS_URL, target: '_blank', rel: 'noopener', text: 'their terms' }), '). Off: Item Market and points market only.']),
     ]);
 
     const displaySec = settingsSection('Display', null, [

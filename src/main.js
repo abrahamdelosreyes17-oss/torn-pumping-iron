@@ -16,7 +16,7 @@ import { maybeSyncPlan } from './discord.js';
 import { bootAppPage } from './app-page.js';
 import { bootTornPage } from './torn-page.js';
 import { bootEyePage } from './eye-page.js';
-import { detectPage, isAppPageUrl, isTornHost, APP_PAGE_URL } from './sources/route.js';
+import { detectPage, isAppPageUrl, APP_PAGE_URL } from './sources/route.js';
 
 function menus() {
     gmMenu('Open Pumping Iron', () => gmOpenTab(APP_PAGE_URL));
@@ -39,5 +39,5 @@ export function boot() {
     // The plan's next steps go to your Discord Worker when they change (if you set one up).
     onModel((m) => maybeSyncPlan(m));
     // Off torn.com (the harness), expose the model for checks. On torn.com the sandbox keeps it private anyway.
-    if (!isTornHost(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed };
+    if (/^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed };
 }

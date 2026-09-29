@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Pumping Iron
 // @namespace    torn-pumping-iron
-// @version      0.1.0
+// @version      1.0.0
 // @description  Gym planner and fight scout for Torn: what to take, what to train, what to buy, who you can beat. Reads the API and the page you're on; never acts for you.
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
@@ -47,7 +47,7 @@
 (function () {
     'use strict';
 
-    const PI_BUILD_VERSION = '0.1.0';
+    const PI_BUILD_VERSION = '1.0.0';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -262,9 +262,10 @@
         bands: DEFAULT_BANDS,
         donator: true,
         odRisk: 0,
+        w3b: true,
     };
 
-    const DEFAULT_PLAN = { type: 'steady', strategy: 'steady', build: 'balanced', goal: null, createdAt: 0, strategyPicked: false };
+    const DEFAULT_PLAN = { type: 'steady', strategy: 'steady', build: 'baldr', buildPicked: false, goal: null, createdAt: 0, strategyPicked: false };
 
     function merged(stored, defaults) {
         return stored && typeof stored === 'object' && !Array.isArray(stored) ? { ...defaults, ...stored } : { ...defaults };
@@ -590,7 +591,9 @@
             savePause = null,
             isVisible = () => true,
             addToWindow = null,
+            onDeadKey = null,
         } = {}) {
+            this.onDeadKey = onDeadKey;
             this.addToWindow = addToWindow;
             this.loadPause = loadPause;
             this.savePause = savePause;
@@ -732,9 +735,10 @@
 
             const key = this.getKey ? this.getKey() : '';
             if (!key) {
-                throw new TornApiError('No API key set.', {
-                    code: TORN_ERROR_KEY_INVALID,
-                });
+                // Nothing to send with: not a key Torn refused (no code, so nothing marks a key dead).
+                const e = new TornApiError('No API key set.');
+                e.noKey = true;
+                throw e;
             }
 
             let attempt = 0;
@@ -753,6 +757,14 @@
                     return await this.requestOnce(path, params, key);
                 } catch (error) {
                     lastError = error;
+                    // Torn refused this key (2, 13, 18): every part of every tab stops using it.
+                    if (error instanceof TornApiError && KEY_DEAD_CODES.has(error.code) && this.onDeadKey) {
+                        try {
+                            this.onDeadKey(error.code);
+                        } catch {
+                            // best-effort
+                        }
+                    }
                     mine = Math.max(mine, this.pauseFor(error));
 
                     if (!this.isRetryable(error) || attempt === this.maxRetries) {
@@ -853,7 +865,7 @@
              * on its own; this is the assertion that actually enforces "one
              * destination".
              */
-            if (url.hostname !== 'api.torn.com') {
+            if (url.hostname !== 'api.torn.com' || url.protocol !== 'https:') {
                 throw new TornApiError(
                     'Refusing to send the API key to ' + url.hostname + '.',
                 );
@@ -1091,11 +1103,15 @@
         const bars = a.bars || {};
         const cd = a.cooldowns || {};
         let stats = null;
+        let statMods = null;
         if (a.battlestats && typeof a.battlestats === 'object') {
             stats = {};
+            statMods = {};
             for (const [k, short] of Object.entries(API_STAT)) {
                 const v = a.battlestats[k];
                 stats[short] = Number(v && typeof v === 'object' ? v.value : v) || 0;
+                // Merits, faction and passive bonuses on that stat, in % (what counts in a fight).
+                statMods[short] = Number(v && typeof v === 'object' ? v.modifier : 0) || 0;
             }
         }
         return {
@@ -1108,6 +1124,7 @@
             medicalCd: Number(cd.medical) || 0,
             refillUsed: a.refills ? Boolean(a.refills.energy) : null,
             stats,
+            statMods,
             gymId: a.gym && a.gym.id ? Number(a.gym.id) : null,
             gymName: a.gym && a.gym.name ? String(a.gym.name) : null,
         };
@@ -1410,7 +1427,7 @@
 
     /** Share of the total, per stat. The first listed gyms are the ones the build relies on. */
     const BUILDS = {
-        balanced: { id: 'balanced', name: 'Balanced', shares: { str: 0.25, spd: 0.25, def: 0.25, dex: 0.25 }, gyms: [GEORGES], line: 'Strong everywhere, best at defending. Stay until George\'s.' },
+        balanced: { id: 'balanced', name: 'Balanced', shares: { str: 0.25, spd: 0.25, def: 0.25, dex: 0.25 }, gyms: [GEORGES], line: 'Even split. No specialist gym, no stat for merits to lift.' },
         baldr: { id: 'baldr', name: "Baldr's", shares: { str: 0.309, spd: 0.247, def: 0.222, dex: 0.222 }, gyms: [GYM_3000, FRONTLINE], line: 'One stat high, its partner close. Easy to leave.' },
         baldrDef: { id: 'baldrDef', name: "Baldr's defensive", shares: { str: 0.222, spd: 0.222, def: 0.309, dex: 0.247 }, gyms: [ISOYAMAS, BALBOAS], line: 'Hard to hit and hard to hurt.' },
         hank: { id: 'hank', name: "Hank's", shares: { str: 0.347, spd: 0.097, def: 0.278, dex: 0.278 }, gyms: [GYM_3000, BALBOAS], line: 'Fastest total growth, weakest in a fight.' },
@@ -1419,9 +1436,34 @@
         offense: { id: 'offense', name: 'Offense', shares: { str: 0.31, spd: 0.31, def: 0.19, dex: 0.19 }, gyms: [FRONTLINE], line: 'Hits often and hard; takes hits badly.' },
     };
 
-    const BUILD_ORDER = ['balanced', 'baldr', 'baldrDef', 'hank', 'hankDef', 'tank', 'offense'];
+    /**
+     * The builds you pick from. Baldr's and Hank's take a high stat you choose
+     * (their defensive versions are DEF or DEX high), then the pair builds, and
+     * Balanced last.
+     */
+    const BUILD_ORDER = ['baldr', 'hank', 'tank', 'offense', 'balanced'];
 
-    const DEFAULT_BUILD = 'balanced';
+    /** Old ids of the defensive presets, as a base + high stat. */
+    const BUILD_ALIASES = { baldrDef: 'baldr:def', hankDef: 'hank:def' };
+
+    /**
+     * Until you pick, plans work toward Baldr's with STR high (a specialist build
+     * that stays close to even), and Home asks you to pick. The owner's rule:
+     * specialist builds are the meta; the plan follows the build you choose.
+     */
+    const DEFAULT_BUILD = 'baldr';
+
+    /** Builds with a high stat you choose (the single-stat specialist gym and your merits go there). */
+    function highStatOf(buildId) {
+        const id = BUILD_ALIASES[buildId] || String(buildId || DEFAULT_BUILD);
+        const [base, high] = id.split(':');
+        const b = BUILDS[base];
+        if (!b) return null;
+        const sorted = [...STATS].sort((x, y) => b.shares[y] - b.shares[x]);
+        // A single high stat only when it clearly leads (Tank, Offense and Balanced have none).
+        if (!(b.shares[sorted[0]] - b.shares[sorted[1]] > 0.02)) return null;
+        return STATS.includes(high) ? high : sorted[0];
+    }
 
     /** Within this many percentage points of the target counts as "on build". */
     const ON_BUILD_PP = 0.5;
@@ -1429,18 +1471,53 @@
     const SINGLE = { str: GYM_3000, def: ISOYAMAS, spd: TOTAL_REBOUND, dex: ELITES };
     const PAIR_OF = { str: FRONTLINE, spd: FRONTLINE, def: BALBOAS, dex: BALBOAS };
 
+    /** The same-side partner of each stat (STR+SPD attack, DEF+DEX defence). */
+    const PARTNER = { str: 'spd', spd: 'str', def: 'dex', dex: 'def' };
+
     /**
-     * A preset with its high stat moved (e.g. Baldr's on DEX uses Elites +
-     * Balboas): the shares of `from` and `to` swap, and so do the gyms.
+     * A preset with its high stat moved, keeping its shape: Baldr's on DEX is
+     * DEX high with DEF (its partner) close behind, using Elites + Balboas;
+     * Hank's on DEF is Hank's defensive. The stat's partner follows it, the
+     * other pair swaps sides when needed, and the gyms follow the stats.
      */
     function withHighStat(buildId, stat) {
         const b = BUILDS[buildId];
-        if (!b) return null;
+        if (!b || !STATS.includes(stat)) return null;
         const high = STATS.reduce((a, k) => (b.shares[k] > b.shares[a] ? k : a), 'str');
         if (high === stat) return b;
-        const shares = { ...b.shares, [high]: b.shares[stat], [stat]: b.shares[high] };
-        const gyms = b.gyms.map((id) => (id === SINGLE[high] ? SINGLE[stat] : id === PAIR_OF[high] && PAIR_OF[high] !== PAIR_OF[stat] ? PAIR_OF[stat] : id));
+        const to = {};
+        if (PARTNER[high] === stat) {
+            to[high] = stat;
+            to[stat] = high;
+            for (const k of STATS) if (!(k in to)) to[k] = k;
+        } else {
+            to[high] = stat;
+            to[PARTNER[high]] = PARTNER[stat];
+            to[stat] = high;
+            to[PARTNER[stat]] = PARTNER[high];
+        }
+        const shares = {};
+        for (const k of STATS) shares[to[k]] = b.shares[k];
+        const gymOf = {};
+        for (const k of STATS) {
+            gymOf[SINGLE[k]] = SINGLE[to[k]];
+            gymOf[PAIR_OF[k]] = PAIR_OF[to[k]];
+        }
+        const gyms = b.gyms.map((id) => gymOf[id] || id);
         return { ...b, id: buildId + ':' + stat, shares, gyms };
+    }
+
+    const HIGH_WORD = { str: 'STR', spd: 'SPD', def: 'DEF', dex: 'DEX' };
+
+    /** A build id ("hank", "hank:def", "baldrDef") as the build the plan uses, named with its high stat. */
+    function resolveBuild(buildId) {
+        const id = BUILD_ALIASES[buildId] || String(buildId || DEFAULT_BUILD);
+        const [base] = id.split(':');
+        if (!BUILDS[base]) return resolveBuild(DEFAULT_BUILD);
+        const high = highStatOf(id);
+        if (!high) return BUILDS[base];
+        const b = withHighStat(base, high) || BUILDS[base];
+        return { ...b, base, high, name: BUILDS[base].name + ', ' + HIGH_WORD[high] + ' high' };
     }
 
     /** Each stat's share of the total, and its gap to the build (in stat points). */
@@ -2663,6 +2740,16 @@
 
         /** Perks, property, gyms, inventory, key info: each on its own clock. */
         async refreshStatic() {
+            if (this.refreshing) return this.store.get(this.keys.static, {}) || {};
+            this.refreshing = true;
+            try {
+                return await this.refreshStaticOnce();
+            } finally {
+                this.refreshing = false;
+            }
+        }
+
+        async refreshStaticOnce() {
             const st = { ...(this.store.get(this.keys.static, {}) || {}) };
             const at = this.now();
             const due = (k) => !(st[k + 'At'] && at - st[k + 'At'] < STATIC_EVERY[k]);
@@ -2689,9 +2776,11 @@
                 }
                 st[k + 'At'] = at;
                 changed = true;
+                // Merge into what's stored now: other parts (e.g. equipment for Torn Eye) may have been saved meanwhile.
+                this.store.set(this.keys.static, { ...(this.store.get(this.keys.static, {}) || {}), [k]: st[k], [k + 'At']: at });
             }
-            if (changed) this.store.set(this.keys.static, st);
-            return st;
+            void changed;
+            return this.store.get(this.keys.static, {}) || st;
         }
     }
 
@@ -3183,9 +3272,7 @@
 
     /** Build shares for a plan's build id ("baldr" or "baldr:dex"). */
     function buildOf(id) {
-        const [base, high] = String(id || DEFAULT_BUILD).split(':');
-        const b = high ? withHighStat(base, high) : BUILDS[base];
-        return b || BUILDS[DEFAULT_BUILD];
+        return resolveBuild(id);
     }
 
     /**
@@ -3305,6 +3392,7 @@
 
         // Heads-up
         const heads = [];
+        if (!plan.buildPicked) heads.push({ tone: 'warn', text: 'Pick your build type', sub: 'Plan › Build: the plan trains toward it' });
         for (const w of strictWarnings(steps, now)) heads.push({ tone: 'warn', text: w.text });
         if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS * 6) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
         if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.known ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost) });
@@ -3342,6 +3430,7 @@
             energyPerDay,
             buyToday,
             heads,
+            buildPicked: Boolean(plan.buildPicked),
             recommendation: rec,
             compare,
             prices,
@@ -3379,7 +3468,7 @@
         return typeof document === 'undefined' || document.visibilityState !== 'hidden';
     }
 
-    const storeApi = { get: (k, fb) => get(k, fb), set: (k, v) => set(k, v), del: (k) => set(k, null) };
+    const storeApi = { get: (k, fb) => get(k, fb), set: (k, v) => set(k, v), del: (k) => del(k) };
 
     /** The one Torn client every part of this tab uses: 70/min across tabs, visible only. */
     function tornClient() {
@@ -3393,6 +3482,7 @@
             loadPause: () => get(K.apiPause, null),
             savePause: (p) => set(K.apiPause, p),
             isVisible,
+            onDeadKey: () => set(K.apiKeyDead, true),
         });
         return pi.client;
     }
@@ -3474,6 +3564,11 @@
             nextStep: () => (pi.model && pi.model.next) || null,
             onState: () => refresh(),
             onError: (error) => set(K.lastError, { at: Date.now(), where: 'feed', code: error && error.code, message: String((error && error.message) || error) }),
+        });
+        // Leaving the page hands the lead to another tab at once, instead of after the 10 s timeout.
+        window.addEventListener('pagehide', () => {
+            const rec = get(K.leader, null);
+            if (rec && rec.id === pi.tabId) set(K.leader, { id: null, ts: 0 });
         });
         const tick = () => pi.feed.tick().catch(() => {});
         tick();
@@ -3605,6 +3700,11 @@
 
     const SYNC_MIN_MS = 60 * 1000;
 
+    /** The Worker stopped pinging (Torn refused its key): said in Settings until a new key is sent. */
+    function pausedText(r) {
+        return r && r.paused ? 'Your Worker paused pings: ' + (r.lastError || 'Torn refused its key') + '. Paste a new key for it.' : null;
+    }
+
     function discordState() {
         const w = get(K.worker, null);
         return w && w.base && w.secret ? w : null;
@@ -3631,6 +3731,7 @@
      */
     async function connectDiscord(f, model) {
         const base = workerBase(f.base);
+        if (f.tornKey && f.tornKey.trim() === getKey(K.apiKey)) throw new Error('That is your main key. Make a separate custom key for the Worker (bars, cooldowns, refills, travel).');
         const prev = discordState();
         const secret = prev && prev.base === base ? prev.secret : newSecret();
         const body = { base, secret, invite: f.invite || null, plan: planPayload(model) };
@@ -3638,7 +3739,7 @@
         if (f.tornKey) body.tornKey = f.tornKey.trim();
         if (f.discordId) body.discordId = String(f.discordId).replace(/\D/g, '');
         const r = await workerSync(body);
-        set(K.worker, { base, secret, discordId: body.discordId || (prev && prev.discordId) || null, connectedAt: Date.now(), lastSync: Date.now(), lastSig: null, ready: Boolean(r.ready) || Boolean(prev && prev.ready), lastError: null });
+        set(K.worker, { base, secret, discordId: body.discordId || (prev && prev.discordId) || null, connectedAt: Date.now(), lastSync: Date.now(), lastSig: null, ready: Boolean(r.ready) || Boolean(prev && prev.ready), lastError: pausedText(r) });
         return r;
     }
 
@@ -3670,7 +3771,7 @@
         if (sig === w.lastSig || now - (w.lastSync || 0) < SYNC_MIN_MS) return false;
         set(K.worker, { ...w, lastSync: now, lastSig: sig });
         workerSync({ base: w.base, secret: w.secret, plan })
-            .then(() => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: null }))
+            .then((r) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: pausedText(r) }))
             .catch((e) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e) }));
         return true;
     }
@@ -4238,6 +4339,7 @@
             }),
             needs.length ? null : h('div', { class: 'bi' }, [h('div', {}, [h('b', { text: 'Nothing to buy today' })]), h('span'), h('span'), h('small', { text: 'Your inventory covers the plan' })]),
             h('div', { class: 'buyfoot' }, [h('span', { text: held.length ? held.map((n) => n.have + ' ' + n.name + ' in inventory').join(' · ') : 'Nothing held yet' }), h('b', { text: total ? fmtMoney(total) : '' })]),
+            ctx.settings.w3b !== false ? h('small', { class: 'muted', style: 'font-size:11px;margin-top:4px' }, ['Bazaar prices: ', h('a', { href: 'https://weav3r.dev', target: '_blank', rel: 'noopener', text: 'TornW3B' })]) : null,
         ]);
         return h('div', {}, [sectionHead('Buy today', h('span', { class: 'meta' }, [h('a', { href: '#buy', onclick: (e) => { e.preventDefault(); ctx.go('buy'); }, text: 'Next 3 days' })])), list]);
     }
@@ -4317,6 +4419,7 @@
      * Plan (mockups/L-plan.html): the recommended strategy, the others against
      * it with a warning before a worse pick, the build, and the 30-day chart.
      */
+
 
 
 
@@ -4466,11 +4569,17 @@
             );
         }
 
+        // The build is yours to pick (specialist builds first); the high stat decides where the specialist gym and merits go.
+        const current = BUILD_ALIASES[plan.build] || String(plan.build || 'baldr');
+        const curBase = current.split(':')[0];
+        const high = highStatOf(current) || 'str';
+        const buildFor = (id) => (highStatOf(id) ? resolveBuild(id + ':' + high) : BUILDS[id]);
+        const buildIdFor = (id) => (highStatOf(id) ? id + ':' + high : id);
         const buildRows = BUILD_ORDER.map((id) => {
-            const b = BUILDS[id];
-            const sel = String(plan.build || 'balanced').split(':')[0] === id;
-            return h('div', { class: 'brow' + (sel ? ' sel' : ''), tabindex: '0', role: 'button', onclick: () => ctx.setPlan({ build: id }) }, [
-                h('b', {}, [b.name, sel ? h('span', { class: 'pill-tag chalk', style: 'margin-left:6px', text: 'Now' }) : null]),
+            const b = buildFor(id);
+            const sel = curBase === id;
+            return h('div', { class: 'brow' + (sel ? ' sel' : ''), tabindex: '0', role: 'button', onclick: () => ctx.setPlan({ build: buildIdFor(id), buildPicked: true }) }, [
+                h('b', {}, [BUILDS[id].name, sel ? h('span', { class: 'pill-tag chalk', style: 'margin-left:6px', text: plan.buildPicked ? 'Yours' : 'Pick one' }) : null]),
                 h('div', { class: 'ratio' }, STATS.map((k) => h('i', { style: 'width:' + (b.shares[k] * 100).toFixed(1) + '%;background:' + STAT_COLOR[k] }))),
                 t('', b.line),
                 t('', b.gyms.map((g) => (gymById(g) || { name: '' }).name.replace(' Gym', '').replace('Mr. ', '')).join(' + ')),
@@ -4508,7 +4617,14 @@
             h('div', {}, [sectionHead('When you’re late', null, null, 'h3'), headsList([{ tone: 'plain', text: 'Steady and goal plans', sub: 're-time by themselves; later steps move' }, { tone: 'warn', text: 'Jump plans', sub: 'warn 5 min before the tick or cooldown, then re-time' }])]),
         ];
 
-        return { main: [recCard, h('div', {}, blocks), h('div', {}, [sectionHead('Build', meta(['how your total splits across the four stats · the plan picks where each train goes'])), h('div', { class: 'builds num' }, buildRows)]), youVs], pane };
+        const highSeg = h('div', { class: 'row', style: 'margin:0 0 8px' }, [
+            t('lab', 'High stat'),
+            h('div', { class: 'seg', role: 'group', 'aria-label': 'High stat' }, STATS.map((k) => h('button', { type: 'button', 'aria-pressed': String(k === high), onclick: () => ctx.setPlan({ build: (highStatOf(curBase) ? curBase : 'baldr') + ':' + k, buildPicked: true }), text: STAT_LABEL[k] }))),
+            h('span', { class: 'muted', style: 'font-size:12px', text: highStatOf(curBase) ? 'where the single-stat gym and your merits go (DEF or DEX high = the defensive version)' : 'for Baldr\u2019s and Hank\u2019s' }),
+        ]);
+        const georges = m.pc.unlocked.includes(GEORGES);
+        const buildNote = georges ? null : h('p', { class: 'muted', style: 'margin:8px 0 0;font-size:12px', text: 'Specialist gyms open after George\u2019s. Until then every train still moves you toward this build, so you qualify the day they open.' });
+        return { main: [recCard, h('div', {}, blocks), h('div', {}, [sectionHead('Build', meta([plan.buildPicked ? 'the plan trains toward your build' : 'pick your build type: the plan trains toward it'])), highSeg, h('div', { class: 'builds num' }, buildRows), buildNote]), youVs], pane };
     }
 
     /* ===== src/api/w3b.js ===== */
@@ -5526,11 +5642,11 @@
     /** Torn's API ToS disclosure for the userscript's Torn key. */
     const TOS_TORN = [
         ['Data storage', 'Only locally, in this browser'],
-        ['Data sharing', 'Nobody'],
+        ['Data sharing', 'Nobody. (Other data, never this key: player ids you look at go to FFScouter and TornStats if you connect them; your plan\u2019s next steps go to your own Discord service if you set one up; item ids go to TornW3B.)'],
         ['Purpose of use', 'Personal gain: gym planning and fight estimates'],
         ['Key storage & sharing', 'Stored locally / Not shared'],
         ['Key access level', 'Limited (user: bars, cooldowns, refills, battlestats, gym, perks, property, equipment, inventory, attacks, personalstats, discord, profile; torn: gyms, items, itemdetails, attacklog; market: itemmarket, pointsmarket; faction: members; key: info)'],
-        ['Other services', 'None. FFScouter, TornStats, TornW3B and your Discord service never receive this key.'],
+        ['Other services', 'This key goes only to api.torn.com. FFScouter and TornStats use the key you give them in their own sections (it may be the same Torn key, which they already hold). TornW3B and your Discord service never receive it.'],
     ];
 
     const TOS_FFS = [
@@ -5630,11 +5746,16 @@
         };
         const connect = () =>
             run(async () => {
-                let discordId = f.discordId.value.trim();
-                if (!discordId) discordId = (await d.linkedId()) || '';
-                await d.connect({ base: f.base.value, invite: f.invite.value.trim(), webhookUrl: f.hook.value, tornKey: f.key.value, discordId });
-                f.hook.value = '';
-                f.key.value = '';
+                try {
+                    let discordId = f.discordId.value.trim();
+                    if (!discordId) discordId = (await d.linkedId()) || '';
+                    await d.connect({ base: f.base.value, invite: f.invite.value.trim(), webhookUrl: f.hook.value, tornKey: f.key.value, discordId });
+                } finally {
+                    // Secrets never stay in the boxes, whether it worked or not.
+                    f.hook.value = '';
+                    f.key.value = '';
+                    f.invite.value = '';
+                }
                 ctx.rerender();
             }, 'Connected. Your plan syncs by itself when it changes.');
         const rows = [
@@ -5683,7 +5804,8 @@
         const overlaySec = settingsSection('Overlay on Torn', null, [
             h('div', { class: 'opts' }, [settingsCheck('Pill on every page', s.pill, (v) => ctx.setSettings({ pill: v })), settingsCheck('Marks on the gym page', s.gymMarks, (v) => ctx.setSettings({ gymMarks: v })), settingsCheck('Marks on items and markets', s.marketMarks, (v) => ctx.setSettings({ marketMarks: v })), settingsCheck('Torn Eye chips', s.eyeChips, (v) => ctx.setSettings({ eyeChips: v }))]),
             h('p', { class: 'num' }, ['Hide the pill: ', h('b', { class: 'white', text: 'Alt+P' }), ' · drag it anywhere; it stays out of Torn’s content.']),
-            h('p', {}, ['Bazaar prices come from ', h('a', { href: W3B_SITE_URL, target: '_blank', rel: 'noopener', text: 'TornW3B' }), ' (item ids only, never a key; ', h('a', { href: W3B_TERMS_URL, target: '_blank', rel: 'noopener', text: 'their terms' }), ').']),
+            h('div', { class: 'opts' }, [settingsCheck('Bazaar prices from TornW3B', s.w3b !== false, (v) => ctx.setSettings({ w3b: v }))]),
+            h('p', {}, ['Bazaar prices come from ', h('a', { href: W3B_SITE_URL, target: '_blank', rel: 'noopener', text: 'TornW3B' }), ' (item ids only, never a key; ', h('a', { href: W3B_TERMS_URL, target: '_blank', rel: 'noopener', text: 'their terms' }), '). Off: Item Market and points market only.']),
         ]);
 
         const displaySec = settingsSection('Display', null, [
@@ -6484,7 +6606,7 @@
 
     function clients() {
         if (!eye.ffs) eye.ffs = makeFfsClient({ getKey: () => getKey(K.ffsKey), isVisible, loadShared: () => get('ffsWindow', {}), saveShared: (s) => set('ffsWindow', s) });
-        if (!eye.ts) eye.ts = makeTsClient({ getKey: () => getKey(K.tsKey), isVisible });
+        if (!eye.ts) eye.ts = makeTsClient({ getKey: () => getKey(K.tsKey), isVisible, loadShared: () => get('tsWindow', {}), saveShared: (s) => set('tsWindow', s) });
         return eye;
     }
 
@@ -6686,7 +6808,9 @@
         const prof = r.profile || {};
         const level = prof.level || extra.level || null;
         const life = prof.life || extra.life || lifeFromLevel(level);
-        const meStats = m.pc.stats;
+        // Your stats as they fight: merits and passives (Torn's battlestats modifier) included.
+        const mods = m.state.statMods || {};
+        const meStats = Object.fromEntries(Object.entries(m.pc.stats).map(([k, v]) => [k, v * (1 + (mods[k] || 0) / 100)]));
         const attacks = (get('myAttacks', null) || {}).list || [];
         const fights = attacks.filter((a) => Number(a.def) === Number(id)).sort((a, b) => b.ended - a.ended);
         const pub = r.pub && (prof.rank || extra.rank) ? { rank: prof.rank || extra.rank, level, crimes: r.pub.crimes, networth: r.pub.networth } : null;
@@ -6811,7 +6935,7 @@
 
     function w3bClient() {
         if (!page.w3b) {
-            const win = tabWindow('w3bWindow', pi.tabId, { get: (k, fb) => get(k, fb), set: (k, v) => set(k, v), del: (k) => set(k, null) });
+            const win = tabWindow('w3bWindow', pi.tabId, { get: (k, fb) => get(k, fb), set: (k, v) => set(k, v), del: (k) => del(k) });
             page.w3b = new W3bClient({ isVisible, addShared: (at) => win.add(at), loadShared: () => ({ recent: win.load(), cooldownUntil: get('w3bCooldown', 0) }), saveShared: (s) => set('w3bCooldown', s.cooldownUntil || 0) });
         }
         return page.w3b;
@@ -6841,6 +6965,7 @@
                     row.listings = listingsFromItemMarket(await fetchItemMarket(tornClient(), id));
                     row.imAt = Date.now();
                     try {
+                        if (getSettings().w3b === false) throw new Error('TornW3B is off');
                         const w = await fetchW3bListings(w3bClient(), id);
                         row.listings = row.listings.concat(listingsFromW3b(w).filter((l) => l.sellerId && l.price > 1));
                         row.w3bAt = Date.now();
@@ -7853,7 +7978,8 @@
                 }
                 return promise;
             };
-            win.fetch = wrapped;
+            // Firefox's script sandbox can't give the page a plain function: export it, or leave fetch alone.
+            win.fetch = typeof exportFunction === 'function' ? exportFunction(wrapped, win) : wrapped;
             win[HOOK_FLAG] = true;
             return true;
         } catch {
@@ -8035,6 +8161,8 @@
     .pi-warsum b { color: #fff; font-size: 14px; }
     .pi-warsum .pi-muted { color: #939aa1; margin-left: auto; }
     .pi-early { background: #1f2a1d !important; }
+    .pi-warlist { display: flex !important; flex-direction: column; }
+    .pi-warsum a { color: #8fb8e8; }
     .pi-earlytag { color: #9bdc8a; font-weight: bold; font-size: 11px; margin-left: 6px; }
     `;
 
@@ -8063,7 +8191,8 @@
         else kids.push(h('span', { text: mini ? '' : 'no estimate yet' }));
         if (!mini && v && v.source) kids.push(h('span', { class: 'pi-src', text: v.source }));
         // The player id is always on the chip, estimate or not: redraw checks compare it.
-        return h('span', { class: 'pi-mark pi-chip' + (mini ? ' pi-mini' : ''), 'data-pi-player': String(id || (v && v.id) || '') }, kids);
+        const title = v && v.est ? 'Torn Eye · stats: ' + (v.est.source === 'ffscouter' ? 'FFScouter (ffscouter.com)' : v.source) : 'Torn Eye';
+        return h('span', { class: 'pi-mark pi-chip' + (mini ? ' pi-mini' : ''), 'data-pi-player': String(id || (v && v.id) || ''), title }, kids);
     }
 
     /** The hover card: HP kept by likely build, gear, sources with credit. */
@@ -8118,14 +8247,14 @@
     }
 
     /** The war summary line: "5 attackable now · 0:48 until the next one is out · 1 traveling". */
-    function warSummaryEl(sum, updatedAgoS) {
+    function warSummaryEl(sum, updatedAgoS, fromFfs = false) {
         const mmss = (s) => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
         return h('div', { class: 'pi-mark pi-warsum' }, [
             h('span', { class: 'pi-plate' }, [h('i')]),
             h('span', {}, [h('b', { text: String(sum.attackable) }), ' attackable now' + (sum.early ? ' (' + sum.early + ' out early)' : '')]),
             sum.nextOutS !== null ? h('span', {}, [h('b', { text: mmss(sum.nextOutS) }), ' until the next one is out']) : null,
             h('span', {}, [h('b', { text: String(sum.traveling) }), ' traveling']),
-            h('span', { class: 'pi-muted', text: 'updated ' + (updatedAgoS ?? 0) + 's ago · every 10 s while this tab is open' }),
+            h('span', { class: 'pi-muted' }, ['updated ' + (updatedAgoS ?? 0) + 's ago · every 10 s while this tab is open', fromFfs ? ' · stats: ' : '', fromFfs ? h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }) : null]),
         ]);
     }
 
@@ -8146,14 +8275,14 @@
         if (s.gearSaved) kids.push(h('span', { class: 'good', text: 'Their gear is saved for next time.' }));
         else if (!s.gearVisible) kids.push(h('span', { class: 'muted', text: 'Their gear isn’t shown yet. Torn shows it after Start Fight (earlier with the Gun Shop job perk). We’ll save it for next time.' }));
         if (v.gear) kids.push(h('span', { class: 'muted', text: 'Last seen: ' + (v.gear.text || 'gear') + ' · ' + Math.max(0, Math.round((Date.now() - v.gear.seenAt) / 86400000)) + ' days ago' }));
-        if (v.source) kids.push(h('span', { class: 'muted', text: 'Stats: ' + v.source + (v.est && v.est.source === 'ffscouter' ? ' (credit: FFScouter)' : '') }));
+        if (v.source) kids.push(v.est && v.est.source === 'ffscouter' ? h('span', { class: 'muted' }, ['Stats: ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }), ', ' + (v.est.ageDays ?? '?') + ' days old']) : h('span', { class: 'muted', text: 'Stats: ' + v.source }));
         return kids;
     }
 
     const ATTACK_PANEL_CSS = `
     :host { all: initial; }
     * { box-sizing: border-box; font-family: Arial, Helvetica, sans-serif; }
-    .panel { position: fixed; z-index: 99989; width: 250px; background: #1b1e21; border: 1px solid #3a4046; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: #e3e5e8; box-shadow: 0 6px 18px rgba(0,0,0,.4); }
+    .panel { position: fixed; z-index: 99989; pointer-events: none; width: 250px; background: #1b1e21; border: 1px solid #3a4046; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: #e3e5e8; box-shadow: 0 6px 18px rgba(0,0,0,.4); }
     .row { display: flex; align-items: center; gap: 8px; }
     .plate { width: 18px; height: 18px; border-radius: 50%; background: #efebe2; display: inline-grid; place-items: center; box-shadow: inset 0 0 0 3px #efebe2, inset 0 0 0 4px #2a2d31; }
     .plate i { width: 4px; height: 4px; border-radius: 50%; background: #15171a; }
@@ -8161,6 +8290,7 @@
     .big { font: bold 22px "Arial Narrow", Arial, sans-serif; }
     .muted { color: #939aa1; }
     .good { color: #9bdc8a; font-weight: bold; }
+    a { color: #8fb8e8; pointer-events: auto; }
     `;
 
     function attackPanel(doc = document) {
@@ -8283,10 +8413,15 @@
         try {
             removeChips(list.parentNode);
             const byId = new Map(rows.map((r) => [r.id, r]));
+            // Shown in our order with CSS (flex order); Torn's rows stay where React put them.
+            list.classList.add('pi-warlist');
+            sorted.forEach((s, i) => {
+                const r = byId.get(s.id);
+                if (r) r.el.style.order = String(i);
+            });
             for (const s of sorted) {
                 const r = byId.get(s.id);
                 if (!r) continue;
-                list.appendChild(r.el); // Torn's own row, moved: nothing clicked, nothing changed inside it
                 r.cell.appendChild(chipEl(view(s.id), { mini: true, id: s.id }));
                 if (s.state === 'early') {
                     r.el.classList.add('pi-early');
@@ -8294,7 +8429,11 @@
                     if (st) st.appendChild(Object.assign(document.createElement('span'), { className: 'pi-mark pi-earlytag', textContent: 'out early' }));
                 }
             }
-            list.parentNode.insertBefore(warSummaryEl(warSummary(sorted, nowS), ep.war.at ? Math.round((Date.now() - ep.war.at) / 1000) : null), list);
+            const fromFfs = sorted.some((s) => {
+                const v = view(s.id);
+                return v && v.est && v.est.source === 'ffscouter';
+            });
+            list.parentNode.insertBefore(warSummaryEl(warSummary(sorted, nowS), ep.war.at ? Math.round((Date.now() - ep.war.at) / 1000) : null, fromFfs), list);
         } finally {
             ep.drawing = false;
         }
@@ -8446,7 +8585,7 @@
         // The plan's next steps go to your Discord Worker when they change (if you set one up).
         onModel((m) => maybeSyncPlan(m));
         // Off torn.com (the harness), expose the model for checks. On torn.com the sandbox keeps it private anyway.
-        if (!isTornHost(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed };
+        if (/^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed };
     }
 
     boot();

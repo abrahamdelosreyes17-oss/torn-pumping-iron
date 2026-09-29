@@ -30,6 +30,8 @@ export const EYE_CSS = `
 .pi-warsum b { color: #fff; font-size: 14px; }
 .pi-warsum .pi-muted { color: #939aa1; margin-left: auto; }
 .pi-early { background: #1f2a1d !important; }
+.pi-warlist { display: flex !important; flex-direction: column; }
+.pi-warsum a { color: #8fb8e8; }
 .pi-earlytag { color: #9bdc8a; font-weight: bold; font-size: 11px; margin-left: 6px; }
 `;
 
@@ -58,7 +60,8 @@ export function chipEl(v, { mini = false, id = null } = {}) {
     else kids.push(h('span', { text: mini ? '' : 'no estimate yet' }));
     if (!mini && v && v.source) kids.push(h('span', { class: 'pi-src', text: v.source }));
     // The player id is always on the chip, estimate or not: redraw checks compare it.
-    return h('span', { class: 'pi-mark pi-chip' + (mini ? ' pi-mini' : ''), 'data-pi-player': String(id || (v && v.id) || '') }, kids);
+    const title = v && v.est ? 'Torn Eye · stats: ' + (v.est.source === 'ffscouter' ? 'FFScouter (ffscouter.com)' : v.source) : 'Torn Eye';
+    return h('span', { class: 'pi-mark pi-chip' + (mini ? ' pi-mini' : ''), 'data-pi-player': String(id || (v && v.id) || ''), title }, kids);
 }
 
 /** The hover card: HP kept by likely build, gear, sources with credit. */
@@ -113,14 +116,14 @@ export function bindCard(doc, getView) {
 }
 
 /** The war summary line: "5 attackable now · 0:48 until the next one is out · 1 traveling". */
-export function warSummaryEl(sum, updatedAgoS) {
+export function warSummaryEl(sum, updatedAgoS, fromFfs = false) {
     const mmss = (s) => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
     return h('div', { class: 'pi-mark pi-warsum' }, [
         h('span', { class: 'pi-plate' }, [h('i')]),
         h('span', {}, [h('b', { text: String(sum.attackable) }), ' attackable now' + (sum.early ? ' (' + sum.early + ' out early)' : '')]),
         sum.nextOutS !== null ? h('span', {}, [h('b', { text: mmss(sum.nextOutS) }), ' until the next one is out']) : null,
         h('span', {}, [h('b', { text: String(sum.traveling) }), ' traveling']),
-        h('span', { class: 'pi-muted', text: 'updated ' + (updatedAgoS ?? 0) + 's ago · every 10 s while this tab is open' }),
+        h('span', { class: 'pi-muted' }, ['updated ' + (updatedAgoS ?? 0) + 's ago · every 10 s while this tab is open', fromFfs ? ' · stats: ' : '', fromFfs ? h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }) : null]),
     ]);
 }
 
@@ -141,14 +144,14 @@ export function attackPanelContent(v, s) {
     if (s.gearSaved) kids.push(h('span', { class: 'good', text: 'Their gear is saved for next time.' }));
     else if (!s.gearVisible) kids.push(h('span', { class: 'muted', text: 'Their gear isn’t shown yet. Torn shows it after Start Fight (earlier with the Gun Shop job perk). We’ll save it for next time.' }));
     if (v.gear) kids.push(h('span', { class: 'muted', text: 'Last seen: ' + (v.gear.text || 'gear') + ' · ' + Math.max(0, Math.round((Date.now() - v.gear.seenAt) / 86400000)) + ' days ago' }));
-    if (v.source) kids.push(h('span', { class: 'muted', text: 'Stats: ' + v.source + (v.est && v.est.source === 'ffscouter' ? ' (credit: FFScouter)' : '') }));
+    if (v.source) kids.push(v.est && v.est.source === 'ffscouter' ? h('span', { class: 'muted' }, ['Stats: ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }), ', ' + (v.est.ageDays ?? '?') + ' days old']) : h('span', { class: 'muted', text: 'Stats: ' + v.source }));
     return kids;
 }
 
 export const ATTACK_PANEL_CSS = `
 :host { all: initial; }
 * { box-sizing: border-box; font-family: Arial, Helvetica, sans-serif; }
-.panel { position: fixed; z-index: 99989; width: 250px; background: #1b1e21; border: 1px solid #3a4046; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: #e3e5e8; box-shadow: 0 6px 18px rgba(0,0,0,.4); }
+.panel { position: fixed; z-index: 99989; pointer-events: none; width: 250px; background: #1b1e21; border: 1px solid #3a4046; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: #e3e5e8; box-shadow: 0 6px 18px rgba(0,0,0,.4); }
 .row { display: flex; align-items: center; gap: 8px; }
 .plate { width: 18px; height: 18px; border-radius: 50%; background: #efebe2; display: inline-grid; place-items: center; box-shadow: inset 0 0 0 3px #efebe2, inset 0 0 0 4px #2a2d31; }
 .plate i { width: 4px; height: 4px; border-radius: 50%; background: #15171a; }
@@ -156,6 +159,7 @@ export const ATTACK_PANEL_CSS = `
 .big { font: bold 22px "Arial Narrow", Arial, sans-serif; }
 .muted { color: #939aa1; }
 .good { color: #9bdc8a; font-weight: bold; }
+a { color: #8fb8e8; pointer-events: auto; }
 `;
 
 export function attackPanel(doc = document) {

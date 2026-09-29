@@ -6,7 +6,7 @@
  * Discord webhook. Setup: worker/SETUP.md.
  *
  * Routes:
- *   GET  /health          → {ok, users}
+ *   GET  /health          → {ok}
  *   PUT  /plan            (Authorization: Bearer <secret>) store {tornKey?, discordId, webhookUrl, plan, rules}
  *                         the first PUT for a secret needs X-Invite: <INVITE_CODE>
  *   POST /test            (Authorization: Bearer <secret>) send a test ping
@@ -29,8 +29,17 @@ async function sha256(text) {
     return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+// No CORS headers: the userscript talks to the Worker through Tampermonkey, not from a web page.
 function json(body, status = 200) {
-    return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*' } });
+    return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+}
+
+/** Compare two strings without an early exit (the invite code). */
+async function sameSecret(a, b) {
+    const [x, y] = await Promise.all([sha256(String(a || '')), sha256(String(b || ''))]);
+    let diff = 0;
+    for (let i = 0; i < x.length; i++) diff |= x.charCodeAt(i) ^ y.charCodeAt(i);
+    return diff === 0 && Boolean(a);
 }
 
 async function ensureSchema(env) {
@@ -53,7 +62,7 @@ async function userFor(req, env) {
 async function putPlan(req, env) {
     const { id, row, error } = await userFor(req, env);
     if (error) return error;
-    if (!row && (!env.INVITE_CODE || req.headers.get('x-invite') !== env.INVITE_CODE)) return json({ ok: false, error: 'Unknown secret: the first sync needs the invite code' }, 403);
+    if (!row && !(env.INVITE_CODE && (await sameSecret(req.headers.get('x-invite'), env.INVITE_CODE)))) return json({ ok: false, error: 'Unknown secret: the first sync needs the invite code' }, 403);
     let body;
     try {
         body = await req.json();
@@ -67,10 +76,14 @@ async function putPlan(req, env) {
     const discordId = body.discordId !== undefined ? String(body.discordId || '').replace(/\D/g, '') : row ? row.discord_id : '';
     const plan = body.plan !== undefined ? JSON.stringify(body.plan || null) : row ? row.plan : 'null';
     const rules = body.rules !== undefined ? JSON.stringify(body.rules || {}) : row ? row.rules : '{}';
+    // A pause for a dead key stays until a new key is sent (plan syncs alone must not undo it).
+    const newKey = body.tornKey !== undefined && (!row || tornKey !== row.torn_key);
+    const paused = newKey ? 0 : row ? Number(row.paused) || 0 : 0;
+    const lastError = newKey ? null : row ? row.last_error || null : null;
     await env.DB.prepare('INSERT OR REPLACE INTO users (id, torn_key, discord_id, webhook, plan, rules, paused, last_error, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        .bind(id, tornKey, discordId, webhook, plan, rules, 0, null, Math.floor(Date.now() / 1000))
+        .bind(id, tornKey, discordId, webhook, plan, rules, paused, lastError, Math.floor(Date.now() / 1000))
         .run();
-    return json({ ok: true, created: !row, ready: Boolean(tornKey && webhook) });
+    return json({ ok: true, created: !row, ready: Boolean(tornKey && webhook), paused: Boolean(paused), lastError });
 }
 
 async function postWebhook(fetchImpl, url, body) {
@@ -156,12 +169,8 @@ export async function runCron(env, nowS = Math.floor(Date.now() / 1000), fetchIm
 
 export async function handle(req, env, fetchImpl = fetch) {
     const url = new URL(req.url);
-    if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET, PUT, POST, DELETE', 'access-control-allow-headers': 'authorization, content-type, x-invite' } });
     await ensureSchema(env);
-    if (url.pathname === '/health' && req.method === 'GET') {
-        const r = await env.DB.prepare('SELECT COUNT(*) AS n FROM users').first();
-        return json({ ok: true, users: r ? Number(r.n) : 0 });
-    }
+    if (url.pathname === '/health' && req.method === 'GET') return json({ ok: true });
     if (url.pathname === '/plan' && req.method === 'PUT') return putPlan(req, env);
     if (url.pathname === '/plan' && req.method === 'DELETE') return forget(req, env);
     if (url.pathname === '/test' && req.method === 'POST') return testPing(req, env, fetchImpl);

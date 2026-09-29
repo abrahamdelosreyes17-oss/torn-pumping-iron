@@ -121,6 +121,16 @@ export class StateFeed {
 
     /** Perks, property, gyms, inventory, key info: each on its own clock. */
     async refreshStatic() {
+        if (this.refreshing) return this.store.get(this.keys.static, {}) || {};
+        this.refreshing = true;
+        try {
+            return await this.refreshStaticOnce();
+        } finally {
+            this.refreshing = false;
+        }
+    }
+
+    async refreshStaticOnce() {
         const st = { ...(this.store.get(this.keys.static, {}) || {}) };
         const at = this.now();
         const due = (k) => !(st[k + 'At'] && at - st[k + 'At'] < STATIC_EVERY[k]);
@@ -147,9 +157,11 @@ export class StateFeed {
             }
             st[k + 'At'] = at;
             changed = true;
+            // Merge into what's stored now: other parts (e.g. equipment for Torn Eye) may have been saved meanwhile.
+            this.store.set(this.keys.static, { ...(this.store.get(this.keys.static, {}) || {}), [k]: st[k], [k + 'At']: at });
         }
-        if (changed) this.store.set(this.keys.static, st);
-        return st;
+        void changed;
+        return this.store.get(this.keys.static, {}) || st;
     }
 }
 

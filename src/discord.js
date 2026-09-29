@@ -4,12 +4,17 @@
  * visible tab); the Worker reads Torn and pings Discord.
  */
 
-import { K, get, set } from './platform/store.js';
+import { K, get, set, getKey } from './platform/store.js';
 import { tornClient, isVisible } from './runtime.js';
 import { fetchDiscord } from './api/torn.js';
 import { workerBase, newSecret, stepsForWorker, workerSync, workerTest, workerForget } from './api/worker.js';
 
 export const SYNC_MIN_MS = 60 * 1000;
+
+/** The Worker stopped pinging (Torn refused its key): said in Settings until a new key is sent. */
+function pausedText(r) {
+    return r && r.paused ? 'Your Worker paused pings: ' + (r.lastError || 'Torn refused its key') + '. Paste a new key for it.' : null;
+}
 
 export function discordState() {
     const w = get(K.worker, null);
@@ -37,6 +42,7 @@ export async function linkedDiscordId() {
  */
 export async function connectDiscord(f, model) {
     const base = workerBase(f.base);
+    if (f.tornKey && f.tornKey.trim() === getKey(K.apiKey)) throw new Error('That is your main key. Make a separate custom key for the Worker (bars, cooldowns, refills, travel).');
     const prev = discordState();
     const secret = prev && prev.base === base ? prev.secret : newSecret();
     const body = { base, secret, invite: f.invite || null, plan: planPayload(model) };
@@ -44,7 +50,7 @@ export async function connectDiscord(f, model) {
     if (f.tornKey) body.tornKey = f.tornKey.trim();
     if (f.discordId) body.discordId = String(f.discordId).replace(/\D/g, '');
     const r = await workerSync(body);
-    set(K.worker, { base, secret, discordId: body.discordId || (prev && prev.discordId) || null, connectedAt: Date.now(), lastSync: Date.now(), lastSig: null, ready: Boolean(r.ready) || Boolean(prev && prev.ready), lastError: null });
+    set(K.worker, { base, secret, discordId: body.discordId || (prev && prev.discordId) || null, connectedAt: Date.now(), lastSync: Date.now(), lastSig: null, ready: Boolean(r.ready) || Boolean(prev && prev.ready), lastError: pausedText(r) });
     return r;
 }
 
@@ -76,7 +82,7 @@ export function maybeSyncPlan(m, now = Date.now()) {
     if (sig === w.lastSig || now - (w.lastSync || 0) < SYNC_MIN_MS) return false;
     set(K.worker, { ...w, lastSync: now, lastSig: sig });
     workerSync({ base: w.base, secret: w.secret, plan })
-        .then(() => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: null }))
+        .then((r) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: pausedText(r) }))
         .catch((e) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e) }));
     return true;
 }

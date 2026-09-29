@@ -38,7 +38,8 @@ export function dueAlerts(state, plan, nowS, rules = {}) {
     if (on.drug && drug > 0 && drug <= DRUG_LEAD_S) {
         const step = nextStep(plan, nowS, (s) => s.kind === 'xanax' || s.kind === 'stack' || s.kind === 'hold' || s.kind === 'boost' || s.kind === 'jump');
         const endS = nowS + drug;
-        out.push({ id: 'drug:' + Math.round(endS / 60), title: 'Drug cooldown ends in ' + Math.max(1, Math.round(drug / 60)) + ' min', text: step ? step.label + (step.train ? ', then ' + step.train : '') : 'Ready for the next drug', step: step || null });
+        // A 5-minute bucket: cron runs can drift a few seconds, the ping must not repeat.
+        out.push({ id: 'drug:' + Math.round(endS / 300), title: 'Drug cooldown ends in ' + Math.max(1, Math.round(drug / 60)) + ' min', text: step ? step.label + (step.train ? ', then ' + step.train : '') : 'Ready for the next drug', step: step || null });
     }
 
     // Energy full while the plan trains natural energy (not while stacking for a jump).

@@ -8,7 +8,7 @@
 import { STATS, totalOf } from './gain.js';
 import { parsePerks } from './perks.js';
 import { mergeLiveGyms, unlockedGyms, bestGymFor, gymAccess, gymById, nextGym, GYMS } from './gyms.js';
-import { BUILDS, withHighStat, buildGaps, projectBuild, DEFAULT_BUILD } from './builds.js';
+import { buildGaps, projectBuild, resolveBuild } from './builds.js';
 import { energyAt, happyAt, drugFreeAt, boosterFreeAt, refillAvailable, tornDayStart, msToTornMidnight, DAY } from './bars.js';
 import { dayTimeline, targetShares, drugsToday, itemsNeeded, strictWarnings, REFILL_WARN_MS } from './plan.js';
 import { simulateStrategy, feasibleStrategies, STRATEGIES } from './strategies.js';
@@ -34,9 +34,7 @@ export function projectionFor(args) {
 
 /** Build shares for a plan's build id ("baldr" or "baldr:dex"). */
 export function buildOf(id) {
-    const [base, high] = String(id || DEFAULT_BUILD).split(':');
-    const b = high ? withHighStat(base, high) : BUILDS[base];
-    return b || BUILDS[DEFAULT_BUILD];
+    return resolveBuild(id);
 }
 
 /**
@@ -156,6 +154,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
 
     // Heads-up
     const heads = [];
+    if (!plan.buildPicked) heads.push({ tone: 'warn', text: 'Pick your build type', sub: 'Plan › Build: the plan trains toward it' });
     for (const w of strictWarnings(steps, now)) heads.push({ tone: 'warn', text: w.text });
     if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS * 6) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
     if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.known ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost) });
@@ -193,6 +192,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         energyPerDay,
         buyToday,
         heads,
+        buildPicked: Boolean(plan.buildPicked),
         recommendation: rec,
         compare,
         prices,
