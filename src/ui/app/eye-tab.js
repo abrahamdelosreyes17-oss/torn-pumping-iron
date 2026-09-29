@@ -356,7 +356,8 @@ function warControls(ctx, e) {
     if (w.enemies.length > 1 && !w.manual) {
         kids.push(h('div', { class: 'seg', role: 'group', 'aria-label': 'Which war' }, w.enemies.slice(0, 4).map((x) => h('button', { type: 'button', 'aria-pressed': String(x.id === w.fid), onclick: () => e.war.pick(x.id), text: (x.name || x.id) + ' · ' + WAR_KIND_WORDS[x.kind] }))));
     }
-    if (w.manual && w.enemies.length) kids.push(h('button', { class: 'btn sm', type: 'button', onclick: () => e.war.auto(), text: 'Back to our war' }));
+    // A faction typed in can always be cleared (back to your faction's own war, or to none).
+    if (w.manual) kids.push(h('button', { class: 'btn sm', type: 'button', onclick: () => e.war.auto(), text: w.enemies.length ? 'Back to our war' : 'Clear' }));
     let fidIn;
     kids.push(
         h('span', { class: 'sep' }),

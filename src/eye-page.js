@@ -216,14 +216,14 @@ function onAttackData(json) {
         ep.attack.gearSaved = true;
         saveGear(d.defenderId, d.items);
     }
-    drawAttack();
+    if (getSettings().eyeChips) drawAttack();
 }
 
 /* ------------------------------------------------------------- wiring */
 
 function drawAll() {
-    // Taking turns with Torn Trading: nothing of ours on Torn's page.
-    if (isPaused()) {
+    // Taking turns with Torn Trading, or Torn Eye chips switched off in Settings: nothing of ours on Torn's page.
+    if (isPaused() || !getSettings().eyeChips) {
         removeChips(document);
         for (const el of document.querySelectorAll('#pi-attack')) el.remove();
         // Torn's war rows back in their own order.
@@ -233,7 +233,7 @@ function drawAll() {
         }
         return;
     }
-    if (!getSettings().eyeChips || !isVisible()) return;
+    if (!isVisible()) return;
     const p = detectPage(location.href);
     if (p === PAGE_PROFILE) drawProfile();
     if (p === PAGE_FACTION) {
@@ -270,7 +270,7 @@ export function bootEyePage() {
     let lastSig = '';
     onModel((m) => {
         if (!m || !m.ready) return;
-        const sig = [location.href, m.state.at, readFactionRows().length, readWarRows().length, miniProfileId()].join('|');
+        const sig = [location.href, m.state.at, readFactionRows().length, readWarRows().length, miniProfileId(), getSettings().eyeChips ? 1 : 0].join('|');
         if (sig !== lastSig) {
             lastSig = sig;
             ask();
@@ -289,7 +289,7 @@ export function bootEyePage() {
     // The mini-profile popup is added to the body on the first hover, then re-drawn for each player.
     let watchedRoot = null;
     const onMini = () => {
-        if (ep.drawing || isPaused()) return;
+        if (ep.drawing || isPaused() || !getSettings().eyeChips) return;
         const root = document.getElementById('profile-mini-root');
         if (root && root !== watchedRoot) {
             watchedRoot = root;

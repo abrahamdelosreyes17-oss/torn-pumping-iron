@@ -130,6 +130,8 @@ function drawGym(m) {
     }
     if (!m || !m.ready || !getSettings().gymMarks) {
         clearMarks(root);
+        // Marks off: the panel's pill stops showing the gym plan too.
+        tp.lastGymPlan = null;
         return;
     }
     const boxes = readStatBoxes(root);
