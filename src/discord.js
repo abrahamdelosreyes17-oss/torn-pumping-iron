@@ -259,7 +259,10 @@ export function maybeSyncPlan(m, now = Date.now()) {
     const key = getKey(K.apiKey);
     const tag = keyTag(key);
     const keyDue = Boolean(w.discordName && key && w.keyTag !== tag);
-    const due = sig !== w.lastSig || now - (w.lastSync || 0) >= SYNC_EVERY_MS || pendingAcks.length > 0 || targetsDue || keyDue;
+    // Torn Eye's war and watch lists (bands, win %): whenever they change, so the bot's advance pings use today's estimates.
+    const eye = eyeSyncPayload();
+    const eyeDue = Boolean(eye.sig) && eye.sig !== w.eyeSig;
+    const due = sig !== w.lastSig || now - (w.lastSync || 0) >= SYNC_EVERY_MS || pendingAcks.length > 0 || targetsDue || keyDue || eyeDue;
     if (!due || now - (w.lastSync || 0) < SYNC_MIN_MS) return false;
     const statics = get(K.userStatic, {}) || {};
     const ki = statics.keyInfo || {};
@@ -268,13 +271,17 @@ export function maybeSyncPlan(m, now = Date.now()) {
     if (ki.factionId !== undefined) body.factionId = ki.factionId || null;
     if (targetsDue) body.targets = sync.targets;
     if (keyDue) body.tornKey = key;
-    set(K.worker, { ...w, lastSync: now, lastSig: sig, pendingAcks: [], ...(targetsDue ? { targetsSig: sync.targetsSig, targetsAt: now } : {}), ...(keyDue ? { keyTag: tag } : {}) });
+    if (eyeDue) {
+        body.war = eye.war;
+        body.watch = eye.watch;
+    }
+    set(K.worker, { ...w, lastSync: now, lastSig: sig, pendingAcks: [], ...(targetsDue ? { targetsSig: sync.targetsSig, targetsAt: now } : {}), ...(keyDue ? { keyTag: tag } : {}), ...(eyeDue ? { eyeSig: eye.sig } : {}) });
     workerSync(body)
         .then((r) => {
             const acked = applyAcks(r.acks, Date.now());
             set(K.worker, { ...(get(K.worker, {}) || {}), lastError: pausedText(r), ready: Boolean(r.ready), linked: Boolean(r.linked), bot: Boolean(r.bot), pendingAcks: acked });
         })
         // Failed: the plan counts as unsent (next minute tries again); the acks wait too.
-        .catch((e) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks, lastSig: w.lastSig, ...(keyDue ? { keyTag: w.keyTag } : {}) }));
+        .catch((e) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks, lastSig: w.lastSig, ...(keyDue ? { keyTag: w.keyTag } : {}), ...(eyeDue ? { eyeSig: w.eyeSig } : {}) }));
     return true;
 }

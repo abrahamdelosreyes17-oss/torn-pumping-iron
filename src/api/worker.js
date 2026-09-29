@@ -84,10 +84,12 @@ export function workerHealth(base, opts) {
 
 /**
  * Store the plan (and on first connect the key, webhook and Discord id).
- * @param {object} o - {base, secret, invite?, plan, tornKey?, webhookUrl?, discordId?, rules?}
+ * @param {object} o - {base, secret, invite?, plan, tornKey?, webhookUrl?, discordId?, rules?, war?, watch?}
  */
-export function workerSync({ base, secret, invite = null, plan, tornKey, webhookUrl, discordId, rules, ackIds, targets, factionId, playerId, fetchImpl }) {
+export function workerSync({ base, secret, invite = null, plan, tornKey, webhookUrl, discordId, rules, ackIds, targets, factionId, playerId, war, watch, fetchImpl }) {
     const body = { plan };
+    if (war !== undefined) body.war = war;
+    if (watch !== undefined) body.watch = watch;
     if (ackIds && ackIds.length) body.ackIds = ackIds.slice(0, 50);
     if (targets !== undefined) body.targets = targets;
     if (factionId !== undefined) body.factionId = factionId;

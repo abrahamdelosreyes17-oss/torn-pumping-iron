@@ -194,10 +194,10 @@ test('row details: our fair fight, FFScouter\'s from its list, age ("old" past 1
     const d = targetDetails({ fairFight: 2.6, ours: 2.41, ageDays: 200, source: 'FFScouter 200 d' });
     assert.equal(d.old, true);
     assert.equal(OLD_ESTIMATE_DAYS, 180);
-    assert.equal(detailsText(d), 'Fair fight ×2.41 ours · ×2.60 FFScouter’s list · estimate 200 days old (old: past 180 days) · from FFScouter 200 d');
+    assert.equal(detailsText(d), 'About 53% as strong as you (our estimate) · 60% by FFScouter’s list · estimate 200 days old (old: past 180 days) · from FFScouter 200 d');
     const v = targetDetails({ fairFight: 1.9 }, { ours: 1.75, est: { ageDays: 3, sourceText: 'your fight 3 d' } });
     assert.equal(v.old, false);
-    assert.match(detailsText(v), /×1\.75 ours · ×1\.90 FFScouter’s list · estimate 3 days old · from your fight 3 d/);
+    assert.match(detailsText(v), /About 28% as strong as you \(our estimate\) · 34% by FFScouter’s list · estimate 3 days old · from your fight 3 d/);
 });
 
 /* ------------------------------------------------------------------ war */

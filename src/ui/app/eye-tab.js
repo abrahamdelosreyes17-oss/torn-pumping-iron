@@ -108,10 +108,23 @@ export function filterTargets(rows, f, { now, attackedToday = new Set() } = {}) 
     });
 }
 
-/** "Fair fight ×2.41 ours · ×2.60 FFScouter’s list · estimate 12 days old · FFScouter 12 d" */
+/**
+ * How strong they are next to you, from Torn's fight modifier (the owner:
+ * never the words "FF" or "fair fight" on screen): 3 means 75% or more of
+ * your battle strength, 1 means far weaker.
+ */
+export function strengthPct(ff) {
+    if (!Number.isFinite(ff)) return null;
+    return Math.round((3 / 8) * (Math.min(3, Math.max(1, ff)) - 1) * 100);
+}
+
+/** "About 53% as strong as you (our estimate) · 60% by FFScouter’s list · estimate 12 days old · from FFScouter 12 d" */
 export function detailsText(d) {
-    const x = (v) => (Number.isFinite(v) ? '×' + v.toFixed(2) : '—');
-    const parts = ['Fair fight ' + x(d.ours) + ' ours · ' + x(d.list) + ' FFScouter’s list'];
+    const pct = (v) => {
+        const p = strengthPct(v);
+        return p === null ? '—' : p >= 75 ? '75%+' : p + '%';
+    };
+    const parts = ['About ' + pct(d.ours) + ' as strong as you (our estimate) · ' + pct(d.list) + ' by FFScouter’s list'];
     if (d.ageDays !== null && d.ageDays !== undefined) parts.push('estimate ' + (d.ageDays < 1 ? 'from today' : d.ageDays + ' days old') + (d.old ? ' (old: past ' + OLD_ESTIMATE_DAYS + ' days)' : ''));
     if (d.source) parts.push('from ' + d.source);
     return parts.join(' · ');
@@ -509,7 +522,7 @@ export function renderEye(m, ctx) {
         if (mode === 'targets' && stored && stored.list && stored.list.length) {
             if (d.cant) notes.push(d.cant + ' can’t-win player' + (d.cant === 1 ? '' : 's') + ' dropped (never kept)');
             if (d.none) notes.push(d.none + ' with no estimate dropped');
-            if (stored.ffIgnored) notes.push('FFScouter’s list ignored the fair-fight range this time; our own fight check still decided');
+            if (stored.ffIgnored) notes.push('FFScouter’s list ignored the strength range this time; our own fight check still decided');
         }
         if (hiddenKeep) notes.push(hiddenKeep + ' hidden because you’d keep under 50% HP');
         // A load that failed still says so above an older list.
@@ -523,7 +536,7 @@ export function renderEye(m, ctx) {
                 notes.length ? h('div', { class: 'note2', text: notes.join(' · ') + '.' }) : null,
                 mode === 'chain'
                     ? h('div', { class: 'note2', text: 'Chains only list players you’ll beat (green and light green); Tough never shows here, and Can’t win is never kept.' })
-                    : h('div', { class: 'note2', text: 'Only players you beat are kept: FFScouter is asked for fair fight ' + TARGET_FF.min.toFixed(1) + '–' + TARGET_FF.max.toFixed(1) + ' in slices and levels, then each one is checked with the fight model. Click a row for its details.' }),
+                    : h('div', { class: 'note2', text: 'Only players you beat are kept: FFScouter is asked for players up to 75% of your strength (the most respect Torn gives), by levels, then each one is checked with the fight model. Click a row for its details.' }),
             ]),
         );
         if (heads.length) pane.push(headsUpBlock(heads, now, ctx.settings));

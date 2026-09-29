@@ -176,3 +176,37 @@ test('Log in with Discord: opens Discord, waits, then sends the plan and the mai
         gmDel('apiKey');
     }
 });
+
+test('the plan sync carries Torn Eye’s war and watch lists when they change, and a new main key once', async () => {
+    const calls = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init = {}) => {
+        calls.push({ url, init });
+        return { ok: true, status: 200, json: async () => ({ ok: true, ready: true, linked: true, bot: true, acks: [] }) };
+    };
+    try {
+        const d = await import('../src/discord.js');
+        gmSet('apiKey', 'NewMainKey123456');
+        gmSet('worker', { base: 'https://svc.workers.dev', secret: 'd'.repeat(64), discordName: 'NoChance17', keyTag: d.keyTag('OldMainKey123456'), lastSync: 0 });
+        d.setEyeForSync({ war: { factionId: 9, members: [{ id: 1, name: 'A', level: 20, band: 'stomp', win: 99, keep: 80 }] }, watch: [{ id: 2, name: 'B', level: 30, band: 'good', win: 90, keep: 50, tag: 'mug' }] });
+        const m = { ready: true, steps: [{ at: Date.now() + 60000, kind: 'xanax', label: 'Xanax #1', trains: {} }] };
+        assert.equal(d.maybeSyncPlan(m, Date.now()), true);
+        await new Promise((r) => setTimeout(r, 10));
+        const body = JSON.parse(calls[0].init.body);
+        assert.equal(body.tornKey, 'NewMainKey123456', 'the changed key goes once');
+        assert.equal(body.war.factionId, 9);
+        assert.equal(body.watch[0].tag, 'mug');
+        // Same lists, same key, a minute later: neither goes again.
+        const w = gmGet('worker', null);
+        gmSet('worker', { ...w, lastSync: 0, lastSig: null });
+        d.maybeSyncPlan(m, Date.now() + 61000);
+        await new Promise((r) => setTimeout(r, 10));
+        const body2 = JSON.parse(calls[1].init.body);
+        assert.equal(body2.tornKey, undefined);
+        assert.equal(body2.war, undefined);
+    } finally {
+        globalThis.fetch = realFetch;
+        gmDel('worker');
+        gmDel('apiKey');
+    }
+});

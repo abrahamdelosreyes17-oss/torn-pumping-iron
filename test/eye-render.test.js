@@ -86,7 +86,7 @@ const model = { ready: true, pc: { stats: { str: 1e8, spd: 1e8, def: 1e8, dex: 1
 test('Targets: only beatable rows, the dropped count, details open; Chain: Stomp and Good only', () => {
     const t = text(renderEye(model, ctxFor('targets')));
     assert.match(t, /7 can’t-win players dropped \(never kept\)/);
-    assert.match(t, /Fair fight ×2\.40 ours · ×2\.50 FFScouter’s list · estimate 3 days old · from FFScouter 3 d/);
+    assert.match(t, /About 52% as strong as you \(our estimate\) · 56% by FFScouter’s list · estimate 3 days old · from FFScouter 3 d/);
     assert.doesNotMatch(t, /Hide can.t win/);
     assert.match(t, /Most respect/);
     const c = text(renderEye(model, ctxFor('chain')));

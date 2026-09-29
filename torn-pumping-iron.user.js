@@ -6578,10 +6578,12 @@
 
     /**
      * Store the plan (and on first connect the key, webhook and Discord id).
-     * @param {object} o - {base, secret, invite?, plan, tornKey?, webhookUrl?, discordId?, rules?}
+     * @param {object} o - {base, secret, invite?, plan, tornKey?, webhookUrl?, discordId?, rules?, war?, watch?}
      */
-    function workerSync({ base, secret, invite = null, plan, tornKey, webhookUrl, discordId, rules, ackIds, targets, factionId, playerId, fetchImpl }) {
+    function workerSync({ base, secret, invite = null, plan, tornKey, webhookUrl, discordId, rules, ackIds, targets, factionId, playerId, war, watch, fetchImpl }) {
         const body = { plan };
+        if (war !== undefined) body.war = war;
+        if (watch !== undefined) body.watch = watch;
         if (ackIds && ackIds.length) body.ackIds = ackIds.slice(0, 50);
         if (targets !== undefined) body.targets = targets;
         if (factionId !== undefined) body.factionId = factionId;
@@ -6881,7 +6883,10 @@
         const key = getKey(K.apiKey);
         const tag = keyTag(key);
         const keyDue = Boolean(w.discordName && key && w.keyTag !== tag);
-        const due = sig !== w.lastSig || now - (w.lastSync || 0) >= SYNC_EVERY_MS || pendingAcks.length > 0 || targetsDue || keyDue;
+        // Torn Eye's war and watch lists (bands, win %): whenever they change, so the bot's advance pings use today's estimates.
+        const eye = eyeSyncPayload();
+        const eyeDue = Boolean(eye.sig) && eye.sig !== w.eyeSig;
+        const due = sig !== w.lastSig || now - (w.lastSync || 0) >= SYNC_EVERY_MS || pendingAcks.length > 0 || targetsDue || keyDue || eyeDue;
         if (!due || now - (w.lastSync || 0) < SYNC_MIN_MS) return false;
         const statics = get(K.userStatic, {}) || {};
         const ki = statics.keyInfo || {};
@@ -6890,14 +6895,18 @@
         if (ki.factionId !== undefined) body.factionId = ki.factionId || null;
         if (targetsDue) body.targets = sync.targets;
         if (keyDue) body.tornKey = key;
-        set(K.worker, { ...w, lastSync: now, lastSig: sig, pendingAcks: [], ...(targetsDue ? { targetsSig: sync.targetsSig, targetsAt: now } : {}), ...(keyDue ? { keyTag: tag } : {}) });
+        if (eyeDue) {
+            body.war = eye.war;
+            body.watch = eye.watch;
+        }
+        set(K.worker, { ...w, lastSync: now, lastSig: sig, pendingAcks: [], ...(targetsDue ? { targetsSig: sync.targetsSig, targetsAt: now } : {}), ...(keyDue ? { keyTag: tag } : {}), ...(eyeDue ? { eyeSig: eye.sig } : {}) });
         workerSync(body)
             .then((r) => {
                 const acked = applyAcks(r.acks, Date.now());
                 set(K.worker, { ...(get(K.worker, {}) || {}), lastError: pausedText(r), ready: Boolean(r.ready), linked: Boolean(r.linked), bot: Boolean(r.bot), pendingAcks: acked });
             })
             // Failed: the plan counts as unsent (next minute tries again); the acks wait too.
-            .catch((e) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks, lastSig: w.lastSig, ...(keyDue ? { keyTag: w.keyTag } : {}) }));
+            .catch((e) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks, lastSig: w.lastSig, ...(keyDue ? { keyTag: w.keyTag } : {}), ...(eyeDue ? { eyeSig: w.eyeSig } : {}) }));
         return true;
     }
 
@@ -11969,10 +11978,23 @@
         });
     }
 
-    /** "Fair fight ×2.41 ours · ×2.60 FFScouter’s list · estimate 12 days old · FFScouter 12 d" */
+    /**
+     * How strong they are next to you, from Torn's fight modifier (the owner:
+     * never the words "FF" or "fair fight" on screen): 3 means 75% or more of
+     * your battle strength, 1 means far weaker.
+     */
+    function strengthPct(ff) {
+        if (!Number.isFinite(ff)) return null;
+        return Math.round((3 / 8) * (Math.min(3, Math.max(1, ff)) - 1) * 100);
+    }
+
+    /** "About 53% as strong as you (our estimate) · 60% by FFScouter’s list · estimate 12 days old · from FFScouter 12 d" */
     function detailsText(d) {
-        const x = (v) => (Number.isFinite(v) ? '×' + v.toFixed(2) : '—');
-        const parts = ['Fair fight ' + x(d.ours) + ' ours · ' + x(d.list) + ' FFScouter’s list'];
+        const pct = (v) => {
+            const p = strengthPct(v);
+            return p === null ? '—' : p >= 75 ? '75%+' : p + '%';
+        };
+        const parts = ['About ' + pct(d.ours) + ' as strong as you (our estimate) · ' + pct(d.list) + ' by FFScouter’s list'];
         if (d.ageDays !== null && d.ageDays !== undefined) parts.push('estimate ' + (d.ageDays < 1 ? 'from today' : d.ageDays + ' days old') + (d.old ? ' (old: past ' + OLD_ESTIMATE_DAYS + ' days)' : ''));
         if (d.source) parts.push('from ' + d.source);
         return parts.join(' · ');
@@ -12370,7 +12392,7 @@
             if (mode === 'targets' && stored && stored.list && stored.list.length) {
                 if (d.cant) notes.push(d.cant + ' can’t-win player' + (d.cant === 1 ? '' : 's') + ' dropped (never kept)');
                 if (d.none) notes.push(d.none + ' with no estimate dropped');
-                if (stored.ffIgnored) notes.push('FFScouter’s list ignored the fair-fight range this time; our own fight check still decided');
+                if (stored.ffIgnored) notes.push('FFScouter’s list ignored the strength range this time; our own fight check still decided');
             }
             if (hiddenKeep) notes.push(hiddenKeep + ' hidden because you’d keep under 50% HP');
             // A load that failed still says so above an older list.
@@ -12384,7 +12406,7 @@
                     notes.length ? h('div', { class: 'note2', text: notes.join(' · ') + '.' }) : null,
                     mode === 'chain'
                         ? h('div', { class: 'note2', text: 'Chains only list players you’ll beat (green and light green); Tough never shows here, and Can’t win is never kept.' })
-                        : h('div', { class: 'note2', text: 'Only players you beat are kept: FFScouter is asked for fair fight ' + TARGET_FF.min.toFixed(1) + '–' + TARGET_FF.max.toFixed(1) + ' in slices and levels, then each one is checked with the fight model. Click a row for its details.' }),
+                        : h('div', { class: 'note2', text: 'Only players you beat are kept: FFScouter is asked for players up to 75% of your strength (the most respect Torn gives), by levels, then each one is checked with the fight model. Click a row for its details.' }),
                 ]),
             );
             if (heads.length) pane.push(headsUpBlock(heads, now, ctx.settings));
