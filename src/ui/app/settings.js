@@ -369,7 +369,7 @@ export function renderSettings(m, ctx) {
     const fullSec = settingsSection('Full key (Auto mode)', fullState, [
         h('p', { text: 'Auto mode, the default plan, sizes your gym spending to your income. It needs a Full key, used for one thing only: reading your money log to see where your income comes from. It never leaves this browser.' }),
         full.row,
-        full.msg,
+        ctx.ui.fullKeyMsg ? h('span', { class: 'msg ' + (ctx.ui.fullKeyMsg.ok ? 'ok' : 'bad'), text: ctx.ui.fullKeyMsg.text }) : full.msg,
         fk.has ? h('div', { class: 'row' }, [fk.logAt ? h('span', { class: 'muted num', text: 'Money log read ' + new Date(fk.logAt).toISOString().slice(11, 16) + ' UTC' + (fk.logLines ? ' · ' + fk.logLines + ' lines' : '') }) : h('span', { class: 'muted', text: 'Money log not read yet' }), confirmButton(ctx, 'full-forget', 'Forget the Full key', () => { ctx.forgetFullKey(); ctx.rerender(); })]) : null,
         h('div', { class: 'row' }, [t('lab', 'Keep for war days'), h('input', { class: 'inp num', style: 'width:72px', inputmode: 'numeric', 'aria-label': 'Energy kept for war days', value: String(s.warReserve || 0), onchange: (ev) => ctx.setSettings({ warReserve: Math.max(0, Math.min(1000, Math.round(Number(ev.target.value) || 0))) }) }), h('span', { class: 'muted', text: 'energy · during a faction war the plan never trains below this (0 = you decide)' })]),
         h('p', {}, ['No Full key? Pick a manual plan on Plan (Most stats in my budget) and set the budget yourself. ', h('a', { href: apiKeyPageUrl(), target: '_blank', rel: 'noopener', text: 'Make a Full key' })]),

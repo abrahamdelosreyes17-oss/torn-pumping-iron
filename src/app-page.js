@@ -381,11 +381,14 @@ function getCtx() {
         saveTornKey,
         saveFullKey: async (v) => {
             const r = await saveFullKey(v);
+            // The answer stays on screen through the redraw that follows (the new key changes the page).
+            page.app.ui.fullKeyMsg = r;
             refresh();
             page.app.render(true);
             return r;
         },
         forgetFullKey: () => {
+            page.app.ui.fullKeyMsg = null;
             forgetFullKey();
             refresh();
             page.app.render(true);
