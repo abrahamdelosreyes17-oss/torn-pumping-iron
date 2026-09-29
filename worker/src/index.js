@@ -1,13 +1,15 @@
 /*
  * Pumping Iron's Discord service: a Cloudflare Worker (free plan) that reads
- * each user's Torn timers once a minute and tags them in Discord when a
- * step is due. It never acts in Torn; it only reads (a custom key with
- * bars, cooldowns, refills and travel) and posts to the user's own
- * Discord webhook. Setup: worker/SETUP.md.
+ * each user's Torn timers once a minute and pings them in Discord (a DM
+ * from the bot, or their own channel webhook) when a step is due, and
+ * answers the bot's slash commands. It never acts in Torn; it only reads
+ * through the API with each user's own custom key, stored encrypted
+ * (KEY_ENC). Setup: worker/SETUP.md. What's built: worker/BOT.md.
  *
  * Routes:
  *   GET  /health          → {ok}
- *   PUT  /plan            (Authorization: Bearer <secret>) store {tornKey?, discordId, webhookUrl, plan, rules}
+ *   PUT  /plan            (Authorization: Bearer <secret>) store {tornKey?, discordId, webhookUrl, plan, rules,
+ *                         targets?, factionId?, playerId?, ackIds?}; answers {ready, paused, lastError, linked, bot, acks}
  *                         the first PUT for a secret needs X-Invite: <INVITE_CODE>
  *   POST /test            (Authorization: Bearer <secret>) send a test ping
  *   DELETE /plan          (Authorization: Bearer <secret>) forget this user
