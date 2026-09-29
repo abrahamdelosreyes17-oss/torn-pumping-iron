@@ -93,6 +93,8 @@ a:hover { text-decoration: underline; }
 .tbl tr.now .t { color: var(--chalk); }
 .tbl tr.sel td { background: #202428; }
 .tbl tr.sel td:first-child { box-shadow: inset 2px 0 0 var(--chalk); }
+.tbl tr.pending td { background: #26221c; }
+.tbl tr.pending td:first-child { box-shadow: inset 2px 0 0 var(--warn); }
 .tbl tr.click { cursor: pointer; }
 .tbl tr.click:hover td { background: #1f2326; }
 .tbl .when { color: var(--muted); font-size: 12px; }

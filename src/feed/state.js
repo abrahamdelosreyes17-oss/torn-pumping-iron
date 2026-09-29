@@ -16,9 +16,9 @@ import { totalOf } from '../core/gain.js';
 import { calibrationSample, addCalibration } from '../core/calibration.js';
 import { mergeLiveGyms, GYMS } from '../core/gyms.js';
 import { parsePerks } from '../core/perks.js';
-import { fetchUserState, fetchPerks, fetchProperty, fetchGyms, fetchInventory, fetchMoney, fetchCalendar, fetchKeyInfo, fetchNetworthHistory } from '../api/torn.js';
+import { fetchUserState, fetchPerks, fetchProperty, fetchGyms, fetchInventory, fetchMoney, fetchCalendar, fetchKeyInfo, fetchNetworthHistory, fetchJob, fetchJobPoints, fetchItemsInfo } from '../api/torn.js';
 import { NETWORTH_STATS, INCOME_DAYS } from '../core/auto.js';
-import { POINTS } from '../core/items.js';
+import { POINTS, CANDY_IDS, GAME_CONSOLE } from '../core/items.js';
 import { TRADING_SEEN_KEY } from '../core/turns.js';
 import { KEY_DEAD_CODES } from '../api/client.js';
 import { receiptChange, recordChange, applyInventory, receiptPriceNow } from '../core/receipts.js';
@@ -41,7 +41,14 @@ export const STATIC_EVERY = {
     calendar: 12 * 60 * 60 * 1000,
     // Auto mode's income: networth now, a week ago and a month ago (3 calls).
     income: 6 * 60 * 60 * 1000,
+    // Your company job and its job points (company what-ifs, job-point happy); Torn's item data (NPC shop prices).
+    job: 6 * 60 * 60 * 1000,
+    jobPoints: 6 * 60 * 60 * 1000,
+    items: 24 * 60 * 60 * 1000,
 };
+
+/** The items whose Torn data (market price, city shops) the plan reads: every candy and the Game Console. */
+export const ITEMS_INFO_IDS = [...CANDY_IDS, GAME_CONSOLE];
 
 /** A slow part that failed is asked again after this long (not after its whole period). */
 export const STATIC_RETRY_MS = 5 * 60 * 1000;
@@ -234,6 +241,9 @@ export class StateFeed {
                     return fetchNetworthHistory(this.client, { stats: NETWORTH_STATS, dates: [nowS - INCOME_DAYS * 86400, nowS - 7 * 86400, null] });
                 },
             ],
+            ['job', () => fetchJob(this.client)],
+            ['jobPoints', () => fetchJobPoints(this.client)],
+            ['items', () => fetchItemsInfo(this.client, ITEMS_INFO_IDS)],
         ];
         for (const [k, fn] of jobs) {
             if (!due(k)) continue;

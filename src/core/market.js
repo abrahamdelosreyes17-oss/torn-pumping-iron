@@ -4,12 +4,72 @@
  * a verdict against our own 7-day history. Pure. ENGINE-SPEC §8.
  */
 
-import { POINTS, ITEMS, itemName } from './items.js';
-import { bazaarUrl, itemMarketUrl, pointsMarketUrl } from '../sources/route.js';
+import { POINTS, ITEMS, itemName, isCandy } from './items.js';
+import { bazaarUrl, itemMarketUrl, pointsMarketUrl, shopUrl } from '../sources/route.js';
 
 export const SOURCE_BAZAAR = 'bazaar';
 export const SOURCE_ITEM_MARKET = 'itemmarket';
 export const SOURCE_POINTS = 'points';
+/** A city (NPC) shop: Sally's Sweet Shop and the like. */
+export const SOURCE_NPC = 'npc';
+
+/**
+ * The slice of /v2/torn/{ids}/items the plan keeps: Torn's market price and
+ * the city shops that sell each item (only shops in Torn: abroad needs a flight).
+ * @param {object[]} items - the `items` array
+ * @returns {object} {[id]: {market:number|null, shops:[{shop, buy}]}}
+ */
+export function itemsInfoFrom(items) {
+    const out = {};
+    for (const it of Array.isArray(items) ? items : []) {
+        const id = Number(it && it.id);
+        if (!id) continue;
+        const v = it.value || {};
+        const shops = (Array.isArray(v.shops) ? v.shops : [])
+            .filter((s) => s && (s.country === undefined || s.country === 'Torn') && Number(s.buy_price) > 0)
+            .map((s) => ({ shop: String(s.shop), buy: Number(s.buy_price) }));
+        out[id] = { market: Number(v.market_price) > 0 ? Number(v.market_price) : null, shops };
+    }
+    return out;
+}
+
+/** Torn's own market price per item (a price to weigh a candy by until listings load). */
+export function marketPricesFrom(info) {
+    const out = {};
+    for (const [id, v] of Object.entries(info || {})) if (v && v.market > 0) out[id] = v.market;
+    return out;
+}
+
+/** The city shops that sell candy (Buy › Shops I can buy from lists these). */
+export function candyShopsFrom(info) {
+    const set = new Set();
+    for (const [id, v] of Object.entries(info || {})) if (isCandy(Number(id))) for (const s of (v && v.shops) || []) set.add(s.shop);
+    return [...set].sort();
+}
+
+/**
+ * NPC prices the player may use: only shops they ticked (Torn's API can't
+ * tell who may buy there; the owner: Sally's is for newbies only).
+ * @returns {object} {[id]: {price, shop}} the cheapest ticked shop per item
+ */
+export function npcPricesFrom(info, allowed = []) {
+    const ok = new Set(Array.isArray(allowed) ? allowed : []);
+    const out = {};
+    if (!ok.size) return out;
+    for (const [id, v] of Object.entries(info || {})) {
+        for (const s of (v && v.shops) || []) {
+            if (!ok.has(s.shop)) continue;
+            if (!out[id] || s.buy < out[id].price) out[id] = { price: s.buy, shop: s.shop };
+        }
+    }
+    return out;
+}
+
+/** A shop "listing" for the Buy list: as many as needed at the shop's price. */
+export function npcListing(npc, qty) {
+    if (!npc || !(npc.price > 0)) return null;
+    return { source: SOURCE_NPC, shop: npc.shop, sellerName: npc.shop, price: npc.price, qty: Math.max(1, Math.floor(qty || 1)) };
+}
 
 /** Verdict thresholds vs the 7-day average of the lowest price. */
 export const BUY_NOW_MAX_PCT = 1;
@@ -43,6 +103,7 @@ export function needList(needed, inventory = {}) {
 export function linkFor(row, itemId) {
     if (row.source === SOURCE_BAZAAR && row.sellerId) return bazaarUrl(row.sellerId);
     if (row.source === SOURCE_POINTS) return pointsMarketUrl();
+    if (row.source === SOURCE_NPC) return shopUrl(row.shop);
     return itemMarketUrl(itemId);
 }
 
@@ -64,7 +125,7 @@ export function fillCheapest(listings, qty, itemId) {
     for (const l of sorted) {
         if (left <= 0) break;
         const take = Math.min(left, l.qty);
-        const row = { source: l.source, sellerId: l.sellerId || null, sellerName: l.sellerName || null, listingId: l.listingId || null, listed: l.qty, qty: take, price: l.price, subtotal: take * l.price, dataAt: l.dataAt || null };
+        const row = { source: l.source, sellerId: l.sellerId || null, sellerName: l.sellerName || null, listingId: l.listingId || null, listed: l.qty, qty: take, price: l.price, subtotal: take * l.price, dataAt: l.dataAt || null, ...(l.shop ? { shop: l.shop } : {}) };
         row.link = linkFor(row, itemId);
         rows.push(row);
         total += row.subtotal;
@@ -138,11 +199,11 @@ export function unitPrice(row, qty = 10) {
     return row.avg7 > 0 ? row.avg7 : null;
 }
 
-/** {itemId: price row} → {itemId: $ per unit}, only the ones known (points: per point, 300 at a time). */
+/** {itemId: price row} → {itemId: $ per unit}, only the ones known (points: per point, 300 at a time; candy: a boost's 50). */
 export function livePrices(rows) {
     const out = {};
     for (const [id, row] of Object.entries(rows || {})) {
-        const p = unitPrice(row, id === POINTS ? 300 : 10);
+        const p = unitPrice(row, id === POINTS ? 300 : isCandy(Number(id)) ? 50 : 10);
         if (p) out[id] = p;
     }
     return out;
@@ -158,5 +219,6 @@ export function listingsFromPoints(api) {
 export function whereText(row) {
     if (row.source === SOURCE_BAZAAR) return (row.sellerName ? row.sellerName + "'s" : 'A') + ' bazaar';
     if (row.source === SOURCE_POINTS) return 'Points market';
+    if (row.source === SOURCE_NPC) return row.shop || 'City shop';
     return 'Item Market';
 }

@@ -56,8 +56,8 @@ export function recommend(results, { budget = Infinity, bliss = false, pickBy = 
     const list = Object.values(results).filter(Boolean);
     if (!list.length) return { recommended: null, pickBy, alternatives: [], reasons: [] };
     const limit = pickBy === 'max' ? Infinity : budget;
-    // A plan whose numbers aren't checked in game yet (the console jump) is shown, never picked.
-    const pickable = list.filter((r) => !(STRATEGIES[r.id] && STRATEGIES[r.id].unverified));
+    // A plan that doesn't fit the player (the console jump over 250k in a stat it trains) is shown, never picked.
+    const pickable = list.filter((r) => !r.blocked);
     const inBudget = (pickable.length ? pickable : list).filter((r) => r.cost <= limit);
     const pool = inBudget.length ? inBudget : [(pickable.length ? pickable : list).reduce((a, b) => (b.cost < a.cost ? b : a))];
     const perM = perMillion;
@@ -76,7 +76,7 @@ export function recommend(results, { budget = Infinity, bliss = false, pickBy = 
             if (overBudget && r.gained > best.gained) verdict = 'overBudget';
             else if (Math.abs(deltaStatsPct) < 1 && Math.abs(deltaCost) < 1e6) verdict = 'same';
             else if (deltaStatsPct > 0 && !overBudget) verdict = 'better';
-            const alt = { id: r.id, gained: r.gained, cost: r.cost, perM: perM(r), deltaStatsPct, deltaCost, overBudget, verdict, fits: fitsPlayer(r, best) };
+            const alt = { id: r.id, gained: r.gained, cost: r.cost, perM: perM(r), deltaStatsPct, deltaCost, overBudget, verdict, fits: !r.blocked && fitsPlayer(r, best), blocked: r.blocked || null, buysConsole: Boolean(r.used && r.used[104] > 0) };
             return { ...alt, why: whyNot(best, alt, { bliss, budget, pickBy }) };
         })
         .sort((a, b) => b.gained - a.gained);
@@ -111,9 +111,10 @@ export function whyNot(best, alt, { bliss = false, budget = Infinity, pickBy = '
     if (pickBy === 'value' && pct > 0) return '+' + pct + '% stats but fewer per $1M (' + fmtShort(alt.perM || 0) + ' vs ' + fmtShort(perMillion(best)) + ').';
     // Over budget is the reason only when it would otherwise win; a worse plan leads with what it loses.
     if (alt.overBudget && alt.gained > best.gained) return 'Over your ' + fmtMoney(budget) + ' budget (it would gain +' + pct + '% more).';
+    if (alt.blocked) return 'Doesn’t fit you: ' + alt.blocked + '.';
     if (alt.verdict === 'same') return 'The same stats for the same money: nothing to gain by switching.';
     const why = [];
-    if (STRATEGIES[alt.id] && STRATEGIES[alt.id].unverified) why.push('from a player’s guide, not checked in game yet (needs a Game Console)');
+    if (alt.buysConsole) why.push('the cost includes a Game Console (you have none)');
     if (JUMP_LIKE.has(alt.id)) why.push('holding Xanax for the jump stops natural energy');
     if (HAPPY_BOUGHT.has(alt.id)) why.push('the Ecstasy takes a drug cooldown a Xanax would fill');
     if (alt.id === 'dailyChoco' || alt.id === 'candyXanax') why.push('the candy lifts happy for one session a day');
@@ -135,7 +136,7 @@ export function pickWarning(recommended, picked, { bliss = false, days = 30 } = 
     const dCost = picked.cost - recommended.cost;
     const warn = dPct < -WARN_STATS_PCT || (dCost > 0 && dPct < WARN_STATS_PCT);
     const reasons = [];
-    if (JUMP_LIKE.has(picked.id)) reasons.push('Holding four Xanax stops natural energy.');
+    if (JUMP_LIKE.has(picked.id)) reasons.push('Holding ' + (picked.id === 'consoleJump' || picked.id === 'consoleJumpToy' ? 'three' : 'four') + ' Xanax stops natural energy.');
     if (HAPPY_BOUGHT.has(picked.id)) reasons.push('The Ecstasy uses a drug cooldown a Xanax would have filled.');
     if (picked.id === 'dailyChoco') reasons.push('The candy lifts happy for one session a day only.');
     if (HAPPY_BOUGHT.has(picked.id) && !bliss) reasons.push('Worth it only if you read Ignorance Is Bliss.');

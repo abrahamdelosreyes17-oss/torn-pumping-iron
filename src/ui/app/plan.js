@@ -11,11 +11,11 @@
 import { h, t } from '../dom.js';
 import { STATS, STAT_LABEL } from '../../core/gain.js';
 import { fmtInt, fmtShort, fmtMoney, fmtPct } from '../../core/format.js';
-import { STRATEGIES, SPECIAL } from '../../core/strategies.js';
+import { STRATEGIES, SPECIAL, planWhat } from '../../core/strategies.js';
 import { pickWarning, perMillion, PICK_BY } from '../../core/recommend.js';
 import { BUILDS, BUILD_ORDER, BUILD_ALIASES, resolveBuild, highStatOf } from '../../core/builds.js';
 import { GEORGES, gymById } from '../../core/gyms.js';
-import { XANAX, EDVD, FHC, POINTS, REFILL_POINTS, ITEMS, CANDY_KISSES } from '../../core/items.js';
+import { XANAX, EDVD, FHC, POINTS, REFILL_POINTS, ITEMS, CANDY_KISSES, CANDY_IDS, itemName } from '../../core/items.js';
 import { lineChart, chartNum } from '../charts.js';
 import { sectionHead, meta, STAT_COLOR } from './common.js';
 
@@ -30,8 +30,11 @@ export function planPerDay(r, days) {
     if (per(EDVD)) parts.push(n(per(EDVD)) + ' EDVD');
     if (per(FHC)) parts.push(n(per(FHC)) + ' FHC');
     for (const id of [530, 532, 533]) if (per(id)) parts.push(n(per(id)) + ' ' + ITEMS[id].name.replace(/^Can of /, ''));
-    if (per(CANDY_KISSES) && !per(EDVD)) parts.push('candy');
-    if (((r.used && r.used[POINTS]) || 0) >= REFILL_POINTS * days * 0.9) parts.push('refill');
+    // The candy the plan picked, by name.
+    const candyId = r.candy ? r.candy.id : CANDY_KISSES;
+    if (per(candyId) && !per(EDVD)) parts.push(r.candy ? itemName(candyId) : 'candy');
+    // A refill a day, points or (while specials are held) a special.
+    if (((r.used && r.used[POINTS]) || 0) / REFILL_POINTS + ((r.used && r.used.dailySpecial) || 0) >= days * 0.9) parts.push('refill');
     return parts.join(' + ') || '—';
 }
 
@@ -155,7 +158,8 @@ function controls(m, ctx) {
             h('span', { class: 'muted' }, ['you have ', h('b', { class: 'white', text: fmtInt(sp.have) }), ' · use']),
             numberInput(sp.use || 0, 58, (v) => ctx.setPlan({ specialUse: Math.min(v, sp.have), specialStart: sp.have, specialSetAt: Date.now() }), { label: 'Special refills to use' }),
             h('span', { class: 'muted', text: 'in this plan · each adds ' + each + ' energy' + (perE ? ' (about +' + fmtShort(perE * each) + ' stats for you)' : '') + (sp.use ? ' · ' + sp.left + ' left' : ' · set how many to use') }),
-            h('span', { class: 'info', title: 'Shown because Torn says your account has special refills. They aren’t limited to one a day: the plan puts them where they add the most (in a happy jump or boost, where the happy they cost resets anyway) and keeps the rest.', text: 'i' }),
+            h('span', { class: 'info', title: 'Shown because Torn says your account has special refills. They aren’t limited to one a day (at most 100 a week): the plan puts them where they add the most (in a happy jump or boost, where the happy they cost resets anyway) and keeps the rest. A refill fills energy to the maximum, never above it, so each is used once the last is trained. While you hold any, Torn lets you use the points refill only once they’re spent (one source), so the plan’s daily refill is a special until then.', text: 'i' }),
+            h('span', { class: 'muted', text: '· daily refill: a special while you hold any' }),
             h('span', { class: 'sep' }),
         );
     }
@@ -207,7 +211,7 @@ function recommendedCard(m, ctx, rec, compare, days) {
     const kids = [
         sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + money + ' · ' + days + ' days'])),
         h('div', { class: 'prime num' }, [
-            h('div', {}, [h('span', { class: 'pill-tag chalk', text: kindOf(rec.recommended) }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: S.what })]),
+            h('div', {}, [h('span', { class: 'pill-tag chalk', text: kindOf(rec.recommended) }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: planWhat(rec.recommended, best) })]),
             h('div', { class: 'figs' }, figs),
             h('div', { class: 'why' }, [
                 'Wins because: ' + reasons + (autoOn && a.afford ? ' ' + a.afford : spend) + ' ',
@@ -273,10 +277,12 @@ function otherPlans(m, ctx, rec, compare, days) {
     for (const a of rec.alternatives) {
         if (!a.fits && !showAll) continue;
         const st = STRATEGIES[a.id];
-        const sel = (ctx.ui.planPick || using) === a.id;
+        // The plan you're really on is marked whatever you're picking; a pick still waiting on its warning has its own look.
+        const current = a.id === using;
+        const pending = ctx.ui.planPick === a.id && !current;
         rows.push(
             h('tr', {
-                class: 'click' + (sel ? ' sel' : ''),
+                class: 'click' + (current ? ' sel' : '') + (pending ? ' pending' : ''),
                 tabindex: '0',
                 role: 'button',
                 'aria-label': 'Pick ' + st.name,
@@ -298,8 +304,8 @@ function otherPlans(m, ctx, rec, compare, days) {
                 },
             }, [
                 h('td', {}, [h('small', { text: kindOf(a.id) })]),
-                h('td', {}, [h('b', { class: 'w', text: st.name }), st.unverified ? h('span', { class: 'tag warn', style: 'margin-left:6px', text: 'unverified' }) : null, sel && a.id === using ? h('span', { class: 'tag chalk', style: 'margin-left:6px', text: 'yours' }) : null]),
-                h('td', { class: 'muted', text: st.what }),
+                h('td', {}, [h('b', { class: 'w', text: st.name }), current ? h('span', { class: 'tag chalk', style: 'margin-left:6px', text: 'current plan' }) : null, pending ? h('span', { class: 'tag warn', style: 'margin-left:6px', text: 'picked · see the warning' }) : null]),
+                h('td', { class: 'muted', text: planWhat(a.id, compare[a.id]) }),
                 h('td', { class: 'r ' + (a.deltaStatsPct >= 0 ? 'c-good' : 'c-bad'), text: fmtPct(a.deltaStatsPct) }),
                 h('td', { class: 'r ' + (a.deltaCost > 0 ? 'c-bad' : 'c-good'), text: (a.deltaCost >= 0 ? '+' : '−') + fmtMoney(Math.abs(a.deltaCost)) }),
                 h('td', { class: 'r', text: a.cost > 0 ? chartNum(a.perM) : '—' }),
@@ -315,11 +321,27 @@ function otherPlans(m, ctx, rec, compare, days) {
             h('tr', { class: 'whatif' }, [
                 h('td', {}, [h('small', { text: 'Book' })]),
                 h('td', {}, [h('b', { class: 'w', text: st.name === 'Steady with Bliss' ? st.name : st.name + ' with Bliss' }), ' ', h('span', { class: 'tag', text: 'what-if' })]),
-                h('td', { text: st.what }),
+                h('td', { text: planWhat(w.id, w) }),
                 h('td', { class: 'r', text: fmtPct(d) }),
                 h('td', { class: 'r', text: (w.cost - best.cost >= 0 ? '+' : '−') + fmtMoney(Math.abs(w.cost - best.cost)) }),
                 h('td', { class: 'r', text: chartNum(perMillion(w)) }),
                 h('td', { class: 'why ok', text: 'Needs Ignorance Is Bliss active; see the Bliss card' }),
+            ]),
+        );
+    }
+    // Company what-ifs: only the ones that beat your plan ("Hired at a 10★ Adult Novelties: +X% stats this month").
+    for (const w of m.jobWhatIf || []) {
+        const r = w.result;
+        const d = best.gained > 0 ? (100 * (r.gained - best.gained)) / best.gained : 0;
+        rows.push(
+            h('tr', { class: 'whatif job' }, [
+                h('td', {}, [h('small', { text: 'Job' })]),
+                h('td', {}, [h('b', { class: 'w', text: w.title }), ' ', h('span', { class: 'tag', text: 'what-if' })]),
+                h('td', { text: planWhat(w.strategy, r) }),
+                h('td', { class: 'r', text: fmtPct(d) }),
+                h('td', { class: 'r', text: (r.cost - best.cost >= 0 ? '+' : '−') + fmtMoney(Math.abs(r.cost - best.cost)) }),
+                h('td', { class: 'r', text: r.cost > 0 ? chartNum(perMillion(r)) : '—' }),
+                h('td', { class: 'why ok', title: w.note, text: w.title + ': ' + fmtPct(d) + ' stats this ' + (days === 30 ? 'month' : days + ' days') + '. ' + w.note }),
             ]),
         );
     }
@@ -428,6 +450,8 @@ export function renderPlan(m, ctx) {
     const compare = ctx.compare || {};
     const rec = m.recommendation;
     const days = ctx.settings.horizonDays || 30;
+    // Every candy a plan might pick is priced (a few listings, every 30 min), so the candy choice follows prices.
+    if (ctx.wantPrices) ctx.wantPrices([], CANDY_IDS);
     if (!rec || !rec.recommended || !compare[rec.recommended]) return { ctl: controls(m, ctx), main: [h('div', { class: 'lead' }, [h('p', { class: 'muted', style: 'margin:0', text: 'Working out the plans…' })])], pane: [] };
     return {
         ctl: controls(m, ctx),

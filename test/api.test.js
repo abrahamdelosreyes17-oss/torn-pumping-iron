@@ -102,7 +102,7 @@ test('inventory: one call per category; a category Torn refuses is skipped', asy
     });
     const inv = await torn.fetchInventory(tornClient(f));
     assert.deepEqual(inv, { 206: 1, 197: 2 });
-    assert.deepEqual(f.calls.map((x) => new URL(x.url).searchParams.get('cat')), ['Drug', 'Booster', 'Candy', 'Energy Drink']);
+    assert.deepEqual(f.calls.map((x) => new URL(x.url).searchParams.get('cat')), ['Drug', 'Booster', 'Candy', 'Energy Drink', 'Special']);
 });
 
 test('a dead key during inventory stops it (not skipped)', async () => {
@@ -253,4 +253,20 @@ test('third-party budgets are shared through storage and respected', async () =>
     await fetchFfsStats(a, [3]);
     assert.equal(f.calls.length, 3);
     assert.ok(slept.length >= 1 && slept[0] > 50000, 'the third waited for the shared window');
+});
+
+test('job, job points and Torn’s item data (candy shops): exact URLs and shapes', async () => {
+    const f = recorder((url) => {
+        const p = new URL(url).pathname;
+        if (p === '/v2/user/job') return res({ job: { type: 'company', id: 7, type_id: 14, name: 'Sweets', rating: 10, position: 'Employee', days_in_company: 3 } });
+        if (p === '/v2/user/jobpoints') return res({ error: { code: 16, error: 'Access level of this key is not high enough' } });
+        if (p === '/v2/torn/310,104/items') return res({ items: [{ id: 310, value: { market_price: 399, shops: [{ country: 'Torn', shop: "Sally's Sweet Shop", buy_price: 25, sell_price: 12 }] } }, { id: 104, value: { market_price: 170, shops: [] } }] });
+        return res({});
+    });
+    const c = tornClient(f);
+    assert.equal((await torn.fetchJob(c)).type_id, 14);
+    assert.equal(await torn.fetchJobPoints(c), null, 'a key that can’t read it: null, not an error');
+    assert.deepEqual(await torn.fetchItemsInfo(c, [310, 104]), { 310: { market: 399, shops: [{ shop: "Sally's Sweet Shop", buy: 25 }] }, 104: { market: 170, shops: [] } });
+    assert.deepEqual(f.calls.map((x) => new URL(x.url).pathname), ['/v2/user/job', '/v2/user/jobpoints', '/v2/torn/310,104/items']);
+    assert.ok(f.calls.every((x) => new URL(x.url).hostname === 'api.torn.com'));
 });

@@ -215,6 +215,27 @@ test('a key Torn refuses on ANY call is reported dead (onDeadKey), not only in t
     assert.deepEqual(dead, [13]);
 });
 
+test('the slow parts include your job, job points and Torn’s data for candy and the Game Console', async () => {
+    let t = 1_790_000_000_000;
+    const store = memStore();
+    const f = fakeTorn((u) => {
+        if (u.pathname === '/v2/user/job') return { job: { type: 'company', id: 7, type_id: 14, name: 'Sweets', rating: 10, position: 'Employee', days_in_company: 3 } };
+        if (u.pathname === '/v2/user/jobpoints') return { jobpoints: { jobs: {}, companies: [{ company: { id: 14, name: 'Sweet Shop' }, points: 40 }] } };
+        if (/^\/v2\/torn\/[\d,]+\/items$/.test(u.pathname)) return { items: [{ id: 310, value: { market_price: 399, shops: [{ country: 'Torn', shop: "Sally's Sweet Shop", buy_price: 25 }] } }] };
+        return staticAnswers(u, userApi);
+    });
+    const client = new TornApiClient({ getKey: () => 'k'.repeat(16), fetchImpl: f, maxRetries: 0, dedupTtlMs: 0 });
+    const feed = new StateFeed({ client, store, tabId: 'A', now: () => t });
+    await feed.tick();
+    await feed.tick();
+    const st = store.get('userStatic');
+    assert.equal(st.job.type_id, 14);
+    assert.equal(st.jobPoints.companies[0].points, 40);
+    assert.deepEqual(st.items[310], { market: 399, shops: [{ shop: "Sally's Sweet Shop", buy: 25 }] });
+    const itemsCall = f.calls.find((c) => /\/items\?/.test(c) || /\/items$/.test(new URL(c).pathname));
+    assert.ok(itemsCall.includes('310') && itemsCall.includes('104') && itemsCall.includes('1028'), 'every candy and the console in one call');
+});
+
 test('the warning names the problem instead of "Reading your state…"', () => {
     const ffs = { level: 0, type: 'Custom', selections: { user: ['cooldowns', 'refills', 'battlestats'] } };
     const p = keyProblem({ hasKey: true, dead: false, stateError: { code: 16 }, keyInfo: ffs });

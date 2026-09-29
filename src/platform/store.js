@@ -69,6 +69,8 @@ export const DEFAULT_SETTINGS = {
     w3b: true,
     // Auto mode: energy kept for a faction war (0 = you decide).
     warReserve: 0,
+    // Buy › Shops I can buy from: city shops whose prices the plan may use (none until ticked; Sally's is for newbies only).
+    npcShops: [],
 };
 
 /**

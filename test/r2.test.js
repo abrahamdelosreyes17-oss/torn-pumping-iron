@@ -59,7 +59,9 @@ test('special refills pay in a boosted session; at the maximum each train’s ha
     assert.ok(c.chocoJump.gained > none.chocoJump.gained * 1.3, 'choco jump +30% or more with them');
     assert.equal(c.chocoJump.specialHelps, true);
     assert.ok(c.chocoJump.used[SPECIAL] > 0);
-    assert.equal(c.chocoJump.cost, none.chocoJump.cost, 'free');
+    // Free themselves, but the specials held also stand in for the daily points refill: spent in jumps, later days pay points.
+    assert.ok(c.chocoJump.cost >= none.chocoJump.cost);
+    assert.ok(none.chocoJump.used[POINTS] < 30 * 30, 'held specials replace some points refills');
     assert.ok(c.steady.gained >= none.steady.gained, 'never worse: kept only where they help');
     assert.ok(c.steady.used[SPECIAL] <= 100 && c.steady.used[SPECIAL] >= 0);
 });
@@ -70,7 +72,7 @@ test('special refills in the day plan: a boosted session takes as many as keep h
     const steps = dayTimeline({ state, now: T0, strategy: 'chocoJump', ctx });
     const sp = steps.find((s) => s.kind === 'special');
     assert.ok(sp && sp.items[0].id === SPECIAL && sp.items[0].qty > 4, 'more than a day’s share in the jump');
-    assert.match(sp.label, /^Special refills × \d+$/);
+    assert.match(sp.label, /^Special refills × \d+, train after each$/);
     assert.equal(itemsNeeded(steps)[SPECIAL], undefined, 'never on the Buy list');
 });
 
@@ -173,18 +175,23 @@ test('fits: a plan losing more than half the best plan’s stats is hidden unles
 
 /* Console jump and company variants (§1 items 21, 25) */
 
-test('console jump: 3 Xanax, 300 energy on the Game Console, candy + Ecstasy; shown, never picked (unverified)', () => {
+test('console jump: 3 Xanax, 300 energy on the Game Console, the plan’s candy to the cap + Ecstasy; bought only without one', () => {
     const state = player({ stats: FRIEND, energy: 900, drug: 3600 });
-    const steps = dayTimeline({ state, now: T0, strategy: 'consoleJump', ctx: { shares: BUILDS.balanced.shares, unlocked: unlockedGyms(18), active: 18, stackedSoFar: 3 } });
+    const steps = dayTimeline({ state, now: T0, strategy: 'consoleJump', ctx: { shares: BUILDS.balanced.shares, unlocked: unlockedGyms(18), active: 18, stackedSoFar: 3, candyId: 310, consoleOwned: true } });
     const j = steps.find((s) => s.kind === 'jump');
-    assert.match(j.label, /^Game Console × 60 \(Hardcore\), candy × 10 \+ Ecstasy/);
+    assert.match(j.label, /^Game Console × 60 \(Hardcore\) \+ Lollipop × 49 \+ Ecstasy/);
     assert.equal(j.energy, 600, '900 − 300 on the console');
-    assert.equal(itemsNeeded(steps)[CONSOLE_ITEM], undefined, 'the console isn’t bought');
-    assert.equal(STRATEGIES.consoleJump.unverified, true);
+    assert.equal(itemsNeeded(steps)[CONSOLE_ITEM], undefined, 'you have one: not bought');
+    const none = dayTimeline({ state, now: T0, strategy: 'consoleJump', ctx: { shares: BUILDS.balanced.shares, unlocked: unlockedGyms(18), active: 18, stackedSoFar: 3, candyId: 310 } });
+    assert.equal(itemsNeeded(none)[CONSOLE_ITEM], 1, 'none held: buy one');
+    assert.equal(STRATEGIES.consoleJump.unverified, undefined, 'the wiki confirms it');
     const results = { steady: { id: 'steady', gained: 100, cost: 50e6 }, consoleJump: { id: 'consoleJump', gained: 200, cost: 40e6 } };
-    const r = recommend(results, { budget: 150e6 });
+    assert.equal(recommend(results, { budget: 150e6 }).recommended, 'consoleJump', 'picked when it wins');
+    const blocked = { ...results, consoleJump: { ...results.consoleJump, blocked: 'for stats under 250k; your STR is over it' } };
+    const r = recommend(blocked, { budget: 150e6 });
     assert.equal(r.recommended, 'steady');
-    assert.match(r.alternatives[0].why, /not checked in game/);
+    assert.equal(r.alternatives[0].fits, false, 'behind the tick');
+    assert.match(r.alternatives[0].why, /under 250k/);
 });
 
 test('company variants show only for players in that job (read from /user/perks)', () => {
@@ -253,7 +260,7 @@ test('the model: ladder, spend a day and how long the cash lasts, special refill
     const compare = compareStrategies({ state, pc, shares, settings: SETTINGS, prices: PRICES, special: 100 });
     const m = buildModel({ state, statics: { inventory: { [XANAX]: 1, cash: 200e6 } }, plan: { strategy: 'steady', build: 'baldr:str', pickBy: 'most', specialUse: 100, specialStart: 100 }, settings: SETTINGS, compare, unlockedKnown: unlockedGyms(18), now: T0 });
     assert.equal(m.pickBy, 'most');
-    assert.deepEqual(m.special, { have: 100, left: 100, use: 100 });
+    assert.deepEqual(m.special, { have: 100, left: 100, use: 100, held: 100 });
     assert.ok(m.ladder.rows.some((r) => r.id === 'special'));
     assert.ok(Math.abs(m.spend.perDay - compare.steady.cost / 30) < 1);
     assert.equal(Math.round(m.spend.lastsDays), Math.round(200e6 / (compare.steady.cost / 30)));
