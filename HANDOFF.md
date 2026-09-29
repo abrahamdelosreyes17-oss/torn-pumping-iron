@@ -53,6 +53,8 @@
 ## 3. Settled decisions (don't reopen)
 
 - One script, one release; the overlay opens the webpage in a new tab (GM_openInTab), like trading's Torn Bids.
+- **One layout (owner, after 1.0.0):** Compact only; no density switch.
+- **The panel on Torn (owner, after 1.0.0):** docked like NPC Arbitrage, collapsed/expanded with Alt+`, living beside the trading script's panels (left margin first), never over them.
 - The attack, targets and war side is called **Torn Eye** (the owner said "call this one Torn Eye (kinda like a spy)"; read as the fight side inside Pumping Iron).
 - **Plan types:** Steady, Goal (unlock gym / reach build / stat numbers), Jump (choco, EDVD, 99k). Jump plans are strict (warn before a timing, then re-time). Steady and goal plans re-time silently. There is no strict/adaptive switch; buying re-prices daily.
 - The app recommends, with a dropdown of alternatives. A worse pick shows a warning ("not worth it; train natural energy and drug cooldown instead, unless you have Ignorance Is Bliss").
@@ -148,8 +150,8 @@ Done on the owner's yes. For later releases, the same steps minus the one-time r
 
 - **Live check pending** (§8 list). The things most likely wrong, because no source could confirm them: Fill on the gym box (React may need more than the native setter + input event); `selected___` = the gym you're in; `refills.energy` = "used today"; `bars.*.full_time` semantics; the items page Use row; the attack page's armour field (`arm`?); the first attackData answer is missed at `@run-at document-idle` (later polls are read).
 - **Calibrate with real data** (named exports marked [calibrate]): post-50M damping, happy loss per train, fight base damage / hit zones / accuracy / default gear, life by level, respect base, SSL drug limit, specialist gyms needing George's. Progress › Gain model collects predicted-vs-actual from the owner's trains (`calibration` in GM storage); Torn Eye can be checked against `myAttacks` (the replay test uses FFScouter's published scale, not real logs).
-- **Audit items left as low risk** (`docs/audit-1.0.md`): the pill overlaps Torn's content at ≤ 1340 px (it's draggable; Alt+P hides it); `.pi-on`/`.pi-outlined` set `position:relative` on Torn's rows; the Worker has no rate limit on invite guesses (constant-time compare only).
-- **Owner decisions still open** (defaults in §4): Compact vs Comfortable, one Discord Worker or one each, sharing captured gear with the friend, the pill on every page.
+- **Audit items left as low risk** (`docs/audit-1.0.md`): the panel floats over Torn's content only when neither margin holds 220 px (≈ ≤ 1440 px wide; it collapses to a bar with Alt+`); `.pi-on`/`.pi-outlined` set `position:relative` on Torn's rows; the Worker has no rate limit on invite guesses (constant-time compare only).
+- **Owner decisions still open** (defaults in §4): one Discord Worker or one each, sharing captured gear with the friend, the pill on every page.
 - **Not built (by plan):** the Discord bot (worker/BOT.md); goal "unlock gym" only re-labels the plan (it doesn't change the split); the 99k jump needs a booster-cap setting (no UI yet; `settings.boosterCapH`).
 - **The friend's numbers:** every friend figure in docs/mockups is from EXAMPLE stats. Real ones come when his key is in.
 
@@ -157,11 +159,15 @@ Done on the owner's yes. For later releases, the same steps minus the one-time r
 
 ## What each session did (newest first)
 
-### 2026-09-29 (later): owner's first live check → key fix (not released yet)
-- Owner's notes: stuck on "Reading your state…" after saving a key, nothing opens; wants ONE layout (Compact); must sit beside the trading script's NPC Arbitrage panel (`#ttv2-host`, bottom-right) and Torn Bids window; overlay should dock/collapse like NPC Arbitrage, toggled with **Alt+`** (Arbitrage uses backtick).
+### 2026-09-29 (later): owner's first live check → 1.0.1
+- Owner's notes: stuck on "Reading your state…" after saving a key, nothing opens; wants ONE layout (Compact); must sit beside the trading script's NPC Arbitrage panel (`#ttv2-host`, bottom-right) and Torn Bids window; overlay should dock/collapse like NPC Arbitrage, toggled with **Alt+`** (Arbitrage uses backtick). "finish all first", then release.
 - Cause (from the owner's Tampermonkey storage): they pasted their FFScouter **Custom** key; it lacks `bars` and `gym`, so the state call got Torn error 16 on every try. 1.0.0 hid it: the loading screen covered every tab (Settings too), the save warning was swapped away, and the feed retried every 3 s heartbeat.
-- Fixed (local, 224 tests + ux-check + torn-check + a Playwright check of the 16 path): `stateError` in storage; the feed asks once on error 16 and waits for a new key (other errors: every 30 s); `missingSelections(keyInfo)` names what a custom key can't read; one warning (`src/ui/key-status.js`) on the loading screen (with Open Settings), in Settings, and on the pill ("Key too limited · open Settings", card opens `#settings`); Settings always opens; the page stays on Settings after a key is saved. Harness: `&access=1` answers 16.
-- Still to do from the owner's notes: drop Compact/Comfortable; overlay → a docked panel like NPC Arbitrage (header drag held right of Torn's content, collapse, Alt+`), stacked above `#ttv2-host`, above its z-index; our market labels collide with trading's `.ttv2-trader` labels (same row corner); cap our Torn calls lower (both scripts cap at 70/min on their own; Torn allows 100 per player).
+- Key fix: `stateError` in storage; the feed asks once on error 16 and waits for a new key (other errors: every 30 s); `missingSelections(keyInfo)` names what a custom key can't read; one warning (`src/ui/key-status.js`) on the loading screen (Open Settings), in Settings and on the panel ("Key too limited · open Settings", its button opens `#settings`); Settings always opens; the page stays on Settings after a key is saved; the feed's own error redraws at once (GM change events only fire for other tabs). Harness: `&access=1` answers 16.
+- One layout: the Compact/Comfortable switch and `.comfy` are gone (top bar, Settings › Display, store default).
+- Overlay → a docked panel (`src/ui/overlay.js`): header bar (plate, countdown, step, –/+) you drag by; body = the old card; collapses to the bar; Alt+` (e.code Backquote) toggles; collapsed state (`overlayCollapsed`) and spot (`overlayPos` = {side, off, y}; 1.0.0's {x,y} is ignored) remembered. It lives in the empty margin beside Torn's page (sidebar + content), LEFT first, so NPC Arbitrage keeps the right; drags are held inside a margin; floats only when neither margin holds 220 px. In the right column its body stops above NPC Arbitrage (read-only look at `#ttv2-host`'s open shadow root). z-index just under trading's. No hover-open, no Alt+P.
+- Market/gym labels (`.pi-label`) moved to the top-LEFT of the row; trading's `.ttv2-trader` labels sit top-right.
+- Torn API cap 70 → 40 a minute (`TORN_PER_MINUTE`), so with trading's 30 both stay under Torn's 100.
+- Checks: 225 tests, ux-check, torn-check (panel: bar, body, Open, Alt+`, click-to-expand, drag), a Playwright check of the error-16 path, a side-by-side render at 1528×784 with a stand-in NPC Arbitrage.
 
 ### 2026-09-29: build session (M0 → M8, released 1.0.0)
 - Built every milestone in order, researched unknowns with subagents (API shapes, Torn page DOM + fixtures, FFScouter/TornStats/TornW3B), backed numbers with sims, tests first, pages to K. An independent audit before release (`docs/audit-1.0.md`); both FAILs and the day-one bugs fixed.

@@ -6,7 +6,7 @@
 
 import { gmOnChange } from './platform/gm.js';
 import { K, get, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup } from './platform/store.js';
-import { pi, tornClient, refresh, onModel, isVisible } from './runtime.js';
+import { pi, tornClient, refresh, onModel, isVisible, TORN_PER_MINUTE } from './runtime.js';
 import { PiApp } from './ui/app/app.js';
 import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, keyIsEnough } from './api/torn.js';
 import { W3bClient, fetchW3bListings } from './api/w3b.js';
@@ -132,6 +132,7 @@ function diagnostics() {
     const w3b = page.w3b ? page.w3b.stats().usedLastMinute : 0;
     return {
         torn: tornClient().stats().usedLastMinute,
+        tornMax: TORN_PER_MINUTE,
         ffs: page.ffs ? page.ffs.stats().usedLastMinute : 0,
         w3b,
         lastError: err ? new Date(err.at).toISOString().slice(11, 16) + ' ' + err.message : null,

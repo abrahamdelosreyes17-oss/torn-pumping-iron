@@ -26,10 +26,20 @@ import { detectPage, bazaarOwnerId, itemMarketItemOf, APP_PAGE_URL, PAGE_GYM, PA
 
 const tp = { overlay: null, model: null, observer: null, drawing: false, lastGymPlan: null };
 
-function contentRight() {
-    const el = document.querySelector('.content-wrapper') || document.getElementById('mainContainer') || document.querySelector('.container');
-    const r = el && el.getBoundingClientRect();
-    return r && r.width ? r.right : Math.min(window.innerWidth, (window.innerWidth + 976) / 2);
+/** Torn's page (its sidebar and content column) as {left, right}; a centred 976 px guess if it can't be measured. */
+function pageRect() {
+    const parts = [document.querySelector('.content-wrapper'), document.getElementById('sidebarroot'), document.getElementById('sidebar')].filter(Boolean);
+    const rects = parts.map((el) => el.getBoundingClientRect()).filter((r) => r.width > 0 && r.height > 0);
+    if (rects.length) return { left: Math.min(...rects.map((r) => r.left)), right: Math.max(...rects.map((r) => r.right)) };
+    const w = Math.min(window.innerWidth, 976);
+    return { left: (window.innerWidth - w) / 2, right: (window.innerWidth + w) / 2 };
+}
+
+/** The trading script's NPC Arbitrage panel, if it is on this page (read only: its open shadow root). */
+function tradingRect() {
+    const host = document.getElementById('ttv2-host');
+    const panel = host && host.shadowRoot && host.shadowRoot.querySelector('.ttv2-panel');
+    return panel ? panel.getBoundingClientRect() : null;
 }
 
 /* ---------------------------------------------------------------- pill */
@@ -46,8 +56,8 @@ function overlayView(m, page) {
     if (!m || !m.ready) {
         const hasKey = Boolean(getKey(K.apiKey));
         const p = currentProblem();
-        if (p) return { noStep: true, pillText: p.short, cardStep: p.title, cardSub: p.text, warn: p.kind === 'retry' ? null : 'Open Pumping Iron › Settings' };
-        return hasKey ? { noStep: true, pillText: 'Reading your state…', cardStep: 'Asking Torn for your bars, stats and gym.' } : { noStep: true, pillText: 'Open to set up', cardStep: 'Add your Torn key in Pumping Iron’s Settings.' };
+        if (p) return { pillText: p.short, cardStep: p.title, cardSub: p.text, warn: p.kind === 'retry' ? null : 'Open Pumping Iron › Settings' };
+        return hasKey ? { pillText: 'Reading your state…', cardStep: 'Asking Torn for your bars, stats and gym.' } : { pillText: 'Open to set up', cardStep: 'Add your Torn key in Pumping Iron’s Settings.' };
     }
     const next = m.next;
     const later = m.steps.slice(1, 3).map((x) => tornClock(x.at) + ' · ' + x.label + (trainsText(x.trains) ? ', ' + trainsText(x.trains) : ''));
@@ -204,16 +214,16 @@ export function bootTornPage() {
         onOpen: () => gmOpenTab(APP_PAGE_URL + (currentProblem() && !(tp.model && tp.model.ready) ? '#settings' : '')),
         loadPos: () => get(K.overlayPos, null),
         savePos: (p) => set(K.overlayPos, p),
-        loadHidden: () => Boolean(get('overlayHidden', false)),
-        saveHidden: (v) => set('overlayHidden', v),
-        contentRight,
+        loadCollapsed: () => Boolean(get(K.overlayCollapsed, false)),
+        saveCollapsed: (v) => set(K.overlayCollapsed, v),
+        pageRect,
+        avoidRect: tradingRect,
     });
     tp.overlay.mount();
     gmMenu('Reset overlay position', () => {
         set(K.overlayPos, null);
-        set('overlayHidden', false);
-        tp.overlay.place();
-        tp.overlay.applyHidden();
+        set(K.overlayCollapsed, false);
+        tp.overlay.setCollapsed(false, false);
     });
     let lastSig = '';
     let lastView = '';

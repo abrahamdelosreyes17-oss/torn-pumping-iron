@@ -31,7 +31,6 @@ a:hover { text-decoration: underline; }
 
 /* density */
 .app { --row: 34px; --pad: 12px; --gap: 20px; --sec: 24px; min-width: 1180px; background: var(--page); }
-.app.comfy { --row: 44px; --pad: 16px; --gap: 28px; --sec: 36px; }
 
 /* top bar */
 .top { height: 48px; display: flex; align-items: center; gap: 10px; padding: 0 20px; border-bottom: 1px solid var(--line); }

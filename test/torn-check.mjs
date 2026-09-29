@@ -5,7 +5,8 @@
  *     Fill types N into Torn's box, makes no request, never clicks TRAIN;
  *   - the specialist stop ("Stop at 18 trains … Balboas") caps Fill;
  *   - items, bazaar, Item Market and points market outline the chosen thing;
- *   - the pill shows, its card opens on hover, Alt+P hides it;
+ *   - the panel shows its step in the bar, opens the webpage, Alt+` collapses
+ *     and expands it, a drag stays on screen and is remembered;
  *   - a hidden tab asks nothing; nothing loads from torn.com.
  *
  *   npm run build
@@ -85,8 +86,8 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     ok(after.events >= 1, 'gym: an input event told React about it');
     ok(after.train === 0, 'gym: TRAIN was never clicked');
     ok(after.calls === 0, 'gym: Fill made no request');
-    const pill = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.querySelector('.pill').textContent);
-    ok(/Train DEX × 27/.test(pill), 'gym: the pill says "Train DEX × 27" (' + pill + ')');
+    const pill = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.querySelector('.head').textContent);
+    ok(/Train DEX × 27/.test(pill), 'gym: the panel bar says "Train DEX × 27" (' + pill + ')');
     const stored = await page.evaluate(() => ({ u: JSON.parse(_store['pumpingIron.v1.unlockedGyms'] || 'null'), p: JSON.parse(_store['pumpingIron.v1.gymProgress'] || 'null') }));
     ok(stored.u && stored.u.length === 18 && stored.p && stored.p.nextId === 19 && stored.p.energy === Math.round(36610 * 0.8), 'gym: unlocked gyms and progress read from the page');
     ok(errors.length === 0, 'gym: no page errors ' + JSON.stringify(errors));
@@ -142,32 +143,38 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     await page.close();
 }
 
-/* The pill and its card on any page; Alt+P. */
+/* The panel on any page: its bar, the body, Alt+` and a drag. */
 {
     const { page, errors } = await open('page=other');
-    const pill = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.querySelector('.pill').textContent);
-    ok(/3:5\d\s*Xanax #1/.test(pill.replace(/\s+/g, ' ')), 'pill: countdown and step (' + pill + ')');
-    const box = await page.evaluate(() => {
-        const r = document.getElementById('pi-overlay').shadowRoot.querySelector('.pill').getBoundingClientRect();
-        return { x: r.x, y: r.y, w: r.width, h: r.height };
-    });
-    ok(box.h === 36 || Math.abs(box.h - 36) <= 1, 'pill: 36 px tall (' + box.h + ')');
-    await page.mouse.move(box.x + 10, box.y + 10);
-    await page.waitForTimeout(200);
-    const card = await page.evaluate(() => {
-        const c = document.getElementById('pi-overlay').shadowRoot.querySelector('.card');
-        return { hidden: c.hidden, text: c.textContent };
-    });
-    ok(!card.hidden && /Take Xanax #1, then train (STR|SPD|DEF|DEX)/.test(card.text) && /Open Pumping Iron/.test(card.text), 'card: opens on hover with the step and the link');
+    const q = (sel) => `document.getElementById('pi-overlay').shadowRoot.querySelector('${sel}')`;
+    const bar = await page.evaluate(`${q('.head')}.textContent`);
+    ok(/3:5\d\s*Xanax #1/.test(bar.replace(/\s+/g, ' ')), 'panel: countdown and step in the bar (' + bar + ')');
+    const box = await page.evaluate(`(() => { const r = ${q('.head')}.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })()`);
+    ok(Math.abs(box.h - 36) <= 1, 'panel: bar 36 px tall (' + box.h + ')');
+    const body = await page.evaluate(`({ shown: getComputedStyle(${q('.body')}).display !== 'none', text: ${q('.body')}.textContent })`);
+    ok(body.shown && /Take Xanax #1, then train (STR|SPD|DEF|DEX)/.test(body.text) && /Open Pumping Iron/.test(body.text), 'panel: expanded by default with the step and the link');
     await page.locator('#pi-overlay .open').click();
     const opened = await page.evaluate(() => window.__opened || []);
-    ok(opened[0] === 'https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html', 'card: Open Pumping Iron opens the webpage in a new tab');
-    await page.mouse.move(5, 800);
-    await page.keyboard.press('Alt+P');
+    ok(opened[0] === 'https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html', 'panel: Open Pumping Iron opens the webpage in a new tab');
+    await page.keyboard.press('Alt+Backquote');
     await page.waitForTimeout(100);
-    const hidden = await page.evaluate(() => getComputedStyle(document.getElementById('pi-overlay').shadowRoot.querySelector('.wrap')).display);
-    ok(hidden === 'none', 'Alt+P hides the pill');
-    ok(errors.length === 0, 'pill: no page errors');
+    const collapsed = await page.evaluate(`({ body: getComputedStyle(${q('.body')}).display, saved: _store['pumpingIron.v1.overlayCollapsed'] })`);
+    ok(collapsed.body === 'none' && collapsed.saved === 'true', 'Alt+` collapses it to the bar, and it is remembered (' + JSON.stringify(collapsed) + ')');
+    await page.mouse.click(box.x + 60, box.y + 18);
+    await page.waitForTimeout(100);
+    ok((await page.evaluate(`getComputedStyle(${q('.body')}).display`)) !== 'none', 'a click on the collapsed bar expands it');
+    await page.keyboard.press('Alt+Backquote');
+    await page.keyboard.press('Alt+Backquote');
+    ok((await page.evaluate(`getComputedStyle(${q('.body')}).display`)) !== 'none', 'Alt+` again expands it');
+    // Drag by the bar far off the bottom-right: it stays on screen and the spot is saved.
+    await page.mouse.move(box.x + 60, box.y + 18);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 400, box.y + 200, { steps: 5 });
+    await page.mouse.move(5000, 5000, { steps: 5 });
+    await page.mouse.up();
+    const after = await page.evaluate(`(() => { const r = ${q('.wrap')}.getBoundingClientRect(); return { x: r.x, y: r.y, r: r.right, vw: innerWidth, vh: innerHeight, pos: JSON.parse(_store['pumpingIron.v1.overlayPos'] || 'null') }; })()`);
+    ok(after.r <= after.vw && after.y + 36 <= after.vh && after.pos && after.pos.side, 'drag: stays on screen, spot saved (' + JSON.stringify(after) + ')');
+    ok(errors.length === 0, 'panel: no page errors');
     await page.close();
 }
 

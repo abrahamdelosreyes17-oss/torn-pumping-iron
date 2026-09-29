@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { planGymPage } from '../src/core/gympage.js';
 import { buildModel } from '../src/core/model.js';
 import { normalizeState } from '../src/core/bars.js';
-import { defaultPosition, clampPosition } from '../src/ui/overlay.js';
+import { spots, pointOf, dragTo, posOf, PANEL_W, DEFAULT_TOP } from '../src/ui/overlay.js';
 
 const T0 = Date.UTC(2026, 8, 29, 10, 48);
 
@@ -56,8 +56,34 @@ test('too little energy for a train: the pill says wait', () => {
     assert.equal(p.pill, 'Energy 5 · wait for the next step');
 });
 
-test('the pill sits right of Torn\'s content when there is room, else at the right edge; a stored spot stays on screen', () => {
-    assert.deepEqual(defaultPosition(1920, 1448), { x: 1460, y: 110 });
-    assert.deepEqual(defaultPosition(1280, 1128), { x: 1068, y: 110 });
-    assert.deepEqual(clampPosition({ x: 5000, y: -20 }, 1280, 800), { x: 1076, y: 4 });
+test('the panel lives in the empty LEFT margin first, so NPC Arbitrage keeps the right; it floats only when no margin fits', () => {
+    // The owner's window: 1528 wide, Torn's sidebar + content from 320 to 1194.
+    const page = { left: 320, right: 1194 };
+    const list = spots(1528, page);
+    assert.deepEqual(list.map((s) => s.side), ['left', 'right']);
+    assert.equal(list[0].width, 296, 'the left margin is 12..308: a little under the usual 300');
+    assert.deepEqual(pointOf(null, list, 784), { spot: list[0], x: 12, y: DEFAULT_TOP });
+    // 1280 wide: Torn's page fills all but ~150 px each side, so it floats at the right edge.
+    const narrow = spots(1280, { left: 152, right: 1128 });
+    assert.equal(narrow.length, 1);
+    assert.equal(narrow[0].side, 'float');
+    assert.equal(pointOf(null, narrow, 700).x, 1276 - PANEL_W);
+});
+
+test('dragging keeps it inside a margin (never over Torn’s page), and the spot survives a resize', () => {
+    const list = spots(1528, { left: 320, right: 1194 });
+    // Dragged over Torn's content: held at the nearest margin's edge.
+    const p = dragTo(list, 400, 300, 784);
+    assert.equal(p.spot.side, 'left');
+    assert.equal(p.x, 12);
+    const q = dragTo(list, 1000, 300, 784);
+    assert.equal(q.spot.side, 'right');
+    assert.equal(q.x, 1206, 'right margin starts 12 px after Torn’s page');
+    // Off the bottom: the header stays on screen.
+    assert.equal(dragTo(list, 1300, 5000, 784).y, 784 - 36 - 4);
+    // Saved against the right edge: after a wider window it is still at the right edge.
+    const saved = posOf(dragTo(list, 5000, 200, 784));
+    assert.deepEqual(saved, { side: 'right', off: 0, y: 200 });
+    const wide = spots(1920, { left: 472, right: 1448 });
+    assert.equal(pointOf(saved, wide, 900).x, 1908 - PANEL_W);
 });

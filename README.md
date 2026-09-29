@@ -28,7 +28,7 @@ A Tampermonkey script for [Torn](https://www.torn.com) that plans your gym train
 | **Torn Eye** | Targets (from FFScouter) ranked by our fight estimate, from easiest to most respect; your colour bands; where the numbers come from. |
 | **Settings** | Keys, FFScouter, TornStats, Discord, what shows on Torn, spacing and time, diagnostics, and your stored data with a clear button for each part. |
 
-On Torn: the pill and its card on every page (drag it anywhere, **Alt+P** hides it), the gym page marks, outlines on the items page and on the listing the Buy list chose, and Torn Eye chips.
+On Torn: a small panel on every page, in the empty margin beside Torn's page (left of it first, so the trading script's NPC Arbitrage keeps the right; drag it by its bar, **Alt+`** collapses or expands it), the gym page marks, outlines on the items page and on the listing the Buy list chose, and Torn Eye chips.
 
 ## Keys and what each one does
 
@@ -61,7 +61,7 @@ Torn allows scripts that use the API or the page you loaded yourself, and that n
 1. **Only the API or the page you're viewing.** It never loads a Torn page by itself, in the background, a hidden tab or a frame. Network calls go to `api.torn.com`, `weav3r.dev` (bazaar prices, no key), `ffscouter.com` and `www.tornstats.com` (only if you add their keys), and your own `*.workers.dev` Discord service.
 2. **It never acts for you.** No train, buy, use, attack or click on Torn's buttons. **Fill** types one number into the gym's box when you click it; you press TRAIN. Outlines and labels never cover Torn's buttons. In war mode the enemy rows are only re-ordered on your screen.
 3. **No alerts from a Torn tab.** No pop-ups, sounds or title changes. Discord pings come only from your own service, which reads the API.
-4. **One key's worth of calls.** All Torn calls share one limit of 70 a minute across every open tab (Torn allows 100 per player), and nothing is asked from a tab you aren't looking at. War mode reads the enemy faction at most every 10 seconds while that tab is open. FFScouter, TornStats and TornW3B each have their own, lower limits.
+4. **One key's worth of calls.** All Torn calls share one limit of 40 a minute across every open tab (Torn allows 100 per player; this leaves room for the trading script and another tool), and nothing is asked from a tab you aren't looking at. War mode reads the enemy faction at most every 10 seconds while that tab is open. FFScouter, TornStats and TornW3B each have their own, lower limits.
 5. **Each key only where it belongs** (see above), never written to a log or an error message, and masked in its box.
 6. **Stops on a dead key.** If Torn says a key is invalid, disabled or paused, nothing more is sent until you save a new one.
 7. **The attack page is only read.** To remember the gear Torn shows you after Start Fight, the script reads a copy of Torn's answer; Torn gets its own answer untouched, and nothing is changed on the page or in Torn's data.

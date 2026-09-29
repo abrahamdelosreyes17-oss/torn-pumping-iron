@@ -1,5 +1,5 @@
 /*
- * What every tab shares at run time: the one Torn client (70/min across
+ * What every tab shares at run time: the one Torn client (40/min across
  * tabs, visible only), the state feed, and the model every surface renders
  * from. Userscript-only; core/ and api/ stay plain modules.
  */
@@ -30,11 +30,20 @@ export function isVisible() {
 
 export const storeApi = { get: (k, fb) => get(k, fb), set: (k, v) => set(k, v), del: (k) => del(k) };
 
-/** The one Torn client every part of this tab uses: 70/min across tabs, visible only. */
+/**
+ * Our share of Torn's 100 calls a minute (per player, every tool together).
+ * The trading script (NPC Arbitrage, Torn Bids) keeps its own count of up to
+ * 30, so 40 here leaves room for both plus another tool. The plan needs ~2 a
+ * minute; only Torn Eye sweeps and price loads come near it, and they queue.
+ */
+export const TORN_PER_MINUTE = 40;
+
+/** The one Torn client every part of this tab uses: 40/min across tabs, visible only. */
 export function tornClient() {
     if (pi.client) return pi.client;
     const win = tabWindow('apiWindow', pi.tabId, storeApi);
     pi.client = new TornApiClient({
+        maxPerMinute: TORN_PER_MINUTE,
         // A key Torn refused (2, 13, 18) is not used again, by any part of any tab, until a new one is saved.
         getKey: () => (get(K.apiKeyDead, false) ? '' : getKey(K.apiKey)),
         loadWindow: () => win.load(),

@@ -26,7 +26,7 @@ export const MARK_CSS = `
 .pi-warn { display: flex; align-items: center; gap: 10px; padding: 7px 10px; margin: 6px 0; background: #2a1f10; border-left: 3px solid #e8a33d; border-radius: 0 5px 5px 0; font-size: 12px; color: #ffd79a; }
 .pi-warn b { color: #ffe3b3; }
 .pi-outlined { box-shadow: inset 0 0 0 2px #efebe2 !important; position: relative; }
-.pi-label { position: absolute; top: -9px; right: 10px; height: 18px; line-height: 18px; padding: 0 8px; border-radius: 9px; background: #efebe2; color: #15171a; font: bold 11px Arial, sans-serif; pointer-events: none; z-index: 2; white-space: nowrap; }
+.pi-label { position: absolute; top: -9px; left: 10px; right: auto; height: 18px; line-height: 18px; padding: 0 8px; border-radius: 9px; background: #efebe2; color: #15171a; font: bold 11px Arial, sans-serif; pointer-events: none; z-index: 2; white-space: nowrap; }
 `;
 
 /** Our page CSS, once per page (torn.com: no outside fonts). */

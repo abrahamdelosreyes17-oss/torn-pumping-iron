@@ -29,6 +29,7 @@ export const K = {
     gymProgress: 'gymProgress',
     leader: 'leader',
     overlayPos: 'overlayPos',
+    overlayCollapsed: 'overlayCollapsed',
     apiPause: 'apiPause',
     lastError: 'lastError',
     stateError: 'stateError',
@@ -42,7 +43,6 @@ export const DEFAULT_BANDS = {
 };
 
 export const DEFAULT_SETTINGS = {
-    density: 'compact',
     timeFormat: 'torn',
     pill: true,
     gymMarks: true,

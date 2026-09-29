@@ -160,12 +160,9 @@ if (!only.length || only.includes('plan')) {
     ok(shown.text.includes("You vs Hank's, DEF high"), 'build: the plan names it');
     m = await measure(page);
     ok(m.text.toLowerCase().includes('yours') && m.text.includes('the plan trains toward your build'), 'build: marked as yours');
-    // The density switch applies app-wide.
-    await page.locator('#pi-app .top button', { hasText: 'Comfortable' }).click();
-    await page.waitForTimeout(300);
-    const comfy = await page.evaluate(() => document.getElementById('pi-app').shadowRoot.querySelector('.app').classList.contains('comfy'));
-    ok(comfy, 'density: Comfortable applies');
-    await page.locator('#pi-app .top button', { hasText: 'Compact' }).click();
+    // One layout (the owner: "i dont need 2 layouts, just one, compact is fine"): no density switch anywhere.
+    const switches = await page.evaluate(() => /Comfortable/.test(document.getElementById('pi-app').shadowRoot.textContent));
+    ok(!switches, 'one layout: no Compact/Comfortable switch');
 }
 
 ok(tornHits() === 0, 'nothing loaded from torn.com');

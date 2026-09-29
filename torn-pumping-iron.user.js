@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Pumping Iron
 // @namespace    torn-pumping-iron
-// @version      1.0.0
+// @version      1.0.1
 // @description  Gym planner and fight scout for Torn: what to take, what to train, what to buy, who you can beat. Reads the API and the page you're on; never acts for you.
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
@@ -47,7 +47,7 @@
 (function () {
     'use strict';
 
-    const PI_BUILD_VERSION = '1.0.0';
+    const PI_BUILD_VERSION = '1.0.1';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -238,6 +238,7 @@
         gymProgress: 'gymProgress',
         leader: 'leader',
         overlayPos: 'overlayPos',
+        overlayCollapsed: 'overlayCollapsed',
         apiPause: 'apiPause',
         lastError: 'lastError',
         stateError: 'stateError',
@@ -251,7 +252,6 @@
     };
 
     const DEFAULT_SETTINGS = {
-        density: 'compact',
         timeFormat: 'torn',
         pill: true,
         gymMarks: true,
@@ -3468,7 +3468,7 @@
 
     /* ===== src/runtime.js ===== */
     /*
-     * What every tab shares at run time: the one Torn client (70/min across
+     * What every tab shares at run time: the one Torn client (40/min across
      * tabs, visible only), the state feed, and the model every surface renders
      * from. Userscript-only; core/ and api/ stay plain modules.
      */
@@ -3499,11 +3499,20 @@
 
     const storeApi = { get: (k, fb) => get(k, fb), set: (k, v) => set(k, v), del: (k) => del(k) };
 
-    /** The one Torn client every part of this tab uses: 70/min across tabs, visible only. */
+    /**
+     * Our share of Torn's 100 calls a minute (per player, every tool together).
+     * The trading script (NPC Arbitrage, Torn Bids) keeps its own count of up to
+     * 30, so 40 here leaves room for both plus another tool. The plan needs ~2 a
+     * minute; only Torn Eye sweeps and price loads come near it, and they queue.
+     */
+    const TORN_PER_MINUTE = 40;
+
+    /** The one Torn client every part of this tab uses: 40/min across tabs, visible only. */
     function tornClient() {
         if (pi.client) return pi.client;
         const win = tabWindow('apiWindow', pi.tabId, storeApi);
         pi.client = new TornApiClient({
+            maxPerMinute: TORN_PER_MINUTE,
             // A key Torn refused (2, 13, 18) is not used again, by any part of any tab, until a new one is saved.
             getKey: () => (get(K.apiKeyDead, false) ? '' : getKey(K.apiKey)),
             loadWindow: () => win.load(),
@@ -3908,7 +3917,6 @@
 
     /* density */
     .app { --row: 34px; --pad: 12px; --gap: 20px; --sec: 24px; min-width: 1180px; background: var(--page); }
-    .app.comfy { --row: 44px; --pad: 16px; --gap: 28px; --sec: 36px; }
 
     /* top bar */
     .top { height: 48px; display: flex; align-items: center; gap: 10px; padding: 0 20px; border-bottom: 1px solid var(--line); }
@@ -5840,19 +5848,18 @@
         const discordSec = discordSection(ctx);
 
         const overlaySec = settingsSection('Overlay on Torn', null, [
-            h('div', { class: 'opts' }, [settingsCheck('Pill on every page', s.pill, (v) => ctx.setSettings({ pill: v })), settingsCheck('Marks on the gym page', s.gymMarks, (v) => ctx.setSettings({ gymMarks: v })), settingsCheck('Marks on items and markets', s.marketMarks, (v) => ctx.setSettings({ marketMarks: v })), settingsCheck('Torn Eye chips', s.eyeChips, (v) => ctx.setSettings({ eyeChips: v }))]),
-            h('p', { class: 'num' }, ['Hide the pill: ', h('b', { class: 'white', text: 'Alt+P' }), ' · drag it anywhere; it stays out of Torn’s content.']),
+            h('div', { class: 'opts' }, [settingsCheck('Panel on every page', s.pill, (v) => ctx.setSettings({ pill: v })), settingsCheck('Marks on the gym page', s.gymMarks, (v) => ctx.setSettings({ gymMarks: v })), settingsCheck('Marks on items and markets', s.marketMarks, (v) => ctx.setSettings({ marketMarks: v })), settingsCheck('Torn Eye chips', s.eyeChips, (v) => ctx.setSettings({ eyeChips: v }))]),
+            h('p', { class: 'num' }, ['Expand or collapse the panel: ', h('b', { class: 'white', text: 'Alt+`' }), ' · drag it by its bar; it stays in the empty margin beside Torn’s page, left of it first, so NPC Arbitrage keeps the right.']),
             h('div', { class: 'opts' }, [settingsCheck('Bazaar prices from TornW3B', s.w3b !== false, (v) => ctx.setSettings({ w3b: v }))]),
             h('p', {}, ['Bazaar prices come from ', h('a', { href: W3B_SITE_URL, target: '_blank', rel: 'noopener', text: 'TornW3B' }), ' (item ids only, never a key; ', h('a', { href: W3B_TERMS_URL, target: '_blank', rel: 'noopener', text: 'their terms' }), '). Off: Item Market and points market only.']),
         ]);
 
         const displaySec = settingsSection('Display', null, [
-            h('div', { class: 'row' }, [h('span', { class: 'lab', style: 'width:90px', text: 'Spacing' }), segOf(s.density, [['compact', 'Compact'], ['comfy', 'Comfortable']], (v) => ctx.setSettings({ density: v }), 'Spacing')]),
             h('div', { class: 'row' }, [h('span', { class: 'lab', style: 'width:90px', text: 'Time' }), segOf(s.timeFormat, [['torn', 'Torn time'], ['local', 'Local time']], (v) => ctx.setSettings({ timeFormat: v }), 'Time')]),
         ]);
 
         const d = ctx.diagnostics();
-        const diagSec = settingsSection('Diagnostics', null, [h('dl', { class: 'kv num', style: 'max-width:460px' }, [h('dt', { text: 'Torn API, last minute' }), h('dd', { text: d.torn + ' of 70' }), h('dt', { text: 'FFScouter, last minute' }), h('dd', { text: d.ffs + ' of 60' }), h('dt', { text: 'TornW3B, last minute' }), h('dd', { text: d.w3b + ' of 60' }), h('dt', { text: 'Last error' }), h('dd', { text: d.lastError || 'none' }), h('dt', { text: 'Perk lines not understood' }), h('dd', { text: String(d.unknownPerks) }), h('dt', { text: 'Version' }), h('dd', { text: d.version })])]);
+        const diagSec = settingsSection('Diagnostics', null, [h('dl', { class: 'kv num', style: 'max-width:460px' }, [h('dt', { text: 'Torn API, last minute' }), h('dd', { text: d.torn + ' of ' + (d.tornMax || 40) }), h('dt', { text: 'FFScouter, last minute' }), h('dd', { text: d.ffs + ' of 60' }), h('dt', { text: 'TornW3B, last minute' }), h('dd', { text: d.w3b + ' of 60' }), h('dt', { text: 'Last error' }), h('dd', { text: d.lastError || 'none' }), h('dt', { text: 'Perk lines not understood' }), h('dd', { text: String(d.unknownPerks) }), h('dt', { text: 'Version' }), h('dd', { text: d.version })])]);
 
         const dataRows = [
             ['keys', 'Keys', 'Torn, FFScouter, TornStats, Discord service', 'Forget keys'],
@@ -5872,7 +5879,7 @@
     /*
      * The webpage: a full-page shadow host drawn over app.html's placeholder
      * (the trading app's traders-page pattern). Top bar with tabs and the
-     * density switch, the status strip on Home and Plan, then the 70/30 body.
+     * the status strip on Home and Plan, then the 70/30 body.
      * Countdowns tick every second without redrawing the page.
      */
 
@@ -5956,8 +5963,8 @@
             if (!force && (sig === this.sig || this.typing())) return;
             this.sig = sig;
             const s = ctx.settings;
-            const app = h('div', { class: 'app' + (s.density === 'comfy' ? ' comfy' : '') });
-            app.appendChild(this.topBar(ctx));
+            const app = h('div', { class: 'app' });
+            app.appendChild(this.topBar());
             let tab = this.tab;
             if (!m || !m.ready) {
                 // No state yet: keys first. Settings always opens, so a key can always be replaced.
@@ -5987,8 +5994,7 @@
             this.tick();
         }
 
-        topBar(ctx) {
-            const s = ctx.settings;
+        topBar() {
             const tabs = APP_TABS.filter(([id]) => this.renderers[id]).map(([id, label]) => h('a', { class: 'tab' + (id === this.tab ? ' on' : ''), href: '#' + id, onclick: (e) => { e.preventDefault(); this.go(id); }, text: label }));
             this.clockEl = h('span', { class: 'upd num' }, [h('i'), (this.clockText = t('', ''))]);
             return h('div', { class: 'top' }, [
@@ -5997,10 +6003,6 @@
                 ...tabs,
                 h('div', { class: 'grow' }),
                 this.clockEl,
-                h('div', { class: 'seg', role: 'group', 'aria-label': 'Spacing' }, [
-                    h('button', { type: 'button', 'aria-pressed': String(s.density !== 'comfy'), onclick: () => ctx.setSettings({ density: 'compact' }), text: 'Compact' }),
-                    h('button', { type: 'button', 'aria-pressed': String(s.density === 'comfy'), onclick: () => ctx.setSettings({ density: 'comfy' }), text: 'Comfortable' }),
-                ]),
             ]);
         }
 
@@ -7110,6 +7112,7 @@
         const w3b = page.w3b ? page.w3b.stats().usedLastMinute : 0;
         return {
             torn: tornClient().stats().usedLastMinute,
+            tornMax: TORN_PER_MINUTE,
             ffs: page.ffs ? page.ffs.stats().usedLastMinute : 0,
             w3b,
             lastError: err ? new Date(err.at).toISOString().slice(11, 16) + ' ' + err.message : null,
@@ -7226,29 +7229,45 @@
 
     /* ===== src/ui/overlay.js ===== */
     /*
-     * The overlay on torn.com (DESIGN §4): a 36px pill with the countdown and
-     * the step, and a card on hover or click. In its own shadow root
-     * (:host{all:initial}) so Torn's CSS and ours never meet. It sits in the
-     * free space right of Torn's content, can be dragged (the spot is kept),
-     * and Alt+P hides it. No sounds, pop-ups or title changes, ever.
+     * The panel on torn.com (DESIGN §4), docked like the trading script's NPC
+     * Arbitrage panel: a header bar (the countdown and the step) you drag by,
+     * and a body under it that collapses. It lives in the empty margin beside
+     * Torn's page, the LEFT one first, so the right-hand column stays NPC
+     * Arbitrage's and Torn Bids'. Dragging keeps it inside a margin; only when
+     * neither margin is wide enough does it float. Alt+` collapses/expands it
+     * (NPC Arbitrage uses ` alone). In its own shadow root (:host{all:initial}).
+     * No sounds, pop-ups or title changes, ever.
      */
 
 
 
 
+    /** Its usual width, and the least a margin must have to hold it. */
+    const PANEL_W = 300;
+    const PANEL_MIN_W = 220;
+    /** Space kept from Torn's page and from the window's edge. */
+    const GAP = 12;
+    const EDGE = 12;
+    /** Its default top: level with Torn's page title. */
+    const DEFAULT_TOP = 80;
+    /** Under NPC Arbitrage's layer, so the trading script's windows stay on top if they ever meet. */
+    const Z = 2147482990;
+
     const OVERLAY_CSS = `
     :host { all: initial; }
     * { box-sizing: border-box; font-family: Arial, Helvetica, sans-serif; }
-    .wrap { position: fixed; z-index: 99990; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
-    .pill { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px 0 6px; border-radius: 18px; background: #1b1e21; border: 1px solid #3a4046; box-shadow: 0 4px 14px rgba(0,0,0,.4); font: bold 13px Arial, sans-serif; color: #e3e5e8; cursor: grab; user-select: none; white-space: nowrap; }
-    .pill:focus-visible { outline: 2px solid #efebe2; outline-offset: 2px; }
-    .pill .cd { font: bold 16px "Arial Narrow", Arial, sans-serif; color: #efebe2; font-variant-numeric: tabular-nums; }
+    .wrap { position: fixed; z-index: ${Z}; width: var(--w, ${PANEL_W}px); display: flex; flex-direction: column; background: #1b1e21; border: 1px solid #3a4046; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.5); color: #e3e5e8; font-size: 13px; overflow: hidden; }
+    .head { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 4px 0 6px; font-weight: bold; cursor: move; user-select: none; touch-action: none; white-space: nowrap; }
+    .head:focus-visible { outline: 2px solid #efebe2; outline-offset: -2px; }
+    .head .cd { font: bold 16px "Arial Narrow", Arial, sans-serif; color: #efebe2; font-variant-numeric: tabular-nums; flex: none; }
+    .head .ti { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
     .plate { width: 24px; height: 24px; border-radius: 50%; background: #efebe2; display: grid; place-items: center; box-shadow: inset 0 0 0 4px #efebe2, inset 0 0 0 5px #2a2d31; flex: none; }
     .plate i { width: 5px; height: 5px; border-radius: 50%; background: #15171a; }
-    .card { width: 280px; background: #1b1e21; border: 1px solid #3a4046; border-radius: 10px; padding: 12px 14px; box-shadow: 0 8px 24px rgba(0,0,0,.5); display: flex; flex-direction: column; gap: 8px; color: #e3e5e8; font-size: 13px; }
-    .card[hidden] { display: none; }
-    .lab { font-size: 11px; font-weight: bold; letter-spacing: .5px; text-transform: uppercase; color: #939aa1; }
-    .big { font: bold 34px/1 "Arial Narrow", Arial, sans-serif; color: #efebe2; font-variant-numeric: tabular-nums; }
+    .col { flex: none; width: 26px; height: 26px; padding: 0; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #e3e5e8; font: bold 15px/24px Arial, sans-serif; cursor: pointer; }
+    .col:hover { border-color: #3a4046; }
+    .col:focus-visible { outline: 2px solid #efebe2; outline-offset: 1px; }
+    .body { border-top: 1px solid #2c3136; padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
+    .collapsed .body { display: none; }
     .step { font-weight: bold; color: #fff; }
     .sub { font-size: 12px; color: #939aa1; }
     .mini { display: grid; grid-template-columns: 48px 1fr 64px; gap: 6px; align-items: center; font-size: 11px; color: #939aa1; font-variant-numeric: tabular-nums; }
@@ -7260,132 +7279,198 @@
     .warn { color: #e8a33d; font-size: 12px; font-weight: bold; }
     `;
 
-    /** Where the pill goes by default: just right of Torn's content column, or the right edge. */
-    function defaultPosition(viewW, contentRight, pillW = 200) {
-        const free = viewW - contentRight;
-        if (free >= pillW + 24) return { x: contentRight + 12, y: 110 };
-        return { x: Math.max(8, viewW - pillW - 12), y: 110 };
+    /**
+     * Where the panel may live. `page` is Torn's page (sidebar + content) as
+     * {left, right}; null when it can't be measured.
+     * @returns {{side: 'left'|'right'|'float', from: number, to: number, width: number}[]}
+     *   each margin wide enough to hold it (left first), else one 'float' spot
+     */
+    function spots(viewW, page, want = PANEL_W, min = PANEL_MIN_W) {
+        const out = [];
+        if (page && Number.isFinite(page.left) && Number.isFinite(page.right)) {
+            for (const m of [{ side: 'left', from: EDGE, to: page.left - GAP }, { side: 'right', from: page.right + GAP, to: viewW - EDGE }]) {
+                if (m.to - m.from >= min) out.push({ ...m, width: Math.min(want, m.to - m.from) });
+            }
+        }
+        if (!out.length) out.push({ side: 'float', from: 4, to: viewW - 4, width: Math.max(160, Math.min(want, viewW - 8)) });
+        return out;
     }
 
-    /** Keep a stored spot on screen after a resize. */
-    function clampPosition(pos, viewW, viewH, w = 200, hgt = 40) {
-        return { x: Math.max(4, Math.min(viewW - w - 4, pos.x)), y: Math.max(4, Math.min(viewH - hgt - 4, pos.y)) };
+    /** A saved spot ({side, off, y}: off = distance from the margin's outer edge) as a point on screen. */
+    function pointOf(pos, list, viewH, height = 36) {
+        const spot = (pos && list.find((s) => s.side === pos.side)) || list[0];
+        const off = pos && pos.side === spot.side && Number.isFinite(pos.off) ? pos.off : 0;
+        // The left margin counts from the window's left edge; the right one and a floating panel from the right edge.
+        const x = spot.side === 'left' ? spot.from + off : spot.to - spot.width - off;
+        return clampInto(spot, x, pos && Number.isFinite(pos.y) ? pos.y : DEFAULT_TOP, viewH, height);
+    }
+
+    /** Keep a point inside its spot and on screen (at least the header stays visible). */
+    function clampInto(spot, x, y, viewH, height = 36) {
+        const maxX = Math.max(spot.from, spot.to - spot.width);
+        const maxY = Math.max(4, viewH - Math.min(height, 40) - 4);
+        return { spot, x: Math.round(Math.min(maxX, Math.max(spot.from, x))), y: Math.round(Math.min(maxY, Math.max(4, y))) };
+    }
+
+    /** While dragging: the spot nearest the pointer's panel position, and the point clamped into it. */
+    function dragTo(list, x, y, viewH, height = 36) {
+        let best = null;
+        for (const s of list) {
+            const cx = Math.min(Math.max(s.from, x), Math.max(s.from, s.to - s.width));
+            const d = Math.abs(cx - x);
+            if (!best || d < best.d) best = { s, d };
+        }
+        return clampInto(best.s, x, y, viewH, height);
+    }
+
+    /** The point as a saved spot (survives window resizes). */
+    function posOf(p) {
+        const s = p.spot;
+        return { side: s.side, off: Math.round(s.side === 'left' ? p.x - s.from : s.to - s.width - p.x), y: p.y };
     }
 
     class Overlay {
         /**
-         * @param {object} o - {onOpen, loadPos, savePos, loadHidden, saveHidden, contentRight}
+         * @param {object} o
+         * @param {function} o.onOpen
+         * @param {function} o.loadPos - () => {side, off, y}|null
+         * @param {function} o.savePos
+         * @param {function} o.loadCollapsed - () => boolean
+         * @param {function} o.saveCollapsed
+         * @param {function} o.pageRect - () => {left, right}|null (Torn's sidebar + content)
+         * @param {function} [o.avoidRect] - () => DOMRect|null: a panel to stay above (NPC Arbitrage)
          */
-        constructor({ onOpen, loadPos, savePos, loadHidden, saveHidden, contentRight }) {
+        constructor({ onOpen, loadPos, savePos, loadCollapsed, saveCollapsed, pageRect, avoidRect = () => null }) {
             this.onOpen = onOpen;
             this.loadPos = loadPos;
             this.savePos = savePos;
-            this.loadHidden = loadHidden;
-            this.saveHidden = saveHidden;
-            this.contentRight = contentRight;
-            this.cardOpen = false;
-            this.pinned = false;
+            this.loadCollapsed = loadCollapsed;
+            this.saveCollapsed = saveCollapsed;
+            this.pageRect = pageRect;
+            this.avoidRect = avoidRect;
+            this.off = false;
         }
 
         mount(doc = document) {
             this.host = doc.getElementById('pi-overlay') || h('div', { id: 'pi-overlay' });
             if (!this.host.parentNode) (doc.body || doc.documentElement).appendChild(this.host);
             this.shadow = this.host.shadowRoot || this.host.attachShadow({ mode: 'open' });
-            this.wrap = h('div', { class: 'wrap' });
-            this.pill = h('div', { class: 'pill', role: 'button', tabindex: '0', 'aria-label': 'Pumping Iron: next step' });
-            this.card = h('div', { class: 'card', hidden: true });
-            this.wrap.append(this.pill, this.card);
+            this.head = h('div', { class: 'head', role: 'button', tabindex: '0', 'aria-label': 'Pumping Iron: next step (Alt+` to expand or collapse)' });
+            this.headInfo = h('span', { class: 'ti' });
+            this.colBtn = h('button', { class: 'col', type: 'button', onclick: () => this.setCollapsed(!this.collapsed, true) });
+            this.body = h('div', { class: 'body' });
+            this.wrap = h('div', { class: 'wrap' }, [this.head, this.body]);
             fill(this.shadow, [h('style', { text: OVERLAY_CSS }), this.wrap]);
-            this.place();
+            this.headInfo.textContent = 'Pumping Iron';
+            fill(this.head, [h('span', { class: 'plate' }, [h('i')]), this.headInfo, this.colBtn]);
             this.bindDrag();
-            this.wrap.addEventListener('mouseenter', () => this.showCard(true));
-            this.wrap.addEventListener('mouseleave', () => !this.pinned && this.showCard(false));
-            this.pill.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
+            this.head.addEventListener('keydown', (e) => {
+                if (e.target === this.head && (e.key === 'Enter' || e.key === ' ')) {
                     e.preventDefault();
-                    this.pinned = !this.pinned;
-                    this.showCard(this.pinned);
+                    this.setCollapsed(!this.collapsed, true);
                 }
             });
             doc.addEventListener('keydown', (e) => {
-                if (e.altKey && (e.key === 'p' || e.key === 'P')) {
-                    const hidden = !this.isHidden();
-                    this.saveHidden(hidden);
-                    this.applyHidden();
+                if (e.altKey && !e.ctrlKey && !e.metaKey && !e.repeat && e.code === 'Backquote') {
+                    e.preventDefault();
+                    this.setCollapsed(!this.collapsed, true);
                 }
             });
             window.addEventListener('resize', () => this.place());
-            this.applyHidden();
+            // Torn's page settles after load (sidebar, React): fit again then.
+            setTimeout(() => this.place(), 1500);
+            this.setCollapsed(Boolean(this.loadCollapsed()), false);
         }
 
-        isHidden() {
-            return Boolean(this.loadHidden());
+        setCollapsed(on, save) {
+            this.collapsed = Boolean(on);
+            this.wrap.classList.toggle('collapsed', this.collapsed);
+            this.colBtn.textContent = this.collapsed ? '+' : '–';
+            this.colBtn.setAttribute('aria-label', this.collapsed ? 'Expand' : 'Collapse');
+            this.colBtn.title = (this.collapsed ? 'Expand' : 'Collapse') + ' (Alt+`)';
+            this.head.setAttribute('aria-expanded', String(!this.collapsed));
+            if (save) this.saveCollapsed(this.collapsed);
+            this.place();
         }
 
-        applyHidden() {
-            this.wrap.style.display = this.isHidden() || this.off ? 'none' : 'flex';
+        spotList() {
+            return spots(window.innerWidth, this.pageRect());
         }
 
+        /** Put it where it was left (or the default), inside its margin, above NPC Arbitrage when they share one. */
         place() {
-            const vw = window.innerWidth;
-            const vh = window.innerHeight;
+            if (!this.wrap) return;
+            this.wrap.style.display = this.off ? 'none' : 'flex';
+            if (this.off) return;
+            const list = this.spotList();
             const stored = this.loadPos();
-            const pos = stored && Number.isFinite(stored.x) ? clampPosition(stored, vw, vh) : defaultPosition(vw, this.contentRight());
-            this.wrap.style.left = pos.x + 'px';
-            this.wrap.style.top = pos.y + 'px';
-            // Open the card toward the side with room.
-            this.wrap.style.alignItems = pos.x + 290 > vw ? 'flex-end' : 'flex-start';
+            const pos = stored && stored.side ? stored : null;
+            const spot = (pos && list.find((s) => s.side === pos.side)) || list[0];
+            this.wrap.style.setProperty('--w', spot.width + 'px');
+            const p = pointOf(pos, list, window.innerHeight, this.wrap.offsetHeight || 36);
+            this.apply(p);
+        }
+
+        apply(p) {
+            this.wrap.style.left = p.x + 'px';
+            this.wrap.style.top = p.y + 'px';
+            this.wrap.style.setProperty('--w', p.spot.width + 'px');
+            // The body scrolls inside the window, and stops above NPC Arbitrage if that panel is below it.
+            let bottom = window.innerHeight - 12;
+            const a = this.avoidRect();
+            if (a && a.width && a.height && a.left < p.x + p.spot.width && a.right > p.x && a.top > p.y + 36) bottom = Math.min(bottom, a.top - 8);
+            this.body.style.maxHeight = Math.max(60, bottom - p.y - 36) + 'px';
         }
 
         bindDrag() {
             let start = null;
-            this.pill.addEventListener('pointerdown', (e) => {
-                start = { x: e.clientX, y: e.clientY, left: parseFloat(this.wrap.style.left), top: parseFloat(this.wrap.style.top), moved: false };
-                this.pill.setPointerCapture(e.pointerId);
+            this.head.addEventListener('pointerdown', (e) => {
+                if (e.button !== 0) return;
+                if (e.target.closest && e.target.closest('button, a, input')) return;
+                const r = this.wrap.getBoundingClientRect();
+                start = { x: e.clientX, y: e.clientY, left: r.left, top: r.top, moved: false, list: this.spotList() };
+                this.head.setPointerCapture(e.pointerId);
             });
-            this.pill.addEventListener('pointermove', (e) => {
+            this.head.addEventListener('pointermove', (e) => {
                 if (!start) return;
                 const dx = e.clientX - start.x;
                 const dy = e.clientY - start.y;
-                if (Math.abs(dx) + Math.abs(dy) > 4) start.moved = true;
-                if (!start.moved) return;
-                const p = clampPosition({ x: start.left + dx, y: start.top + dy }, window.innerWidth, window.innerHeight);
-                this.wrap.style.left = p.x + 'px';
-                this.wrap.style.top = p.y + 'px';
+                if (!start.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+                start.moved = true;
+                start.p = dragTo(start.list, start.left + dx, start.top + dy, window.innerHeight, this.wrap.offsetHeight);
+                this.apply(start.p);
             });
-            this.pill.addEventListener('pointerup', () => {
+            const end = (e) => {
                 if (!start) return;
-                if (start.moved) this.savePos({ x: parseFloat(this.wrap.style.left), y: parseFloat(this.wrap.style.top) });
-                else {
-                    this.pinned = !this.pinned;
-                    this.showCard(this.pinned);
-                }
+                const { moved, p } = start;
                 start = null;
-            });
-        }
-
-        showCard(on) {
-            this.cardOpen = on;
-            this.card.hidden = !on;
+                if (this.head.hasPointerCapture && this.head.hasPointerCapture(e.pointerId)) this.head.releasePointerCapture(e.pointerId);
+                if (moved && p) this.savePos(posOf(p));
+                else if (!moved && e.type === 'pointerup' && this.collapsed) this.setCollapsed(false, true);
+            };
+            this.head.addEventListener('pointerup', end);
+            this.head.addEventListener('pointercancel', end);
         }
 
         /**
-         * @param {object} v - {off, noStep, cdAt, pillText, pillNow, cardStep, cardSub, warn, energy:{current,max}, happy:{current,max}, later:[string]}
+         * @param {object} v - {off, cdAt, pillText, pillNow, cardStep, cardSub, warn, energy:{current,max}, happy:{current,max}, later:[string]}
          */
         update(v) {
+            const wasOff = this.off;
             this.off = Boolean(v.off);
-            this.applyHidden();
-            if (this.off) return;
+            if (this.off) {
+                this.wrap.style.display = 'none';
+                return;
+            }
             const now = Date.now();
             const cdText = v.pillNow || (v.cdAt ? countdown(v.cdAt - now) : '');
-            fill(this.pill, [h('span', { class: 'plate' }, [h('i')]), cdText ? h('span', { class: 'cd', 'data-cd': v.cdAt && !v.pillNow ? String(v.cdAt) : null, text: cdText }) : null, h('span', { text: v.pillText || 'Pumping Iron' })]);
+            this.headInfo.textContent = v.pillText || 'Pumping Iron';
+            fill(this.head, [h('span', { class: 'plate' }, [h('i')]), cdText ? h('span', { class: 'cd', 'data-cd': v.cdAt && !v.pillNow ? String(v.cdAt) : null, text: cdText }) : null, this.headInfo, this.colBtn]);
+            this.head.title = v.pillText || '';
             const bars = [];
             if (v.energy) bars.push(h('div', { class: 'mini' }, [h('span', { text: 'Energy' }), h('div', { class: 'bar' }, [h('i', { style: 'width:' + Math.min(100, (100 * v.energy.current) / Math.max(1, v.energy.max)) + '%;background:#efebe2' })]), h('span', { text: v.energy.current + ' / ' + v.energy.max })]));
             if (v.happy) bars.push(h('div', { class: 'mini' }, [h('span', { text: 'Happy' }), h('div', { class: 'bar' }, [h('i', { style: 'width:' + Math.min(100, (100 * v.happy.current) / Math.max(1, v.happy.max)) + '%;background:#9bdc8a' })]), h('span', { text: String(v.happy.current).replace(/\B(?=(\d{3})+(?!\d))/g, ',') })]));
-            fill(this.card, [
-                // A key problem has no next step: just the warning.
-                v.noStep ? null : h('span', { class: 'lab', text: 'Next' }),
-                v.noStep ? null : h('span', { class: 'big', 'data-cd': v.cdAt ? String(v.cdAt) : null, text: v.cdAt ? countdown(v.cdAt - now) : 'Now' }),
+            fill(this.body, [
                 h('span', { class: 'step', text: v.cardStep || '' }),
                 v.cardSub ? h('span', { class: 'sub', text: v.cardSub }) : null,
                 v.warn ? h('span', { class: 'warn', text: v.warn }) : null,
@@ -7393,6 +7478,10 @@
                 v.later && v.later.length ? h('div', { class: 'later' }, v.later.map((x) => h('span', { text: x }))) : null,
                 h('button', { class: 'open', type: 'button', onclick: () => this.onOpen(), text: 'Open Pumping Iron' }),
             ]);
+            if (wasOff || !this.placed) {
+                this.placed = true;
+                this.place();
+            }
         }
 
         /** Every second: the countdowns only. */
@@ -7531,7 +7620,7 @@
     .pi-warn { display: flex; align-items: center; gap: 10px; padding: 7px 10px; margin: 6px 0; background: #2a1f10; border-left: 3px solid #e8a33d; border-radius: 0 5px 5px 0; font-size: 12px; color: #ffd79a; }
     .pi-warn b { color: #ffe3b3; }
     .pi-outlined { box-shadow: inset 0 0 0 2px #efebe2 !important; position: relative; }
-    .pi-label { position: absolute; top: -9px; right: 10px; height: 18px; line-height: 18px; padding: 0 8px; border-radius: 9px; background: #efebe2; color: #15171a; font: bold 11px Arial, sans-serif; pointer-events: none; z-index: 2; white-space: nowrap; }
+    .pi-label { position: absolute; top: -9px; left: 10px; right: auto; height: 18px; line-height: 18px; padding: 0 8px; border-radius: 9px; background: #efebe2; color: #15171a; font: bold 11px Arial, sans-serif; pointer-events: none; z-index: 2; white-space: nowrap; }
     `;
 
     /** Our page CSS, once per page (torn.com: no outside fonts). */
@@ -7789,10 +7878,20 @@
 
     const tp = { overlay: null, model: null, observer: null, drawing: false, lastGymPlan: null };
 
-    function contentRight() {
-        const el = document.querySelector('.content-wrapper') || document.getElementById('mainContainer') || document.querySelector('.container');
-        const r = el && el.getBoundingClientRect();
-        return r && r.width ? r.right : Math.min(window.innerWidth, (window.innerWidth + 976) / 2);
+    /** Torn's page (its sidebar and content column) as {left, right}; a centred 976 px guess if it can't be measured. */
+    function pageRect() {
+        const parts = [document.querySelector('.content-wrapper'), document.getElementById('sidebarroot'), document.getElementById('sidebar')].filter(Boolean);
+        const rects = parts.map((el) => el.getBoundingClientRect()).filter((r) => r.width > 0 && r.height > 0);
+        if (rects.length) return { left: Math.min(...rects.map((r) => r.left)), right: Math.max(...rects.map((r) => r.right)) };
+        const w = Math.min(window.innerWidth, 976);
+        return { left: (window.innerWidth - w) / 2, right: (window.innerWidth + w) / 2 };
+    }
+
+    /** The trading script's NPC Arbitrage panel, if it is on this page (read only: its open shadow root). */
+    function tradingRect() {
+        const host = document.getElementById('ttv2-host');
+        const panel = host && host.shadowRoot && host.shadowRoot.querySelector('.ttv2-panel');
+        return panel ? panel.getBoundingClientRect() : null;
     }
 
     /* ---------------------------------------------------------------- pill */
@@ -7809,8 +7908,8 @@
         if (!m || !m.ready) {
             const hasKey = Boolean(getKey(K.apiKey));
             const p = currentProblem();
-            if (p) return { noStep: true, pillText: p.short, cardStep: p.title, cardSub: p.text, warn: p.kind === 'retry' ? null : 'Open Pumping Iron › Settings' };
-            return hasKey ? { noStep: true, pillText: 'Reading your state…', cardStep: 'Asking Torn for your bars, stats and gym.' } : { noStep: true, pillText: 'Open to set up', cardStep: 'Add your Torn key in Pumping Iron’s Settings.' };
+            if (p) return { pillText: p.short, cardStep: p.title, cardSub: p.text, warn: p.kind === 'retry' ? null : 'Open Pumping Iron › Settings' };
+            return hasKey ? { pillText: 'Reading your state…', cardStep: 'Asking Torn for your bars, stats and gym.' } : { pillText: 'Open to set up', cardStep: 'Add your Torn key in Pumping Iron’s Settings.' };
         }
         const next = m.next;
         const later = m.steps.slice(1, 3).map((x) => tornClock(x.at) + ' · ' + x.label + (trainsText(x.trains) ? ', ' + trainsText(x.trains) : ''));
@@ -7967,16 +8066,16 @@
             onOpen: () => gmOpenTab(APP_PAGE_URL + (currentProblem() && !(tp.model && tp.model.ready) ? '#settings' : '')),
             loadPos: () => get(K.overlayPos, null),
             savePos: (p) => set(K.overlayPos, p),
-            loadHidden: () => Boolean(get('overlayHidden', false)),
-            saveHidden: (v) => set('overlayHidden', v),
-            contentRight,
+            loadCollapsed: () => Boolean(get(K.overlayCollapsed, false)),
+            saveCollapsed: (v) => set(K.overlayCollapsed, v),
+            pageRect,
+            avoidRect: tradingRect,
         });
         tp.overlay.mount();
         gmMenu('Reset overlay position', () => {
             set(K.overlayPos, null);
-            set('overlayHidden', false);
-            tp.overlay.place();
-            tp.overlay.applyHidden();
+            set(K.overlayCollapsed, false);
+            tp.overlay.setCollapsed(false, false);
         });
         let lastSig = '';
         let lastView = '';

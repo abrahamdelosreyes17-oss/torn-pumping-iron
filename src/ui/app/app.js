@@ -1,7 +1,7 @@
 /*
  * The webpage: a full-page shadow host drawn over app.html's placeholder
  * (the trading app's traders-page pattern). Top bar with tabs and the
- * density switch, the status strip on Home and Plan, then the 70/30 body.
+ * the status strip on Home and Plan, then the 70/30 body.
  * Countdowns tick every second without redrawing the page.
  */
 
@@ -85,8 +85,8 @@ export class PiApp {
         if (!force && (sig === this.sig || this.typing())) return;
         this.sig = sig;
         const s = ctx.settings;
-        const app = h('div', { class: 'app' + (s.density === 'comfy' ? ' comfy' : '') });
-        app.appendChild(this.topBar(ctx));
+        const app = h('div', { class: 'app' });
+        app.appendChild(this.topBar());
         let tab = this.tab;
         if (!m || !m.ready) {
             // No state yet: keys first. Settings always opens, so a key can always be replaced.
@@ -116,8 +116,7 @@ export class PiApp {
         this.tick();
     }
 
-    topBar(ctx) {
-        const s = ctx.settings;
+    topBar() {
         const tabs = APP_TABS.filter(([id]) => this.renderers[id]).map(([id, label]) => h('a', { class: 'tab' + (id === this.tab ? ' on' : ''), href: '#' + id, onclick: (e) => { e.preventDefault(); this.go(id); }, text: label }));
         this.clockEl = h('span', { class: 'upd num' }, [h('i'), (this.clockText = t('', ''))]);
         return h('div', { class: 'top' }, [
@@ -126,10 +125,6 @@ export class PiApp {
             ...tabs,
             h('div', { class: 'grow' }),
             this.clockEl,
-            h('div', { class: 'seg', role: 'group', 'aria-label': 'Spacing' }, [
-                h('button', { type: 'button', 'aria-pressed': String(s.density !== 'comfy'), onclick: () => ctx.setSettings({ density: 'compact' }), text: 'Compact' }),
-                h('button', { type: 'button', 'aria-pressed': String(s.density === 'comfy'), onclick: () => ctx.setSettings({ density: 'comfy' }), text: 'Comfortable' }),
-            ]),
         ]);
     }
 
