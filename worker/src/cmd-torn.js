@@ -8,7 +8,8 @@
 import { Q, parse } from './db.js';
 import { reply, defer, linkButton, row as actionRow } from './discord.js';
 import { keyFor, KeyError } from './keys.js';
-import { userState, playerBasic, pauseUser, tornErrorText, TornError } from './torn.js';
+import { userState, playerBasic, factionWars, factionMembers, factionChain, pauseUser, tornErrorText, TornError } from './torn.js';
+import { findWar, membersOf, warView, warText, chainText } from './war.js';
 import { bestPrice, buyMessage, itemName, MAX_WATCHES } from './market.js';
 import { ITEMS } from './commands.js';
 import { clock, rel, dur, money, PAGES } from './format.js';
@@ -161,6 +162,31 @@ export async function targetCmd(user, i, env, fetchImpl, ctx, nowS) {
         const known = t.list.find((x) => Number(x.id) === id) || (t.bands[id] ? { band: t.bands[id] } : null);
         const lines = ['**' + (p.name || 'Player') + '** [' + id + ']' + (p.level ? ' · Lv ' + p.level : ''), 'Status: ' + statusText(p.status, nowS), 'Torn Eye: ' + (known ? estimateText(known) : 'no estimate synced (open their profile with Pumping Iron once)')];
         return { content: lines.join('\n'), components: [actionRow([linkButton('Attack', PAGES.attack(id)), linkButton('Profile', PAGES.profile(id))])] };
+    });
+}
+
+/* ---------- /war and /chain ---------- */
+
+export async function warCmd(user, i, env, fetchImpl, ctx, nowS) {
+    const asked = Math.round(Number(opts(i).faction)) || null;
+    if (!asked && !user.faction_id) return reply('The bot doesn’t know your faction yet: open Pumping Iron once (it sends it), or ask for one: `/war faction:<id>`.');
+    return withTorn(user, i, env, fetchImpl, ctx, nowS, async (key) => {
+        let war;
+        if (asked) war = { enemy: asked, enemyName: 'faction ' + asked, start: 0 };
+        else {
+            war = findWar(await factionWars(fetchImpl, key), user.faction_id, nowS);
+            if (!war) return { content: 'No war right now. `/war faction:<id>` shows any faction.' };
+        }
+        const view = warView(membersOf(await factionMembers(fetchImpl, key, war.enemy)), targetsOf(user).bands, nowS);
+        const attack = view.hit.slice(0, 4).map((x) => linkButton('Attack ' + x.name, PAGES.attack(x.id)));
+        return { content: warText(war, view, nowS).slice(0, 2000), components: [actionRow([...attack, linkButton('Faction', PAGES.faction(war.enemy))])] };
+    });
+}
+
+export async function chainCmd(user, i, env, fetchImpl, ctx, nowS) {
+    return withTorn(user, i, env, fetchImpl, ctx, nowS, async (key) => {
+        const c = ((await factionChain(fetchImpl, key)) || {}).chain || {};
+        return { content: chainText(c, nowS), components: [actionRow([linkButton('Your faction', PAGES.myFaction)])] };
     });
 }
 

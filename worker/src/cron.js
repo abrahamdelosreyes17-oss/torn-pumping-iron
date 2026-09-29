@@ -9,7 +9,9 @@ import { dueAlerts, resolvedBy, nextPrev } from './alerts.js';
 import { Q, parse, meterDb, ensureSchema } from './db.js';
 import { guard, BudgetError } from './net.js';
 import { userState, pauseUser, TornError } from './torn.js';
-import { deliver, canDeliver, bodyOf, editAlertMessage, PER_MESSAGE } from './deliver.js';
+import { deliver, canDeliver, bodyOf, editAlertMessage, PER_MESSAGE, LIVE_KINDS } from './deliver.js';
+import { warTick, chainTick } from './war.js';
+import { targetsOf } from './cmd-torn.js';
 import { clock, DAY_S } from './format.js';
 import { keyFor, KeyError } from './keys.js';
 import { watchAlerts, WATCH_EVERY_S } from './market.js';
@@ -35,7 +37,7 @@ export async function sendAlerts(env, f, db, user, alerts, nowS) {
     const ids = [];
     const sorted = [...alerts].sort((a, b) => (a.id < b.id ? -1 : 1));
     for (const group of chunks(sorted, PER_MESSAGE)) {
-        const rows = group.map((a) => ({ user: user.id, alert: a.id, at: nowS, state: 'sent', until: null, body: { title: a.title, text: a.text, kind: a.kind, link: a.link || null, step: a.step && a.skip !== false ? { at: a.step.at, kind: a.step.kind, label: a.step.label } : null } }));
+        const rows = group.map((a) => ({ user: user.id, alert: a.id, at: nowS, state: 'sent', until: null, body: { title: a.title, text: a.text, kind: a.kind, link: a.link || null, step: a.step && a.skip !== false ? { at: a.step.at, kind: a.step.kind, label: a.step.label } : null, ...(a.attack ? { attack: a.attack } : {}) } }));
         const d = await deliver(env, f, db, user, rows, nowS);
         if (!d.ok) break;
         for (const r of rows) await db.prepare(Q.sentPut).bind(user.id, r.alert, nowS, 'sent', null, d.channel, d.message, JSON.stringify(r.body), d.via).run();
@@ -122,6 +124,7 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
     for (const r of rows) {
         if (r.state !== 'snoozed' || Number(r.until) > nowS) continue;
         const b = bodyOf(r);
+        if (LIVE_KINDS.has(b.kind)) continue;
         const now = alerts.find((a) => a.id === r.alert);
         if (now) fresh.push(now);
         else if (!resolvedBy(b.kind, state, nowS, b)) fresh.push({ id: r.alert, kind: b.kind, link: b.link, step: b.step, title: 'Reminder (snoozed at ' + clock(Number(r.until) - 600) + ')', text: b.title + (b.text ? ' · ' + b.text : '') });
@@ -137,9 +140,42 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
     if (inQuiet(st, nowS) || room <= 0) fresh = fresh.filter((a) => a.kind === 'jump');
     else if (fresh.length > room * PER_MESSAGE) fresh = fresh.slice(0, room * PER_MESSAGE);
 
-    const { sent, ids } = await sendAlerts(env, f, db, row, fresh, nowS);
-    for (const a of fresh) if (a.kind === 'watch' && ids.includes(a.id)) await db.prepare(Q.watchMark).bind(1, row.id, a.item).run();
-    await db.prepare(Q.userRan).bind(nowS, JSON.stringify(nextPrev(prev, state, nowS)), row.war || null, row.id).run();
+    const out = await sendAlerts(env, f, db, row, fresh, nowS);
+    let sent = out.sent;
+    let used = out.messages;
+    for (const a of fresh) if (a.kind === 'watch' && out.ids.includes(a.id)) await db.prepare(Q.watchMark).bind(1, row.id, a.item).run();
+
+    // Wars and chains: live messages edited in place (see war.js).
+    let war = parse(row.war, null);
+    const live = {
+        env,
+        f,
+        db,
+        user: row,
+        key,
+        nowS,
+        rows,
+        bands: targetsOf(row).bands,
+        mayStart: () => !inQuiet(st, nowS) && room - used > 0,
+        send: async (list) => {
+            const r = await sendAlerts(env, f, db, row, list, nowS);
+            sent += r.sent;
+            used += r.messages;
+        },
+    };
+    try {
+        if (on.war && row.faction_id && !muted(st, 'war', nowS)) war = await warTick({ ...live, war });
+        if (on.chain && !muted(st, 'chain', nowS)) await chainTick(live);
+    } catch (e) {
+        if (e instanceof BudgetError) throw e;
+        if (e instanceof TornError && e.dead) {
+            await pauseUser(db, row.id, e);
+            return { sent, resolved, error: 'Torn error ' + e.code };
+        }
+        // A key without the faction selections (error 16) or no faction: wars are checked again in 10 minutes.
+        if (e instanceof TornError) war = { checked: nowS, error: e.code };
+    }
+    await db.prepare(Q.userRan).bind(nowS, JSON.stringify(nextPrev(prev, state, nowS)), war ? JSON.stringify(war) : null, row.id).run();
     return { sent, resolved };
 }
 

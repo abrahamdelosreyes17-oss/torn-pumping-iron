@@ -9,7 +9,7 @@
 import { Q, parse } from './db.js';
 import { DISCORD_API, CANNOT_DM, CHALK, GREY, AMBER, discordCall, button, linkButton, row as actionRow } from './discord.js';
 import { settingsOf } from './settings.js';
-import { clock } from './format.js';
+import { clock, PAGES } from './format.js';
 
 /** After a DM fails with 50007, use the webhook for this long before trying DMs again. */
 export const DM_RETRY_S = 6 * 3600;
@@ -48,8 +48,21 @@ function headline(rows) {
     return (live.length ? live : rows).map((r) => bodyOf(r).title).join(' · ');
 }
 
+/** War and chain pings: one message edited in place; Done and Attack links, no snooze or skip. */
+export const LIVE_KINDS = new Set(['war', 'chain']);
+
+function liveMessage(r) {
+    const b = bodyOf(r);
+    const btns = [];
+    if (active(r)) btns.push(button('Done', 'done:' + r.alert, 3));
+    for (const t of (Array.isArray(b.attack) ? b.attack : []).slice(0, 4)) btns.push(linkButton('Attack ' + t.name, PAGES.attack(t.id)));
+    if (btns.length < 5 && b.link) btns.push(linkButton('Open in Torn', b.link));
+    return { content: String(b.title || '').slice(0, 2000), embeds: embeds([r]), components: btns.length ? [actionRow(btns)] : [], allowed_mentions: { parse: [] } };
+}
+
 /** The bot's message (DMs): buttons per ping, the Torn link on each. */
 export function alertMessage(rows) {
+    if (rows.length === 1 && LIVE_KINDS.has(bodyOf(rows[0]).kind)) return liveMessage(rows[0]);
     const many = rows.length > 1;
     const components = [];
     for (const r of rows.slice(0, PER_MESSAGE)) {
