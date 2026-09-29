@@ -71,6 +71,13 @@ Read this first. Then `docs/BUILD-PLAN.md` (what to build, in order), `docs/ENGI
 | One Discord Worker or one each | One Worker supporting several users; the docs explain both |
 | Keys | One Limited Torn key for the userscript; a separate custom Minimal key for the Worker |
 | Pill on every Torn page | Yes (setting to limit) |
+| Buy window | 3 days (Today / Week on the switch) |
+| Budget for the recommendation | $150M over 30 days (Plan › Plan for) |
+| Specialist gyms | Assumed to open once George's is unlocked [calibrate] |
+| War mode | Enemy faction read every 10 s while that tab is visible; rows re-ordered on screen only |
+| Public-stats estimate | TornTools' rank buckets, labelled rough |
+| Discord for two | One Worker with an invite code; the friend's own webhook and custom key stored on it (disclosed) |
+| The 99k jump | Hidden unless the booster cap is above 24 h (it equals the EDVD jump otherwise) |
 
 ## 5. Key findings (details in docs/)
 
@@ -106,6 +113,29 @@ Research index: `docs/research-gym.md`, `research-builds-gympage.md`, `research-
 7. Stop on a dead key (errors 2, 13, 18).
 8. The page hook is read-only: clone responses, never modify Torn's data or state.
 9. The Torn rules page (torn.com/rules.php) could never be fetched by tools. Ask the owner to read the scripting section before release.
+
+## 8. Release 1.0.0 (waiting for the owner's yes)
+
+**Ask:** "1.0.0 is ready. Commit, push to torn-pumping-iron and publish the page?" Only on a yes:
+
+1. `npm run check` (all green) and the two browser checks:
+   `PWPATH=<scratchpad>/node_modules/playwright-core node test/ux-check.mjs` and `… node test/torn-check.mjs` (install playwright-core into the session scratchpad with `npm i playwright-core@1`; they drive the installed Edge).
+2. `git remote add origin https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron.git`
+3. `git add src test worker site build.mjs package.json README.md HANDOFF.md CLAUDE.md torn-pumping-iron.user.js .gitignore` (never `docs/`, `mockups/`, `.claude/`; they're ignored) → commit → `git push -u origin main`.
+4. gh-pages: `git checkout --orphan gh-pages`, keep only `site/app.html` and `site/.nojekyll` moved to the root, commit, `git push origin gh-pages`, back to `main`. Check https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html shows the placeholder.
+5. Verify: `curl -s https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/<sha>/torn-pumping-iron.user.js | grep -m1 @version` → `1.0.0`.
+6. Give the owner the pinned install link (`…/<sha>/torn-pumping-iron.user.js`) and the `@updateURL` link (`…/main/torn-pumping-iron.user.js`), plus a second commit putting the pinned link at the top of this file.
+
+**What the owner should look at first (live, read only), in order:**
+1. Settings → paste a Limited key → "Connected · Limited". Home fills in: do the Energy/Happy/Drug/Refill cells match Torn's bars? (`refills.energy` = "used today" is an assumption.)
+2. Gym page: the strip, the outline and **Fill N**. Does Fill put the number in Torn's box so TRAIN uses it? (React may need something other than the native setter; no reference script writes this box.) Is the outlined gym (`selected___`) the one you're in?
+3. Items page and a bazaar/Item Market/points page after opening Buy: are the right rows outlined?
+4. A profile, a faction page and a ranked war: chips, hover card, the war order and summary.
+5. An attack page: the panel; after Start Fight, "saved for next time".
+6. Read https://www.torn.com/rules.php (scripting section): our tools could never fetch it. Confirm the page hook (read-only) and the Discord Worker fit.
+7. When the Discord server exists: worker/SETUP.md.
+
+**Calibrations that need real data** (all named exports marked [calibrate]): post-50M damping (`POST_50M_MODE`), happy loss per train, fight base damage/zones/accuracy/default gear, life by level, respect base, SSL drug limit, specialist gyms needing George's. Torn Eye's replay test uses FFScouter's published difficulty scale, not real logs: once installed, the owner's own attacks (`myAttacks`) are the data to check it against.
 
 ---
 
