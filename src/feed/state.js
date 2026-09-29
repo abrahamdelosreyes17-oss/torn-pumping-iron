@@ -21,6 +21,12 @@ import { KEY_DEAD_CODES } from '../api/client.js';
 
 export const STATE_POLL_MS = 30000;
 
+/** After a failed state call, wait this long before asking again (not every 3 s heartbeat). */
+export const STATE_RETRY_MS = 30000;
+
+/** Torn's "access level too low": this key never gets the state, so the feed waits for a new key. */
+export const ACCESS_TOO_LOW = 16;
+
 /** How often each slower part refreshes. */
 export const STATIC_EVERY = {
     perks: 60 * 60 * 1000,
@@ -52,7 +58,7 @@ export class StateFeed {
         this.nextStep = nextStep;
         this.onState = onState;
         this.onError = onError;
-        this.keys = { state: 'userState', static: 'userStatic', log: 'dayLog', leader: 'leader', history: 'statsHistory', dead: 'apiKeyDead', ...keys };
+        this.keys = { state: 'userState', static: 'userStatic', log: 'dayLog', leader: 'leader', history: 'statsHistory', dead: 'apiKeyDead', stateError: 'stateError', ...keys };
         this.polling = false;
     }
 
@@ -79,6 +85,9 @@ export class StateFeed {
             await this.refreshStatic();
             return false;
         }
+        // A refused state call: a key without access waits for a new key (saving one clears this); anything else waits 30 s.
+        const failed = this.store.get(this.keys.stateError, null);
+        if (failed && (failed.code === ACCESS_TOO_LOW || t - failed.at < STATE_RETRY_MS)) return false;
         this.polling = true;
         try {
             const api = await fetchUserState(this.client);
@@ -95,17 +104,25 @@ export class StateFeed {
                 if (sample) this.store.set('calibration', addCalibration(this.store.get('calibration', null), sample));
             }
             this.store.set(this.keys.state, { at, api });
+            if (failed) this.clearStateError();
             this.recordDaily(next);
             this.onState(next, api);
             await this.refreshStatic();
             return true;
         } catch (error) {
             if (error && KEY_DEAD_CODES.has(error.code)) this.store.set(this.keys.dead, true);
+            // No key yet is not a failed call: nothing was sent.
+            else if (!(error && error.noKey)) this.store.set(this.keys.stateError, { at: this.now(), code: (error && error.code) ?? null, message: String((error && error.message) || error) });
             this.onError(error);
             return false;
         } finally {
             this.polling = false;
         }
+    }
+
+    clearStateError() {
+        if (this.store.del) this.store.del(this.keys.stateError);
+        else this.store.set(this.keys.stateError, null);
     }
 
     /** Stats at the end of each Torn day seen (Progress). Keeps 120 days. */

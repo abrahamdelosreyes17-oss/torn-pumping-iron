@@ -89,10 +89,16 @@ export class PiApp {
         app.appendChild(this.topBar(ctx));
         let tab = this.tab;
         if (!m || !m.ready) {
-            // No state yet: keys first.
-            if (!ctx.flags.hasKey || ctx.flags.keyDead) tab = 'settings';
-            else {
-                app.appendChild(h('div', { class: 'empty' }, [h('h2', { text: 'Reading your state…' }), h('p', { text: 'One call to Torn for your bars, cooldowns, stats and gym. It shows here in a few seconds.' })]));
+            // No state yet: keys first. Settings always opens, so a key can always be replaced.
+            // Stay there once a key is saved, so its message (e.g. "this key won't work") is read, not swapped for Home.
+            if (!ctx.flags.hasKey || ctx.flags.keyDead) tab = this.tab = 'settings';
+            else if (tab !== 'settings') {
+                const p = ctx.keyProblem;
+                app.appendChild(
+                    p
+                        ? h('div', { class: 'empty' }, [h('div', { class: 'warnb' }, [h('b', { text: p.title }), h('p', { text: p.text }), h('div', { class: 'acts' }, [h('button', { class: 'btn primary sm', type: 'button', onclick: () => this.go('settings'), text: 'Open Settings' })])])])
+                        : h('div', { class: 'empty' }, [h('h2', { text: 'Reading your state…' }), h('p', { text: 'One call to Torn for your bars, cooldowns, stats and gym. It shows here in a few seconds.' })]),
+                );
                 fill(this.root, [app]);
                 return;
             }

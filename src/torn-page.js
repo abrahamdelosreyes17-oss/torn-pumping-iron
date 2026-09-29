@@ -5,7 +5,8 @@
  */
 
 import { gmMenu, gmOpenTab } from './platform/gm.js';
-import { K, get, set, getSettings, getPlan } from './platform/store.js';
+import { K, get, set, getKey, getSettings, getPlan } from './platform/store.js';
+import { keyProblem } from './ui/key-status.js';
 import { onModel, isVisible } from './runtime.js';
 import { Overlay } from './ui/overlay.js';
 import { ensureMarkCss, clearMarks, drawGymMarks, outline } from './ui/marks/marks.js';
@@ -33,11 +34,21 @@ function contentRight() {
 
 /* ---------------------------------------------------------------- pill */
 
+/** Why there's no state yet (key refused, too limited, Torn not answering), or null. */
+function currentProblem() {
+    return keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: (get(K.userStatic, {}) || {}).keyInfo || null });
+}
+
 function overlayView(m, page) {
     const s = getSettings();
     const relevant = [PAGE_GYM, PAGE_ITEMS, PAGE_BAZAAR, PAGE_ITEM_MARKET, PAGE_POINTS].includes(page);
     if (!s.pill && !relevant) return { off: true };
-    if (!m || !m.ready) return { pillText: get(K.apiKeyDead, false) ? 'Key refused · open Settings' : 'Open to set up', cardStep: 'Add your Torn key in Pumping Iron’s Settings.' };
+    if (!m || !m.ready) {
+        const hasKey = Boolean(getKey(K.apiKey));
+        const p = currentProblem();
+        if (p) return { noStep: true, pillText: p.short, cardStep: p.title, cardSub: p.text, warn: p.kind === 'retry' ? null : 'Open Pumping Iron › Settings' };
+        return hasKey ? { noStep: true, pillText: 'Reading your state…', cardStep: 'Asking Torn for your bars, stats and gym.' } : { noStep: true, pillText: 'Open to set up', cardStep: 'Add your Torn key in Pumping Iron’s Settings.' };
+    }
     const next = m.next;
     const later = m.steps.slice(1, 3).map((x) => tornClock(x.at) + ' · ' + x.label + (trainsText(x.trains) ? ', ' + trainsText(x.trains) : ''));
     const v = { energy: m.strip.energy, happy: m.strip.happy, later };
@@ -189,7 +200,8 @@ function pageRowsCount(p) {
 export function bootTornPage() {
     ensureMarkCss();
     tp.overlay = new Overlay({
-        onOpen: () => gmOpenTab(APP_PAGE_URL),
+        // A key problem opens straight on Settings, where the key is replaced.
+        onOpen: () => gmOpenTab(APP_PAGE_URL + (currentProblem() && !(tp.model && tp.model.ready) ? '#settings' : '')),
         loadPos: () => get(K.overlayPos, null),
         savePos: (p) => set(K.overlayPos, p),
         loadHidden: () => Boolean(get('overlayHidden', false)),

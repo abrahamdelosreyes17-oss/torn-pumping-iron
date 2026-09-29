@@ -150,10 +150,13 @@ export function renderSettings(m, ctx) {
     const ki = (ctx.statics && ctx.statics.keyInfo) || null;
     const dead = ctx.flags.keyDead;
     const hasKey = ctx.flags.hasKey;
-    const tornState = !hasKey ? stateTag('off', 'No key yet') : dead ? stateTag('bad', 'Torn rejected this key') : ki && ki.type ? stateTag(ki.level >= 3 || ki.level === 0 ? 'ok' : 'bad', (ki.level >= 3 || ki.level === 0 ? 'Connected · ' : 'Too low · ') + String(ki.type).replace(' Access', '').replace(' Only', '')) : stateTag('ok', 'Saved');
+    const problem = ctx.keyProblem;
+    const kiType = ki && ki.type ? String(ki.type).replace(' Access', '').replace(' Only', '') : '';
+    const tornState = !hasKey ? stateTag('off', 'No key yet') : dead ? stateTag('bad', 'Torn rejected this key') : problem && problem.kind === 'access' ? stateTag('bad', 'Too limited' + (kiType ? ' · ' + kiType : '')) : kiType ? stateTag('ok', 'Connected · ' + kiType) : stateTag('ok', 'Saved');
 
     const torn = keyRow({ label: 'Torn API key', placeholder: hasKey ? 'Saved · paste a new one to replace it' : 'Paste a Limited key', onSave: ctx.saveTornKey, onReveal: () => ctx.revealKey(K.apiKey) });
     const tornSec = settingsSection('Torn API key', tornState, [
+        problem && problem.kind !== 'dead' ? h('div', { class: 'warnb' }, [h('b', { text: problem.title }), h('p', { text: problem.text })]) : null,
         torn.row,
         torn.msg,
         h('p', {}, ['Reads your bars, cooldowns, stats, perks, property, gear and attacks. It can’t train, buy or attack. ', h('a', { href: apiKeyPageUrl(), target: '_blank', rel: 'noopener', text: 'Make a Limited key' })]),

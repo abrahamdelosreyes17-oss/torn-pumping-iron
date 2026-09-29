@@ -31,6 +31,7 @@ export const K = {
     overlayPos: 'overlayPos',
     apiPause: 'apiPause',
     lastError: 'lastError',
+    stateError: 'stateError',
 };
 
 /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */
@@ -93,7 +94,10 @@ export function setKey(name, value) {
     const v = String(value || '').trim();
     if (v) gmSet(name, v);
     else gmDel(name);
-    if (name === K.apiKey) gmDel(K.apiKeyDead);
+    if (name === K.apiKey) {
+        gmDel(K.apiKeyDead);
+        gmDel(K.stateError);
+    }
     return v;
 }
 

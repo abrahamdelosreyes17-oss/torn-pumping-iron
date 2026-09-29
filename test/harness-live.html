@@ -12,6 +12,7 @@
  *   &page=gym     stand in for a Torn page (gym, items, itemmarket, bazaar, points, profile, faction, attack)
  *   &pi=app       boot the webpage instead
  *   &dead=1       Torn answers error 2 (dead key)
+ *   &access=1     the state call answers error 16 (a custom key without bars/gym, like FFScouter's)
  *   &drug=0       drug cooldown already over
  *   &calls=1      list every request made in the output
  *   &at=2026-09-29T10:48:00Z   run the page's clock from this Torn time
@@ -92,6 +93,8 @@ window.GM_xmlhttpRequest = (o) => {
   setTimeout(() => {
     let body;
     if (Q.get('dead') && u.hostname === 'api.torn.com') body = { error: { code: 2, error: 'Incorrect key' } };
+    else if (Q.get('access') && u.pathname === '/v2/user' && u.searchParams.get('selections')) body = { error: { code: 16, error: 'Access level of this key is not high enough' } };
+    else if (Q.get('access') && u.pathname === '/v2/key/info') body = { info: { access: { level: 0, type: 'Custom' }, user: { id: 2345678 }, selections: { user: ['profile', 'basic', 'cooldowns', 'refills', 'attacks', 'battlestats', 'personalstats'] } } };
     else if (/^\/v2\/user\/\d+\/profile$/.test(u.pathname)) body = profileOf(u.pathname.split('/')[3]);
     else body = (CANNED[u.pathname] || (() => ({})))(u);
     o.onload({ status: 200, responseText: JSON.stringify(body) });

@@ -123,7 +123,11 @@ export function startFeed() {
         isVisible,
         nextStep: () => (pi.model && pi.model.next) || null,
         onState: () => refresh(),
-        onError: (error) => set(K.lastError, { at: Date.now(), where: 'feed', code: error && error.code, message: String((error && error.message) || error) }),
+        onError: (error) => {
+            set(K.lastError, { at: Date.now(), where: 'feed', code: error && error.code, message: String((error && error.message) || error) });
+            // This tab's own writes fire no change event here: redraw so the warning shows now.
+            refresh();
+        },
     });
     // Leaving the page hands the lead to another tab at once, instead of after the 10 s timeout.
     window.addEventListener('pagehide', () => {
@@ -138,6 +142,8 @@ export function startFeed() {
     gmOnChange(K.userStatic, refresh);
     gmOnChange(K.plan, refresh);
     gmOnChange(K.settings, refresh);
+    gmOnChange(K.stateError, refresh);
+    gmOnChange(K.apiKeyDead, refresh);
     // Countdowns tick by themselves every second; the model itself is worked out again every 5 s.
     setInterval(refresh, 5000);
     refresh();

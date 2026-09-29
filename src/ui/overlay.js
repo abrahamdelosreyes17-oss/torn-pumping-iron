@@ -143,7 +143,7 @@ export class Overlay {
     }
 
     /**
-     * @param {object} v - {off, cdAt, pillText, pillNow, cardStep, cardSub, warn, energy:{current,max}, happy:{current,max}, later:[string]}
+     * @param {object} v - {off, noStep, cdAt, pillText, pillNow, cardStep, cardSub, warn, energy:{current,max}, happy:{current,max}, later:[string]}
      */
     update(v) {
         this.off = Boolean(v.off);
@@ -156,8 +156,9 @@ export class Overlay {
         if (v.energy) bars.push(h('div', { class: 'mini' }, [h('span', { text: 'Energy' }), h('div', { class: 'bar' }, [h('i', { style: 'width:' + Math.min(100, (100 * v.energy.current) / Math.max(1, v.energy.max)) + '%;background:#efebe2' })]), h('span', { text: v.energy.current + ' / ' + v.energy.max })]));
         if (v.happy) bars.push(h('div', { class: 'mini' }, [h('span', { text: 'Happy' }), h('div', { class: 'bar' }, [h('i', { style: 'width:' + Math.min(100, (100 * v.happy.current) / Math.max(1, v.happy.max)) + '%;background:#9bdc8a' })]), h('span', { text: String(v.happy.current).replace(/\B(?=(\d{3})+(?!\d))/g, ',') })]));
         fill(this.card, [
-            h('span', { class: 'lab', text: 'Next' }),
-            h('span', { class: 'big', 'data-cd': v.cdAt ? String(v.cdAt) : null, text: v.cdAt ? countdown(v.cdAt - now) : 'Now' }),
+            // A key problem has no next step: just the warning.
+            v.noStep ? null : h('span', { class: 'lab', text: 'Next' }),
+            v.noStep ? null : h('span', { class: 'big', 'data-cd': v.cdAt ? String(v.cdAt) : null, text: v.cdAt ? countdown(v.cdAt - now) : 'Now' }),
             h('span', { class: 'step', text: v.cardStep || '' }),
             v.cardSub ? h('span', { class: 'sub', text: v.cardSub }) : null,
             v.warn ? h('span', { class: 'warn', text: v.warn }) : null,

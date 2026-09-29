@@ -117,6 +117,16 @@ test('key info: Limited is enough, Minimal is not, a custom key needs the Home s
     assert.equal(torn.keyIsEnough({ level: null }), null);
 });
 
+test('key info: a custom key (the FFScouter one) names what it can’t read', () => {
+    // The owner's FFScouter key, as key/info described it on 1.0.0.
+    const ffs = { level: 0, type: 'Custom', selections: { user: ['profile', 'timestamp', 'lookup', 'hof', 'faction', 'basic', 'cooldowns', 'refills', 'attacks', 'battlestats', 'personalstats'] } };
+    assert.deepEqual(torn.missingSelections(ffs), ['bars', 'gym']);
+    assert.equal(torn.keyIsEnough(ffs), false);
+    assert.deepEqual(torn.missingSelections({ level: 3 }), []);
+    assert.equal(torn.missingSelections({ level: 1 }).length, 5);
+    assert.equal(torn.missingSelections(null), null);
+});
+
 test('personal stats come back as name → value', () => {
     assert.deepEqual(torn.personalStatValues([{ name: 'xantaken', value: 812 }, { name: 'refills', value: '40' }]), { xantaken: 812, refills: 40 });
     assert.deepEqual(torn.personalStatValues({ drugs: {} }), {});

@@ -169,13 +169,21 @@ export async function fetchKeyInfo(client) {
     return { level, type: access.type || null, userId: info.user && info.user.id ? Number(info.user.id) : null, selections: info.selections || null };
 }
 
+/**
+ * The user-state selections a custom key lacks (Torn refuses the whole
+ * state call, error 16, if even one is missing). Empty for Limited/Full;
+ * null when key/info can't tell.
+ */
+export function missingSelections(info) {
+    if (!info || info.level === null || info.level === undefined) return null;
+    if (info.level >= ACCESS_LIMITED) return [];
+    if (info.level !== ACCESS_CUSTOM) return USER_STATE_SELECTIONS.split(',');
+    const u = (info.selections && info.selections.user) || [];
+    return USER_STATE_SELECTIONS.split(',').filter((s) => !u.includes(s));
+}
+
 /** Is this key enough for the app (Limited or Full, or a custom key with the user state selections)? */
 export function keyIsEnough(info) {
-    if (!info || info.level === null) return null;
-    if (info.level >= ACCESS_LIMITED) return true;
-    if (info.level === ACCESS_CUSTOM) {
-        const u = (info.selections && info.selections.user) || [];
-        return USER_STATE_SELECTIONS.split(',').every((s) => u.includes(s));
-    }
-    return false;
+    const missing = missingSelections(info);
+    return missing === null ? null : missing.length === 0;
 }

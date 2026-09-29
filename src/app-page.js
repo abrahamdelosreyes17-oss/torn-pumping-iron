@@ -22,6 +22,7 @@ import { parsePerks } from './core/perks.js';
 import { POINTS } from './core/items.js';
 import { STRATEGIES } from './core/strategies.js';
 import { redactKey } from './api/client.js';
+import { keyProblem } from './ui/key-status.js';
 
 /** How long fetched prices count as fresh. */
 export const PRICE_FRESH_MS = 5 * 60 * 1000;
@@ -91,13 +92,16 @@ async function saveTornKey(v) {
     if (!v) return { ok: false, text: 'Paste a key first.' };
     if (!/^[A-Za-z0-9]{16}$/.test(v)) return { ok: false, text: 'A Torn key is 16 letters and numbers.' };
     setKey(K.apiKey, v);
-    set(K.userStatic, { ...(get(K.userStatic, {}) || {}), keyInfoAt: 0 });
+    set(K.userStatic, { ...(get(K.userStatic, {}) || {}), keyInfo: null, keyInfoAt: 0 });
     try {
         const info = await fetchKeyInfo(tornClient());
         const s = { ...(get(K.userStatic, {}) || {}), keyInfo: info, keyInfoAt: Date.now() };
         set(K.userStatic, s);
         const enough = keyIsEnough(info);
-        if (enough === false) return { ok: false, text: 'Saved, but this is a ' + (info.type || 'low') + ' key: make a Limited one for stats and attacks.' };
+        if (enough === false) {
+            const p = keyProblem({ hasKey: true, dead: false, keyInfo: info });
+            return { ok: false, text: 'Saved, but this ' + (info.type || '') + ' key won’t work. ' + (p ? p.text : 'Make a Limited key.') };
+        }
         return { ok: true, text: 'Saved · ' + (info.type || 'key accepted') + '.' };
     } catch (error) {
         return { ok: false, text: String((error && error.message) || error) };
@@ -181,8 +185,9 @@ function getCtx() {
         gymProgress: get(K.gymProgress, null),
         calibration: get('calibration', null),
         flags: { hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)), hasFfs: Boolean(getKey(K.ffsKey)), ffsDead: Boolean(ffsState && ffsState.registered === false), hasTs: Boolean(getKey(K.tsKey)) },
+        keyProblem: keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: statics.keyInfo || null }),
         planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
-        sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0].join('|'),
+        sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null))].join('|'),
         setSettings: (p) => {
             setSettings(p);
             refresh();
@@ -236,7 +241,7 @@ export function bootAppPage({ renderers = {} } = {}) {
     if (stored) setTimeout(() => wantPlayers(stored.list.map((x) => x.playerId)), 500);
     page.app.mount();
     onModel(() => page.app.render());
-    for (const k of [K.prices, K.settings, K.plan, K.userStatic]) gmOnChange(k, () => page.app.render());
+    for (const k of [K.prices, K.settings, K.plan, K.userStatic, K.stateError, K.apiKeyDead]) gmOnChange(k, () => page.app.render());
     page.app.render(true);
     return page.app;
 }

@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { StateFeed, STATE_POLL_MS } from '../src/feed/state.js';
+import { StateFeed, STATE_POLL_MS, STATE_RETRY_MS } from '../src/feed/state.js';
+import { keyProblem } from '../src/ui/key-status.js';
 import { TornApiClient } from '../src/api/client.js';
 
 function memStore() {
@@ -112,6 +113,52 @@ test('state changes become done steps in the day log', async () => {
     assert.equal(Object.values(hist)[0].dex, 84100);
 });
 
+test('a key without access (Torn error 16) is asked once, then waits for a new key', async () => {
+    let t = 1_790_000_000_000;
+    const store = memStore();
+    const f = fakeTorn(() => ({ error: { code: 16, error: 'Access level of this key is not high enough' } }));
+    const client = new TornApiClient({ getKey: () => 'k'.repeat(16), fetchImpl: f, maxRetries: 0, dedupTtlMs: 0 });
+    const feed = new StateFeed({ client, store, tabId: 'A', now: () => t });
+    await feed.tick();
+    await feed.tick();
+    assert.equal(f.calls.length, 1);
+    assert.equal(store.get('stateError').code, 16);
+    assert.equal(store.get('apiKeyDead', false), false, 'not a dead key: it still works for what it can read');
+    // 1.0.0 asked again every 3 s heartbeat; now nothing until the key changes.
+    for (let i = 0; i < 20; i += 1) {
+        t += 3000;
+        await feed.tick();
+    }
+    t += STATE_RETRY_MS * 10;
+    await feed.tick();
+    assert.equal(f.calls.length, 1, 'nothing more is sent');
+    // A new key clears the mark (store.setKey does this); the next tick asks again.
+    store.del('stateError');
+    await feed.tick();
+    assert.equal(f.calls.length, 2);
+});
+
+test('any other failed state call waits 30 s, and a good answer clears the warning', async () => {
+    let t = 1_790_000_000_000;
+    const store = memStore();
+    let down = true;
+    const f = fakeTorn((u) => (down ? { error: { code: 17, error: 'Backend error occurred, please try again' } } : staticAnswers(u, userApi)));
+    const client = new TornApiClient({ getKey: () => 'k'.repeat(16), fetchImpl: f, maxRetries: 0, dedupTtlMs: 0 });
+    const feed = new StateFeed({ client, store, tabId: 'A', now: () => t });
+    await feed.tick();
+    await feed.tick();
+    assert.equal(f.calls.length, 1);
+    assert.equal(store.get('stateError').code, 17);
+    t += STATE_RETRY_MS - 3000;
+    await feed.tick();
+    assert.equal(f.calls.length, 1, 'not before 30 s');
+    down = false;
+    t += 3000;
+    assert.equal(await feed.tick(), true);
+    assert.equal(store.get('stateError', null), null);
+    assert.ok(feed.current());
+});
+
 test('a dead key (Torn error 2) stops the feed until a new key is saved', async () => {
     let t = 1_790_000_000_000;
     const store = memStore();
@@ -166,4 +213,17 @@ test('a key Torn refuses on ANY call is reported dead (onDeadKey), not only in t
     const client = new TornApiClient({ getKey: () => 'k'.repeat(16), fetchImpl: fakeTorn(() => ({ error: { code: 13, error: 'Key disabled' } })), maxRetries: 0, onDeadKey: (c) => dead.push(c) });
     await assert.rejects(client.get('v2/market/pointsmarket'));
     assert.deepEqual(dead, [13]);
+});
+
+test('the warning names the problem instead of "Reading your state…"', () => {
+    const ffs = { level: 0, type: 'Custom', selections: { user: ['cooldowns', 'refills', 'battlestats'] } };
+    const p = keyProblem({ hasKey: true, dead: false, stateError: { code: 16 }, keyInfo: ffs });
+    assert.equal(p.kind, 'access');
+    assert.match(p.text, /can’t read your energy and happy or gym/);
+    assert.match(p.text, /Make a Limited key/);
+    assert.equal(keyProblem({ hasKey: true, dead: false, stateError: { code: 16 }, keyInfo: null }).kind, 'access');
+    assert.equal(keyProblem({ hasKey: true, dead: true }).kind, 'dead');
+    assert.equal(keyProblem({ hasKey: true, dead: false, stateError: { code: 17, message: 'Torn API 17: Backend error' } }).kind, 'retry');
+    assert.equal(keyProblem({ hasKey: true, dead: false, keyInfo: { level: 3 } }), null, 'a good key while loading: no warning');
+    assert.equal(keyProblem({ hasKey: false, dead: false, stateError: { code: 16 } }), null, 'no key: Settings asks for one');
 });

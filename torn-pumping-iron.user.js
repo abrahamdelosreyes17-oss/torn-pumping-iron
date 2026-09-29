@@ -240,6 +240,7 @@
         overlayPos: 'overlayPos',
         apiPause: 'apiPause',
         lastError: 'lastError',
+        stateError: 'stateError',
     };
 
     /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */
@@ -302,7 +303,10 @@
         const v = String(value || '').trim();
         if (v) gmSet(name, v);
         else gmDel(name);
-        if (name === K.apiKey) gmDel(K.apiKeyDead);
+        if (name === K.apiKey) {
+            gmDel(K.apiKeyDead);
+            gmDel(K.stateError);
+        }
         return v;
     }
 
@@ -2605,15 +2609,23 @@
         return { level, type: access.type || null, userId: info.user && info.user.id ? Number(info.user.id) : null, selections: info.selections || null };
     }
 
+    /**
+     * The user-state selections a custom key lacks (Torn refuses the whole
+     * state call, error 16, if even one is missing). Empty for Limited/Full;
+     * null when key/info can't tell.
+     */
+    function missingSelections(info) {
+        if (!info || info.level === null || info.level === undefined) return null;
+        if (info.level >= ACCESS_LIMITED) return [];
+        if (info.level !== ACCESS_CUSTOM) return USER_STATE_SELECTIONS.split(',');
+        const u = (info.selections && info.selections.user) || [];
+        return USER_STATE_SELECTIONS.split(',').filter((s) => !u.includes(s));
+    }
+
     /** Is this key enough for the app (Limited or Full, or a custom key with the user state selections)? */
     function keyIsEnough(info) {
-        if (!info || info.level === null) return null;
-        if (info.level >= ACCESS_LIMITED) return true;
-        if (info.level === ACCESS_CUSTOM) {
-            const u = (info.selections && info.selections.user) || [];
-            return USER_STATE_SELECTIONS.split(',').every((s) => u.includes(s));
-        }
-        return false;
+        const missing = missingSelections(info);
+        return missing === null ? null : missing.length === 0;
     }
 
     /* ===== src/feed/state.js ===== */
@@ -2639,6 +2651,12 @@
 
 
     const STATE_POLL_MS = 30000;
+
+    /** After a failed state call, wait this long before asking again (not every 3 s heartbeat). */
+    const STATE_RETRY_MS = 30000;
+
+    /** Torn's "access level too low": this key never gets the state, so the feed waits for a new key. */
+    const ACCESS_TOO_LOW = 16;
 
     /** How often each slower part refreshes. */
     const STATIC_EVERY = {
@@ -2671,7 +2689,7 @@
             this.nextStep = nextStep;
             this.onState = onState;
             this.onError = onError;
-            this.keys = { state: 'userState', static: 'userStatic', log: 'dayLog', leader: 'leader', history: 'statsHistory', dead: 'apiKeyDead', ...keys };
+            this.keys = { state: 'userState', static: 'userStatic', log: 'dayLog', leader: 'leader', history: 'statsHistory', dead: 'apiKeyDead', stateError: 'stateError', ...keys };
             this.polling = false;
         }
 
@@ -2698,6 +2716,9 @@
                 await this.refreshStatic();
                 return false;
             }
+            // A refused state call: a key without access waits for a new key (saving one clears this); anything else waits 30 s.
+            const failed = this.store.get(this.keys.stateError, null);
+            if (failed && (failed.code === ACCESS_TOO_LOW || t - failed.at < STATE_RETRY_MS)) return false;
             this.polling = true;
             try {
                 const api = await fetchUserState(this.client);
@@ -2714,17 +2735,25 @@
                     if (sample) this.store.set('calibration', addCalibration(this.store.get('calibration', null), sample));
                 }
                 this.store.set(this.keys.state, { at, api });
+                if (failed) this.clearStateError();
                 this.recordDaily(next);
                 this.onState(next, api);
                 await this.refreshStatic();
                 return true;
             } catch (error) {
                 if (error && KEY_DEAD_CODES.has(error.code)) this.store.set(this.keys.dead, true);
+                // No key yet is not a failed call: nothing was sent.
+                else if (!(error && error.noKey)) this.store.set(this.keys.stateError, { at: this.now(), code: (error && error.code) ?? null, message: String((error && error.message) || error) });
                 this.onError(error);
                 return false;
             } finally {
                 this.polling = false;
             }
+        }
+
+        clearStateError() {
+            if (this.store.del) this.store.del(this.keys.stateError);
+            else this.store.set(this.keys.stateError, null);
         }
 
         /** Stats at the end of each Torn day seen (Progress). Keeps 120 days. */
@@ -3563,7 +3592,11 @@
             isVisible,
             nextStep: () => (pi.model && pi.model.next) || null,
             onState: () => refresh(),
-            onError: (error) => set(K.lastError, { at: Date.now(), where: 'feed', code: error && error.code, message: String((error && error.message) || error) }),
+            onError: (error) => {
+                set(K.lastError, { at: Date.now(), where: 'feed', code: error && error.code, message: String((error && error.message) || error) });
+                // This tab's own writes fire no change event here: redraw so the warning shows now.
+                refresh();
+            },
         });
         // Leaving the page hands the lead to another tab at once, instead of after the 10 s timeout.
         window.addEventListener('pagehide', () => {
@@ -3578,6 +3611,8 @@
         gmOnChange(K.userStatic, refresh);
         gmOnChange(K.plan, refresh);
         gmOnChange(K.settings, refresh);
+        gmOnChange(K.stateError, refresh);
+        gmOnChange(K.apiKeyDead, refresh);
         // Countdowns tick by themselves every second; the model itself is worked out again every 5 s.
         setInterval(refresh, 5000);
         refresh();
@@ -5776,10 +5811,13 @@
         const ki = (ctx.statics && ctx.statics.keyInfo) || null;
         const dead = ctx.flags.keyDead;
         const hasKey = ctx.flags.hasKey;
-        const tornState = !hasKey ? stateTag('off', 'No key yet') : dead ? stateTag('bad', 'Torn rejected this key') : ki && ki.type ? stateTag(ki.level >= 3 || ki.level === 0 ? 'ok' : 'bad', (ki.level >= 3 || ki.level === 0 ? 'Connected · ' : 'Too low · ') + String(ki.type).replace(' Access', '').replace(' Only', '')) : stateTag('ok', 'Saved');
+        const problem = ctx.keyProblem;
+        const kiType = ki && ki.type ? String(ki.type).replace(' Access', '').replace(' Only', '') : '';
+        const tornState = !hasKey ? stateTag('off', 'No key yet') : dead ? stateTag('bad', 'Torn rejected this key') : problem && problem.kind === 'access' ? stateTag('bad', 'Too limited' + (kiType ? ' · ' + kiType : '')) : kiType ? stateTag('ok', 'Connected · ' + kiType) : stateTag('ok', 'Saved');
 
         const torn = keyRow({ label: 'Torn API key', placeholder: hasKey ? 'Saved · paste a new one to replace it' : 'Paste a Limited key', onSave: ctx.saveTornKey, onReveal: () => ctx.revealKey(K.apiKey) });
         const tornSec = settingsSection('Torn API key', tornState, [
+            problem && problem.kind !== 'dead' ? h('div', { class: 'warnb' }, [h('b', { text: problem.title }), h('p', { text: problem.text })]) : null,
             torn.row,
             torn.msg,
             h('p', {}, ['Reads your bars, cooldowns, stats, perks, property, gear and attacks. It can’t train, buy or attack. ', h('a', { href: apiKeyPageUrl(), target: '_blank', rel: 'noopener', text: 'Make a Limited key' })]),
@@ -5922,10 +5960,16 @@
             app.appendChild(this.topBar(ctx));
             let tab = this.tab;
             if (!m || !m.ready) {
-                // No state yet: keys first.
-                if (!ctx.flags.hasKey || ctx.flags.keyDead) tab = 'settings';
-                else {
-                    app.appendChild(h('div', { class: 'empty' }, [h('h2', { text: 'Reading your state…' }), h('p', { text: 'One call to Torn for your bars, cooldowns, stats and gym. It shows here in a few seconds.' })]));
+                // No state yet: keys first. Settings always opens, so a key can always be replaced.
+                // Stay there once a key is saved, so its message (e.g. "this key won't work") is read, not swapped for Home.
+                if (!ctx.flags.hasKey || ctx.flags.keyDead) tab = this.tab = 'settings';
+                else if (tab !== 'settings') {
+                    const p = ctx.keyProblem;
+                    app.appendChild(
+                        p
+                            ? h('div', { class: 'empty' }, [h('div', { class: 'warnb' }, [h('b', { text: p.title }), h('p', { text: p.text }), h('div', { class: 'acts' }, [h('button', { class: 'btn primary sm', type: 'button', onclick: () => this.go('settings'), text: 'Open Settings' })])])])
+                            : h('div', { class: 'empty' }, [h('h2', { text: 'Reading your state…' }), h('p', { text: 'One call to Torn for your bars, cooldowns, stats and gym. It shows here in a few seconds.' })]),
+                    );
                     fill(this.root, [app]);
                     return;
                 }
@@ -6902,12 +6946,42 @@
         return { avg: lows.reduce((a, b) => a + b, 0) / lows.length, days: lows.length };
     }
 
+    /* ===== src/ui/key-status.js ===== */
+    /*
+     * Why there is no state yet, in the player's words: the one warning the
+     * webpage, Settings and the pill all show instead of waiting forever.
+     */
+
+
+
+    const PLAIN = { bars: 'energy and happy', cooldowns: 'cooldowns', refills: 'refills', battlestats: 'battle stats', gym: 'gym' };
+
+    const list = (xs) => (xs.length > 1 ? xs.slice(0, -1).join(', ') + ' or ' + xs[xs.length - 1] : xs[0] || '');
+
+    /**
+     * @param {object} o - {hasKey, dead, stateError: {code, message}|null, keyInfo}
+     * @returns {null|{kind, short, title, text}} null = no problem known (or no key yet)
+     */
+    function keyProblem({ hasKey, dead, stateError = null, keyInfo = null }) {
+        if (!hasKey) return null;
+        if (dead) return { kind: 'dead', short: 'Key refused · open Settings', title: 'Torn refused this key', text: 'It was deleted, paused or mistyped. Paste a new Limited key in Settings.' };
+        const missing = missingSelections(keyInfo);
+        if ((stateError && stateError.code === 16) || (missing && missing.length)) {
+            const what = missing && missing.length ? ' It can’t read your ' + list(missing.map((s) => PLAIN[s] || s)) + '.' : '';
+            const said = stateError && stateError.code === 16 ? 'Torn says its access level is too low.' : '';
+            return { kind: 'access', short: 'Key too limited · open Settings', title: 'This key can’t read your state', text: (said + what).trim() + ' Make a Limited key and paste it in Settings.' };
+        }
+        if (stateError) return { kind: 'retry', short: 'Torn didn’t answer · retrying', title: 'Torn didn’t answer', text: String(stateError.message || 'The call failed.') + ' Trying again every 30 s.' };
+        return null;
+    }
+
     /* ===== src/app-page.js ===== */
     /*
      * The webpage's wiring: what each tab can read and do. Prices are fetched
      * only for items the Buy list needs (plus a few tracked ones), at most once
      * every 5 minutes, and only while this tab is visible.
      */
+
 
 
 
@@ -6996,13 +7070,16 @@
         if (!v) return { ok: false, text: 'Paste a key first.' };
         if (!/^[A-Za-z0-9]{16}$/.test(v)) return { ok: false, text: 'A Torn key is 16 letters and numbers.' };
         setKey(K.apiKey, v);
-        set(K.userStatic, { ...(get(K.userStatic, {}) || {}), keyInfoAt: 0 });
+        set(K.userStatic, { ...(get(K.userStatic, {}) || {}), keyInfo: null, keyInfoAt: 0 });
         try {
             const info = await fetchKeyInfo(tornClient());
             const s = { ...(get(K.userStatic, {}) || {}), keyInfo: info, keyInfoAt: Date.now() };
             set(K.userStatic, s);
             const enough = keyIsEnough(info);
-            if (enough === false) return { ok: false, text: 'Saved, but this is a ' + (info.type || 'low') + ' key: make a Limited one for stats and attacks.' };
+            if (enough === false) {
+                const p = keyProblem({ hasKey: true, dead: false, keyInfo: info });
+                return { ok: false, text: 'Saved, but this ' + (info.type || '') + ' key won’t work. ' + (p ? p.text : 'Make a Limited key.') };
+            }
             return { ok: true, text: 'Saved · ' + (info.type || 'key accepted') + '.' };
         } catch (error) {
             return { ok: false, text: String((error && error.message) || error) };
@@ -7086,8 +7163,9 @@
             gymProgress: get(K.gymProgress, null),
             calibration: get('calibration', null),
             flags: { hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)), hasFfs: Boolean(getKey(K.ffsKey)), ffsDead: Boolean(ffsState && ffsState.registered === false), hasTs: Boolean(getKey(K.tsKey)) },
+            keyProblem: keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: statics.keyInfo || null }),
             planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
-            sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0].join('|'),
+            sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null))].join('|'),
             setSettings: (p) => {
                 setSettings(p);
                 refresh();
@@ -7141,7 +7219,7 @@
         if (stored) setTimeout(() => wantPlayers(stored.list.map((x) => x.playerId)), 500);
         page.app.mount();
         onModel(() => page.app.render());
-        for (const k of [K.prices, K.settings, K.plan, K.userStatic]) gmOnChange(k, () => page.app.render());
+        for (const k of [K.prices, K.settings, K.plan, K.userStatic, K.stateError, K.apiKeyDead]) gmOnChange(k, () => page.app.render());
         page.app.render(true);
         return page.app;
     }
@@ -7292,7 +7370,7 @@
         }
 
         /**
-         * @param {object} v - {off, cdAt, pillText, pillNow, cardStep, cardSub, warn, energy:{current,max}, happy:{current,max}, later:[string]}
+         * @param {object} v - {off, noStep, cdAt, pillText, pillNow, cardStep, cardSub, warn, energy:{current,max}, happy:{current,max}, later:[string]}
          */
         update(v) {
             this.off = Boolean(v.off);
@@ -7305,8 +7383,9 @@
             if (v.energy) bars.push(h('div', { class: 'mini' }, [h('span', { text: 'Energy' }), h('div', { class: 'bar' }, [h('i', { style: 'width:' + Math.min(100, (100 * v.energy.current) / Math.max(1, v.energy.max)) + '%;background:#efebe2' })]), h('span', { text: v.energy.current + ' / ' + v.energy.max })]));
             if (v.happy) bars.push(h('div', { class: 'mini' }, [h('span', { text: 'Happy' }), h('div', { class: 'bar' }, [h('i', { style: 'width:' + Math.min(100, (100 * v.happy.current) / Math.max(1, v.happy.max)) + '%;background:#9bdc8a' })]), h('span', { text: String(v.happy.current).replace(/\B(?=(\d{3})+(?!\d))/g, ',') })]));
             fill(this.card, [
-                h('span', { class: 'lab', text: 'Next' }),
-                h('span', { class: 'big', 'data-cd': v.cdAt ? String(v.cdAt) : null, text: v.cdAt ? countdown(v.cdAt - now) : 'Now' }),
+                // A key problem has no next step: just the warning.
+                v.noStep ? null : h('span', { class: 'lab', text: 'Next' }),
+                v.noStep ? null : h('span', { class: 'big', 'data-cd': v.cdAt ? String(v.cdAt) : null, text: v.cdAt ? countdown(v.cdAt - now) : 'Now' }),
                 h('span', { class: 'step', text: v.cardStep || '' }),
                 v.cardSub ? h('span', { class: 'sub', text: v.cardSub }) : null,
                 v.warn ? h('span', { class: 'warn', text: v.warn }) : null,
@@ -7707,6 +7786,7 @@
 
 
 
+
     const tp = { overlay: null, model: null, observer: null, drawing: false, lastGymPlan: null };
 
     function contentRight() {
@@ -7717,11 +7797,21 @@
 
     /* ---------------------------------------------------------------- pill */
 
+    /** Why there's no state yet (key refused, too limited, Torn not answering), or null. */
+    function currentProblem() {
+        return keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: (get(K.userStatic, {}) || {}).keyInfo || null });
+    }
+
     function overlayView(m, page) {
         const s = getSettings();
         const relevant = [PAGE_GYM, PAGE_ITEMS, PAGE_BAZAAR, PAGE_ITEM_MARKET, PAGE_POINTS].includes(page);
         if (!s.pill && !relevant) return { off: true };
-        if (!m || !m.ready) return { pillText: get(K.apiKeyDead, false) ? 'Key refused · open Settings' : 'Open to set up', cardStep: 'Add your Torn key in Pumping Iron’s Settings.' };
+        if (!m || !m.ready) {
+            const hasKey = Boolean(getKey(K.apiKey));
+            const p = currentProblem();
+            if (p) return { noStep: true, pillText: p.short, cardStep: p.title, cardSub: p.text, warn: p.kind === 'retry' ? null : 'Open Pumping Iron › Settings' };
+            return hasKey ? { noStep: true, pillText: 'Reading your state…', cardStep: 'Asking Torn for your bars, stats and gym.' } : { noStep: true, pillText: 'Open to set up', cardStep: 'Add your Torn key in Pumping Iron’s Settings.' };
+        }
         const next = m.next;
         const later = m.steps.slice(1, 3).map((x) => tornClock(x.at) + ' · ' + x.label + (trainsText(x.trains) ? ', ' + trainsText(x.trains) : ''));
         const v = { energy: m.strip.energy, happy: m.strip.happy, later };
@@ -7873,7 +7963,8 @@
     function bootTornPage() {
         ensureMarkCss();
         tp.overlay = new Overlay({
-            onOpen: () => gmOpenTab(APP_PAGE_URL),
+            // A key problem opens straight on Settings, where the key is replaced.
+            onOpen: () => gmOpenTab(APP_PAGE_URL + (currentProblem() && !(tp.model && tp.model.ready) ? '#settings' : '')),
             loadPos: () => get(K.overlayPos, null),
             savePos: (p) => set(K.overlayPos, p),
             loadHidden: () => Boolean(get('overlayHidden', false)),

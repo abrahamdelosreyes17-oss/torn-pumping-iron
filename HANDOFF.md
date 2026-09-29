@@ -157,6 +157,12 @@ Done on the owner's yes. For later releases, the same steps minus the one-time r
 
 ## What each session did (newest first)
 
+### 2026-09-29 (later): owner's first live check → key fix (not released yet)
+- Owner's notes: stuck on "Reading your state…" after saving a key, nothing opens; wants ONE layout (Compact); must sit beside the trading script's NPC Arbitrage panel (`#ttv2-host`, bottom-right) and Torn Bids window; overlay should dock/collapse like NPC Arbitrage, toggled with **Alt+`** (Arbitrage uses backtick).
+- Cause (from the owner's Tampermonkey storage): they pasted their FFScouter **Custom** key; it lacks `bars` and `gym`, so the state call got Torn error 16 on every try. 1.0.0 hid it: the loading screen covered every tab (Settings too), the save warning was swapped away, and the feed retried every 3 s heartbeat.
+- Fixed (local, 224 tests + ux-check + torn-check + a Playwright check of the 16 path): `stateError` in storage; the feed asks once on error 16 and waits for a new key (other errors: every 30 s); `missingSelections(keyInfo)` names what a custom key can't read; one warning (`src/ui/key-status.js`) on the loading screen (with Open Settings), in Settings, and on the pill ("Key too limited · open Settings", card opens `#settings`); Settings always opens; the page stays on Settings after a key is saved. Harness: `&access=1` answers 16.
+- Still to do from the owner's notes: drop Compact/Comfortable; overlay → a docked panel like NPC Arbitrage (header drag held right of Torn's content, collapse, Alt+`), stacked above `#ttv2-host`, above its z-index; our market labels collide with trading's `.ttv2-trader` labels (same row corner); cap our Torn calls lower (both scripts cap at 70/min on their own; Torn allows 100 per player).
+
 ### 2026-09-29: build session (M0 → M8, released 1.0.0)
 - Built every milestone in order, researched unknowns with subagents (API shapes, Torn page DOM + fixtures, FFScouter/TornStats/TornW3B), backed numbers with sims, tests first, pages to K. An independent audit before release (`docs/audit-1.0.md`); both FAILs and the day-one bugs fixed.
 - Owner feedback mid-M8: "balanced is never really the way to go… better to be a specialist as we can even put merits there"; "you don't even know his stats yet". Built: you pick the build and high stat, specialist first; fights use effective stats; friend figures labelled as examples.
