@@ -19,6 +19,7 @@ import { isDiscordWebhook, LINKS } from './alerts.js';
 import { runCron, sendAlerts } from './cron.js';
 import { canDeliver } from './deliver.js';
 import { pendingAcks } from './buttons.js';
+import { sealKey, openKey } from './keys.js';
 import { Q, SCHEMA, ensureSchema } from './db.js';
 import { guard } from './net.js';
 import { interactionsRoute } from './interactions.js';
@@ -72,15 +73,30 @@ async function putPlan(req, env) {
     }
     const webhook = body.webhookUrl !== undefined ? String(body.webhookUrl || '') : row ? row.webhook : '';
     if (webhook && !isDiscordWebhook(webhook)) return json({ ok: false, error: 'That is not a Discord webhook URL' }, 400);
-    const tornKey = body.tornKey !== undefined ? String(body.tornKey || '') : row ? row.torn_key : '';
-    if (tornKey && !/^[A-Za-z0-9]{16}$/.test(tornKey)) return json({ ok: false, error: 'A Torn key is 16 letters and numbers' }, 400);
+    const sentKey = body.tornKey !== undefined ? String(body.tornKey || '') : null;
+    if (sentKey && !/^[A-Za-z0-9]{16}$/.test(sentKey)) return json({ ok: false, error: 'A Torn key is 16 letters and numbers' }, 400);
+    // Keys are stored sealed (AES-GCM, KEY_ENC); the old one is opened only to see if this is a new key.
+    let oldKey = '';
+    try {
+        oldKey = row && row.torn_key ? (await openKey(row.torn_key, env, id)).key : '';
+    } catch {
+        oldKey = '';
+    }
+    let tornKey = row ? row.torn_key || '' : '';
+    if (sentKey !== null && sentKey !== oldKey) {
+        try {
+            tornKey = sentKey ? await sealKey(sentKey, env, id) : '';
+        } catch (e) {
+            return json({ ok: false, error: String(e.message) }, 500);
+        }
+    }
     // A Discord id linked with /link (signed by Discord) wins over one typed in Settings.
     const linked = Boolean(row && Number(row.linked));
     const discordId = !linked && body.discordId !== undefined ? String(body.discordId || '').replace(/\D/g, '') : row ? row.discord_id : '';
     const plan = body.plan !== undefined ? JSON.stringify(body.plan || null) : row ? row.plan : 'null';
     const rules = body.rules !== undefined ? JSON.stringify(body.rules || {}) : row ? row.rules : '{}';
     // A pause for a dead key stays until a new key is sent (plan syncs alone must not undo it).
-    const newKey = body.tornKey !== undefined && (!row || tornKey !== row.torn_key);
+    const newKey = sentKey !== null && (!row || sentKey !== oldKey);
     const paused = newKey ? 0 : row ? Number(row.paused) || 0 : 0;
     const lastError = newKey ? null : row ? row.last_error || null : null;
     const nowS = Math.floor(Date.now() / 1000);
@@ -112,7 +128,7 @@ async function testPing(req, env, fetchImpl) {
     const nowS = Math.floor(Date.now() / 1000);
     // A step of kind "test": its Skip button can be tried; the userscript ignores that ack.
     const alert = { id: 'test:' + nowS, kind: 'test', link: LINKS.items, title: 'Test ping from Pumping Iron', text: 'Pings will look like this: "Drug cooldown ends in 5 min · Xanax #2, then DEX × 27".', step: { at: nowS + 300, kind: 'test', label: 'Test step' } };
-    const sent = await sendAlerts(env, guard(fetchImpl), env.DB, row, [alert], nowS);
+    const { sent } = await sendAlerts(env, guard(fetchImpl), env.DB, row, [alert], nowS);
     return json({ ok: sent > 0 }, sent > 0 ? 200 : 502);
 }
 

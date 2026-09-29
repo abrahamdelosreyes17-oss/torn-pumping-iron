@@ -12,7 +12,8 @@ import { T, R, json, reply, verifyDiscord, interactionUser } from './discord.js'
 import { ensureSchema } from './db.js';
 import { HELP } from './commands.js';
 import { BUTTON_HANDLERS } from './buttons.js';
-import { needsLink, statusCmd, planCmd, nextCmd, linkCmd, unlinkCmd } from './cmd-core.js';
+import { needsLink, statusCmd, planCmd, nextCmd, linkCmd, unlinkCmd, snoozeCmd, settingsCmd } from './cmd-core.js';
+import { timersCmd } from './cmd-torn.js';
 
 const COMMANDS = {
     help: async () => reply(HELP),
@@ -21,6 +22,9 @@ const COMMANDS = {
     next: needsLink(nextCmd),
     link: linkCmd,
     unlink: unlinkCmd,
+    snooze: needsLink(snoozeCmd),
+    settings: needsLink(settingsCmd),
+    timers: needsLink(timersCmd),
 };
 
 const BUTTONS = { ...BUTTON_HANDLERS };

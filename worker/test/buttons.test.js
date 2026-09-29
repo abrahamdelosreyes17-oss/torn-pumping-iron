@@ -89,5 +89,5 @@ test('in a grouped message, Done on one ping keeps the other’s buttons', async
     assert.equal(r.data.embeds.length, 2);
     assert.equal(r.data.embeds[0].footer.text, 'Done');
     assert.equal(r.data.embeds[1].footer, undefined);
-    assert.deepEqual(r.data.components[1].components.map((b) => b.label), ['Done · Energy', 'Snooze 10 min · Energy', 'Skip step · Energy', 'Open in Torn · Energy']);
+    assert.deepEqual(r.data.components[1].components.map((b) => b.label), ['Done · Energy', 'Snooze 10 min · Energy', 'Open in Torn · Energy'], 'energy full has no step of its own to skip');
 });

@@ -101,7 +101,7 @@ export async function linkedEnv(extra = {}, body = {}) {
 
 /** Torn's answer to /v2/user?selections=bars,cooldowns,refills,travel. */
 export function tornState({ drug = 232, booster = 0, medical = 0, energy = 20, max = 150, refill = false, travel = 0, destination = 'Torn' } = {}) {
-    return { bars: { energy: { current: energy, maximum: max, fulltime: Math.max(0, (max - energy) * 36) } }, cooldowns: { drug, booster, medical }, refills: { energy: refill, nerve: false, token: false }, travel: { destination, time_left: travel, arrival_at: travel ? T0 + travel : 0 } };
+    return { bars: { energy: { current: energy, maximum: max, full_time: Math.max(0, (max - energy) * 36) } }, cooldowns: { drug, booster, medical }, refills: { energy: refill, nerve: false, token: false }, travel: { destination, time_left: travel, arrival_at: travel ? T0 + travel : 0 } };
 }
 
 /**

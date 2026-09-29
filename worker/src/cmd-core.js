@@ -7,7 +7,7 @@
 import { Q, parse } from './db.js';
 import { reply, interactionUser, linkButton, row as actionRow } from './discord.js';
 import { clock, rel, dur, dayStart, DAY_S, PAGES } from './format.js';
-import { settingsOf, kindsOn, planAge, planStale, muted } from './settings.js';
+import { settingsOf, kindsOn, planAge, planStale, muted, parseQuiet } from './settings.js';
 import { KINDS } from './commands.js';
 
 export const NOT_LINKED = 'You’re not linked yet. In Pumping Iron: Settings → Discord → **Get a link code**, then type `/link CODE` here.';
@@ -110,6 +110,86 @@ export async function nextCmd(user, i, env, fetchImpl, ctx, nowS) {
     const note = staleNote(user, nowS);
     if (!s) return reply(['No next step in your synced plan.', ...(note ? [note] : [])].join('\n'));
     return reply(['**Next:** ' + stepLine(s) + ' · ' + rel(s.at), ...(note ? ['', note] : [])].join('\n'), { components: [actionRow([linkButton('Open in Torn', stepPage(s))])] });
+}
+
+/* ---------- /snooze and /settings ---------- */
+
+function optionsOf(i) {
+    const out = {};
+    for (const o of (i.data && i.data.options) || []) out[o.name] = o.value;
+    return out;
+}
+
+async function saveSettings(env, user, st) {
+    const { kinds, mute, delivery, quiet, perHour, perDay } = st;
+    const text = JSON.stringify({ kinds, mute, delivery, quiet, perHour, perDay });
+    await env.DB.prepare(Q.userSettings).bind(text, user.id).run();
+    user.settings = text;
+}
+
+export async function snoozeCmd(user, i, env, fetchImpl, ctx, nowS) {
+    const o = optionsOf(i);
+    const kind = o.kind && (o.kind === 'all' || KINDS[o.kind]) ? o.kind : 'all';
+    const minutes = Math.max(0, Math.min(1440, Math.round(Number(o.minutes) || 0)));
+    const st = settingsOf(user);
+    // Drop mutes that are over.
+    for (const [k, until] of Object.entries(st.mute)) if (Number(until) <= nowS) delete st.mute[k];
+    const what = kind === 'all' ? 'all pings' : KINDS[kind];
+    if (minutes === 0) {
+        if (kind === 'all') st.mute = {};
+        else delete st.mute[kind];
+        await saveSettings(env, user, st);
+        return reply('Unmuted ' + what + '.');
+    }
+    st.mute[kind] = nowS + minutes * 60;
+    await saveSettings(env, user, st);
+    return reply('Muted ' + what + ' until ' + clock(nowS + minutes * 60) + ' TCT (' + rel(nowS + minutes * 60) + '). `/snooze minutes:0` unmutes.');
+}
+
+export function settingsText(user, env) {
+    const st = settingsOf(user);
+    const on = kindsOn(user);
+    return [
+        '**Settings**',
+        'Pings go to: ' + (st.delivery === 'channel' ? 'your channel (webhook)' : 'DM' + (env.BOT_TOKEN ? '' : ' (the bot has no token yet: channel for now)')),
+        'Quiet hours: ' + (st.quiet ? st.quiet.from + '–' + st.quiet.to + ' TCT (jump steps still come)' : 'off'),
+        'At most: ' + st.perHour + ' an hour, ' + st.perDay + ' a day (jump steps still come)',
+        'On: ' + Object.keys(KINDS).filter((k) => on[k]).map((k) => KINDS[k]).join(', '),
+        'Off: ' + (Object.keys(KINDS).filter((k) => !on[k]).map((k) => KINDS[k]).join(', ') || 'none'),
+    ].join('\n');
+}
+
+export async function settingsCmd(user, i, env) {
+    const o = optionsOf(i);
+    const st = settingsOf(user);
+    const changed = [];
+    if (o.quiet !== undefined) {
+        const q = parseQuiet(o.quiet);
+        if (q === undefined) return reply('Quiet hours look like `23-7` (from 23:00 to 07:00 Torn time) or `off`.');
+        st.quiet = q;
+        changed.push('quiet hours');
+    }
+    if (o.delivery === 'dm' || o.delivery === 'channel') {
+        if (o.delivery === 'channel' && !user.webhook) return reply('No channel webhook saved: add one in Pumping Iron → Settings → Discord first.');
+        st.delivery = o.delivery;
+        changed.push('delivery');
+    }
+    if (o.kind !== undefined) {
+        if (!KINDS[o.kind]) return reply('Unknown ping kind.');
+        if (o.on === undefined) return reply('Say `on:True` or `on:False` with the kind.');
+        st.kinds[o.kind] = Boolean(o.on);
+        changed.push(KINDS[o.kind] + (o.on ? ' on' : ' off'));
+    }
+    if (o.per_hour !== undefined) {
+        st.perHour = Math.max(1, Math.min(60, Math.round(Number(o.per_hour))));
+        changed.push('per hour');
+    }
+    if (o.per_day !== undefined) {
+        st.perDay = Math.max(1, Math.min(500, Math.round(Number(o.per_day))));
+        changed.push('per day');
+    }
+    if (changed.length) await saveSettings(env, user, st);
+    return reply((changed.length ? 'Saved: ' + changed.join(', ') + '.\n\n' : '') + settingsText(user, env));
 }
 
 export async function statusCmd(user, i, env, fetchImpl, ctx, nowS) {

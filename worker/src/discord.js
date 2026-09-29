@@ -125,6 +125,29 @@ export async function discordCall(env, fetchImpl, db, { method = 'POST', url, bo
     return { ok, status: res.status, code: !ok && data && data.code !== undefined ? Number(data.code) : null, data };
 }
 
+/**
+ * Answer "thinking…" now (type 5, only the asker sees it) and fill it in
+ * when `work` is done: for answers that need Torn (Discord waits 3 s at
+ * most for the first answer, 15 minutes for the rest).
+ */
+export function defer(ctx, env, fetchImpl, db, interaction, work) {
+    const job = (async () => {
+        let data;
+        try {
+            data = await work();
+        } catch {
+            data = { content: 'Something went wrong. Try again in a minute.' };
+        }
+        try {
+            await editOriginal(env, fetchImpl, db, interaction, data);
+        } catch {
+            // Discord unreachable: nothing more to do.
+        }
+    })();
+    ctx.waitUntil(job);
+    return json({ type: R.DEFERRED, data: { flags: EPHEMERAL } });
+}
+
 /** Replace a deferred answer (valid 15 minutes after the interaction). */
 export function editOriginal(env, fetchImpl, db, interaction, data) {
     const app = env.DISCORD_APP_ID || interaction.application_id;

@@ -31,10 +31,12 @@ test('a linked user gets a DM from the bot, with Done, Snooze, Skip and Open in 
     assert.match(row.message, /^msg-/);
     assert.equal(JSON.parse(row.body).step.label, 'Xanax #2');
     assert.equal(user().dm_channel, 'dm-chan-1', 'the DM channel is kept');
-    // A later ping reuses the channel.
+    // An hour on: the drug was taken (the ping closes itself), energy is full (a new ping, same DM channel).
     const g = world({ torn: tornState({ drug: 3600, energy: 150 }) });
     await runCron(env, T0 + 3600, g);
-    assert.equal(discordCalls(g).length, 1);
+    assert.deepEqual(discordCalls(g).map((c) => (c.init.method || 'GET') + ' ' + new URL(c.url).pathname), ['PATCH /api/v10/channels/dm-chan-1/messages/' + row.message, 'POST /api/v10/channels/dm-chan-1/messages']);
+    assert.equal(discordCalls(g)[0].body.embeds[0].footer.text, 'Seen in Torn');
+    assert.deepEqual(discordCalls(g)[0].body.components[0].components.map((b) => b.label), ['Open in Torn']);
     assert.ok(env.DB.sent.has(id + '|energy:' + Math.floor((T0 + 3600) / 3600)));
 });
 
@@ -54,7 +56,8 @@ test('DMs closed (50007): the ping goes to the channel webhook with a mention, a
     // Next hour: straight to the webhook.
     const g = world({ torn: tornState({ drug: 3600, energy: 150 }) });
     await runCron(env, T0 + 3600, g);
-    assert.deepEqual(discordCalls(g).map((c) => c.url), [HOOK + '?wait=true']);
+    const hookRow = [...env.DB.sent.values()].find((r) => r.alert.startsWith('drug:'));
+    assert.deepEqual(discordCalls(g).map((c) => c.url), [HOOK + '/messages/' + hookRow.message, HOOK + '?wait=true'], 'the webhook message is closed by an edit, then the new ping');
 });
 
 test('no shared server (50007 when opening the DM) also falls back', async () => {
