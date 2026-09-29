@@ -27,7 +27,9 @@ export function kindsOn(row) {
 /** Is this kind muted by /snooze right now? */
 export function muted(settings, kind, nowS) {
     const m = settings.mute || {};
-    return (Number(m.all) || 0) > nowS || (Number(m[kind]) || 0) > nowS;
+    // Jump sequence steps without a tick ("step") are jump pings too.
+    const k = kind === 'step' ? 'jump' : kind;
+    return (Number(m.all) || 0) > nowS || (Number(m[k]) || 0) > nowS;
 }
 
 /** Quiet hours {from, to} in Torn hours; wraps past midnight (23-7). */

@@ -136,6 +136,6 @@ test('a user with neither webhook nor link is skipped without a Torn read', asyn
     const { env, user } = await linkedEnv();
     user().linked = 0;
     const f = world();
-    assert.deepEqual(await runCron(env, T0, f), [{ sent: 0, skipped: true }]);
+    assert.deepEqual(await runCron(env, T0, f), [], 'not even picked: it would block the line');
     assert.equal(f.calls.length, 0);
 });

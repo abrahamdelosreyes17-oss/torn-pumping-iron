@@ -47,6 +47,12 @@ export function nextPrev(prev, state, nowS) {
     return { at: nowS, drug, booster: Number(cd.booster) || 0, travel: Number(state && state.travel && state.travel.time_left) || 0, drugZeroAt: zeroAt };
 }
 
+/** When a timer seen last read ended (last read + what was left), in 5-minute steps. */
+function eventBucket(prev, left, nowS) {
+    const at = Number(prev && prev.at) || nowS;
+    return Math.round((at + (Number(left) || 0)) / 300);
+}
+
 /** The first planned step at or after `nowS` matching a test. */
 function nextStep(plan, nowS, test) {
     const steps = (plan && Array.isArray(plan.steps) ? plan.steps : []).filter((s) => s && Number(s.at) >= nowS - 60 && test(s));
@@ -59,14 +65,15 @@ function nextStep(plan, nowS, test) {
  * @param {object} plan - {type, steps:[{at (s), kind, label, train, strict, tick (s)}]}
  * @param {number} nowS - unix seconds
  * @param {object} [rules] - {drug, drugready, booster, energy, refill, jump, landed, stale} booleans (default all on)
- * @param {object} [ctx] - {prev: nextPrev() of the last read, planStale: bool, planAge: s}
+ * @param {object} [ctx] - {prev: nextPrev() of the last read (+ staleFor), planStale: bool, planAge: s, planAt: s}
  * @returns {{id, kind, title, text, link, step, skip?}[]}
  */
 export function dueAlerts(state, plan, nowS, rules = {}, ctx = {}) {
     const on = { drug: true, drugready: true, booster: true, energy: true, refill: true, jump: true, landed: true, stale: true, ...rules };
     const prev = ctx.prev || null;
-    // A plan not synced for 12 h: only pings from Torn's own state, and one "out of date" a day.
-    if (ctx.planStale) plan = null;
+    // A plan not synced for 12 h: pings from Torn's own state, strict jump steps still ahead
+    // (a 1.0.1 client syncs only when its steps change), and one "out of date" per synced plan.
+    if (ctx.planStale) plan = plan && Array.isArray(plan.steps) ? { type: plan.type, steps: plan.steps.filter((s) => s && s.strict && s.tick && Number(s.at) > nowS) } : null;
     const out = [];
     const cd = (state && state.cooldowns) || {};
     const bars = (state && state.bars) || {};
@@ -118,7 +125,8 @@ export function dueAlerts(state, plan, nowS, rules = {}, ctx = {}) {
     const booster = Number(cd.booster) || 0;
     if (on.booster && prev && Number(prev.booster) > 0 && booster === 0) {
         const step = nextStep(plan, nowS, (s) => s.kind === 'boost' || s.kind === 'jump');
-        if (step) out.push({ id: 'booster:' + Math.floor(nowS / 60), kind: 'booster', link: LINKS.items, title: 'Booster cooldown is over', text: withTrain(step), step });
+        // The id is the Torn event (when the old cooldown ended), so a replayed run can't ping twice.
+        if (step) out.push({ id: 'booster:' + eventBucket(prev, prev.booster, nowS), kind: 'booster', link: LINKS.items, title: 'Booster cooldown is over', text: withTrain(step), step });
     }
 
     // Drug ready for 15 minutes and a drug step is due: one nudge per ready spell.
@@ -130,11 +138,11 @@ export function dueAlerts(state, plan, nowS, rules = {}, ctx = {}) {
     // Back from travel with a step waiting.
     if (on.landed && prev && Number(prev.travel) > 0 && !traveling) {
         const step = dueStep(plan, nowS, 10 * 60);
-        if (step) out.push({ id: 'landed:' + Math.floor(nowS / 60), kind: 'landed', link: stepLink(step), title: 'Back in Torn', text: 'Next: ' + withTrain(step), step });
+        if (step) out.push({ id: 'landed:' + eventBucket(prev, prev.travel, nowS), kind: 'landed', link: stepLink(step), title: 'Back in Torn', text: 'Next: ' + withTrain(step), step });
     }
 
-    if (on.stale && ctx.planStale && ctx.planAge) {
-        out.push({ id: 'stale:' + Math.floor(nowS / DAY_S), kind: 'stale', link: null, title: 'Plan out of date', text: 'Last synced ' + Math.round(ctx.planAge / 3600) + ' h ago. Open Pumping Iron so it sends your plan; until then only timer pings come.', step: null });
+    if (on.stale && ctx.planStale && ctx.planAge && !(prev && ctx.planAt && Number(prev.staleFor) === Number(ctx.planAt))) {
+        out.push({ id: 'stale:' + (ctx.planAt || Math.floor(nowS / DAY_S)), kind: 'stale', link: null, title: 'Plan out of date', text: 'Last synced ' + Math.round(ctx.planAge / 3600) + ' h ago. Open Pumping Iron so it sends your plan; until then only timer pings come.', step: null });
     }
 
     if (traveling) for (const a of out) a.text += ' (you’re flying)';

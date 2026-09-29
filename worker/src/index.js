@@ -21,12 +21,12 @@ import { isDiscordWebhook, LINKS } from './alerts.js';
 import { runCron, sendAlerts } from './cron.js';
 import { canDeliver, hookUrl } from './deliver.js';
 import { pendingAcks } from './buttons.js';
-import { sealKey, openKey } from './keys.js';
+import { sealKey, openKey, isSealed } from './keys.js';
 import { cleanTargets } from './cmd-torn.js';
 
 /** A plan, its targets and bands fit easily in this. */
 const MAX_BODY = 100000;
-import { Q, SCHEMA, ensureSchema } from './db.js';
+import { Q, SCHEMA, ensureSchema, ackDeleteMany, MAX_ACK_IDS } from './db.js';
 import { guard } from './net.js';
 import { interactionsRoute } from './interactions.js';
 import { newLinkCode } from './cmd-core.js';
@@ -100,6 +100,9 @@ async function putPlan(req, env) {
         } catch (e) {
             return json({ ok: false, error: String(e.message) }, 500);
         }
+    } else if (tornKey && oldKey && !isSealed(tornKey) && env.KEY_ENC) {
+        // A plain key stored by 1.0 (even when the same key is sent again): sealed now.
+        tornKey = await sealKey(oldKey, env, id);
     }
     // A Discord id linked with /link (signed by Discord) wins over one typed in Settings.
     const linked = Boolean(row && Number(row.linked));
@@ -121,7 +124,8 @@ async function putPlan(req, env) {
     if (row) await env.DB.prepare(Q.userSync).bind(tornKey, discordId, hook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId, id).run();
     else await env.DB.prepare(Q.userInsert).bind(id, tornKey, discordId, hook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId).run();
     // Acks (Done / Skip in Discord): the userscript says which it applied; the rest go back to it.
-    if (Array.isArray(body.ackIds)) for (const a of body.ackIds.slice(0, 50)) if (typeof a === 'string' && a.length <= 120) await env.DB.prepare(Q.ackDelete).bind(id, a).run();
+    const ackIds = Array.isArray(body.ackIds) ? body.ackIds.filter((a) => typeof a === 'string' && a.length <= 120).slice(0, MAX_ACK_IDS) : [];
+    if (ackIds.length) await env.DB.prepare(ackDeleteMany(ackIds.length)).bind(id, ...ackIds).run();
     const acks = await pendingAcks(env.DB, id);
     return json({ ok: true, created: !row, acks, ready: Boolean(tornKey && (webhook || (linked && env.BOT_TOKEN))), paused: Boolean(paused), lastError, linked, bot: Boolean(env.BOT_TOKEN && env.DISCORD_PUBLIC_KEY) });
 }

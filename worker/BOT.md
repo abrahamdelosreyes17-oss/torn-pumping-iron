@@ -8,7 +8,7 @@ Same Worker as the 1.0 webhook pings, plus Discord's HTTP interactions at `POST 
 - Never acts in Torn. Every Torn button is a link the user clicks. Done / Snooze / Skip only change the reminder.
 - Stops on a dead key (errors 2, 13, 18) until a new key arrives. Keys are encrypted in D1 (AES-GCM, `KEY_ENC`).
 - Only three hosts are ever called: `api.torn.com`, `discord.com`, `weav3r.dev` (`src/net.js` blocks anything else; every test checks it).
-- Free plan: at most 45 outside calls and 45 D1 queries per run; users are taken oldest-run first, the rest go next minute. The schema is checked once per Worker instance. No fight simulation here: the userscript syncs its results.
+- Free plan: at most 45 outside calls and 45 D1 queries per run, both enforced (a call past them stops the run; a ping is only sent when there's room to record it, so it is never sent twice). Users are taken oldest-run first, the rest go next minute; only users a ping can reach are picked. The schema is checked once per Worker instance. No fight simulation here: the userscript syncs its results.
 - Every reply is ephemeral (only the asker sees it) and pings nobody.
 
 ## Commands
@@ -34,13 +34,13 @@ Commands that read Torn: at most one per user every 5 seconds.
 ## Pings (cron, every minute)
 
 Existing: drug cooldown ≤ 5 min, energy full (not while stacking), refill unused 2 h before Torn midnight, strict jump steps 5 min before their tick.
-Added: booster cooldown over (booster step next), drug ready 15 min and unused (one nudge), back from travel with a step waiting, jump sequence steps without a tick, plan out of date after 12 h (then only state pings), price watches, war targets, chain timeout (off by default).
+Added: booster cooldown over (booster step next), drug ready 15 min and unused (one nudge), back from travel with a step waiting, jump sequence steps without a tick, plan out of date after 12 h (then only state pings and strict jump steps still ahead; "plan out of date" once per synced plan), price watches (5 minutes after the user's last check), war targets, chain timeout (off by default).
 
 - **Delivery:** a DM from the bot (DM channel kept); on 50007 or 403, the channel webhook (mention, no buttons) and DMs rest 6 h. `/settings delivery:channel` forces the webhook.
-- **Buttons:** Done, Snooze 10 min, Skip step (when there's a step), Open in Torn. War and chain: Done and Attack links.
+- **Buttons:** Done, Snooze 10 min, Skip step (when there's a step), Open in Torn. On a ping already closed (done, skipped, seen in Torn) they answer "already done" and store nothing. War and chain: Done and Attack links.
 - **Anti-spam:** stable alert ids (kept 2 days); pings due the same minute share one message (5 at most); quiet hours and caps (default 10 an hour, 60 a day; strict jump steps still go); `/snooze`; per-kind on/off.
 - **Auto-close:** when Torn shows it done (a new drug started, booster used, energy trained, refill used), the message is edited to "Seen in Torn" and loses its buttons.
-- **War:** wars checked every 10 minutes; during one, the enemy faction once a minute; Stomp or Good targets out now or within 2 minutes get one message, edited in place (a new one at most every 30 minutes). Done stops them for that war.
+- **War:** wars checked every 10 minutes; during one, the enemy faction once a minute; Stomp or Good targets out now or within 2 minutes get one message, edited in place. Note: it is not one message for the whole war: a new message (which notifies) starts every 30 minutes while there are targets, because edits don't notify. Done stops them for that war.
 - **Chain:** 10+ hits and under 60 s left: one message per 10 minutes, edited.
 
 `DRY_RUN=1`: Torn is read, nothing is posted; every Discord body goes to the `outbox` table.

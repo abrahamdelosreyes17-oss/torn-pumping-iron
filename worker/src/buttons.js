@@ -23,6 +23,8 @@ async function press(verb, i, alertId, env, fetchImpl, ctx, nowS) {
     if (!r) return reply('This ping is gone (pings are kept for 2 days).');
     const body = bodyOf(r);
     let state = r.state || 'sent';
+    // A ping already closed (Done, skipped, or seen in Torn) takes no more presses: no ack is stored.
+    if (state !== 'sent' && state !== 'snoozed') return reply(state === 'resolved' ? 'Already done: Torn shows it.' : 'Already done.');
     let until = null;
     let ack = null;
     if (verb === 'done') {

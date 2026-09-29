@@ -186,7 +186,7 @@ test('cron: a user without a webhook or key is skipped; old sent rows are cleare
     env.DB.sent.set('old|x', { user: 'old', alert: 'x', at: T - 3 * 86400 });
     const f = recorder(() => new Response('{}'));
     const out = await runCron(env, T + 120, f);
-    assert.deepEqual(out, [{ sent: 0, skipped: true }]);
+    assert.deepEqual(out, [], 'a user no ping can reach is not picked');
     assert.equal(f.calls.length, 0);
     assert.equal(env.DB.sent.size, 0);
 });

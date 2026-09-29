@@ -6,6 +6,8 @@
  * one small read (`meta.schema`) the first time, then nothing.
  */
 
+import { BudgetError } from './net.js';
+
 export const SCHEMA_VERSION = 2;
 
 /** Free plan: 50 D1 queries per invocation. Keep a few spare. */
@@ -17,12 +19,15 @@ export const Q = {
 
     userGet: 'SELECT * FROM users WHERE id = ?',
     userByDiscord: 'SELECT * FROM users WHERE discord_id = ? AND linked = 1',
-    usersDue: 'SELECT * FROM users WHERE paused = 0 ORDER BY ran ASC LIMIT ?',
+    // Only users the cron can serve (a key, and a webhook or a Discord link): others never block the line.
+    usersDue: "SELECT * FROM users WHERE paused = 0 AND torn_key != '' AND (webhook != '' OR linked = 1) ORDER BY ran ASC LIMIT ?",
+    usersPlainKeys: "SELECT id, torn_key FROM users WHERE torn_key != '' AND torn_key NOT LIKE 'v1.%' LIMIT 5",
     userInsert: 'INSERT INTO users (id, torn_key, discord_id, webhook, plan, rules, paused, last_error, updated, plan_at, targets, faction_id, player_id, linked, ran) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)',
     userSync: 'UPDATE users SET torn_key = ?, discord_id = ?, webhook = ?, plan = ?, rules = ?, paused = ?, last_error = ?, updated = ?, plan_at = ?, targets = ?, faction_id = ?, player_id = ? WHERE id = ?',
     userPause: 'UPDATE users SET paused = 1, last_error = ? WHERE id = ?',
     userDelete: 'DELETE FROM users WHERE id = ?',
     userRan: 'UPDATE users SET ran = ?, prev = ?, war = ? WHERE id = ?',
+    userWar: 'UPDATE users SET war = ? WHERE id = ?',
     userKey: 'UPDATE users SET torn_key = ? WHERE id = ?',
     userLink: 'UPDATE users SET discord_id = ?, linked = 1, dm_channel = NULL, dm_fail = 0 WHERE id = ?',
     userUnlink: "UPDATE users SET discord_id = '', linked = 0, dm_channel = NULL WHERE discord_id = ? AND linked = 1",
@@ -47,7 +52,6 @@ export const Q = {
 
     ackPut: 'INSERT OR REPLACE INTO acks (id, user, kind, alert, step, at) VALUES (?, ?, ?, ?, ?, ?)',
     ackList: 'SELECT * FROM acks WHERE user = ?',
-    ackDelete: 'DELETE FROM acks WHERE user = ? AND id = ?',
     ackDeleteUser: 'DELETE FROM acks WHERE user = ?',
     ackClean: 'DELETE FROM acks WHERE at < ?',
 
@@ -63,6 +67,10 @@ export const Q = {
 
     outboxPut: 'INSERT INTO outbox (at, route, body) VALUES (?, ?, ?)',
 };
+
+/** Acks the userscript applied, in one statement (at most MAX_ACK_IDS ids). */
+export const MAX_ACK_IDS = 50;
+export const ackDeleteMany = (n) => 'DELETE FROM acks WHERE user = ? AND id IN (' + Array.from({ length: n }, () => '?').join(', ') + ')';
 
 /** Version 1 (1.0) tables first, then what the bot adds. Safe to run again. */
 export const SCHEMA = [
@@ -141,17 +149,18 @@ export async function ensureSchema(db) {
     return p;
 }
 
-/** Count queries so one run stays under the free plan's 50. */
+/** Count queries so one run stays under the free plan's 50: one past the budget throws BudgetError. */
 export function meterDb(db, budget = QUERY_BUDGET) {
     let used = 0;
     const count = () => {
+        if (used >= budget) throw new BudgetError();
         used++;
     };
     const wrap = (s) => ({
         bind: (...a) => wrap(s.bind(...a)),
-        run: () => (count(), s.run()),
-        first: () => (count(), s.first()),
-        all: () => (count(), s.all()),
+        run: async () => (count(), s.run()),
+        first: async () => (count(), s.first()),
+        all: async () => (count(), s.all()),
     });
     return {
         prepare: (sql) => wrap(db.prepare(sql)),

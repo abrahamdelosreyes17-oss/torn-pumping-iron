@@ -33,7 +33,7 @@ export function fakeD1() {
 
         [Q.userGet]: ([id]) => ({ first: users.get(id) || null }),
         [Q.userByDiscord]: ([d]) => ({ first: [...users.values()].find((u) => u.discord_id === d && Number(u.linked) === 1) || null }),
-        [Q.usersDue]: ([limit]) => ({ all: [...users.values()].filter((u) => !Number(u.paused)).sort((a, b) => (Number(a.ran) || 0) - (Number(b.ran) || 0)).slice(0, limit) }),
+        [Q.usersDue]: ([limit]) => ({ all: [...users.values()].filter((u) => !Number(u.paused) && u.torn_key && (u.webhook || Number(u.linked) === 1)).sort((a, b) => (Number(a.ran) || 0) - (Number(b.ran) || 0)).slice(0, limit) }),
         [Q.userInsert]: ([id, torn_key, discord_id, webhook, plan, rules, paused, last_error, updated, plan_at, targets, faction_id, player_id]) => {
             if (users.has(id)) throw new Error('UNIQUE constraint failed: users.id');
             users.set(id, { id, torn_key, discord_id, webhook, plan, rules, paused, last_error, updated, plan_at, targets, faction_id, player_id, linked: 0, ran: 0, settings: null, dm_channel: null, dm_fail: 0, prev: null, war: null, cmd_at: 0 });
@@ -43,6 +43,8 @@ export function fakeD1() {
         [Q.userPause]: ([last_error, id]) => patch(users, id, { paused: 1, last_error }),
         [Q.userDelete]: ([id]) => (users.delete(id), {}),
         [Q.userRan]: ([ran, prev, war, id]) => patch(users, id, { ran, prev, war }),
+        [Q.userWar]: ([war, id]) => patch(users, id, { war }),
+        [Q.usersPlainKeys]: () => ({ all: [...users.values()].filter((u) => u.torn_key && !String(u.torn_key).startsWith('v1.')).slice(0, 5).map((u) => ({ id: u.id, torn_key: u.torn_key })) }),
         [Q.userKey]: ([torn_key, id]) => patch(users, id, { torn_key }),
         [Q.userLink]: ([discord_id, id]) => patch(users, id, { discord_id, linked: 1, dm_channel: null, dm_fail: 0 }),
         [Q.userUnlink]: ([d]) => {
@@ -79,7 +81,6 @@ export function fakeD1() {
 
         [Q.ackPut]: ([id, user, kind, alert, step, at]) => (acks.set(user + '|' + id, { id, user, kind, alert, step, at }), {}),
         [Q.ackList]: ([u]) => ({ all: byUser(acks, u) }),
-        [Q.ackDelete]: ([u, id]) => (acks.delete(u + '|' + id), {}),
         [Q.ackDeleteUser]: ([u]) => (dropUser(acks, u), {}),
         [Q.ackClean]: ([t]) => {
             for (const [k, r] of [...acks]) if (r.at < t) acks.delete(k);
@@ -104,6 +105,13 @@ export function fakeD1() {
     const patterns = [
         [/^CREATE (TABLE|INDEX) IF NOT EXISTS /, () => ({})],
         [/^ALTER TABLE (users|sent) ADD COLUMN \w+ \w+( DEFAULT .+)?$/, () => ({})],
+        [
+            /^DELETE FROM acks WHERE user = \? AND id IN \(\?(, \?)*\)$/,
+            ([u, ...ids]) => {
+                for (const id of ids) acks.delete(u + '|' + id);
+                return {};
+            },
+        ],
     ];
 
     const exec = (sql, args) => {
