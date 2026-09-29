@@ -10,6 +10,7 @@
 
 import { STATS, gainPerTrain, HAPPY_CAP, HAPPY_LOSS_PER_ENERGY, totalOf } from './gain.js';
 import { XANAX, ECSTASY, EDVD, FHC, CANDY_KISSES, POINTS, REFILL_POINTS, XANAX_CD_MIN, ECSTASY_CD_MIN, ITEMS, boostersThatFit, BOOSTER_CAP_H } from './items.js';
+import { pickStat } from './builds.js';
 
 export const STRATEGY_IDS = ['steady', 'dailyChoco', 'chocoJump', 'edvdJump', 'happy99k', 'blissSteady', 'steadyBoost', 'steadyMax', 'candyXanax', 'consoleJump', 'consoleJumpToy', 'edvdJumpAN'];
 
@@ -81,6 +82,7 @@ export const TICK_OFFSET_MIN = 5;
  * @param {number} [o.canMult] - energy-drink perks (faction): × can energy
  * @param {boolean} [o.toyShop5] - 5★ Toy/Game Shop: console happy × 2 [verify]
  * @param {number} [o.candyMult] - candy perks (faction Voracity, a book, Absorption): × candy happy
+ * @param {string} [o.splitRule] - builds.js SPLIT_RULE (default) or 'deficit' (the old split, for the simulator check)
  * @returns {{id, gained:number, perStat:object, cost:number, energyTrained:number, daily:number[], used:object}}
  */
 export function simulateStrategy(id, o) {
@@ -127,20 +129,12 @@ export function simulateStrategy(id, o) {
     const daily = [];
     const start = totalOf(S);
 
+    // Toward a build: the same per-train split as the day plan (builds.js pickStat), in each stat's gym.
+    const cands = single ? null : STATS.filter((k) => o.gyms[k] && o.gyms[k].dots > 0).map((k) => ({ k, dots: o.gyms[k].dots, energy: o.gyms[k].energy }));
     const pick = () => {
         if (single) return single;
-        const tot = totalOf(S);
-        let best = null;
-        let bd = -Infinity;
-        for (const k of STATS) {
-            if (!o.gyms[k] || !(o.gyms[k].dots > 0)) continue;
-            const d = shares[k] - S[k] / tot;
-            if (d > bd) {
-                bd = d;
-                best = k;
-            }
-        }
-        return best;
+        const c = pickStat(cands, S, shares, H, o.perks || null, o.splitRule, undefined, maxH);
+        return c ? c.k : null;
     };
     const train = (keep = 0) => {
         for (;;) {
