@@ -23,6 +23,7 @@ import { POINTS } from './core/items.js';
 import { STRATEGIES } from './core/strategies.js';
 import { redactKey } from './api/client.js';
 import { keyProblem } from './ui/key-status.js';
+import { isPaused, onPauseChange } from './turns.js';
 
 /** How long fetched prices count as fresh. */
 export const PRICE_FRESH_MS = 5 * 60 * 1000;
@@ -44,7 +45,8 @@ export function ffsClient() {
 
 /** Fetch listings for the items the Buy list shows, if older than 5 minutes. */
 export async function loadPrices(ids) {
-    if (!getKey(K.apiKey)) return;
+    // Nothing from Torn or TornW3B while Torn Trading runs (the two take turns).
+    if (!getKey(K.apiKey) || isPaused()) return;
     const prices = { ...(get(K.prices, {}) || {}) };
     const now = Date.now();
     const due = [...new Set(ids.map(String))].filter((id) => !page.loading.has(id) && !(prices[id] && now - (prices[id].at || 0) < PRICE_FRESH_MS));
@@ -63,7 +65,8 @@ export async function loadPrices(ids) {
                 try {
                     if (getSettings().w3b === false) throw new Error('TornW3B is off');
                     const w = await fetchW3bListings(w3bClient(), id);
-                    row.listings = row.listings.concat(listingsFromW3b(w).filter((l) => l.sellerId && l.price > 1));
+                    // Bazaars TornW3B re-checked in the last 2 minutes, never a $1 locked listing.
+                    row.listings = row.listings.concat(listingsFromW3b(w, { now: Date.now() }));
                     row.w3bAt = Date.now();
                 } catch {
                     // Bazaars are a bonus; the Item Market still answers.
@@ -177,6 +180,7 @@ function getCtx() {
     const S = STRATEGIES[plan.strategy] || STRATEGIES.steady;
     return {
         model: pi.model,
+        paused: isPaused(),
         settings,
         plan,
         statics,
@@ -244,6 +248,7 @@ export function bootAppPage({ renderers = {} } = {}) {
     page.app.mount();
     onModel(() => page.app.render());
     for (const k of [K.prices, K.settings, K.plan, K.userStatic, K.stateError, K.apiKeyDead]) gmOnChange(k, () => page.app.render());
+    onPauseChange(() => page.app.render(true));
     page.app.render(true);
     return page.app;
 }

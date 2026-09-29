@@ -33,6 +33,10 @@ export const OVERLAY_CSS = `
 .head .ti { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .plate { width: 24px; height: 24px; border-radius: 50%; background: #efebe2; display: grid; place-items: center; box-shadow: inset 0 0 0 4px #efebe2, inset 0 0 0 5px #2a2d31; flex: none; }
 .plate i { width: 5px; height: 5px; border-radius: 50%; background: #15171a; }
+.wrap.paused { border-color: #e8a33d; }
+.wrap.paused .plate { background: #e8a33d; box-shadow: none; color: #15171a; font: bold 14px Arial, sans-serif; }
+.wrap.paused .step { font-weight: bold; }
+.wrap.paused .sub { color: #c9cdd1; }
 .col { flex: none; width: 26px; height: 26px; padding: 0; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #e3e5e8; font: bold 15px/24px Arial, sans-serif; cursor: pointer; }
 .col:hover { border-color: #3a4046; }
 .col:focus-visible { outline: 2px solid #efebe2; outline-offset: 1px; }
@@ -223,7 +227,8 @@ export class Overlay {
     }
 
     /**
-     * @param {object} v - {off, cdAt, pillText, pillNow, cardStep, cardSub, warn, energy:{current,max}, happy:{current,max}, later:[string]}
+     * @param {object} v - {off, paused, cdAt, pillText, pillNow, cardStep, cardSub, warn, energy:{current,max}, happy:{current,max}, later:[string]}
+     *   paused: Torn Trading runs (a warning sign instead of the plate, an amber edge)
      */
     update(v) {
         const wasOff = this.off;
@@ -235,7 +240,8 @@ export class Overlay {
         const now = Date.now();
         const cdText = v.pillNow || (v.cdAt ? countdown(v.cdAt - now) : '');
         this.headInfo.textContent = v.pillText || 'Pumping Iron';
-        fill(this.head, [h('span', { class: 'plate' }, [h('i')]), cdText ? h('span', { class: 'cd', 'data-cd': v.cdAt && !v.pillNow ? String(v.cdAt) : null, text: cdText }) : null, this.headInfo, this.colBtn]);
+        this.wrap.classList.toggle('paused', Boolean(v.paused));
+        fill(this.head, [v.paused ? h('span', { class: 'plate', text: '!', 'aria-label': 'Paused' }) : h('span', { class: 'plate' }, [h('i')]), cdText ? h('span', { class: 'cd', 'data-cd': v.cdAt && !v.pillNow ? String(v.cdAt) : null, text: cdText }) : null, this.headInfo, this.colBtn]);
         this.head.title = v.pillText || '';
         const bars = [];
         if (v.energy) bars.push(h('div', { class: 'mini' }, [h('span', { text: 'Energy' }), h('div', { class: 'bar' }, [h('i', { style: 'width:' + Math.min(100, (100 * v.energy.current) / Math.max(1, v.energy.max)) + '%;background:#efebe2' })]), h('span', { text: v.energy.current + ' / ' + v.energy.max })]));

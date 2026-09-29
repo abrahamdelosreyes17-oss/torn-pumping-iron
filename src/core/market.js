@@ -16,6 +16,9 @@ export const BUY_NOW_MAX_PCT = 1;
 export const WAIT_OVER_PCT = 3;
 export const BULK_UNDER_PCT = 3;
 
+/** Bazaar listings TornW3B hasn't re-checked in this long are dropped (Torn Trading's rule). */
+export const BAZAAR_MAX_AGE_MS = 2 * 60 * 1000;
+
 /** Buy windows (Buy tab switch). */
 export const WINDOWS = { today: 1, three: 3, week: 7 };
 
@@ -99,9 +102,50 @@ export function listingsFromItemMarket(api) {
     return list.map((l) => ({ source: SOURCE_ITEM_MARKET, price: Number(l.price), qty: Number(l.amount ?? l.quantity) || 0 }));
 }
 
-export function listingsFromW3b(api) {
+/**
+ * TornW3B's bazaar listings. With `now`, only listings re-checked within
+ * BAZAAR_MAX_AGE_MS stay (Torn Trading's rule: an older one is often gone),
+ * and never a $1 listing (locked, one person's).
+ */
+export function listingsFromW3b(api, { now = null, maxAgeMs = BAZAAR_MAX_AGE_MS } = {}) {
     const list = api && Array.isArray(api.listings) ? api.listings : [];
-    return list.map((l) => ({ source: SOURCE_BAZAAR, sellerId: l.player_id ? String(l.player_id) : null, sellerName: l.player_name || null, price: Number(l.price), qty: Number(l.quantity) || 0 }));
+    const rows = list.map((l) => ({ source: SOURCE_BAZAAR, sellerId: l.player_id ? String(l.player_id) : null, sellerName: l.player_name || null, price: Number(l.price), qty: Number(l.quantity) || 0, dataAt: toMs(l.last_checked) || toMs(l.content_updated) }));
+    if (now === null) return rows;
+    return rows.filter((r) => r.sellerId && r.price > 1 && r.dataAt && now - r.dataAt <= maxAgeMs);
+}
+
+/** Seconds or milliseconds → milliseconds (TornW3B sends seconds). */
+function toMs(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return n < 1e12 ? n * 1000 : n;
+}
+
+/**
+ * The price a plan should count for an item: what `qty` units cost from the
+ * cheapest listings up, per unit. Stored price rows are objects
+ * ({at, listings, avg7}), sample prices plain numbers; anything else is null
+ * (never $0: a free item would win every comparison).
+ */
+export function unitPrice(row, qty = 10) {
+    if (typeof row === 'number') return row > 0 ? row : null;
+    if (!row || typeof row !== 'object') return null;
+    const ls = Array.isArray(row.listings) ? row.listings : [];
+    if (ls.length) {
+        const f = fillCheapest(ls, qty, null);
+        if (f.filled > 0) return f.total / f.filled;
+    }
+    return row.avg7 > 0 ? row.avg7 : null;
+}
+
+/** {itemId: price row} → {itemId: $ per unit}, only the ones known (points: per point, 300 at a time). */
+export function livePrices(rows) {
+    const out = {};
+    for (const [id, row] of Object.entries(rows || {})) {
+        const p = unitPrice(row, id === POINTS ? 300 : 10);
+        if (p) out[id] = p;
+    }
+    return out;
 }
 
 export function listingsFromPoints(api) {

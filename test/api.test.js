@@ -77,7 +77,7 @@ test('each wrapper asks for the exact v2 path', async () => {
         '/v2/torn/gyms',
         '/v2/torn/206,197/items',
         '/v2/torn/111,222/itemdetails',
-        '/v2/market/206/itemmarket',
+        '/v2/market/206/itemmarket?limit=100',
         '/v2/market/pointsmarket',
         '/v2/user/77/profile',
         '/v2/faction/9/members',

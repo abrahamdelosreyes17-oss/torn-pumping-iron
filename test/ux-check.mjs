@@ -181,6 +181,28 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     await o.page.close();
 }
 
+// Taking turns: Torn Trading seen → the webpage says Paused, keeps the plan moving, asks nothing; back by itself.
+{
+    const o = await openApp('');
+    await o.page.evaluate(() => window.GM_setValue('pumpingIron.v1.tradingSeenAt', JSON.stringify(Date.now())));
+    await o.page.waitForTimeout(6000);
+    const n1 = await o.page.evaluate(() => window.__calls.length);
+    const m = await measure(o.page);
+    ok(/Paused: Torn Trading is running/.test(m.text) && /plan as of \d\d:\d\d/.test(m.text), 'paused: the warning on top, plan as of the last read');
+    ok(/Paused · last read/.test(m.text), 'paused: the top bar says Paused');
+    ok(/Xanax #\d/.test(m.text), 'paused: the plan still shows');
+    await o.page.screenshot({ path: resolve(shots, 'app-paused.png'), fullPage: true });
+    await o.page.waitForTimeout(5000);
+    const n2 = await o.page.evaluate(() => window.__calls.length);
+    ok(n2 === n1, 'paused: no request (' + (n2 - n1) + ')');
+    await o.page.evaluate(() => window.GM_setValue('pumpingIron.v1.tradingSeenAt', JSON.stringify(Date.now() - 61000)));
+    await o.page.waitForTimeout(6000);
+    const back = await measure(o.page);
+    ok(!/Paused: Torn Trading/.test(back.text), 'paused: back by itself');
+    ok(o.errors.length === 0, 'paused: no page errors ' + JSON.stringify(o.errors));
+    await o.page.close();
+}
+
 // No key: the page opens on Settings with the ToS table open.
 {
     const p2 = await browser.newPage({ viewport: { width: 1280, height: 900 } });

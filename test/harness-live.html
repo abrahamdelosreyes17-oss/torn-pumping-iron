@@ -22,6 +22,7 @@
  *   &energy=275   the friend's energy now (default 20)
  *   &win=week     the Buy window (today, three, week)
  *   &hidden=1     the tab reports itself hidden (nothing may be asked)
+ *   &trading=MS   a stand-in Torn Trading panel (#ttv2-host) appears after MS ms: Pumping Iron pauses
  *   &ffs=1        save an FFScouter key (canned estimates for the fixture players)
  */
 const Q = new URLSearchParams(location.search);
@@ -64,11 +65,12 @@ const CANNED = {
   '/v2/user/perks': () => ({ perks: { faction: [], job: [], property: ['+ 2% gym gains'], education: ['+ 1% dexterity gym gains'], enhancer: [], book: [], stock: [], merit: [] } }),
   '/v2/user/property': () => ({ property: { id: 1, property: { id: 13, name: 'Private Island' }, happy: 5025 } }),
   '/v2/torn/gyms': () => ({ gyms: [{ id: 18, name: 'Gun Shop', class: 'Middleweight', energy_cost: 10, cost: 10000000, modifiers: { strength: 6.5, speed: 6.4, defense: 6.2, dexterity: 6.2 }, note: null }] }),
+  '/v2/user/money': () => ({ money: { points: 45, wallet: 1000000, company: 0, vault: 0, cayman_bank: 0, city_bank: null, faction: null, daily_networth: 0 } }),
   '/v2/user/inventory': (u) => ({ inventory: { items: u.searchParams.get('cat') === 'Drug' ? [{ id: 206, amount: 1, name: 'Xanax' }] : [] } }),
   '/v2/key/info': () => ({ info: { access: { level: 3, type: 'Limited Access' }, user: { id: 2345678 }, selections: {} } }),
   '/v2/market/206/itemmarket': () => ({ itemmarket: { item: { id: 206, name: 'Xanax' }, listings: [{ price: 829500, amount: 3 }, { price: 830000, amount: 1805 }] } }),
   '/v2/market/pointsmarket': () => ({ pointsmarket: [{ id: 91827364, cost: 45120, quantity: 25 }, { id: 91827399, cost: 45150, quantity: 1000 }] }),
-  '/api/marketplace/206': () => ({ item_id: 206, listings: [{ player_id: 1234567, player_name: 'Iron_Monk', price: 826500, quantity: 3 }, { player_id: 2345678, player_name: 'LuckyLefty', price: 828000, quantity: 6 }] }),
+  '/api/marketplace/206': () => ({ item_id: 206, listings: [{ player_id: 1234567, player_name: 'Iron_Monk', price: 826500, quantity: 3, last_checked: Math.floor(Date.now() / 1000) - 30 }, { player_id: 2345678, player_name: 'LuckyLefty', price: 828000, quantity: 6, last_checked: Math.floor(Date.now() / 1000) - 45 }] }),
 };
 
 // Torn Eye: canned estimates (total stats) and profiles for the fixture players.
@@ -111,6 +113,7 @@ if (Q.get('fixture')) {
   x.send();
   document.write(x.responseText);
 }
+if (Q.get('trading')) setTimeout(() => { const d = document.createElement('div'); d.id = 'ttv2-host'; d.style.cssText = 'position:fixed;right:16px;bottom:16px;width:300px;height:300px;background:#2e2e2e'; document.body.appendChild(d); }, Number(Q.get('trading')) || 0);
 window.onerror = (m) => { document.getElementById('out').textContent = 'BOOT ERROR: ' + m; };
 </script>
 <script>document.write('<script src="../torn-pumping-iron.user.js?v=' + Date.now() + '"><\/script>');</script>

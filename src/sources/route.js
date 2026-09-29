@@ -19,6 +19,13 @@ export const PAGE_OTHER = 'other';
 /** The webpage the script draws over (GitHub Pages, gh-pages branch). */
 export const APP_PAGE_URL = 'https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html';
 
+/** Torn Trading's Torn Bids page: we only note that Torn Trading runs there (read only). */
+export const TRADING_PAGE_URL = 'https://abrahamdelosreyes17-oss.github.io/torn-moneymaker-releases/traders.html';
+
+export function isTradingPageUrl(href) {
+    return String(href || '').split(/[?#]/)[0] === TRADING_PAGE_URL;
+}
+
 /** The harness boots the webpage on its own host with this marker. */
 export const APP_PAGE_PARAM = 'pi';
 export const APP_PAGE_VALUE = 'app';

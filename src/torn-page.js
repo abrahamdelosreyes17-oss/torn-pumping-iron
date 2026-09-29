@@ -7,7 +7,8 @@
 import { gmMenu, gmOpenTab } from './platform/gm.js';
 import { K, get, set, getKey, getSettings, getPlan } from './platform/store.js';
 import { keyProblem } from './ui/key-status.js';
-import { onModel, isVisible } from './runtime.js';
+import { onModel, isVisible, refresh } from './runtime.js';
+import { isPaused, onPauseChange } from './turns.js';
 import { Overlay } from './ui/overlay.js';
 import { ensureMarkCss, clearMarks, drawGymMarks, outline } from './ui/marks/marks.js';
 import { gymRoot, gymLoading, readStatBoxes, readGymButtons, gymListSummary } from './sources/dom/gym.js';
@@ -87,6 +88,26 @@ function overlayView(m, page) {
     return v;
 }
 
+/** The panel while Torn Trading runs: a warning sign, why, how to switch, and the plan's last steps. */
+export function pausedView(m) {
+    const steps = m && m.ready ? m.steps.slice(0, 2).map((x) => x.label.split(' · ')[0] + ' at ' + tornClock(x.at)) : [];
+    return {
+        paused: true,
+        pillText: 'Paused · Torn Trading is on',
+        cardStep: 'Pumping Iron and Torn Trading can’t run at the same time: they’d share Torn’s 100 calls a minute and mark the same listings.',
+        cardSub: 'To use Pumping Iron: turn off Torn Trading in Tampermonkey (or close its Torn Bids tab). Pumping Iron starts again by itself within a minute. Nothing is asked from Torn while paused.',
+        later: steps.length ? ['Your plan’s next steps: ' + steps.join(' · ')] : [],
+    };
+}
+
+/** Everything we drew on Torn's page, gone (paused). */
+function clearAll() {
+    const root = gymRoot();
+    if (root) clearMarks(root);
+    clearMarks(document.querySelector('.content-wrapper') || document);
+    tp.lastGymPlan = null;
+}
+
 /* ----------------------------------------------------------- gym marks */
 
 function drawGym(m) {
@@ -122,9 +143,12 @@ function drawGym(m) {
 }
 
 function watchGym() {
-    if (tp.observer) return;
     const root = gymRoot();
     if (!root) return;
+    // Torn may replace the gym root: watch the new one.
+    if (tp.observer && tp.observedRoot === root) return;
+    if (tp.observer) tp.observer.disconnect();
+    tp.observedRoot = root;
     let timer = null;
     tp.observer = new MutationObserver((muts) => {
         if (tp.drawing) return;
@@ -230,6 +254,19 @@ export function bootTornPage() {
     onModel((m) => {
         tp.model = m;
         if (!isVisible()) return;
+        // Taking turns with Torn Trading: nothing on Torn's page, only the panel with a warning sign.
+        if (isPaused()) {
+            if (lastSig !== 'paused') {
+                lastSig = 'paused';
+                clearAll();
+            }
+            const pv = JSON.stringify(pausedView(m));
+            if (pv !== lastView) {
+                lastView = pv;
+                tp.overlay.update(pausedView(m));
+            }
+            return;
+        }
         const p = detectPage(location.href);
         const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), Object.values(get(K.prices, {}) || {}).map((x) => x.at).join(), pageRowsCount(p)].join('|');
         if (sig !== lastSig) {

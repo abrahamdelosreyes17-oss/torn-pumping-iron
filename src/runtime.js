@@ -1,6 +1,6 @@
 /*
- * What every tab shares at run time: the one Torn client (40/min across
- * tabs, visible only), the state feed, and the model every surface renders
+ * What every tab shares at run time: the one Torn client (70/min across
+ * tabs, visible only, silent while Torn Trading runs), the state feed, and the model every surface renders
  * from. Userscript-only; core/ and api/ stay plain modules.
  */
 
@@ -13,6 +13,9 @@ import { StateFeed } from './feed/state.js';
 import { normalizeState, tornDayStart } from './core/bars.js';
 import { buildModel, compareStrategies, playerContext, buildOf } from './core/model.js';
 import { targetShares } from './core/plan.js';
+import { livePrices } from './core/market.js';
+import { TORN_PER_MINUTE_ALONE } from './core/turns.js';
+import { isPaused } from './turns.js';
 
 export const pi = {
     tabId: makeTabId(),
@@ -32,13 +35,14 @@ export const storeApi = { get: (k, fb) => get(k, fb), set: (k, v) => set(k, v), 
 
 /**
  * Our share of Torn's 100 calls a minute (per player, every tool together).
- * The trading script (NPC Arbitrage, Torn Bids) keeps its own count of up to
- * 30, so 40 here leaves room for both plus another tool. The plan needs ~2 a
- * minute; only Torn Eye sweeps and price loads come near it, and they queue.
+ * Pumping Iron and Torn Trading (NPC Arbitrage, Torn Bids) take turns: while
+ * Torn Trading runs, this makes no Torn call at all, so it may use Torn
+ * Trading's own 70. The plan needs ~2 a minute; only Torn Eye sweeps and
+ * price loads come near it, and they queue.
  */
-export const TORN_PER_MINUTE = 40;
+export const TORN_PER_MINUTE = TORN_PER_MINUTE_ALONE;
 
-/** The one Torn client every part of this tab uses: 40/min across tabs, visible only. */
+/** The one Torn client every part of this tab uses: 70/min across tabs, visible only, nothing while paused. */
 export function tornClient() {
     if (pi.client) return pi.client;
     const win = tabWindow('apiWindow', pi.tabId, storeApi);
@@ -52,6 +56,7 @@ export function tornClient() {
         savePause: (p) => set(K.apiPause, p),
         isVisible,
         onDeadKey: () => set(K.apiKeyDead, true),
+        isPaused: () => isPaused(),
     });
     return pi.client;
 }
@@ -60,9 +65,13 @@ export function tornClient() {
 function comparisonFor(state, statics, plan, settings) {
     const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null) });
     const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
-    const key = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, state.gymId, state.happy.maximum, pc.perks.bliss, Math.round(pc.stats.str / 1000)].join('|');
+    const prices = get(K.prices, {}) || {};
+    // Every input that moves the answer: all four stats (in ~2% steps), prices (2 significant digits), perks, gyms.
+    const statsSig = Object.values(pc.stats).map((v) => Math.round(Math.log1p(v) * 50)).join(',');
+    const priceSig = Object.entries(livePrices(prices)).map(([id, p]) => id + ':' + Number(p.toPrecision(2))).join(',');
+    const key = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, JSON.stringify(pc.perks.mult), pc.perks.happyLossMult, statsSig, priceSig, pc.unlocked.join(',')].join('|');
     if (key !== pi.compareKey) {
-        pi.compare = compareStrategies({ state, pc, shares, settings, prices: get(K.prices, {}) || {} });
+        pi.compare = compareStrategies({ state, pc, shares, settings, prices });
         pi.compareKey = key;
     }
     return pi.compare;
@@ -86,6 +95,9 @@ export function currentModel(now = Date.now()) {
  */
 function recordDayTotals(m) {
     if (!m || !m.ready) return;
+    // Only the leader tab writes, so tabs with slightly different clocks don't take turns overwriting it.
+    const lead = get(K.leader, null);
+    if (!lead || lead.id !== pi.tabId) return;
     const day = tornDayStart(m.now);
     const row = {
         gained: Math.round(m.gainedToday),
@@ -138,6 +150,7 @@ export function startFeed() {
         tabId: pi.tabId,
         isVisible,
         nextStep: () => (pi.model && pi.model.next) || null,
+        isPaused: () => isPaused(),
         onState: () => refresh(),
         onError: (error) => {
             set(K.lastError, { at: Date.now(), where: 'feed', code: error && error.code, message: String((error && error.message) || error) });

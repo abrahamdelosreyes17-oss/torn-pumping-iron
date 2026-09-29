@@ -50,6 +50,7 @@ const HEADER = `// ==UserScript==
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
 // @match        https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html*
+// @match        https://abrahamdelosreyes17-oss.github.io/torn-moneymaker-releases/traders.html*
 // @run-at       document-idle
 // @noframes
 // @grant        GM_getValue

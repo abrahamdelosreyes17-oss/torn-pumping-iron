@@ -28,6 +28,20 @@ const RENDERERS = { home: renderHome, plan: renderPlan, buy: renderBuy, progress
 
 const FONT_URL = 'https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&display=swap';
 
+/** The warning while Torn Trading runs (Z-paused). */
+export function pausedBanner(m, settings) {
+    const at = m && m.ready ? m.state.at : null;
+    return h('div', { class: 'warnb paused', role: 'status' }, [
+        h('b', { text: '⚠ Paused: Torn Trading is running' }),
+        h('p', {
+            text:
+                'No Torn calls while it runs' +
+                (at ? ', so this is your plan as of ' + clock(at, settings) + ' and it keeps moving on the clock' : '') +
+                '. Turn Torn Trading off (or close its Torn Bids tab) and Pumping Iron reads Torn again by itself within a minute; whatever changed meanwhile shows as one catch-up entry in Progress.',
+        }),
+    ]);
+}
+
 export class PiApp {
     /** @param {object} o - {getCtx: () => ctx, renderers: {tab: fn} (extra tabs, e.g. Torn Eye)} */
     constructor({ getCtx, renderers = {}, getUpdated = null }) {
@@ -81,18 +95,23 @@ export class PiApp {
         ctx.go = (tab) => this.go(tab);
         ctx.rerender = () => this.render(true);
         const m = ctx.model;
-        const sig = [this.tab, m && m.ready ? m.state.at : 'x', ctx.sig || '', JSON.stringify(this.ui)].join('|');
+        const sig = [this.tab, m && m.ready ? m.state.at : 'x', ctx.sig || '', JSON.stringify(this.ui), ctx.paused ? 'paused' : ''].join('|');
         if (!force && (sig === this.sig || this.typing())) return;
         this.sig = sig;
         const s = ctx.settings;
         const app = h('div', { class: 'app' });
         app.appendChild(this.topBar());
+        // Taking turns with Torn Trading: say so on top; the plan below keeps moving on the clock from the last read.
+        if (ctx.paused) app.appendChild(pausedBanner(m, s));
         let tab = this.tab;
         if (!m || !m.ready) {
             // No state yet: keys first. Settings always opens, so a key can always be replaced.
             // Stay there once a key is saved, so its message (e.g. "this key won't work") is read, not swapped for Home.
             if (!ctx.flags.hasKey || ctx.flags.keyDead) tab = this.tab = 'settings';
-            else if (tab !== 'settings') {
+            else if (tab !== 'settings' && ctx.paused) {
+                fill(this.root, [app]);
+                return;
+            } else if (tab !== 'settings') {
                 const p = ctx.keyProblem;
                 app.appendChild(
                     p
@@ -141,6 +160,10 @@ export class PiApp {
             const st = this.getUpdated ? this.getUpdated() : null;
             const settings = (ctx && ctx.settings) || null;
             const ago = st ? Math.max(0, Math.round((now - st) / 1000)) : null;
+            if (ctx && ctx.paused) {
+                this.clockText.textContent = 'Paused' + (st ? ' · last read ' + clock(st, settings) : '');
+                return;
+            }
             this.clockText.textContent = clock(now, settings) + (settings && settings.timeFormat === 'local' ? ' local' : ' Torn time') + (ago !== null ? ' · updated ' + (ago < 90 ? ago + 's' : Math.round(ago / 60) + ' min') + ' ago' : '');
         }
     }

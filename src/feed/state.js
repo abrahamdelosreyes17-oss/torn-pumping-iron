@@ -16,7 +16,9 @@ import { totalOf } from '../core/gain.js';
 import { calibrationSample, addCalibration } from '../core/calibration.js';
 import { mergeLiveGyms, GYMS } from '../core/gyms.js';
 import { parsePerks } from '../core/perks.js';
-import { fetchUserState, fetchPerks, fetchProperty, fetchGyms, fetchInventory, fetchKeyInfo } from '../api/torn.js';
+import { fetchUserState, fetchPerks, fetchProperty, fetchGyms, fetchInventory, fetchPoints, fetchKeyInfo } from '../api/torn.js';
+import { POINTS } from '../core/items.js';
+import { TRADING_SEEN_KEY } from '../core/turns.js';
 import { KEY_DEAD_CODES } from '../api/client.js';
 
 export const STATE_POLL_MS = 30000;
@@ -36,6 +38,12 @@ export const STATIC_EVERY = {
     keyInfo: 24 * 60 * 60 * 1000,
 };
 
+/** A slow part that failed is asked again after this long (not after its whole period). */
+export const STATIC_RETRY_MS = 5 * 60 * 1000;
+
+/** A gap this long between two reads (e.g. paused for Torn Trading) makes one catch-up entry. */
+export const CATCH_UP_GAP_MS = 3 * 60 * 1000;
+
 export class StateFeed {
     /**
      * @param {object} o
@@ -47,9 +55,11 @@ export class StateFeed {
      * @param {function} [o.nextStep] - () => the plan's next step (names a drug taken)
      * @param {function} [o.onState] - (state, api) => void, after each poll
      * @param {function} [o.onError] - (error) => void
+     * @param {function} [o.isPaused] - () => boolean: Torn Trading runs, ask nothing
      * @param {object} [o.keys] - store keys {state, static, log, leader, history}
      */
-    constructor({ client, store, tabId, now = () => Date.now(), isVisible = () => true, nextStep = () => null, onState = () => {}, onError = () => {}, keys = {} }) {
+    constructor({ client, store, tabId, now = () => Date.now(), isVisible = () => true, nextStep = () => null, onState = () => {}, onError = () => {}, isPaused = () => false, keys = {} }) {
+        this.isPaused = isPaused;
         this.client = client;
         this.store = store;
         this.tabId = tabId;
@@ -79,6 +89,8 @@ export class StateFeed {
     async tick() {
         if (this.polling || !this.heartbeat()) return false;
         if (this.store.get(this.keys.dead, false)) return false;
+        // Taking turns with Torn Trading: no Torn call at all while it runs.
+        if (this.isPaused()) return false;
         const last = this.store.get(this.keys.state, null);
         const t = this.now();
         if (last && t - last.at < STATE_POLL_MS) {
@@ -96,7 +108,7 @@ export class StateFeed {
             const prev = last && last.api ? normalizeState(last.api, last.at) : null;
             if (prev) {
                 const diff = diffStates(prev, next);
-                const log = logFromDiff(this.store.get(this.keys.log, []), diff, { at, nextStep: this.nextStep() });
+                const log = logFromDiff(this.store.get(this.keys.log, []), diff, { at, nextStep: this.nextStep(), catchUp: at - last.at > CATCH_UP_GAP_MS && Number(this.store.get(TRADING_SEEN_KEY, 0)) > last.at });
                 this.store.set(this.keys.log, log);
                 // The gain model checks itself against your own trains.
                 const st = this.store.get(this.keys.static, {}) || {};
@@ -110,6 +122,7 @@ export class StateFeed {
             await this.refreshStatic();
             return true;
         } catch (error) {
+            if (error && error.takingTurns) return false;
             if (error && KEY_DEAD_CODES.has(error.code)) this.store.set(this.keys.dead, true);
             // No key yet is not a failed call: nothing was sent.
             else if (!(error && error.noKey)) this.store.set(this.keys.stateError, { at: this.now(), code: (error && error.code) ?? null, message: String((error && error.message) || error) });
@@ -156,11 +169,21 @@ export class StateFeed {
             ['perks', () => fetchPerks(this.client)],
             ['property', () => fetchProperty(this.client)],
             ['gyms', () => fetchGyms(this.client)],
-            ['inventory', () => fetchInventory(this.client)],
+            [
+                'inventory',
+                async () => {
+                    const inv = await fetchInventory(this.client);
+                    // Points held (for the refill) come from /user/money.
+                    const points = await fetchPoints(this.client);
+                    if (points !== null) inv[POINTS] = points;
+                    return inv;
+                },
+            ],
         ];
-        let changed = false;
         for (const [k, fn] of jobs) {
             if (!due(k)) continue;
+            if (this.isPaused()) break;
+            let stamp = at;
             try {
                 st[k] = await fn();
             } catch (error) {
@@ -169,15 +192,15 @@ export class StateFeed {
                     this.onError(error);
                     break;
                 }
-                // A part Torn refuses (e.g. access level) is retried on its clock, not every tick.
+                if (error && error.takingTurns) break;
+                // A part that failed keeps what it had and is asked again in 5 minutes, not after its whole period.
                 this.onError(error);
+                stamp = at - STATIC_EVERY[k] + STATIC_RETRY_MS;
             }
-            st[k + 'At'] = at;
-            changed = true;
+            st[k + 'At'] = stamp;
             // Merge into what's stored now: other parts (e.g. equipment for Torn Eye) may have been saved meanwhile.
-            this.store.set(this.keys.static, { ...(this.store.get(this.keys.static, {}) || {}), [k]: st[k], [k + 'At']: at });
+            this.store.set(this.keys.static, { ...(this.store.get(this.keys.static, {}) || {}), [k]: st[k], [k + 'At']: stamp });
         }
-        void changed;
         return this.store.get(this.keys.static, {}) || st;
     }
 }

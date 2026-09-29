@@ -27,14 +27,14 @@ export const W3B_HOST = 'weav3r.dev';
 export const W3B_TERMS_URL = 'https://weav3r.dev/terms-of-service';
 export const W3B_SITE_URL = 'https://weav3r.dev';
 
-/** TornW3B enforces 100/min per IP; leave 40 for TornTools and friends. */
-export const W3B_MAX_PER_MINUTE = 60;
-
 /**
- * Every tab together: each client's own ceiling only limits itself. The
- * trading app and TornTools draw on the same 100/min per IP, so this app
- * stays well under it (the Buy tab asks for a handful of items).
+ * TornW3B enforces 100/min per IP. Pumping Iron and Torn Trading take turns
+ * (never both running), so this uses Torn Trading's own 80/min, leaving 20
+ * for TornTools and friends.
  */
+export const W3B_MAX_PER_MINUTE = 80;
+
+/** Every tab together: each client's own ceiling only limits itself. */
 export const W3B_SHARED_PER_MINUTE = 80;
 
 /** After a 429 or a challenge page, stop asking for this long. */

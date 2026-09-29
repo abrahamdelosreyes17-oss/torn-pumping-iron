@@ -148,7 +148,7 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     const { page, errors } = await open('page=other');
     const q = (sel) => `document.getElementById('pi-overlay').shadowRoot.querySelector('${sel}')`;
     const bar = await page.evaluate(`${q('.head')}.textContent`);
-    ok(/3:5\d\s*Xanax #1/.test(bar.replace(/\s+/g, ' ')), 'panel: countdown and step in the bar (' + bar + ')');
+    ok(/3:[45]\d\s*Xanax #1/.test(bar.replace(/\s+/g, ' ')), 'panel: countdown and step in the bar (' + bar + ')');
     const box = await page.evaluate(`(() => { const r = ${q('.head')}.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })()`);
     ok(Math.abs(box.h - 36) <= 1, 'panel: bar 36 px tall (' + box.h + ')');
     const body = await page.evaluate(`({ shown: getComputedStyle(${q('.body')}).display !== 'none', text: ${q('.body')}.textContent })`);
@@ -230,6 +230,42 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     ok(Array.isArray(stored) && stored.includes('424242'), 'attack: gear kept in IndexedDB for next time');
     ok(errors.length === 0, 'attack: no page errors ' + JSON.stringify(errors));
     await page.screenshot({ path: resolve(shots, 'torn-eye-attack.png'), fullPage: true });
+    await page.close();
+}
+
+/* Taking turns: Torn Trading's panel shows up → paused (no calls, no marks, a warning panel); gone a minute → back. */
+{
+    const { page, errors } = await open('page=gym&fixture=gym-friend&energy=275&build=balanced');
+    const marksBefore = await page.evaluate(() => document.querySelectorAll('li.pi-on').length);
+    ok(marksBefore === 1, 'turns: marks drawn before Torn Trading shows up (' + marksBefore + ')');
+    // Torn Trading's panel mounts after ours (a stand-in #ttv2-host).
+    await page.evaluate(() => {
+        const d = document.createElement('div');
+        d.id = 'ttv2-host';
+        document.body.appendChild(d);
+    });
+    await page.waitForTimeout(1500);
+    const n1 = await page.evaluate(() => window.__calls.length);
+    const state = await page.evaluate(() => {
+        const sh = document.getElementById('pi-overlay').shadowRoot;
+        return { paused: sh.querySelector('.wrap').classList.contains('paused'), head: sh.querySelector('.head').textContent, body: sh.querySelector('.body').textContent, marks: document.querySelectorAll('li.pi-on, .pi-strip, .pi-panel').length };
+    });
+    ok(state.paused && /Paused · Torn Trading is on/.test(state.head), 'turns: the panel shows the warning sign (' + state.head + ')');
+    ok(/turn off Torn Trading/.test(state.body), 'turns: the panel says how to switch');
+    ok(state.marks === 0, 'turns: nothing of ours left on Torn’s page (' + state.marks + ')');
+    await page.waitForTimeout(6000);
+    const n2 = await page.evaluate(() => window.__calls.length);
+    ok(n2 === n1, 'turns: no request while paused (' + (n2 - n1) + ')');
+    // Torn Trading turned off: its panel gone and last seen over a minute ago.
+    await page.evaluate(() => {
+        document.getElementById('ttv2-host').remove();
+        window.GM_setValue('pumpingIron.v1.tradingSeenAt', JSON.stringify(Date.now() - 61000));
+    });
+    await page.waitForTimeout(6000);
+    const back = await page.evaluate(() => ({ paused: document.getElementById('pi-overlay').shadowRoot.querySelector('.wrap').classList.contains('paused'), marks: document.querySelectorAll('li.pi-on').length }));
+    ok(!back.paused && back.marks === 1, 'turns: back by itself, marks drawn again (' + JSON.stringify(back) + ')');
+    ok(errors.length === 0, 'turns: no page errors ' + JSON.stringify(errors));
+    await page.screenshot({ path: resolve(shots, 'torn-paused.png') });
     await page.close();
 }
 

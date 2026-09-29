@@ -73,6 +73,18 @@ export async function fetchInventory(client, cats = INVENTORY_CATS) {
     return out;
 }
 
+/** Points held (for the refill): /user/money. A key that can't read it answers null, not an error. */
+export async function fetchPoints(client) {
+    try {
+        const d = await client.get('v2/user/money');
+        const p = d && d.money ? Number(d.money.points) : NaN;
+        return Number.isFinite(p) ? p : null;
+    } catch (error) {
+        if (error instanceof TornApiError && (error.code === TORN_ERROR_ACCESS_LEVEL || error.code === TORN_ERROR_WRONG_FIELDS)) return null;
+        throw error;
+    }
+}
+
 /** Your recent attacks (newest first), with Torn's fair-fight modifier and respect. */
 export async function fetchAttacks(client, { limit = 100, from = null, to = null, filter = null } = {}) {
     const params = { limit, sort: 'DESC' };
@@ -144,7 +156,7 @@ export async function fetchAttackLog(client, code) {
 }
 
 export async function fetchItemMarket(client, itemId) {
-    return client.get('v2/market/' + ids(itemId)[0] + '/itemmarket');
+    return client.get('v2/market/' + ids(itemId)[0] + '/itemmarket', { limit: 100 });
 }
 
 export async function fetchPointsMarket(client) {

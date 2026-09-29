@@ -46,7 +46,7 @@ test('buy today: the plan\'s items minus what you hold', () => {
 });
 
 test('heads-up: refill unused near midnight, the next gym, and the plan check', () => {
-    const late = Date.UTC(2026, 8, 29, 20, 0);
+    const late = Date.UTC(2026, 8, 29, 22, 30);
     const state = friend({ at: late, drug: 3 * 3600 });
     const pc = playerContext(state, STATICS);
     const compare = compareStrategies({ state, pc, shares: targetShares(PLAN, pc.stats, buildOf('balanced').shares), settings: SETTINGS, prices: {} });

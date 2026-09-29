@@ -6,6 +6,7 @@
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
 // @match        https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html*
+// @match        https://abrahamdelosreyes17-oss.github.io/torn-moneymaker-releases/traders.html*
 // @run-at       document-idle
 // @noframes
 // @grant        GM_getValue
@@ -581,6 +582,8 @@
          * @param {function} [options.savePause] - ({until, code}) => void
          * @param {function} [options.isVisible] - () => boolean; a request never
          *   leaves a hidden tab, even one that was queued while it was visible
+         * @param {function} [options.isPaused] - () => boolean; true while Torn
+         *   Trading runs: nothing is sent (the two scripts take turns)
          */
         constructor({
             getKey,
@@ -596,8 +599,10 @@
             isVisible = () => true,
             addToWindow = null,
             onDeadKey = null,
+            isPaused = () => false,
         } = {}) {
             this.onDeadKey = onDeadKey;
+            this.isPaused = isPaused;
             this.addToWindow = addToWindow;
             this.loadPause = loadPause;
             this.savePause = savePause;
@@ -732,11 +737,20 @@
             }
         }
 
+        /** While Torn Trading runs, nothing goes to Torn (no code: not a key problem). */
+        throwIfTakingTurns() {
+            if (!this.isPaused || !this.isPaused()) return;
+            const e = new TornApiError('Paused while Torn Trading runs.');
+            e.takingTurns = true;
+            throw e;
+        }
+
         async execute(path, params, cacheKey) {
             if (!this.fetchImpl) {
                 throw new TornApiError('No fetch implementation available.');
             }
 
+            this.throwIfTakingTurns();
             const key = this.getKey ? this.getKey() : '';
             if (!key) {
                 // Nothing to send with: not a key Torn refused (no code, so nothing marks a key dead).
@@ -756,6 +770,7 @@
                 await this.waitForSlot();
                 // Another tab may have hit a block while this one waited.
                 this.throwIfPaused(mine);
+                this.throwIfTakingTurns();
 
                 try {
                     return await this.requestOnce(path, params, key);
@@ -1998,6 +2013,108 @@
         return STRATEGY_IDS.filter((id) => (id === 'blissSteady' ? bliss : id === 'happy99k' ? boosterCapH > BOOSTER_CAP_H : true));
     }
 
+    /* ===== src/core/format.js ===== */
+    /*
+     * Number words the way the pages show them. Pure.
+     */
+
+    /** 1234567 → "1,234,567" */
+    function fmtInt(n) {
+        const v = Math.round(Number(n) || 0);
+        return (v < 0 ? '−' : '') + Math.abs(v).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    }
+
+    /** Signed: "+1,420", "−300" */
+    function fmtSigned(n) {
+        const v = Math.round(Number(n) || 0);
+        return (v >= 0 ? '+' : '') + fmtInt(v);
+    }
+
+    /** Short stats: 994142 → "994k", 1124595 → "1.12M", 119410643 → "119M", 8723 → "8,723" */
+    function fmtShort(n) {
+        const v = Math.abs(Number(n) || 0);
+        const sign = Number(n) < 0 ? '−' : '';
+        if (v >= 1e9) return sign + trim(v / 1e9, v >= 1e10 ? 1 : 2) + 'B';
+        if (v >= 1e6) return sign + trim(v / 1e6, v >= 1e8 ? 0 : v >= 1e7 ? 1 : 2) + 'M';
+        if (v >= 1e5) return sign + Math.round(v / 1e3) + 'k';
+        return sign + fmtInt(v);
+    }
+
+    function trim(x, dp) {
+        return x.toFixed(dp).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+    }
+
+    /** Money: "$826,500" under $1M, "$6.62M", "$126M", "$1.2B" */
+    function fmtMoney(n) {
+        const v = Number(n) || 0;
+        if (Math.abs(v) < 1e6) return (v < 0 ? '−$' : '$') + fmtInt(Math.abs(v));
+        const s = fmtShort(Math.abs(v));
+        return (v < 0 ? '−$' : '$') + s;
+    }
+
+    /** "+13%", "−40%" */
+    function fmtPct(p, dp = 0) {
+        const v = Number(p) || 0;
+        return (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toFixed(dp) + '%';
+    }
+
+    /* ===== src/core/turns.js ===== */
+    /*
+     * Taking turns with Torn Trading (NPC Arbitrage, Torn Bids). Pure.
+     *
+     * The owner's rule: the two scripts never run together. While Torn Trading
+     * is seen (its panel on a Torn page, or its Torn Bids tab), Pumping Iron
+     * makes no Torn calls and draws nothing on Torn's pages; it starts again by
+     * itself about a minute after Torn Trading was last seen. Because only one
+     * runs at a time, Pumping Iron may use Torn Trading's own limits.
+     */
+
+
+
+
+    /** GM key every tab and the webpage read: when Torn Trading was last seen. */
+    const TRADING_SEEN_KEY = 'tradingSeenAt';
+
+    /** Pumping Iron starts again this long after Torn Trading was last seen. */
+    const TRADING_GRACE_MS = 60 * 1000;
+
+    /** A tab that sees Torn Trading notes it at most this often (one small GM write). */
+    const TRADING_MARK_EVERY_MS = 15 * 1000;
+
+    /** Torn Trading's own limits, which Pumping Iron may use while it runs alone. */
+    const TORN_PER_MINUTE_ALONE = 70;
+    const W3B_PER_MINUTE_ALONE = 80;
+
+    /** Is Torn Trading running now (seen within the grace period)? */
+    function tradingRunning(seenAt, now) {
+        const t = Number(seenAt) || 0;
+        return t > 0 && now - t < TRADING_GRACE_MS && now - t >= -TRADING_GRACE_MS;
+    }
+
+    /** When Pumping Iron starts again if Torn Trading isn't seen any more. */
+    function resumesAt(seenAt) {
+        return (Number(seenAt) || 0) + TRADING_GRACE_MS;
+    }
+
+    /** Should this tab write a fresh "seen" mark? */
+    function shouldMarkSeen(seenAt, now) {
+        return !(Number(seenAt) > 0) || now - Number(seenAt) >= TRADING_MARK_EVERY_MS;
+    }
+
+    /**
+     * The one Progress entry for what changed while paused: "While paused:
+     * +2.1M SPD, Xanax taken, refill used". `trained` is {str,...}. A Limited
+     * key can't read how many drugs were taken in between, only that one was.
+     */
+    function catchUpLabel(trained = {}, { drug = false, booster = false, refill = false } = {}) {
+        const parts = [];
+        for (const k of STATS) if (trained[k] > 0) parts.push('+' + fmtShort(trained[k]) + ' ' + k.toUpperCase());
+        if (drug) parts.push('Xanax taken');
+        if (booster) parts.push('booster used');
+        if (refill) parts.push('refill used');
+        return 'While paused' + (parts.length ? ': ' + parts.join(', ') : '');
+    }
+
     /* ===== src/core/plan.js ===== */
     /*
      * Plans and the day's steps. Pure. ENGINE-SPEC §6.
@@ -2008,6 +2125,7 @@
      * of the tick they depend on. Steps are marked done from state changes
      * (a drug cooldown that jumped, a stat that rose), never from a click.
      */
+
 
 
 
@@ -2207,6 +2325,11 @@
         // Daily choco: one Xanax a day is held (its energy kept, not trained); at
         // its cooldown end, candy + Ecstasy just after a tick, train it all, refill.
         const daily = s === 'dailyChoco';
+        // Steady with Bliss: EDVD with each Xanax whenever the booster cooldown has room (happy never falls back).
+        const blissEdvd = s === 'blissSteady';
+        const capMs = (ctx.boosterCapH || BOOSTER_CAP_H) * HOUR;
+        const edvdMs = ITEMS[EDVD].boosterH * HOUR;
+        let boosterAt = Math.max(now, boosterFreeAt(state));
         let boosted = Boolean(ctx.boostedToday);
         let holding = Boolean(ctx.holding);
         let naturalOk = true;
@@ -2251,7 +2374,18 @@
                 drugAt += xanCD;
                 continue;
             }
-            train(drugAt, 'xanax', 'Xanax #' + xanN++, [{ id: XANAX, qty: 1 }]);
+            const items = [{ id: XANAX, qty: 1 }];
+            let label = 'Xanax #' + xanN++;
+            if (blissEdvd) {
+                const qty = Math.floor((capMs - Math.max(0, boosterAt - drugAt)) / edvdMs);
+                if (qty > 0) {
+                    H = Math.min(HAPPY_CAP, H + qty * ITEMS[EDVD].happy * (ctx.adultNovelties10 ? 2 : 1));
+                    items.push({ id: EDVD, qty });
+                    label += ' + EDVD × ' + qty;
+                    boosterAt = Math.max(boosterAt, drugAt) + qty * edvdMs;
+                }
+            }
+            train(drugAt, 'xanax', label, items);
             // The refill is worth most right after a session, when energy is near zero.
             if (refillLeft && !daily && drugAt + 5 * MIN < end) {
                 advance(drugAt + 5 * MIN);
@@ -2306,10 +2440,15 @@
      * was (the next planned drug step); trains add to the latest entry, or to
      * a "Natural energy" entry when nothing else happened.
      */
-    function logFromDiff(log, diff, { at, nextStep = null }) {
+    function logFromDiff(log, diff, { at, nextStep = null, catchUp = false }) {
         const out = (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(at));
         const trained = diff && diff.trained ? diff.trained : {};
         const gain = STATS.reduce((a, k) => a + (trained[k] || 0), 0);
+        // After a pause (Torn Trading ran): one entry for everything in between.
+        if (catchUp && diff && (gain > 0 || diff.drugTaken || diff.refillUsed || diff.boosterUsed)) {
+            out.push({ at, kind: 'catchup', label: catchUpLabel(trained, { drug: diff.drugTaken, booster: diff.boosterUsed, refill: diff.refillUsed }), trained: { ...trained }, gain, drug: Boolean(diff.drugTaken) });
+            return out;
+        }
         if (diff && (diff.drugTaken || diff.refillUsed || diff.boosterUsed)) {
             const kind = diff.refillUsed && !diff.drugTaken ? 'refill' : nextStep && nextStep.kind !== 'natural' ? nextStep.kind : 'xanax';
             const label = diff.refillUsed && !diff.drugTaken ? 'Refill · ' + REFILL_POINTS + ' points' : nextStep && nextStep.kind !== 'natural' ? nextStep.label : 'Xanax';
@@ -2328,9 +2467,9 @@
         return out;
     }
 
-    /** Drugs taken so far today, from the log (numbers the next Xanax). */
+    /** Drugs taken so far today, from the log (numbers the next Xanax; a held Xanax counts too). */
     function drugsToday(log, now) {
-        return (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(now) && (e.kind === 'xanax' || e.kind === 'stack')).length;
+        return (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(now) && (e.kind === 'xanax' || e.kind === 'stack' || e.kind === 'hold' || (e.kind === 'catchup' && e.drug))).length;
     }
 
     /* ===== src/core/calibration.js ===== */
@@ -2553,6 +2692,18 @@
         return out;
     }
 
+    /** Points held (for the refill): /user/money. A key that can't read it answers null, not an error. */
+    async function fetchPoints(client) {
+        try {
+            const d = await client.get('v2/user/money');
+            const p = d && d.money ? Number(d.money.points) : NaN;
+            return Number.isFinite(p) ? p : null;
+        } catch (error) {
+            if (error instanceof TornApiError && (error.code === TORN_ERROR_ACCESS_LEVEL || error.code === TORN_ERROR_WRONG_FIELDS)) return null;
+            throw error;
+        }
+    }
+
     /** Your recent attacks (newest first), with Torn's fair-fight modifier and respect. */
     async function fetchAttacks(client, { limit = 100, from = null, to = null, filter = null } = {}) {
         const params = { limit, sort: 'DESC' };
@@ -2624,7 +2775,7 @@
     }
 
     async function fetchItemMarket(client, itemId) {
-        return client.get('v2/market/' + ids(itemId)[0] + '/itemmarket');
+        return client.get('v2/market/' + ids(itemId)[0] + '/itemmarket', { limit: 100 });
     }
 
     async function fetchPointsMarket(client) {
@@ -2690,6 +2841,8 @@
 
 
 
+
+
     const STATE_POLL_MS = 30000;
 
     /** After a failed state call, wait this long before asking again (not every 3 s heartbeat). */
@@ -2707,6 +2860,12 @@
         keyInfo: 24 * 60 * 60 * 1000,
     };
 
+    /** A slow part that failed is asked again after this long (not after its whole period). */
+    const STATIC_RETRY_MS = 5 * 60 * 1000;
+
+    /** A gap this long between two reads (e.g. paused for Torn Trading) makes one catch-up entry. */
+    const CATCH_UP_GAP_MS = 3 * 60 * 1000;
+
     class StateFeed {
         /**
          * @param {object} o
@@ -2718,9 +2877,11 @@
          * @param {function} [o.nextStep] - () => the plan's next step (names a drug taken)
          * @param {function} [o.onState] - (state, api) => void, after each poll
          * @param {function} [o.onError] - (error) => void
+         * @param {function} [o.isPaused] - () => boolean: Torn Trading runs, ask nothing
          * @param {object} [o.keys] - store keys {state, static, log, leader, history}
          */
-        constructor({ client, store, tabId, now = () => Date.now(), isVisible = () => true, nextStep = () => null, onState = () => {}, onError = () => {}, keys = {} }) {
+        constructor({ client, store, tabId, now = () => Date.now(), isVisible = () => true, nextStep = () => null, onState = () => {}, onError = () => {}, isPaused = () => false, keys = {} }) {
+            this.isPaused = isPaused;
             this.client = client;
             this.store = store;
             this.tabId = tabId;
@@ -2750,6 +2911,8 @@
         async tick() {
             if (this.polling || !this.heartbeat()) return false;
             if (this.store.get(this.keys.dead, false)) return false;
+            // Taking turns with Torn Trading: no Torn call at all while it runs.
+            if (this.isPaused()) return false;
             const last = this.store.get(this.keys.state, null);
             const t = this.now();
             if (last && t - last.at < STATE_POLL_MS) {
@@ -2767,7 +2930,7 @@
                 const prev = last && last.api ? normalizeState(last.api, last.at) : null;
                 if (prev) {
                     const diff = diffStates(prev, next);
-                    const log = logFromDiff(this.store.get(this.keys.log, []), diff, { at, nextStep: this.nextStep() });
+                    const log = logFromDiff(this.store.get(this.keys.log, []), diff, { at, nextStep: this.nextStep(), catchUp: at - last.at > CATCH_UP_GAP_MS && Number(this.store.get(TRADING_SEEN_KEY, 0)) > last.at });
                     this.store.set(this.keys.log, log);
                     // The gain model checks itself against your own trains.
                     const st = this.store.get(this.keys.static, {}) || {};
@@ -2781,6 +2944,7 @@
                 await this.refreshStatic();
                 return true;
             } catch (error) {
+                if (error && error.takingTurns) return false;
                 if (error && KEY_DEAD_CODES.has(error.code)) this.store.set(this.keys.dead, true);
                 // No key yet is not a failed call: nothing was sent.
                 else if (!(error && error.noKey)) this.store.set(this.keys.stateError, { at: this.now(), code: (error && error.code) ?? null, message: String((error && error.message) || error) });
@@ -2827,11 +2991,21 @@
                 ['perks', () => fetchPerks(this.client)],
                 ['property', () => fetchProperty(this.client)],
                 ['gyms', () => fetchGyms(this.client)],
-                ['inventory', () => fetchInventory(this.client)],
+                [
+                    'inventory',
+                    async () => {
+                        const inv = await fetchInventory(this.client);
+                        // Points held (for the refill) come from /user/money.
+                        const points = await fetchPoints(this.client);
+                        if (points !== null) inv[POINTS] = points;
+                        return inv;
+                    },
+                ],
             ];
-            let changed = false;
             for (const [k, fn] of jobs) {
                 if (!due(k)) continue;
+                if (this.isPaused()) break;
+                let stamp = at;
                 try {
                     st[k] = await fn();
                 } catch (error) {
@@ -2840,62 +3014,17 @@
                         this.onError(error);
                         break;
                     }
-                    // A part Torn refuses (e.g. access level) is retried on its clock, not every tick.
+                    if (error && error.takingTurns) break;
+                    // A part that failed keeps what it had and is asked again in 5 minutes, not after its whole period.
                     this.onError(error);
+                    stamp = at - STATIC_EVERY[k] + STATIC_RETRY_MS;
                 }
-                st[k + 'At'] = at;
-                changed = true;
+                st[k + 'At'] = stamp;
                 // Merge into what's stored now: other parts (e.g. equipment for Torn Eye) may have been saved meanwhile.
-                this.store.set(this.keys.static, { ...(this.store.get(this.keys.static, {}) || {}), [k]: st[k], [k + 'At']: at });
+                this.store.set(this.keys.static, { ...(this.store.get(this.keys.static, {}) || {}), [k]: st[k], [k + 'At']: stamp });
             }
-            void changed;
             return this.store.get(this.keys.static, {}) || st;
         }
-    }
-
-    /* ===== src/core/format.js ===== */
-    /*
-     * Number words the way the pages show them. Pure.
-     */
-
-    /** 1234567 → "1,234,567" */
-    function fmtInt(n) {
-        const v = Math.round(Number(n) || 0);
-        return (v < 0 ? '−' : '') + Math.abs(v).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-    }
-
-    /** Signed: "+1,420", "−300" */
-    function fmtSigned(n) {
-        const v = Math.round(Number(n) || 0);
-        return (v >= 0 ? '+' : '') + fmtInt(v);
-    }
-
-    /** Short stats: 994142 → "994k", 1124595 → "1.12M", 119410643 → "119M", 8723 → "8,723" */
-    function fmtShort(n) {
-        const v = Math.abs(Number(n) || 0);
-        const sign = Number(n) < 0 ? '−' : '';
-        if (v >= 1e9) return sign + trim(v / 1e9, v >= 1e10 ? 1 : 2) + 'B';
-        if (v >= 1e6) return sign + trim(v / 1e6, v >= 1e8 ? 0 : v >= 1e7 ? 1 : 2) + 'M';
-        if (v >= 1e5) return sign + Math.round(v / 1e3) + 'k';
-        return sign + fmtInt(v);
-    }
-
-    function trim(x, dp) {
-        return x.toFixed(dp).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
-    }
-
-    /** Money: "$826,500" under $1M, "$6.62M", "$126M", "$1.2B" */
-    function fmtMoney(n) {
-        const v = Number(n) || 0;
-        if (Math.abs(v) < 1e6) return (v < 0 ? '−$' : '$') + fmtInt(Math.abs(v));
-        const s = fmtShort(Math.abs(v));
-        return (v < 0 ? '−$' : '$') + s;
-    }
-
-    /** "+13%", "−40%" */
-    function fmtPct(p, dp = 0) {
-        const v = Number(p) || 0;
-        return (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(v).toFixed(dp) + '%';
     }
 
     /* ===== src/core/recommend.js ===== */
@@ -3057,6 +3186,13 @@
 
     /** The webpage the script draws over (GitHub Pages, gh-pages branch). */
     const APP_PAGE_URL = 'https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html';
+
+    /** Torn Trading's Torn Bids page: we only note that Torn Trading runs there (read only). */
+    const TRADING_PAGE_URL = 'https://abrahamdelosreyes17-oss.github.io/torn-moneymaker-releases/traders.html';
+
+    function isTradingPageUrl(href) {
+        return String(href || '').split(/[?#]/)[0] === TRADING_PAGE_URL;
+    }
 
     /** The harness boots the webpage on its own host with this marker. */
     const APP_PAGE_PARAM = 'pi';
@@ -3226,6 +3362,9 @@
     const WAIT_OVER_PCT = 3;
     const BULK_UNDER_PCT = 3;
 
+    /** Bazaar listings TornW3B hasn't re-checked in this long are dropped (Torn Trading's rule). */
+    const BAZAAR_MAX_AGE_MS = 2 * 60 * 1000;
+
     /** Buy windows (Buy tab switch). */
     const WINDOWS = { today: 1, three: 3, week: 7 };
 
@@ -3309,9 +3448,50 @@
         return list.map((l) => ({ source: SOURCE_ITEM_MARKET, price: Number(l.price), qty: Number(l.amount ?? l.quantity) || 0 }));
     }
 
-    function listingsFromW3b(api) {
+    /**
+     * TornW3B's bazaar listings. With `now`, only listings re-checked within
+     * BAZAAR_MAX_AGE_MS stay (Torn Trading's rule: an older one is often gone),
+     * and never a $1 listing (locked, one person's).
+     */
+    function listingsFromW3b(api, { now = null, maxAgeMs = BAZAAR_MAX_AGE_MS } = {}) {
         const list = api && Array.isArray(api.listings) ? api.listings : [];
-        return list.map((l) => ({ source: SOURCE_BAZAAR, sellerId: l.player_id ? String(l.player_id) : null, sellerName: l.player_name || null, price: Number(l.price), qty: Number(l.quantity) || 0 }));
+        const rows = list.map((l) => ({ source: SOURCE_BAZAAR, sellerId: l.player_id ? String(l.player_id) : null, sellerName: l.player_name || null, price: Number(l.price), qty: Number(l.quantity) || 0, dataAt: toMs(l.last_checked) || toMs(l.content_updated) }));
+        if (now === null) return rows;
+        return rows.filter((r) => r.sellerId && r.price > 1 && r.dataAt && now - r.dataAt <= maxAgeMs);
+    }
+
+    /** Seconds or milliseconds → milliseconds (TornW3B sends seconds). */
+    function toMs(v) {
+        const n = Number(v);
+        if (!Number.isFinite(n) || n <= 0) return null;
+        return n < 1e12 ? n * 1000 : n;
+    }
+
+    /**
+     * The price a plan should count for an item: what `qty` units cost from the
+     * cheapest listings up, per unit. Stored price rows are objects
+     * ({at, listings, avg7}), sample prices plain numbers; anything else is null
+     * (never $0: a free item would win every comparison).
+     */
+    function unitPrice(row, qty = 10) {
+        if (typeof row === 'number') return row > 0 ? row : null;
+        if (!row || typeof row !== 'object') return null;
+        const ls = Array.isArray(row.listings) ? row.listings : [];
+        if (ls.length) {
+            const f = fillCheapest(ls, qty, null);
+            if (f.filled > 0) return f.total / f.filled;
+        }
+        return row.avg7 > 0 ? row.avg7 : null;
+    }
+
+    /** {itemId: price row} → {itemId: $ per unit}, only the ones known (points: per point, 300 at a time). */
+    function livePrices(rows) {
+        const out = {};
+        for (const [id, row] of Object.entries(rows || {})) {
+            const p = unitPrice(row, id === POINTS ? 300 : 10);
+            if (p) out[id] = p;
+        }
+        return out;
     }
 
     function listingsFromPoints(api) {
@@ -3334,6 +3514,8 @@
      * plan, the day's log and settings. The webpage and the overlay both render
      * from this, so they can never disagree.
      */
+
+
 
 
 
@@ -3398,7 +3580,8 @@
                 energyMax: state.energy.maximum,
                 fastEnergy: state.energy.interval <= 600,
                 days: settings.horizonDays || 30,
-                prices: { ...SAMPLE_PRICES, ...(prices || {}) },
+                // Stored price rows are objects: count what 10 units cost from the cheapest up (never $0).
+                prices: { ...SAMPLE_PRICES, ...livePrices(prices) },
                 bliss: pc.perks.bliss,
                 happyLossMult: pc.perks.happyLossMult,
                 boosterCapH: settings.boosterCapH || 24,
@@ -3427,7 +3610,24 @@
         const shares = targetShares(plan, pc.stats, build.shares);
         const keep = (build.gyms || []).filter((id) => pc.unlocked.includes(id) && gymAccess(gymById(id, pc.table), pc.stats).ok);
         const today = (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(now));
-        const ctx = { shares, unlocked: pc.unlocked, perks: pc.perks.mult, keep, active: state.gymId, table: pc.table, bliss: pc.perks.bliss, happyLossMult: pc.perks.happyLossMult, drugsToday: drugsToday(today, now), boostedToday: today.some((e) => e.kind === 'boost') };
+        const boostedToday = today.some((e) => e.kind === 'boost');
+        // Energy above the maximum is stacked (a jump) or held (daily choco) Xanax: read from the bars, so it survives Torn midnight and reloads.
+        const over = Math.max(0, energyAt(state, now) - state.energy.maximum);
+        const ctx = {
+            shares,
+            unlocked: pc.unlocked,
+            perks: pc.perks.mult,
+            keep,
+            active: state.gymId,
+            table: pc.table,
+            bliss: pc.perks.bliss,
+            happyLossMult: pc.perks.happyLossMult,
+            drugsToday: drugsToday(today, now),
+            boostedToday,
+            stackedSoFar: Math.min(JUMP_STACK, Math.ceil(over / ITEMS[XANAX].energy)),
+            holding: plan.strategy === 'dailyChoco' && !boostedToday && over > 0,
+            boosterCapH: settings.boosterCapH || undefined,
+        };
         const steps = dayTimeline({ state, now, strategy: plan.strategy, ctx });
         const next = steps[0] || null;
 
@@ -3471,7 +3671,9 @@
 
         // Build ETA and next gym
         const energyPerDay = Math.round(((e.interval <= 600 ? 720 : 480) + 250 * Math.floor(1440 / 420) + e.maximum) / 10) * 10;
-        const proj = projectionFor({ stats: pc.stats, shares, energyPerDay, happy: state.happy.maximum + 300, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: 30, active: state.gymId, table: pc.table });
+        // With Ignorance Is Bliss happy doesn't fall back to the maximum: the projection trains at today's happy.
+        const projHappy = pc.perks.bliss ? Math.min(HAPPY_CAP, Math.max(state.happy.current, state.happy.maximum) + 300) : state.happy.maximum + 300;
+        const proj = projectionFor({ stats: pc.stats, shares, energyPerDay, happy: projHappy, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: 30, active: state.gymId, table: pc.table });
         // The next ladder gym after the highest one unlocked; its progress comes from the gym page (percentage on the button).
         const ladderTop = Math.max(0, ...pc.unlocked.filter((id) => id <= 24));
         const progressE = gymProgress && Number(gymProgress.nextId) === ladderTop + 1 ? gymProgress.energy : null;
@@ -3486,7 +3688,7 @@
         const heads = [];
         if (!plan.buildPicked) heads.push({ tone: 'warn', text: 'Pick your build type', sub: 'Plan › Build: the plan trains toward it' });
         for (const w of strictWarnings(steps, now)) heads.push({ tone: 'warn', text: w.text });
-        if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS * 6) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
+        if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
         if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.known ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost) });
         let rec = null;
         if (compare) {
@@ -3529,12 +3731,101 @@
         };
     }
 
+    /* ===== src/turns.js ===== */
+    /*
+     * Taking turns with Torn Trading, in the page. Any tab that sees Torn
+     * Trading (its NPC Arbitrage panel on a Torn page, or its Torn Bids page)
+     * notes the time in GM storage; every tab and the webpage read it and pause
+     * (core/turns.js). Read only: we look for Torn Trading's host element and
+     * never touch it.
+     */
+
+
+
+
+
+    /** Torn Trading's own hosts: NPC Arbitrage on Torn's pages, Torn Bids on its page. */
+    const TRADING_HOST_IDS = ['ttv2-host', 'ttv2-sell-host'];
+
+    const turns = { listeners: [], last: null, started: false };
+
+    function tradingSeenAt() {
+        return Number(get(TRADING_SEEN_KEY, 0)) || 0;
+    }
+
+    /** True while Torn Trading runs (seen within the last minute). */
+    function isPaused(now = Date.now()) {
+        return tradingRunning(tradingSeenAt(), now);
+    }
+
+    /** Is Torn Trading on this page right now? */
+    function tradingOnThisPage(doc = document) {
+        return TRADING_HOST_IDS.some((id) => doc.getElementById(id));
+    }
+
+    function look() {
+        if (typeof document === 'undefined' || !tradingOnThisPage()) return;
+        const now = Date.now();
+        if (shouldMarkSeen(tradingSeenAt(), now)) set(TRADING_SEEN_KEY, now);
+    }
+
+    function check() {
+        const p = isPaused();
+        if (p === turns.last) return;
+        turns.last = p;
+        for (const fn of turns.listeners) {
+            try {
+                fn(p);
+            } catch {
+                // One listener failing doesn't stop the others.
+            }
+        }
+    }
+
+    /** Call fn(paused) now and whenever it changes (another tab's mark, or the minute running out). */
+    function onPauseChange(fn) {
+        turns.listeners.push(fn);
+        fn(isPaused());
+    }
+
+    /**
+     * Watch for Torn Trading on this page (it may mount after us) and for the
+     * pause starting or ending anywhere. Cheap: one getElementById every few
+     * seconds and one small GM write every 15 s while it's seen.
+     */
+    function watchTrading() {
+        if (turns.started) return;
+        turns.started = true;
+        turns.last = isPaused();
+        look();
+        check();
+        if (typeof document !== 'undefined' && document.body && typeof MutationObserver === 'function') {
+            // Torn Trading mounts its panel on the body, usually within a second or two of ours.
+            const mo = new MutationObserver(() => {
+                if (tradingOnThisPage()) {
+                    look();
+                    check();
+                }
+            });
+            mo.observe(document.body, { childList: true });
+            setTimeout(() => mo.disconnect(), 10000);
+        }
+        setInterval(() => {
+            look();
+            check();
+        }, 5000);
+        gmOnChange(TRADING_SEEN_KEY, () => check());
+    }
+
     /* ===== src/runtime.js ===== */
     /*
-     * What every tab shares at run time: the one Torn client (40/min across
-     * tabs, visible only), the state feed, and the model every surface renders
+     * What every tab shares at run time: the one Torn client (70/min across
+     * tabs, visible only, silent while Torn Trading runs), the state feed, and the model every surface renders
      * from. Userscript-only; core/ and api/ stay plain modules.
      */
+
+
+
 
 
 
@@ -3564,13 +3855,14 @@
 
     /**
      * Our share of Torn's 100 calls a minute (per player, every tool together).
-     * The trading script (NPC Arbitrage, Torn Bids) keeps its own count of up to
-     * 30, so 40 here leaves room for both plus another tool. The plan needs ~2 a
-     * minute; only Torn Eye sweeps and price loads come near it, and they queue.
+     * Pumping Iron and Torn Trading (NPC Arbitrage, Torn Bids) take turns: while
+     * Torn Trading runs, this makes no Torn call at all, so it may use Torn
+     * Trading's own 70. The plan needs ~2 a minute; only Torn Eye sweeps and
+     * price loads come near it, and they queue.
      */
-    const TORN_PER_MINUTE = 40;
+    const TORN_PER_MINUTE = TORN_PER_MINUTE_ALONE;
 
-    /** The one Torn client every part of this tab uses: 40/min across tabs, visible only. */
+    /** The one Torn client every part of this tab uses: 70/min across tabs, visible only, nothing while paused. */
     function tornClient() {
         if (pi.client) return pi.client;
         const win = tabWindow('apiWindow', pi.tabId, storeApi);
@@ -3584,6 +3876,7 @@
             savePause: (p) => set(K.apiPause, p),
             isVisible,
             onDeadKey: () => set(K.apiKeyDead, true),
+            isPaused: () => isPaused(),
         });
         return pi.client;
     }
@@ -3592,9 +3885,13 @@
     function comparisonFor(state, statics, plan, settings) {
         const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null) });
         const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
-        const key = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, state.gymId, state.happy.maximum, pc.perks.bliss, Math.round(pc.stats.str / 1000)].join('|');
+        const prices = get(K.prices, {}) || {};
+        // Every input that moves the answer: all four stats (in ~2% steps), prices (2 significant digits), perks, gyms.
+        const statsSig = Object.values(pc.stats).map((v) => Math.round(Math.log1p(v) * 50)).join(',');
+        const priceSig = Object.entries(livePrices(prices)).map(([id, p]) => id + ':' + Number(p.toPrecision(2))).join(',');
+        const key = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, JSON.stringify(pc.perks.mult), pc.perks.happyLossMult, statsSig, priceSig, pc.unlocked.join(',')].join('|');
         if (key !== pi.compareKey) {
-            pi.compare = compareStrategies({ state, pc, shares, settings, prices: get(K.prices, {}) || {} });
+            pi.compare = compareStrategies({ state, pc, shares, settings, prices });
             pi.compareKey = key;
         }
         return pi.compare;
@@ -3618,6 +3915,9 @@
      */
     function recordDayTotals(m) {
         if (!m || !m.ready) return;
+        // Only the leader tab writes, so tabs with slightly different clocks don't take turns overwriting it.
+        const lead = get(K.leader, null);
+        if (!lead || lead.id !== pi.tabId) return;
         const day = tornDayStart(m.now);
         const row = {
             gained: Math.round(m.gainedToday),
@@ -3670,6 +3970,7 @@
             tabId: pi.tabId,
             isVisible,
             nextStep: () => (pi.model && pi.model.next) || null,
+            isPaused: () => isPaused(),
             onState: () => refresh(),
             onError: (error) => {
                 set(K.lastError, { at: Date.now(), where: 'feed', code: error && error.code, message: String((error && error.message) || error) });
@@ -4779,14 +5080,14 @@
     const W3B_TERMS_URL = 'https://weav3r.dev/terms-of-service';
     const W3B_SITE_URL = 'https://weav3r.dev';
 
-    /** TornW3B enforces 100/min per IP; leave 40 for TornTools and friends. */
-    const W3B_MAX_PER_MINUTE = 60;
-
     /**
-     * Every tab together: each client's own ceiling only limits itself. The
-     * trading app and TornTools draw on the same 100/min per IP, so this app
-     * stays well under it (the Buy tab asks for a handful of items).
+     * TornW3B enforces 100/min per IP. Pumping Iron and Torn Trading take turns
+     * (never both running), so this uses Torn Trading's own 80/min, leaving 20
+     * for TornTools and friends.
      */
+    const W3B_MAX_PER_MINUTE = 80;
+
+    /** Every tab together: each client's own ceiling only limits itself. */
     const W3B_SHARED_PER_MINUTE = 80;
 
     /** After a 429 or a challenge page, stop asking for this long. */
@@ -5938,7 +6239,7 @@
         ]);
 
         const d = ctx.diagnostics();
-        const diagSec = settingsSection('Diagnostics', null, [h('dl', { class: 'kv num', style: 'max-width:460px' }, [h('dt', { text: 'Torn API, last minute' }), h('dd', { text: d.torn + ' of ' + (d.tornMax || 40) }), h('dt', { text: 'FFScouter, last minute' }), h('dd', { text: d.ffs + ' of 60' }), h('dt', { text: 'TornW3B, last minute' }), h('dd', { text: d.w3b + ' of 60' }), h('dt', { text: 'Last error' }), h('dd', { text: d.lastError || 'none' }), h('dt', { text: 'Perk lines not understood' }), h('dd', { text: String(d.unknownPerks) }), h('dt', { text: 'Version' }), h('dd', { text: d.version })])]);
+        const diagSec = settingsSection('Diagnostics', null, [h('dl', { class: 'kv num', style: 'max-width:460px' }, [h('dt', { text: 'Torn API, last minute' }), h('dd', { text: d.torn + ' of ' + (d.tornMax || 70) }), h('dt', { text: 'FFScouter, last minute' }), h('dd', { text: d.ffs + ' of 60' }), h('dt', { text: 'TornW3B, last minute' }), h('dd', { text: d.w3b + ' of 80' }), h('dt', { text: 'Last error' }), h('dd', { text: d.lastError || 'none' }), h('dt', { text: 'Perk lines not understood' }), h('dd', { text: String(d.unknownPerks) }), h('dt', { text: 'Version' }), h('dd', { text: d.version })])]);
 
         const dataRows = [
             ['keys', 'Keys', 'Torn, FFScouter, TornStats, Discord service', 'Forget keys'],
@@ -5984,6 +6285,20 @@
     const RENDERERS = { home: renderHome, plan: renderPlan, buy: renderBuy, progress: renderProgress, settings: renderSettings };
 
     const FONT_URL = 'https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&display=swap';
+
+    /** The warning while Torn Trading runs (Z-paused). */
+    function pausedBanner(m, settings) {
+        const at = m && m.ready ? m.state.at : null;
+        return h('div', { class: 'warnb paused', role: 'status' }, [
+            h('b', { text: '⚠ Paused: Torn Trading is running' }),
+            h('p', {
+                text:
+                    'No Torn calls while it runs' +
+                    (at ? ', so this is your plan as of ' + clock(at, settings) + ' and it keeps moving on the clock' : '') +
+                    '. Turn Torn Trading off (or close its Torn Bids tab) and Pumping Iron reads Torn again by itself within a minute; whatever changed meanwhile shows as one catch-up entry in Progress.',
+            }),
+        ]);
+    }
 
     class PiApp {
         /** @param {object} o - {getCtx: () => ctx, renderers: {tab: fn} (extra tabs, e.g. Torn Eye)} */
@@ -6038,18 +6353,23 @@
             ctx.go = (tab) => this.go(tab);
             ctx.rerender = () => this.render(true);
             const m = ctx.model;
-            const sig = [this.tab, m && m.ready ? m.state.at : 'x', ctx.sig || '', JSON.stringify(this.ui)].join('|');
+            const sig = [this.tab, m && m.ready ? m.state.at : 'x', ctx.sig || '', JSON.stringify(this.ui), ctx.paused ? 'paused' : ''].join('|');
             if (!force && (sig === this.sig || this.typing())) return;
             this.sig = sig;
             const s = ctx.settings;
             const app = h('div', { class: 'app' });
             app.appendChild(this.topBar());
+            // Taking turns with Torn Trading: say so on top; the plan below keeps moving on the clock from the last read.
+            if (ctx.paused) app.appendChild(pausedBanner(m, s));
             let tab = this.tab;
             if (!m || !m.ready) {
                 // No state yet: keys first. Settings always opens, so a key can always be replaced.
                 // Stay there once a key is saved, so its message (e.g. "this key won't work") is read, not swapped for Home.
                 if (!ctx.flags.hasKey || ctx.flags.keyDead) tab = this.tab = 'settings';
-                else if (tab !== 'settings') {
+                else if (tab !== 'settings' && ctx.paused) {
+                    fill(this.root, [app]);
+                    return;
+                } else if (tab !== 'settings') {
                     const p = ctx.keyProblem;
                     app.appendChild(
                         p
@@ -6098,6 +6418,10 @@
                 const st = this.getUpdated ? this.getUpdated() : null;
                 const settings = (ctx && ctx.settings) || null;
                 const ago = st ? Math.max(0, Math.round((now - st) / 1000)) : null;
+                if (ctx && ctx.paused) {
+                    this.clockText.textContent = 'Paused' + (st ? ' · last read ' + clock(st, settings) : '');
+                    return;
+                }
                 this.clockText.textContent = clock(now, settings) + (settings && settings.timeFormat === 'local' ? ' local' : ' Torn time') + (ago !== null ? ' · updated ' + (ago < 90 ? ago + 's' : Math.round(ago / 60) + ' min') + ' ago' : '');
             }
         }
@@ -7083,6 +7407,7 @@
 
 
 
+
     /** How long fetched prices count as fresh. */
     const PRICE_FRESH_MS = 5 * 60 * 1000;
 
@@ -7103,7 +7428,8 @@
 
     /** Fetch listings for the items the Buy list shows, if older than 5 minutes. */
     async function loadPrices(ids) {
-        if (!getKey(K.apiKey)) return;
+        // Nothing from Torn or TornW3B while Torn Trading runs (the two take turns).
+        if (!getKey(K.apiKey) || isPaused()) return;
         const prices = { ...(get(K.prices, {}) || {}) };
         const now = Date.now();
         const due = [...new Set(ids.map(String))].filter((id) => !page.loading.has(id) && !(prices[id] && now - (prices[id].at || 0) < PRICE_FRESH_MS));
@@ -7122,7 +7448,8 @@
                     try {
                         if (getSettings().w3b === false) throw new Error('TornW3B is off');
                         const w = await fetchW3bListings(w3bClient(), id);
-                        row.listings = row.listings.concat(listingsFromW3b(w).filter((l) => l.sellerId && l.price > 1));
+                        // Bazaars TornW3B re-checked in the last 2 minutes, never a $1 locked listing.
+                        row.listings = row.listings.concat(listingsFromW3b(w, { now: Date.now() }));
                         row.w3bAt = Date.now();
                     } catch {
                         // Bazaars are a bonus; the Item Market still answers.
@@ -7236,6 +7563,7 @@
         const S = STRATEGIES[plan.strategy] || STRATEGIES.steady;
         return {
             model: pi.model,
+            paused: isPaused(),
             settings,
             plan,
             statics,
@@ -7303,6 +7631,7 @@
         page.app.mount();
         onModel(() => page.app.render());
         for (const k of [K.prices, K.settings, K.plan, K.userStatic, K.stateError, K.apiKeyDead]) gmOnChange(k, () => page.app.render());
+        onPauseChange(() => page.app.render(true));
         page.app.render(true);
         return page.app;
     }
@@ -7343,6 +7672,10 @@
     .head .ti { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
     .plate { width: 24px; height: 24px; border-radius: 50%; background: #efebe2; display: grid; place-items: center; box-shadow: inset 0 0 0 4px #efebe2, inset 0 0 0 5px #2a2d31; flex: none; }
     .plate i { width: 5px; height: 5px; border-radius: 50%; background: #15171a; }
+    .wrap.paused { border-color: #e8a33d; }
+    .wrap.paused .plate { background: #e8a33d; box-shadow: none; color: #15171a; font: bold 14px Arial, sans-serif; }
+    .wrap.paused .step { font-weight: bold; }
+    .wrap.paused .sub { color: #c9cdd1; }
     .col { flex: none; width: 26px; height: 26px; padding: 0; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #e3e5e8; font: bold 15px/24px Arial, sans-serif; cursor: pointer; }
     .col:hover { border-color: #3a4046; }
     .col:focus-visible { outline: 2px solid #efebe2; outline-offset: 1px; }
@@ -7533,7 +7866,8 @@
         }
 
         /**
-         * @param {object} v - {off, cdAt, pillText, pillNow, cardStep, cardSub, warn, energy:{current,max}, happy:{current,max}, later:[string]}
+         * @param {object} v - {off, paused, cdAt, pillText, pillNow, cardStep, cardSub, warn, energy:{current,max}, happy:{current,max}, later:[string]}
+         *   paused: Torn Trading runs (a warning sign instead of the plate, an amber edge)
          */
         update(v) {
             const wasOff = this.off;
@@ -7545,7 +7879,8 @@
             const now = Date.now();
             const cdText = v.pillNow || (v.cdAt ? countdown(v.cdAt - now) : '');
             this.headInfo.textContent = v.pillText || 'Pumping Iron';
-            fill(this.head, [h('span', { class: 'plate' }, [h('i')]), cdText ? h('span', { class: 'cd', 'data-cd': v.cdAt && !v.pillNow ? String(v.cdAt) : null, text: cdText }) : null, this.headInfo, this.colBtn]);
+            this.wrap.classList.toggle('paused', Boolean(v.paused));
+            fill(this.head, [v.paused ? h('span', { class: 'plate', text: '!', 'aria-label': 'Paused' }) : h('span', { class: 'plate' }, [h('i')]), cdText ? h('span', { class: 'cd', 'data-cd': v.cdAt && !v.pillNow ? String(v.cdAt) : null, text: cdText }) : null, this.headInfo, this.colBtn]);
             this.head.title = v.pillText || '';
             const bars = [];
             if (v.energy) bars.push(h('div', { class: 'mini' }, [h('span', { text: 'Energy' }), h('div', { class: 'bar' }, [h('i', { style: 'width:' + Math.min(100, (100 * v.energy.current) / Math.max(1, v.energy.max)) + '%;background:#efebe2' })]), h('span', { text: v.energy.current + ' / ' + v.energy.max })]));
@@ -7956,6 +8291,7 @@
 
 
 
+
     const tp = { overlay: null, model: null, observer: null, drawing: false, lastGymPlan: null };
 
     /** Torn's page (its sidebar and content column) as {left, right}; a centred 976 px guess if it can't be measured. */
@@ -8019,6 +8355,26 @@
         return v;
     }
 
+    /** The panel while Torn Trading runs: a warning sign, why, how to switch, and the plan's last steps. */
+    function pausedView(m) {
+        const steps = m && m.ready ? m.steps.slice(0, 2).map((x) => x.label.split(' · ')[0] + ' at ' + tornClock(x.at)) : [];
+        return {
+            paused: true,
+            pillText: 'Paused · Torn Trading is on',
+            cardStep: 'Pumping Iron and Torn Trading can’t run at the same time: they’d share Torn’s 100 calls a minute and mark the same listings.',
+            cardSub: 'To use Pumping Iron: turn off Torn Trading in Tampermonkey (or close its Torn Bids tab). Pumping Iron starts again by itself within a minute. Nothing is asked from Torn while paused.',
+            later: steps.length ? ['Your plan’s next steps: ' + steps.join(' · ')] : [],
+        };
+    }
+
+    /** Everything we drew on Torn's page, gone (paused). */
+    function clearAll() {
+        const root = gymRoot();
+        if (root) clearMarks(root);
+        clearMarks(document.querySelector('.content-wrapper') || document);
+        tp.lastGymPlan = null;
+    }
+
     /* ----------------------------------------------------------- gym marks */
 
     function drawGym(m) {
@@ -8054,9 +8410,12 @@
     }
 
     function watchGym() {
-        if (tp.observer) return;
         const root = gymRoot();
         if (!root) return;
+        // Torn may replace the gym root: watch the new one.
+        if (tp.observer && tp.observedRoot === root) return;
+        if (tp.observer) tp.observer.disconnect();
+        tp.observedRoot = root;
         let timer = null;
         tp.observer = new MutationObserver((muts) => {
             if (tp.drawing) return;
@@ -8162,6 +8521,19 @@
         onModel((m) => {
             tp.model = m;
             if (!isVisible()) return;
+            // Taking turns with Torn Trading: nothing on Torn's page, only the panel with a warning sign.
+            if (isPaused()) {
+                if (lastSig !== 'paused') {
+                    lastSig = 'paused';
+                    clearAll();
+                }
+                const pv = JSON.stringify(pausedView(m));
+                if (pv !== lastView) {
+                    lastView = pv;
+                    tp.overlay.update(pausedView(m));
+                }
+                return;
+            }
             const p = detectPage(location.href);
             const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), Object.values(get(K.prices, {}) || {}).map((x) => x.at).join(), pageRowsCount(p)].join('|');
             if (sig !== lastSig) {
@@ -8595,6 +8967,7 @@
 
 
 
+
     /** War mode asks for the enemy faction this often, and only from a visible tab. */
     const WAR_POLL_MS = 10000;
 
@@ -8724,6 +9097,7 @@
     }
 
     function onAttackData(json) {
+        if (isPaused()) return;
         const d = parseAttackData(json);
         if (!d || !d.defenderId) return;
         ep.extras.set(d.defenderId, { ...(ep.extras.get(d.defenderId) || {}), level: d.level, life: d.maxLife, name: d.defenderName });
@@ -8738,6 +9112,12 @@
     /* ------------------------------------------------------------- wiring */
 
     function drawAll() {
+        // Taking turns with Torn Trading: nothing of ours on Torn's page.
+        if (isPaused()) {
+            removeChips(document);
+            for (const el of document.querySelectorAll('#pi-attack')) el.remove();
+            return;
+        }
         if (!getSettings().eyeChips || !isVisible()) return;
         const p = detectPage(location.href);
         if (p === PAGE_PROFILE) drawProfile();
@@ -8760,7 +9140,7 @@
             installAttackHook(pageWin, onAttackData);
         }
         const ask = () => {
-            if (!getSettings().eyeChips || !isVisible()) return;
+            if (!getSettings().eyeChips || !isVisible() || isPaused()) return;
             const pg = detectPage(location.href);
             if (pg === PAGE_PROFILE) wantPlayers([Number(profileIdOf(location.href))], { profiles: true });
             if (pg === PAGE_ATTACK) wantPlayers([Number(attackTargetOf(location.href))], { profiles: true });
@@ -8784,12 +9164,16 @@
         });
         // War mode: every 10 s while visible.
         setInterval(() => {
-            if (detectPage(location.href) === PAGE_FACTION && document.getElementById('faction_war_list_id')) pollWar();
+            if (!isPaused() && detectPage(location.href) === PAGE_FACTION && document.getElementById('faction_war_list_id')) pollWar();
         }, 2000);
+        onPauseChange(() => {
+            lastSig = '';
+            drawAll();
+        });
         // The mini-profile popup is added to the body on the first hover, then re-drawn for each player.
         let watchedRoot = null;
         const onMini = () => {
-            if (ep.drawing) return;
+            if (ep.drawing || isPaused()) return;
             const root = document.getElementById('profile-mini-root');
             if (root && root !== watchedRoot) {
                 watchedRoot = root;
@@ -8834,6 +9218,7 @@
 
 
 
+
     function menus() {
         gmMenu('Open Pumping Iron', () => gmOpenTab(APP_PAGE_URL));
         gmMenu('Diagnostics', () => gmOpenTab(APP_PAGE_URL + '#settings'));
@@ -8841,10 +9226,16 @@
 
     function boot() {
         const href = typeof location !== 'undefined' ? location.href : '';
-        const where = isAppPageUrl(href) ? 'app' : detectPage(href);
+        const where = isAppPageUrl(href) ? 'app' : isTradingPageUrl(href) ? 'trading' : detectPage(href);
         set('lastBoot', { at: Date.now(), where, version: PI_BUILD_VERSION });
         if (typeof document !== 'undefined' && document.documentElement) document.documentElement.setAttribute('data-pi-booted', where);
         if (typeof window === 'undefined' || typeof document === 'undefined' || !document.body) return;
+        // Torn Trading's Torn Bids page: only note that Torn Trading runs (the two take turns). Nothing else here.
+        if (where === 'trading') {
+            watchTrading();
+            return;
+        }
+        watchTrading();
         menus();
         if (where === 'app') bootAppPage();
         else {

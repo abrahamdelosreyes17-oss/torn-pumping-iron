@@ -16,7 +16,8 @@ import { maybeSyncPlan } from './discord.js';
 import { bootAppPage } from './app-page.js';
 import { bootTornPage } from './torn-page.js';
 import { bootEyePage } from './eye-page.js';
-import { detectPage, isAppPageUrl, APP_PAGE_URL } from './sources/route.js';
+import { detectPage, isAppPageUrl, isTradingPageUrl, APP_PAGE_URL } from './sources/route.js';
+import { watchTrading } from './turns.js';
 
 function menus() {
     gmMenu('Open Pumping Iron', () => gmOpenTab(APP_PAGE_URL));
@@ -25,10 +26,16 @@ function menus() {
 
 export function boot() {
     const href = typeof location !== 'undefined' ? location.href : '';
-    const where = isAppPageUrl(href) ? 'app' : detectPage(href);
+    const where = isAppPageUrl(href) ? 'app' : isTradingPageUrl(href) ? 'trading' : detectPage(href);
     set('lastBoot', { at: Date.now(), where, version: PI_BUILD_VERSION });
     if (typeof document !== 'undefined' && document.documentElement) document.documentElement.setAttribute('data-pi-booted', where);
     if (typeof window === 'undefined' || typeof document === 'undefined' || !document.body) return;
+    // Torn Trading's Torn Bids page: only note that Torn Trading runs (the two take turns). Nothing else here.
+    if (where === 'trading') {
+        watchTrading();
+        return;
+    }
+    watchTrading();
     menus();
     if (where === 'app') bootAppPage();
     else {

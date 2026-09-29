@@ -102,6 +102,8 @@ export class TornApiClient {
      * @param {function} [options.savePause] - ({until, code}) => void
      * @param {function} [options.isVisible] - () => boolean; a request never
      *   leaves a hidden tab, even one that was queued while it was visible
+     * @param {function} [options.isPaused] - () => boolean; true while Torn
+     *   Trading runs: nothing is sent (the two scripts take turns)
      */
     constructor({
         getKey,
@@ -117,8 +119,10 @@ export class TornApiClient {
         isVisible = () => true,
         addToWindow = null,
         onDeadKey = null,
+        isPaused = () => false,
     } = {}) {
         this.onDeadKey = onDeadKey;
+        this.isPaused = isPaused;
         this.addToWindow = addToWindow;
         this.loadPause = loadPause;
         this.savePause = savePause;
@@ -253,11 +257,20 @@ export class TornApiClient {
         }
     }
 
+    /** While Torn Trading runs, nothing goes to Torn (no code: not a key problem). */
+    throwIfTakingTurns() {
+        if (!this.isPaused || !this.isPaused()) return;
+        const e = new TornApiError('Paused while Torn Trading runs.');
+        e.takingTurns = true;
+        throw e;
+    }
+
     async execute(path, params, cacheKey) {
         if (!this.fetchImpl) {
             throw new TornApiError('No fetch implementation available.');
         }
 
+        this.throwIfTakingTurns();
         const key = this.getKey ? this.getKey() : '';
         if (!key) {
             // Nothing to send with: not a key Torn refused (no code, so nothing marks a key dead).
@@ -277,6 +290,7 @@ export class TornApiClient {
             await this.waitForSlot();
             // Another tab may have hit a block while this one waited.
             this.throwIfPaused(mine);
+            this.throwIfTakingTurns();
 
             try {
                 return await this.requestOnce(path, params, key);

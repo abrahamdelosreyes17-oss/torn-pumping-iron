@@ -7,6 +7,7 @@
 
 import { getSettings } from './platform/store.js';
 import { onModel, tornClient, isVisible } from './runtime.js';
+import { isPaused, onPauseChange } from './turns.js';
 import { installAttackHook } from './platform/page-hook.js';
 import { wantPlayers, eyeView, onEye, saveGear } from './eye-service.js';
 import { fetchFactionMembers } from './api/torn.js';
@@ -147,6 +148,7 @@ function drawAttack() {
 }
 
 function onAttackData(json) {
+    if (isPaused()) return;
     const d = parseAttackData(json);
     if (!d || !d.defenderId) return;
     ep.extras.set(d.defenderId, { ...(ep.extras.get(d.defenderId) || {}), level: d.level, life: d.maxLife, name: d.defenderName });
@@ -161,6 +163,12 @@ function onAttackData(json) {
 /* ------------------------------------------------------------- wiring */
 
 function drawAll() {
+    // Taking turns with Torn Trading: nothing of ours on Torn's page.
+    if (isPaused()) {
+        removeChips(document);
+        for (const el of document.querySelectorAll('#pi-attack')) el.remove();
+        return;
+    }
     if (!getSettings().eyeChips || !isVisible()) return;
     const p = detectPage(location.href);
     if (p === PAGE_PROFILE) drawProfile();
@@ -183,7 +191,7 @@ export function bootEyePage() {
         installAttackHook(pageWin, onAttackData);
     }
     const ask = () => {
-        if (!getSettings().eyeChips || !isVisible()) return;
+        if (!getSettings().eyeChips || !isVisible() || isPaused()) return;
         const pg = detectPage(location.href);
         if (pg === PAGE_PROFILE) wantPlayers([Number(profileIdOf(location.href))], { profiles: true });
         if (pg === PAGE_ATTACK) wantPlayers([Number(attackTargetOf(location.href))], { profiles: true });
@@ -207,12 +215,16 @@ export function bootEyePage() {
     });
     // War mode: every 10 s while visible.
     setInterval(() => {
-        if (detectPage(location.href) === PAGE_FACTION && document.getElementById('faction_war_list_id')) pollWar();
+        if (!isPaused() && detectPage(location.href) === PAGE_FACTION && document.getElementById('faction_war_list_id')) pollWar();
     }, 2000);
+    onPauseChange(() => {
+        lastSig = '';
+        drawAll();
+    });
     // The mini-profile popup is added to the body on the first hover, then re-drawn for each player.
     let watchedRoot = null;
     const onMini = () => {
-        if (ep.drawing) return;
+        if (ep.drawing || isPaused()) return;
         const root = document.getElementById('profile-mini-root');
         if (root && root !== watchedRoot) {
             watchedRoot = root;

@@ -70,7 +70,7 @@ test('verdict edges', () => {
 
 test('listings from each source in one shape', () => {
     assert.deepEqual(listingsFromItemMarket({ itemmarket: { listings: [{ price: 5, amount: 2 }] } }), [{ source: SOURCE_ITEM_MARKET, price: 5, qty: 2 }]);
-    assert.deepEqual(listingsFromW3b({ listings: [{ player_id: 9, player_name: 'Bo', price: 4, quantity: 3 }] }), [{ source: SOURCE_BAZAAR, sellerId: '9', sellerName: 'Bo', price: 4, qty: 3 }]);
+    assert.deepEqual(listingsFromW3b({ listings: [{ player_id: 9, player_name: 'Bo', price: 4, quantity: 3 }] }), [{ source: SOURCE_BAZAAR, sellerId: '9', sellerName: 'Bo', price: 4, qty: 3, dataAt: null }]);
     assert.deepEqual(listingsFromPoints({ pointsmarket: [{ id: 7, cost: 45000, quantity: 60 }] }), [{ source: SOURCE_POINTS, listingId: '7', price: 45000, qty: 60 }]);
     assert.deepEqual(listingsFromPoints({ pointsmarket: { 8: { cost: 1, quantity: 2 } } })[0].listingId, '8');
     assert.deepEqual(listingsFromW3b(null), []);

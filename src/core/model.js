@@ -13,8 +13,10 @@ import { energyAt, happyAt, drugFreeAt, boosterFreeAt, refillAvailable, tornDayS
 import { dayTimeline, targetShares, drugsToday, itemsNeeded, strictWarnings, REFILL_WARN_MS } from './plan.js';
 import { simulateStrategy, feasibleStrategies, STRATEGIES } from './strategies.js';
 import { recommend, pickWarning } from './recommend.js';
-import { needList } from './market.js';
-import { XANAX, SAMPLE_PRICES } from './items.js';
+import { needList, livePrices } from './market.js';
+import { XANAX, SAMPLE_PRICES, ITEMS } from './items.js';
+import { HAPPY_CAP } from './gain.js';
+import { JUMP_STACK } from './strategies.js';
 
 /*
  * The 30-day build projection is the heavy part of a model (thousands of
@@ -68,7 +70,8 @@ export function compareStrategies({ state, pc, shares, settings, prices }) {
             energyMax: state.energy.maximum,
             fastEnergy: state.energy.interval <= 600,
             days: settings.horizonDays || 30,
-            prices: { ...SAMPLE_PRICES, ...(prices || {}) },
+            // Stored price rows are objects: count what 10 units cost from the cheapest up (never $0).
+            prices: { ...SAMPLE_PRICES, ...livePrices(prices) },
             bliss: pc.perks.bliss,
             happyLossMult: pc.perks.happyLossMult,
             boosterCapH: settings.boosterCapH || 24,
@@ -97,7 +100,24 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const shares = targetShares(plan, pc.stats, build.shares);
     const keep = (build.gyms || []).filter((id) => pc.unlocked.includes(id) && gymAccess(gymById(id, pc.table), pc.stats).ok);
     const today = (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(now));
-    const ctx = { shares, unlocked: pc.unlocked, perks: pc.perks.mult, keep, active: state.gymId, table: pc.table, bliss: pc.perks.bliss, happyLossMult: pc.perks.happyLossMult, drugsToday: drugsToday(today, now), boostedToday: today.some((e) => e.kind === 'boost') };
+    const boostedToday = today.some((e) => e.kind === 'boost');
+    // Energy above the maximum is stacked (a jump) or held (daily choco) Xanax: read from the bars, so it survives Torn midnight and reloads.
+    const over = Math.max(0, energyAt(state, now) - state.energy.maximum);
+    const ctx = {
+        shares,
+        unlocked: pc.unlocked,
+        perks: pc.perks.mult,
+        keep,
+        active: state.gymId,
+        table: pc.table,
+        bliss: pc.perks.bliss,
+        happyLossMult: pc.perks.happyLossMult,
+        drugsToday: drugsToday(today, now),
+        boostedToday,
+        stackedSoFar: Math.min(JUMP_STACK, Math.ceil(over / ITEMS[XANAX].energy)),
+        holding: plan.strategy === 'dailyChoco' && !boostedToday && over > 0,
+        boosterCapH: settings.boosterCapH || undefined,
+    };
     const steps = dayTimeline({ state, now, strategy: plan.strategy, ctx });
     const next = steps[0] || null;
 
@@ -141,7 +161,9 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
 
     // Build ETA and next gym
     const energyPerDay = Math.round(((e.interval <= 600 ? 720 : 480) + 250 * Math.floor(1440 / 420) + e.maximum) / 10) * 10;
-    const proj = projectionFor({ stats: pc.stats, shares, energyPerDay, happy: state.happy.maximum + 300, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: 30, active: state.gymId, table: pc.table });
+    // With Ignorance Is Bliss happy doesn't fall back to the maximum: the projection trains at today's happy.
+    const projHappy = pc.perks.bliss ? Math.min(HAPPY_CAP, Math.max(state.happy.current, state.happy.maximum) + 300) : state.happy.maximum + 300;
+    const proj = projectionFor({ stats: pc.stats, shares, energyPerDay, happy: projHappy, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: 30, active: state.gymId, table: pc.table });
     // The next ladder gym after the highest one unlocked; its progress comes from the gym page (percentage on the button).
     const ladderTop = Math.max(0, ...pc.unlocked.filter((id) => id <= 24));
     const progressE = gymProgress && Number(gymProgress.nextId) === ladderTop + 1 ? gymProgress.energy : null;
@@ -156,7 +178,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const heads = [];
     if (!plan.buildPicked) heads.push({ tone: 'warn', text: 'Pick your build type', sub: 'Plan › Build: the plan trains toward it' });
     for (const w of strictWarnings(steps, now)) heads.push({ tone: 'warn', text: w.text });
-    if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS * 6) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
+    if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
     if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.known ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost) });
     let rec = null;
     if (compare) {

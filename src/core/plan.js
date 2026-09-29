@@ -10,10 +10,11 @@
 
 import { STATS, totalOf, trainsToReach } from './gain.js';
 import { splitSession } from './builds.js';
-import { energyAt, happyAt, drugFreeAt, refillAvailable, tornDayStart, nextQuarterTick, DAY, MIN, HOUR } from './bars.js';
+import { energyAt, happyAt, drugFreeAt, boosterFreeAt, refillAvailable, tornDayStart, nextQuarterTick, DAY, MIN, HOUR } from './bars.js';
 import { XANAX, ECSTASY, EDVD, CANDY_KISSES, POINTS, REFILL_POINTS, ITEMS, XANAX_CD_MIN, ECSTASY_CD_MIN, BOOSTER_CAP_H, boostersThatFit } from './items.js';
 import { STRATEGIES, JUMP_STACK } from './strategies.js';
 import { HAPPY_CAP } from './gain.js';
+import { catchUpLabel } from './turns.js';
 
 export const PLAN_TYPES = ['steady', 'goal', 'jump'];
 
@@ -206,6 +207,11 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     // Daily choco: one Xanax a day is held (its energy kept, not trained); at
     // its cooldown end, candy + Ecstasy just after a tick, train it all, refill.
     const daily = s === 'dailyChoco';
+    // Steady with Bliss: EDVD with each Xanax whenever the booster cooldown has room (happy never falls back).
+    const blissEdvd = s === 'blissSteady';
+    const capMs = (ctx.boosterCapH || BOOSTER_CAP_H) * HOUR;
+    const edvdMs = ITEMS[EDVD].boosterH * HOUR;
+    let boosterAt = Math.max(now, boosterFreeAt(state));
     let boosted = Boolean(ctx.boostedToday);
     let holding = Boolean(ctx.holding);
     let naturalOk = true;
@@ -250,7 +256,18 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             drugAt += xanCD;
             continue;
         }
-        train(drugAt, 'xanax', 'Xanax #' + xanN++, [{ id: XANAX, qty: 1 }]);
+        const items = [{ id: XANAX, qty: 1 }];
+        let label = 'Xanax #' + xanN++;
+        if (blissEdvd) {
+            const qty = Math.floor((capMs - Math.max(0, boosterAt - drugAt)) / edvdMs);
+            if (qty > 0) {
+                H = Math.min(HAPPY_CAP, H + qty * ITEMS[EDVD].happy * (ctx.adultNovelties10 ? 2 : 1));
+                items.push({ id: EDVD, qty });
+                label += ' + EDVD × ' + qty;
+                boosterAt = Math.max(boosterAt, drugAt) + qty * edvdMs;
+            }
+        }
+        train(drugAt, 'xanax', label, items);
         // The refill is worth most right after a session, when energy is near zero.
         if (refillLeft && !daily && drugAt + 5 * MIN < end) {
             advance(drugAt + 5 * MIN);
@@ -305,10 +322,15 @@ export function itemsNeeded(steps) {
  * was (the next planned drug step); trains add to the latest entry, or to
  * a "Natural energy" entry when nothing else happened.
  */
-export function logFromDiff(log, diff, { at, nextStep = null }) {
+export function logFromDiff(log, diff, { at, nextStep = null, catchUp = false }) {
     const out = (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(at));
     const trained = diff && diff.trained ? diff.trained : {};
     const gain = STATS.reduce((a, k) => a + (trained[k] || 0), 0);
+    // After a pause (Torn Trading ran): one entry for everything in between.
+    if (catchUp && diff && (gain > 0 || diff.drugTaken || diff.refillUsed || diff.boosterUsed)) {
+        out.push({ at, kind: 'catchup', label: catchUpLabel(trained, { drug: diff.drugTaken, booster: diff.boosterUsed, refill: diff.refillUsed }), trained: { ...trained }, gain, drug: Boolean(diff.drugTaken) });
+        return out;
+    }
     if (diff && (diff.drugTaken || diff.refillUsed || diff.boosterUsed)) {
         const kind = diff.refillUsed && !diff.drugTaken ? 'refill' : nextStep && nextStep.kind !== 'natural' ? nextStep.kind : 'xanax';
         const label = diff.refillUsed && !diff.drugTaken ? 'Refill · ' + REFILL_POINTS + ' points' : nextStep && nextStep.kind !== 'natural' ? nextStep.label : 'Xanax';
@@ -327,7 +349,7 @@ export function logFromDiff(log, diff, { at, nextStep = null }) {
     return out;
 }
 
-/** Drugs taken so far today, from the log (numbers the next Xanax). */
+/** Drugs taken so far today, from the log (numbers the next Xanax; a held Xanax counts too). */
 export function drugsToday(log, now) {
-    return (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(now) && (e.kind === 'xanax' || e.kind === 'stack')).length;
+    return (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(now) && (e.kind === 'xanax' || e.kind === 'stack' || e.kind === 'hold' || (e.kind === 'catchup' && e.drug))).length;
 }
