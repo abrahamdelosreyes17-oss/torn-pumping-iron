@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Pumping Iron
 // @namespace    torn-pumping-iron
-// @version      1.0.1
+// @version      1.1.0
 // @description  Gym planner and fight scout for Torn: what to take, what to train, what to buy, who you can beat. Reads the API and the page you're on; never acts for you.
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
@@ -48,7 +48,7 @@
 (function () {
     'use strict';
 
-    const PI_BUILD_VERSION = '1.0.1';
+    const PI_BUILD_VERSION = '1.1.0';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -345,6 +345,12 @@
 
     function get(name, fallback = null) {
         return gmGet(name, fallback);
+    }
+
+    /** A big stored value, parsed once per change (read-only: copy before changing). */
+    function getShared(name, fallback = null) {
+        const v = gmGetShared(name, fallback);
+        return v === null || v === undefined ? fallback : v;
     }
 
     /** Prices, parsed once per change (read-only: copy before changing). */
@@ -2026,14 +2032,19 @@
         // Special refills: in a boosted session as many as keep happy above the maximum (it resets there anyway);
         // otherwise a day's share. Each train costs happy, so dumping them all at the maximum drains it for days.
         const specialPerDay = Math.ceil(Math.max(0, Math.floor(o.special || 0)) / days);
-        const spendSpecial = () => {
-            let n = 0;
+        let spDay = -1;
+        let spToday = 0;
+        const spendSpecial = (day) => {
+            if (day !== spDay) {
+                spDay = day;
+                spToday = 0;
+            }
             const drain = HAPPY_LOSS_PER_ENERGY * maxE * lossMult;
-            while (specialLeft > 0 && (n < specialPerDay || H - drain > maxH)) {
+            while (specialLeft > 0 && (spToday < specialPerDay || H - drain > maxH)) {
                 E += maxE;
                 specialLeft--;
                 used[SPECIAL]++;
-                n++;
+                spToday++;
                 train();
             }
         };
@@ -2086,7 +2097,7 @@
                 }
                 if (day !== refillDay && E < 20) refill(day);
                 train();
-                if (took) spendSpecial();
+                if (took) spendSpecial(day);
                 energyBoost(t, day);
             } else if (id === 'candyXanax') {
                 // Once a day the Xanax waits for a tick, then candy + Xanax and train it (no Ecstasy: the candy happy lasts one session).
@@ -2101,7 +2112,7 @@
                             refill(day);
                             train();
                         }
-                        spendSpecial();
+                        spendSpecial(day);
                         doneDay = day;
                     }
                 } else {
@@ -2119,7 +2130,7 @@
                     train();
                     refill(day);
                     train();
-                    spendSpecial();
+                    spendSpecial(day);
                     phase = 'done';
                     doneDay = day;
                 } else if (phase !== 'hold' && t >= drugFree) {
@@ -2156,7 +2167,7 @@
                         refill(day);
                         train();
                     }
-                    spendSpecial();
+                    spendSpecial(day);
                     phase = 'stack';
                     stacked = 0;
                 }
@@ -2432,7 +2443,8 @@
         let t = now;
         let E = energyAt(state, now);
         let H = happyAt(state, now, { bliss });
-        let drugAt = Math.max(now, drugFreeAt(state));
+        // A drug step skipped in Discord moves the next one to the cooldown that would have followed it.
+        let drugAt = Math.max(now, drugFreeAt(state), ctx.drugNotBefore || 0);
         let refillLeft = refillAvailable(state, now);
         let xanN = (ctx.drugsToday || 0) + 1;
         const steps = [];
@@ -2457,13 +2469,15 @@
         };
         const fullAt = () => (E >= maxE ? t : t + Math.ceil((maxE - E) / inc) * interval);
         // Special refills the plan may use: all in the session that gains most (a jump or boost; else the next Xanax session).
-        // In a boosted session: as many as keep happy above the maximum; otherwise today's share (ctx.specialPerDay).
+        // In a boosted session: as many as keep happy above the maximum; otherwise what's left of today's share.
         let specialLeft = Math.max(0, Math.floor(ctx.specialLeft || 0));
+        let shareLeft = Math.max(0, Math.floor((ctx.specialPerDay || 0) - (ctx.specialToday || 0)));
         const special = (at) => {
             if (!specialLeft) return;
             const drain = HAPPY_LOSS_PER_ENERGY * maxE * (ctx.happyLossMult || 1);
-            let qty = Math.min(specialLeft, Math.max(0, Math.floor(ctx.specialPerDay || 0)));
+            let qty = Math.min(specialLeft, shareLeft);
             while (qty < specialLeft && H - drain * (qty + 1) > happyMax) qty++;
+            shareLeft = Math.max(0, shareLeft - qty);
             if (!qty) return;
             E += qty * maxE;
             train(at, 'special', 'Special refills × ' + qty, [{ id: SPECIAL, qty }], { note: 'free: they come with your account' });
@@ -2486,7 +2500,8 @@
                 drugAt += xanCD;
             }
             // The boost lands just after a quarter tick, once the drug cooldown allows the Ecstasy.
-            const tick = nextQuarterTick(drugAt - 1);
+            // An event that boosts this plan's items starts soon: the boost waits for it.
+            const tick = nextQuarterTick(Math.max(drugAt, ctx.holdBooster ? ctx.holdUntil || 0 : 0) - 1);
             const at = tick + MIN;
             advance(at);
             const capH = ctx.boosterCapH || BOOSTER_CAP_H;
@@ -2529,9 +2544,10 @@
 
         // Daily choco: one Xanax a day is held (its energy kept, not trained); at
         // its cooldown end, candy + Ecstasy just after a tick, train it all, refill.
-        const daily = s === 'dailyChoco';
+        // Before an event that boosts candy, today's candy waits for it (plain Xanax sessions meanwhile).
+        const daily = s === 'dailyChoco' && !ctx.holdBooster;
         // Candy + Xanax: once a day the Xanax waits for a quarter tick, then candy fills the booster cooldown (no Ecstasy).
-        const candyDaily = s === 'candyXanax';
+        const candyDaily = s === 'candyXanax' && !ctx.holdBooster;
         // Energy boosters on the booster cooldown after each Xanax session (steadyBoost from the ladder; steadyMax: FHC as often as it allows).
         const eb = ctx.holdBooster ? null : s === 'steadyMax' ? { id: FHC, perDay: Infinity } : s === 'steadyBoost' && ctx.energyBooster && ITEMS[ctx.energyBooster.id] ? ctx.energyBooster : null;
         let ebToday = ctx.boostersToday || 0;
@@ -2551,7 +2567,7 @@
                 advance(at);
                 const candyId = ctx.candyId || CANDY_KISSES;
                 const qty = ctx.candyCount || boostersThatFit(candyId, ctx.boosterCapH || BOOSTER_CAP_H);
-                H = Math.min(HAPPY_CAP, (H + qty * ITEMS[candyId].happy) * ITEMS[ECSTASY].happyMult);
+                H = Math.min(HAPPY_CAP, (H + qty * ITEMS[candyId].happy * candyMult) * ITEMS[ECSTASY].happyMult);
                 train(at, 'boost', 'Candy × ' + qty + ' + Ecstasy, then train it all', [{ id: candyId, qty }, { id: ECSTASY, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick });
                 if (refillLeft) {
                     E += Math.max(0, maxE - E);
@@ -2953,6 +2969,154 @@
         return parsePerks({});
     }
 
+    /* ===== src/core/events.js ===== */
+    /*
+     * Torn calendar events that change training, and what the plan does about
+     * them. Pure. Sources and confidence: docs/research-events-perks.md §1.
+     *
+     * `/v2/torn/calendar` gives each event's calendar day; most events run for
+     * 48 hours from the player's own time slot (`/v2/user/calendar`
+     * start_time), so the window is worked out the way TornTools does it and
+     * shown as "about" until a live event confirms it.
+     */
+
+
+
+    /** How far ahead an event is worth a heads-up. */
+    const EVENT_LOOKAHEAD_MS = 14 * DAY;
+
+    /** Keep the booster cooldown free this long before an event that uses it. */
+    const EVENT_BOOSTER_HOLD_MS = 24 * HOUR;
+
+    /**
+     * Events that matter, matched on the title (case-insensitive, start of title).
+     * canMult / candyMult: × on top of perks. usesBooster: the plan should come
+     * in with the booster cooldown at 0.
+     */
+    const TRAINING_EVENTS = [
+        {
+            id: 'caffeinecon',
+            match: /^caffeinecon/i,
+            name: 'CaffeineCon',
+            canMult: 2,
+            usesBooster: true,
+            effect: 'Energy drinks give double energy (the booster cooldown per can stays 2 h).',
+            advice: 'Come in with the booster cooldown at 0 and cans stocked; keep taking Xanax.',
+        },
+        {
+            id: 'diabetes',
+            match: /^world diabetes day/i,
+            name: 'World Diabetes Day',
+            candyMult: 3,
+            usesBooster: true,
+            effect: 'Candy gives triple happy.',
+            advice: 'A candy happy jump: booster cooldown at 0, energy saved, candy + Ecstasy + train in one quarter-hour.',
+        },
+        {
+            id: 'easter',
+            match: /^easter egg hunt/i,
+            name: 'Easter Egg Hunt',
+            usesBooster: true,
+            effect: 'Eggs: green +500 energy, yellow +10,000 happy, gold +1% all stats (each +6 h booster cooldown).',
+            advice: 'Use yellow eggs in a jump, green ones for energy; leave booster room for them.',
+        },
+        {
+            id: 'anniversary',
+            match: /^torn anniversary/i,
+            name: 'Torn Anniversary',
+            effect: 'The R in the TORN logo gives +500 happy (once per 15 min, 10 times).',
+            advice: 'One click fits a jump window: +500 happy.',
+        },
+        {
+            id: 'ead',
+            match: /^employee appreciation day/i,
+            name: 'Employee Appreciation Day',
+            effect: 'Job points triple (company training, not the gym).',
+            advice: 'More job points for your company specials; the gym plan doesn’t change.',
+        },
+    ];
+
+    /** "HH:MM" from `/v2/user/calendar` start_time (e.g. "12:00" or "12:00:00 TCT"), in minutes after 00:00 TCT. */
+    function slotMinutes(startTime) {
+        const m = String(startTime || '').match(/(\d{1,2}):(\d{2})/);
+        if (!m) return null;
+        const h = Number(m[1]);
+        const mm = Number(m[2]);
+        return h < 24 && mm < 60 ? h * 60 + mm : null;
+    }
+
+    /**
+     * The window this player gets. Personal events: from the day before at
+     * their slot to the day after at their slot (TornTools' rule); fixed ones:
+     * as listed. Times in ms.
+     */
+    function eventWindow(ev, slotMin = null) {
+        const start = Number(ev.start) * 1000;
+        const end = Number(ev.end) * 1000;
+        if (!(start > 0) || !(end > 0) || end <= start) return null;
+        if (ev.fixed_start_time === true || slotMin === null) return { start, end, exact: ev.fixed_start_time === true };
+        const day0 = Math.floor(start / DAY) * DAY;
+        const day1 = Math.floor(end / DAY) * DAY;
+        return { start: day0 - DAY + slotMin * MIN, end: day1 + DAY + slotMin * MIN, exact: false };
+    }
+
+    /**
+     * The training events coming up (or running now), soonest first.
+     * @param {object} calendar - /v2/torn/calendar's `calendar` {events[], competitions[]}
+     * @param {number} now
+     * @param {object} [o] - {startTime: /v2/user/calendar start_time}
+     * @returns {{id, name, title, start, end, exact, active, inMs, effect, advice, canMult?, candyMult?, usesBooster?}[]}
+     */
+    function upcomingEvents(calendar, now, { startTime = null } = {}) {
+        const list = calendar && Array.isArray(calendar.events) ? calendar.events : [];
+        const slot = slotMinutes(startTime);
+        const out = [];
+        for (const ev of list) {
+            const title = String((ev && ev.title) || '');
+            const def = TRAINING_EVENTS.find((d) => d.match.test(title));
+            if (!def) continue;
+            const w = eventWindow(ev, slot);
+            if (!w || w.end <= now || w.start - now > EVENT_LOOKAHEAD_MS) continue;
+            const { match, ...rest } = def;
+            void match;
+            out.push({ ...rest, title, start: w.start, end: w.end, exact: w.exact, active: now >= w.start, inMs: Math.max(0, w.start - now) });
+        }
+        return out.sort((a, b) => a.start - b.start);
+    }
+
+    /** Which plans each event helps (the rest train as usual through it). */
+    const EVENT_PLANS = {
+        caffeinecon: ['steadyBoost', 'steadyMax'],
+        diabetes: ['dailyChoco', 'chocoJump', 'candyXanax', 'consoleJump', 'consoleJumpToy'],
+        easter: ['steadyBoost', 'steadyMax', 'edvdJump', 'edvdJumpAN', 'happy99k', 'blissSteady'],
+    };
+
+    /**
+     * Should the plan keep the booster cooldown free now: an event that uses it
+     * starts within a day, and this plan uses what the event boosts.
+     */
+    function holdBoosterFor(events, now, strategy = null) {
+        return (events || []).find((e) => e.usesBooster && !e.active && e.start - now <= EVENT_BOOSTER_HOLD_MS && (!strategy || (EVENT_PLANS[e.id] || []).includes(strategy))) || null;
+    }
+
+    /** While an event runs: × on can energy and candy happy (on top of perks). */
+    function eventMults(events) {
+        const out = { canMult: 1, candyMult: 1 };
+        for (const e of events || []) {
+            if (!e.active) continue;
+            if (e.canMult) out.canMult *= e.canMult;
+            if (e.candyMult) out.candyMult *= e.candyMult;
+        }
+        return out;
+    }
+
+    /** Home's line: "CaffeineCon in 2 days: …" / "CaffeineCon now (until 16 Oct 12:00)". */
+    function eventHeadsUp(e, now) {
+        if (!e) return null;
+        const when = e.active ? 'now' : e.inMs < HOUR ? 'within the hour' : e.inMs < DAY ? 'in ' + Math.round(e.inMs / HOUR) + ' h' : 'in ' + Math.round(e.inMs / DAY) + ' days';
+        return { text: e.name + ' ' + when + (e.exact ? '' : ' (about)'), sub: e.effect + ' ' + e.advice, at: e.start, active: e.active, id: e.id, until: e.end };
+    }
+
     /* ===== src/api/torn.js ===== */
     /*
      * Torn API v2 calls the app makes, each a thin wrapper over TornApiClient
@@ -2960,6 +3124,7 @@
      * Shapes: docs/research-api-shapes.md. Every function returns plain data the
      * core can read; none of them retries on its own beyond the client.
      */
+
 
 
 
@@ -3069,7 +3234,9 @@
         } catch (error) {
             if (!(error instanceof TornApiError && (error.code === TORN_ERROR_ACCESS_LEVEL || error.code === TORN_ERROR_WRONG_FIELDS))) throw error;
         }
-        return { calendar: (d && d.calendar) || { events: [], competitions: [] }, startTime };
+        // Only the events the plan cares about are kept (the whole calendar would ride along on every Torn page).
+        const events = ((d && d.calendar && d.calendar.events) || []).filter((e) => TRAINING_EVENTS.some((t) => t.match.test(String((e && e.title) || ''))));
+        return { calendar: { events, competitions: [] }, startTime };
     }
 
     /** Your recent attacks (newest first), with Torn's fair-fight modifier and respect. */
@@ -3334,7 +3501,9 @@
             if (!state.stats) return;
             const h = this.store.get(this.keys.history, {}) || {};
             const day = tornDayStart(state.at);
-            h[day] = { ...state.stats, total: totalOf(state.stats) };
+            // Special refills as the day started (how many the plan used today).
+            const special = h[day] && h[day].special !== undefined ? h[day].special : state.specialRefills;
+            h[day] = { ...state.stats, total: totalOf(state.stats), ...(special !== null && special !== undefined ? { special } : {}) };
             const days = Object.keys(h).map(Number).sort((a, b) => a - b);
             while (days.length > 120) delete h[days.shift()];
             this.store.set(this.keys.history, h);
@@ -4001,12 +4170,12 @@
         const out = [];
         const fhcP = priceFor(FHC, prices);
         if (fhcP) {
-            const n = Math.min(boostersThatFit(FHC, capH), Math.floor(perDay / fhcP));
+            const n = Math.min(Math.floor(capH / ITEMS[FHC].boosterH), Math.floor(perDay / fhcP));
             if (n > 0) out.push({ id: FHC, perDay: n, energy: n * maxE, cost: n * fhcP });
         }
         const can = bestCan(prices, { canMult });
         if (can) {
-            const n = Math.min(boostersThatFit(can.id, capH), Math.floor(perDay / can.price));
+            const n = Math.min(Math.floor(capH / ITEMS[can.id].boosterH), Math.floor(perDay / can.price));
             if (n > 0) out.push({ id: can.id, perDay: n, energy: n * can.energy, cost: n * can.price });
         }
         out.sort((a, b) => b.energy - a.energy || a.cost - b.cost);
@@ -4107,133 +4276,6 @@
         return r.costPerStat === null ? Infinity : r.costPerStat;
     }
 
-    /* ===== src/core/events.js ===== */
-    /*
-     * Torn calendar events that change training, and what the plan does about
-     * them. Pure. Sources and confidence: docs/research-events-perks.md §1.
-     *
-     * `/v2/torn/calendar` gives each event's calendar day; most events run for
-     * 48 hours from the player's own time slot (`/v2/user/calendar`
-     * start_time), so the window is worked out the way TornTools does it and
-     * shown as "about" until a live event confirms it.
-     */
-
-
-
-    /** How far ahead an event is worth a heads-up. */
-    const EVENT_LOOKAHEAD_MS = 14 * DAY;
-
-    /** Keep the booster cooldown free this long before an event that uses it. */
-    const EVENT_BOOSTER_HOLD_MS = 24 * HOUR;
-
-    /**
-     * Events that matter, matched on the title (case-insensitive, start of title).
-     * canMult / candyMult: × on top of perks. usesBooster: the plan should come
-     * in with the booster cooldown at 0.
-     */
-    const TRAINING_EVENTS = [
-        {
-            id: 'caffeinecon',
-            match: /^caffeinecon/i,
-            name: 'CaffeineCon',
-            canMult: 2,
-            usesBooster: true,
-            effect: 'Energy drinks give double energy (the booster cooldown per can stays 2 h).',
-            advice: 'Come in with the booster cooldown at 0 and cans stocked; keep taking Xanax.',
-        },
-        {
-            id: 'diabetes',
-            match: /^world diabetes day/i,
-            name: 'World Diabetes Day',
-            candyMult: 3,
-            usesBooster: true,
-            effect: 'Candy gives triple happy.',
-            advice: 'A candy happy jump: booster cooldown at 0, energy saved, candy + Ecstasy + train in one quarter-hour.',
-        },
-        {
-            id: 'easter',
-            match: /^easter egg hunt/i,
-            name: 'Easter Egg Hunt',
-            usesBooster: true,
-            effect: 'Eggs: green +500 energy, yellow +10,000 happy, gold +1% all stats (each +6 h booster cooldown).',
-            advice: 'Use yellow eggs in a jump, green ones for energy; leave booster room for them.',
-        },
-        {
-            id: 'anniversary',
-            match: /^torn anniversary/i,
-            name: 'Torn Anniversary',
-            effect: 'The R in the TORN logo gives +500 happy (once per 15 min, 10 times).',
-            advice: 'One click fits a jump window: +500 happy.',
-        },
-        {
-            id: 'ead',
-            match: /^employee appreciation day/i,
-            name: 'Employee Appreciation Day',
-            effect: 'Job points triple (company training, not the gym).',
-            advice: 'More job points for your company specials; the gym plan doesn’t change.',
-        },
-    ];
-
-    /** "HH:MM" from `/v2/user/calendar` start_time (e.g. "12:00" or "12:00:00 TCT"), in minutes after 00:00 TCT. */
-    function slotMinutes(startTime) {
-        const m = String(startTime || '').match(/(\d{1,2}):(\d{2})/);
-        if (!m) return null;
-        const h = Number(m[1]);
-        const mm = Number(m[2]);
-        return h < 24 && mm < 60 ? h * 60 + mm : null;
-    }
-
-    /**
-     * The window this player gets. Personal events: from the day before at
-     * their slot to the day after at their slot (TornTools' rule); fixed ones:
-     * as listed. Times in ms.
-     */
-    function eventWindow(ev, slotMin = null) {
-        const start = Number(ev.start) * 1000;
-        const end = Number(ev.end) * 1000;
-        if (!(start > 0) || !(end > 0) || end <= start) return null;
-        if (ev.fixed_start_time === true || slotMin === null) return { start, end, exact: ev.fixed_start_time === true };
-        const day0 = Math.floor(start / DAY) * DAY;
-        const day1 = Math.floor(end / DAY) * DAY;
-        return { start: day0 - DAY + slotMin * MIN, end: day1 + DAY + slotMin * MIN, exact: false };
-    }
-
-    /**
-     * The training events coming up (or running now), soonest first.
-     * @param {object} calendar - /v2/torn/calendar's `calendar` {events[], competitions[]}
-     * @param {number} now
-     * @param {object} [o] - {startTime: /v2/user/calendar start_time}
-     * @returns {{id, name, title, start, end, exact, active, inMs, effect, advice, canMult?, candyMult?, usesBooster?}[]}
-     */
-    function upcomingEvents(calendar, now, { startTime = null } = {}) {
-        const list = calendar && Array.isArray(calendar.events) ? calendar.events : [];
-        const slot = slotMinutes(startTime);
-        const out = [];
-        for (const ev of list) {
-            const title = String((ev && ev.title) || '');
-            const def = TRAINING_EVENTS.find((d) => d.match.test(title));
-            if (!def) continue;
-            const w = eventWindow(ev, slot);
-            if (!w || w.end <= now || w.start - now > EVENT_LOOKAHEAD_MS) continue;
-            const { match, ...rest } = def;
-            void match;
-            out.push({ ...rest, title, start: w.start, end: w.end, exact: w.exact, active: now >= w.start, inMs: Math.max(0, w.start - now) });
-        }
-        return out.sort((a, b) => a.start - b.start);
-    }
-
-    /** Should the plan keep the booster cooldown free now (an event that uses it starts within a day)? */
-    function holdBoosterFor(events, now) {
-        return (events || []).find((e) => e.usesBooster && !e.active && e.start - now <= EVENT_BOOSTER_HOLD_MS) || null;
-    }
-
-    /** Home's line: "CaffeineCon in 2 days: …" / "CaffeineCon now (until 16 Oct 12:00)". */
-    function eventHeadsUp(e, now) {
-        if (!e) return null;
-        const when = e.active ? 'now' : e.inMs < HOUR ? 'within the hour' : e.inMs < DAY ? 'in ' + Math.round(e.inMs / HOUR) + ' h' : 'in ' + Math.round(e.inMs / DAY) + ' days';
-        return { text: e.name + ' ' + when + (e.exact ? '' : ' (about)'), sub: e.effect + ' ' + e.advice, at: e.start, active: e.active, id: e.id, until: e.end };
-    }
-
     /* ===== src/core/model.js ===== */
     /*
      * Everything a page shows, worked out from stored data in one pure pass:
@@ -4308,6 +4350,12 @@
     /** The booster cap: 24 h, plus faction Voracity's extra hours, or the setting if higher. */
     function boosterCapOf(pc, settings = {}) {
         return Math.max(settings.boosterCapH || 24, 24 + ((pc.perks && pc.perks.boosterCapExtraH) || 0));
+    }
+
+    /** Days left to spread special refills over (the whole horizon again once it has passed, never one day). */
+    function specialDaysLeft(horizon, daysSince) {
+        const left = horizon - daysSince;
+        return left >= 1 ? left : horizon;
     }
 
     /** Special refills the plan may still use: the number set, less what the account has used since. */
@@ -4416,7 +4464,17 @@
      */
     function withoutSkipped(steps, skipped = []) {
         if (!skipped || !skipped.length) return steps;
-        return steps.filter((s) => !skipped.some((x) => x.kind === s.kind && (Math.abs((x.stepAt || 0) - s.at) <= 10 * 60 * 1000 || (x.label && x.label === s.label))));
+        // Same Torn day only (labels like "Xanax #2" repeat every day), within 30 minutes of the skipped step's time.
+        return steps.filter((s) => !skipped.some((x) => x.kind === s.kind && tornDayStart(x.stepAt || x.at) === tornDayStart(s.at) && Math.abs((x.stepAt || 0) - s.at) <= 30 * 60 * 1000));
+    }
+
+    /** Drug steps skipped today: the next drug is planned from the cooldown that would have followed. */
+    const DRUG_STEP_KINDS = new Set(['xanax', 'stack', 'hold', 'boost', 'jump']);
+
+    function drugNotBefore(skipped, now) {
+        const today = (skipped || []).filter((x) => DRUG_STEP_KINDS.has(x.kind) && tornDayStart(x.stepAt || 0) === tornDayStart(now));
+        if (!today.length) return 0;
+        return Math.max(...today.map((x) => x.stepAt)) + XANAX_CD_MIN * 60 * 1000;
     }
 
     function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, now }) {
@@ -4447,7 +4505,9 @@
             boosterCapH: boosterCapOf(pc, settings),
             // Only where the comparison found they add stats (they cost happy like any train).
             specialLeft: compare && compare[plan.strategy] && compare[plan.strategy].specialHelps === false ? 0 : specialLeft(plan, state),
-            specialPerDay: Math.ceil(specialLeft(plan, state) / Math.max(1, (settings.horizonDays || 30) - Math.floor((now - (plan.specialSetAt || now)) / DAY))),
+            // Special refills used since the Torn day began (the count at the day's first read, less now).
+            specialToday: history && history[tornDayStart(now)] && history[tornDayStart(now)].special !== undefined && state.specialRefills !== null ? Math.max(0, history[tornDayStart(now)].special - state.specialRefills) : 0,
+            specialPerDay: Math.ceil(specialLeft(plan, state) / specialDaysLeft(settings.horizonDays || 30, Math.floor((now - (plan.specialSetAt || now)) / DAY))),
             energyBooster: compare && compare.steadyBoost ? compare.steadyBoost.booster : null,
             boostersToday: today.filter((e) => e.kind === 'booster').length,
             candyMult: pc.perks.candyMult || 1,
@@ -4457,8 +4517,16 @@
         };
         // Torn events that change training: a heads-up, and no boosters in the day before one that needs the booster cooldown.
         const events = statics.calendar ? upcomingEvents(statics.calendar.calendar, now, { startTime: statics.calendar.startTime }) : [];
-        const hold = holdBoosterFor(events, now);
-        if (hold) ctx.holdBooster = hold.id;
+        const hold = holdBoosterFor(events, now, plan.strategy);
+        if (hold) {
+            ctx.holdBooster = hold.id;
+            ctx.holdUntil = hold.start;
+        }
+        ctx.drugNotBefore = drugNotBefore(skipped, now);
+        // During CaffeineCon / World Diabetes Day the day plan counts the event's cans or candy.
+        const em = eventMults(events);
+        ctx.canMult = (ctx.canMult || 1) * em.canMult;
+        ctx.candyMult = (ctx.candyMult || 1) * em.candyMult;
         const steps = withoutSkipped(dayTimeline({ state, now, strategy: plan.strategy, ctx }), skipped);
         const next = steps[0] || null;
 
@@ -4517,15 +4585,15 @@
 
         // Heads-up
         const heads = [];
-        if (!plan.buildPicked) heads.push({ tone: 'warn', text: 'Pick your build type', sub: 'Plan › Build: the plan trains toward it' });
+        if (!plan.buildPicked) heads.push({ tone: 'warn', text: 'Pick your build type', sub: 'Plan › Build: the plan trains toward it', go: 'plan' });
         for (const w of strictWarnings(steps, now)) heads.push({ tone: 'warn', text: w.text });
         if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
-        if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.known ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost) });
+        if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.known ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost), go: 'progress' });
         for (const e of events.slice(0, 2)) {
             const hu = eventHeadsUp(e, now);
-            heads.push({ tone: e.active ? 'good' : 'plain', text: hu.text, sub: hu.sub, event: e.id });
+            heads.push({ tone: e.active ? 'good' : 'plain', text: hu.text, sub: hu.sub, event: e.id, go: 'plan' });
         }
-        if (hold && steps.some((s2) => (s2.items || []).some((it) => ITEMS[it.id] && ITEMS[it.id].kind === 'booster'))) heads.push({ tone: 'warn', text: 'Keep the booster cooldown free', sub: hold.name + ' starts within a day' });
+        if (hold) heads.push({ tone: 'warn', text: 'Booster cooldown kept free', sub: hold.name + ' starts within a day: your plan’s ' + (hold.id === 'diabetes' ? 'candy' : 'cans and FHC') + ' count ' + (hold.canMult || hold.candyMult || 1) + '× then' });
         let rec = null;
         let ladder = null;
         const pickBy = PICK_BY[plan.pickBy] ? plan.pickBy : 'most';
@@ -4536,7 +4604,7 @@
             if (r.recommended === plan.strategy) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is still best' });
             else if (mine) {
                 const w = pickWarning(compare[r.recommended], mine, { bliss: pc.perks.bliss, days: settings.horizonDays || 30 });
-                if (w.warn) heads.push({ tone: 'warn', text: (STRATEGIES[r.recommended] || {}).name + ' would gain more', sub: 'see Plan' });
+                if (w.warn) heads.push({ tone: 'warn', text: (STRATEGIES[r.recommended] || {}).name + ' would gain more', sub: 'see Plan', go: 'plan' });
             }
             ladder = energyLadder({ state, pc, shares, prices, compare, recommended: r.recommended, days: settings.horizonDays || 30, budget: settings.budget || Infinity, specialHave: state.specialRefills || 0, specialUse: specialLeft(plan, state) });
         }
@@ -5110,8 +5178,9 @@
     /** What the engine uses from a learning run: per-stat multipliers, the damping mode, the fight model. */
     function learnedModel(learned) {
         if (!learned) return { mult: { str: 1, spd: 1, def: 1, dex: 1 }, mode: null, fight: null };
+        // The model in use: the learned one when kept, else the one it was checked against (itself possibly learned earlier).
         const g = applyGymModel(learned.gym || null);
-        return { mult: g.mult, mode: learned.gym && learned.gym.accepted ? g.mode : null, fight: learned.fights && learned.fights.accepted ? learned.fights.model : null };
+        return { mult: g.mult, mode: learned.gym ? g.mode : null, fight: learned.fights && learned.fights.accepted ? learned.fights.model : null };
     }
 
     /**
@@ -5131,6 +5200,22 @@
         ];
     }
 
+    const STAT_KEYS = ['str', 'spd', 'def', 'dex'];
+    const inRange = (v, lo, hi) => Number.isFinite(v) && v >= lo && v <= hi;
+
+    /** One imported gym sample, or null when it doesn't look like one (a crafted file can't hang the page). */
+    function cleanSample(s) {
+        if (!s || typeof s !== 'object' || !STAT_KEYS.includes(s.stat) || !inRange(s.trains, 1, 2000) || !inRange(s.actual, 0, 1e10)) return null;
+        const out = { at: inRange(s.at, 0, 1e13) ? s.at : null, stat: s.stat, trains: Math.floor(s.trains), actual: s.actual, predicted: inRange(s.predicted, 0, 1e10) ? s.predicted : null };
+        if (inRange(s.S, 0, 1e13) && inRange(s.H, 0, 99999) && inRange(s.dots, 0, 20) && inRange(s.E, 1, 50)) Object.assign(out, { S: s.S, H: s.H, dots: s.dots, E: s.E, perks: inRange(s.perks, 0.1, 10) ? s.perks : 1 });
+        return out;
+    }
+
+    function cleanFight(f) {
+        if (!f || typeof f !== 'object' || !inRange(f.predictedWin, 0, 1) || typeof f.won !== 'boolean') return null;
+        return { at: inRange(f.at, 0, 1e13) ? f.at : null, who: typeof f.who === 'string' ? f.who.slice(0, 20) : null, predictedWin: f.predictedWin, won: f.won, predictedHpKept: inRange(f.predictedHpKept, 0, 1) ? f.predictedHpKept : null, hpKept: inRange(f.hpKept, 0, 1) ? f.hpKept : null };
+    }
+
     /** A friend's export, read back (never merged into your own data). */
     function importFiles(files) {
         const read = (n) => {
@@ -5144,7 +5229,11 @@
         const fights = read('fights.json');
         const meta = read('meta.json');
         if (!Array.isArray(samples) && !Array.isArray(fights)) throw new Error('This zip has no learning data (gym-samples.json / fights.json).');
-        return { samples: Array.isArray(samples) ? samples : [], fights: Array.isArray(fights) ? fights : [], meta: meta || {} };
+        return {
+            samples: (Array.isArray(samples) ? samples : []).map(cleanSample).filter(Boolean).slice(-5000),
+            fights: (Array.isArray(fights) ? fights : []).map(cleanFight).filter(Boolean).slice(-5000),
+            meta: meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {},
+        };
     }
 
     /* ===== src/runtime.js ===== */
@@ -5153,6 +5242,7 @@
      * tabs, visible only, silent while Torn Trading runs), the state feed, and the model every surface renders
      * from. Userscript-only; core/ and api/ stay plain modules.
      */
+
 
 
 
@@ -5252,7 +5342,7 @@
         const s = get(K.userState, null);
         const state = s && s.api ? normalizeState(s.api, s.at) : null;
         if (!state) return { ready: false, hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)) };
-        const statics = get(K.userStatic, {}) || {};
+        const statics = getShared(K.userStatic, {}) || {};
         const plan = getPlan();
         const settings = getSettings();
         const { compare, pc } = comparisonFor(state, statics, plan, settings);
@@ -5328,15 +5418,17 @@
         const samples = cal.samples || [];
         const fights = joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []);
         const prev = get(K.learned, null);
-        const sig = samples.length + ':' + fights.length;
+        // New trains or fights since the last run (counts stop growing at the cap; the newest time doesn't).
+        const sig = [samples.length, samples.length ? samples[samples.length - 1].at || 0 : 0, fights.length, fights.length ? fights[fights.length - 1].at : 0].join(':');
         if (!force && prev && (now - prev.at < LEARN_EVERY_MS || prev.sig === sig)) return prev;
         set(K.fightLog, fights);
-        const current = prev && prev.gym && prev.gym.accepted ? prev.gym.model : null;
+        // The model in use (kept earlier, or kept over and over since) is the one a new one must beat.
+        const current = prev && prev.gym ? applyGymModel(prev.gym) : null;
         const res = { ...runLearning({ samples, fights, now, current }), sig };
         set(K.learned, res);
         const log = get(K.learnLog, []) || [];
         log.push({ at: now, gym: { accepted: res.gym.accepted, heldOut: res.gym.heldOut, mode: res.gym.model.mode, mult: res.gym.model.mult, sessions: res.gym.sessions, candidates: res.gym.candidates }, fights: { accepted: res.fights.accepted, model: res.fights.model, fights: res.fights.fights, heldOut: res.fights.heldOut } });
-        set(K.learnLog, log.slice(-60));
+        set(K.learnLog, log.slice(-30));
         return res;
     }
 
@@ -5619,6 +5711,14 @@
         const base = workerBase(f.base);
         if (f.tornKey && [getKey(K.apiKey), getKey(K.ffsKey), getKey(K.tsKey)].filter(Boolean).includes(f.tornKey.trim())) throw new Error('That is your main key. Make a separate custom key for the Worker (user: basic, bars, cooldowns, refills, travel · faction: members, chain, wars · market: itemmarket).');
         const prev = discordState();
+        // A new address: the old Worker forgets you (best-effort), so your key and webhook don't stay there.
+        if (prev && prev.base !== base) {
+            try {
+                await workerForget({ base: prev.base, secret: prev.secret });
+            } catch {
+                // It may be gone already.
+            }
+        }
         const secret = prev && prev.base === base ? prev.secret : newSecret();
         const body = { base, secret, invite: f.invite || null, plan: planPayload(model) };
         if (f.webhookUrl) body.webhookUrl = f.webhookUrl.trim();
@@ -5683,7 +5783,8 @@
                 const acked = applyAcks(r.acks, Date.now());
                 set(K.worker, { ...(get(K.worker, {}) || {}), lastError: pausedText(r), ready: Boolean(r.ready), linked: Boolean(r.linked), bot: Boolean(r.bot), pendingAcks: acked });
             })
-            .catch((e) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks }));
+            // Failed: the plan counts as unsent (next minute tries again); the acks wait too.
+            .catch((e) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks, lastSig: w.lastSig }));
         return true;
     }
 
@@ -5836,7 +5937,7 @@
 
     /* tables (steps, sources, targets, war) */
     .tbl { width: 100%; border-collapse: collapse; }
-    .tbl th { text-align: left; font-size: 11px; font-weight: bold; letter-spacing: .5px; text-transform: uppercase; color: var(--dim); padding: 0 8px 6px; white-space: nowrap; }
+    .tbl th { text-align: left; font-size: 11px; font-weight: bold; letter-spacing: .5px; text-transform: uppercase; color: var(--muted); padding: 0 8px 6px; white-space: nowrap; }
     .tbl td { height: var(--row); padding: 0 8px; border-top: 1px solid var(--line); }
     .tbl .r { text-align: right; }
     .tbl .t { font: 600 15px var(--display); color: var(--muted); width: 56px; }
@@ -6083,7 +6184,7 @@
     .tbl tr.sub td:first-child { padding-left: 22px; }
     .verdict { font-size: 12px; }
     svg.ch { width: 100%; display: block; overflow: visible; }
-    svg.ch text { font: 11px Arial; fill: var(--dim); }
+    svg.ch text { font: 11px Arial; fill: var(--muted); }
     svg.ch .ax { stroke: var(--line2); stroke-width: 1; }
     svg.ch .grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
     .legend2 { display: flex; gap: 14px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
@@ -6133,6 +6234,20 @@
     .plansel .opt span { color: var(--muted); font-size: 12px; }
     .plansel .opt.on { outline: 1px solid var(--chalk); }
     .main > .sec, .main > .sec:first-child { padding: 18px 20px; }
+    .heads li.go { cursor: pointer; }
+    .heads li.go:hover div, .heads li.go:focus-visible div { color: var(--white); }
+    .heads li.go:focus-visible { outline: 2px solid var(--chalk); outline-offset: 2px; }
+    .tbl tr.click:focus-visible td { box-shadow: inset 0 0 0 2px var(--chalk); }
+    .pi-chip:focus-visible { outline: 2px solid var(--chalk); }
+    /* Narrow windows (a tablet): bars wrap, the pane goes under the page. */
+    @media (max-width: 1000px) {
+      .app { min-width: 0; }
+      .top { flex-wrap: wrap; height: auto; padding: 6px 16px; }
+      .strip, .strip.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .body { grid-template-columns: minmax(0, 1fr); padding: 16px; }
+      .mult { grid-template-columns: minmax(0, 1fr); }
+      .tbl { display: block; overflow-x: auto; }
+    }
     .warnb.paused { border-radius: 0; margin: 0; padding: 12px 24px; }
     .dev-scatter { max-width: 520px; }
     `;
@@ -6226,7 +6341,7 @@
                 const gapTxt = (r.share * 100).toFixed(1) + '% · ' + (r.over ? 'over' : r.gap > 0 ? '+' + fmtInt(r.gap) : 'on build');
                 let tod;
                 if (todayCol === 'trains') tod = h('span', { class: 'gap' + (r.plannedTrains ? ' s-' + k : ''), text: r.plannedTrains + ' trains' });
-                else tod = h('span', { class: 'tod' + (r.today ? ' s-' + k : ''), style: r.today ? null : 'color:var(--dim)', text: r.today ? fmtSigned(r.today) + ' today' : r.plannedTrains ? r.plannedTrains + ' planned' : '+0 today' });
+                else tod = h('span', { class: 'tod' + (r.today ? ' s-' + k : ''), style: r.today ? null : 'color:var(--muted)', text: r.today ? fmtSigned(r.today) + ' today' : r.plannedTrains ? r.plannedTrains + ' planned' : '+0 today' });
                 return h('div', { class: 'sgr' }, [
                     h('b', { class: 'n s-' + k, text: STAT_LABEL[k] }),
                     h('span', { class: 'v', text: fmtInt(r.value) }),
@@ -6240,11 +6355,15 @@
     }
 
     /** A dot-and-line list (Heads-up). */
-    function headsList(items) {
+    function headsList(items, go = null) {
         return h(
             'ul',
             { class: 'heads num' },
-            items.map((x) => h('li', { class: x.tone === 'warn' ? 'w' : x.tone === 'good' ? 'g' : null }, [h('i'), h('div', {}, [x.text, x.sub ? h('span', { text: ' · ' + x.sub }) : null])])),
+            items.map((x) => {
+                const link = go && x.go;
+                const open = () => go(x.go);
+                return h('li', { class: [x.tone === 'warn' ? 'w' : x.tone === 'good' ? 'g' : null, link ? 'go' : null].filter(Boolean).join(' ') || null, role: link ? 'link' : null, tabindex: link ? '0' : null, onclick: link ? open : null, onkeydown: link ? (e) => { if (e.key === 'Enter') open(); } : null }, [h('i'), h('div', {}, [x.text, x.sub ? h('span', { text: ' · ' + x.sub }) : null])]);
+            }),
         );
     }
 
@@ -6547,7 +6666,7 @@
             const k = r.stat;
             const trains = tot[k] || 0;
             const toGo = r.over ? 'over' : r.gap > 0 ? '+' + fmtShort(r.gap) + ' to go' : 'on target';
-            const tod = trains ? h('span', { class: 'tod s-' + k, text: trains + ' train' + (trains === 1 ? '' : 's') }) : h('span', { class: 'tod', style: 'color:var(--dim)', text: r.over ? 'skip' : 'later' });
+            const tod = trains ? h('span', { class: 'tod s-' + k, text: trains + ' train' + (trains === 1 ? '' : 's') }) : h('span', { class: 'tod muted', text: r.over ? 'skip' : 'later' });
             return h('div', { class: 'sgr' }, [
                 h('b', { class: 'n s-' + k, text: STAT_LABEL[k] }),
                 h('span', { class: 'v', text: fmtInt(r.value) }),
@@ -6692,7 +6811,7 @@
         return {
             strip: true,
             main: [lead, youVsBuild(m), week].filter(Boolean),
-            pane: [buyCard(m, ctx), h('div', {}, [sectionHead('Heads-up', null, null, 'h3'), headsList(m.heads.length ? m.heads : [{ tone: 'good', text: 'Nothing needs you' }])]), planLine(m, ctx), weekCard(m, ctx)],
+            pane: [buyCard(m, ctx), h('div', {}, [sectionHead('Heads-up', null, null, 'h3'), headsList(m.heads.length ? m.heads : [{ tone: 'good', text: 'Nothing needs you' }], (tab) => ctx.go(tab))]), planLine(m, ctx), weekCard(m, ctx)],
         };
     }
 
@@ -6770,8 +6889,8 @@
         return det;
     }
 
-    function numberInput(value, width, onSet, { money = false, min = 0, max = Infinity } = {}) {
-        const inp = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:' + width + 'px', value: money ? '$' + fmtInt(value) : String(value) });
+    function numberInput(value, width, onSet, { money = false, min = 0, max = Infinity, label = null } = {}) {
+        const inp = h('input', { class: 'inp num', inputmode: 'numeric', 'aria-label': label, style: 'width:' + width + 'px', value: money ? '$' + fmtInt(value) : String(value) });
         inp.addEventListener('change', () => {
             const v = Number(String(inp.value).replace(/[^\d]/g, ''));
             if (Number.isFinite(v)) onSet(Math.max(min, Math.min(max, v)));
@@ -6793,10 +6912,10 @@
         const bar1 = [
             planChooser(ctx),
             t('lab', 'for'),
-            numberInput(days, 52, (v) => ctx.setSettings({ horizonDays: Math.max(3, Math.min(90, v || 30)) })),
+            numberInput(days, 52, (v) => ctx.setSettings({ horizonDays: Math.max(3, Math.min(90, v || 30)) }), { label: 'Days' }),
             h('span', { class: 'muted', text: 'days' }),
             ctx.plan.pickBy === 'max' ? h('span', { class: 'muted', text: '· no budget' }) : t('lab', 'with'),
-            ctx.plan.pickBy === 'max' ? null : numberInput(s.budget || 0, 130, (v) => ctx.setSettings({ budget: v }), { money: true }),
+            ctx.plan.pickBy === 'max' ? null : numberInput(s.budget || 0, 130, (v) => (v > 0 ? ctx.setSettings({ budget: v }) : ctx.rerender()), { money: true, label: 'Budget' }),
             ctx.plan.pickBy === 'max' ? null : h('span', { class: 'muted', text: 'budget' }),
             h('span', { class: 'sep' }),
             t('lab', 'Train toward'),
@@ -6814,7 +6933,7 @@
             bar2.push(
                 t('lab', 'Special refills'),
                 h('span', { class: 'muted' }, ['you have ', h('b', { class: 'white', text: fmtInt(sp.have) }), ' · use']),
-                numberInput(sp.use || 0, 58, (v) => ctx.setPlan({ specialUse: Math.min(v, sp.have), specialStart: sp.have, specialSetAt: Date.now() })),
+                numberInput(sp.use || 0, 58, (v) => ctx.setPlan({ specialUse: Math.min(v, sp.have), specialStart: sp.have, specialSetAt: Date.now() }), { label: 'Special refills to use' }),
                 h('span', { class: 'muted', text: 'in this plan · each adds ' + each + ' energy' + (perE ? ' (about +' + fmtShort(perE * each) + ' stats for you)' : '') + (sp.use ? ' · ' + sp.left + ' left' : ' · set how many to use') }),
                 h('span', { class: 'info', title: 'Shown because Torn says your account has special refills. They aren’t limited to one a day: the plan puts them where they add the most (in a happy jump or boost, where the happy they cost resets anyway) and keeps the rest.', text: 'i' }),
                 h('span', { class: 'sep' }),
@@ -6830,7 +6949,7 @@
         const vals = (plan.goal && plan.goal.kind === 'statTargets' && plan.goal.targets) || {};
         const inputs = {};
         return h('div', { class: 'row num', style: 'margin-top:12px;flex-wrap:wrap;gap:12px' }, [
-            ...STATS.map((k) => h('label', { class: 'field', style: 'width:150px' }, [t('lab', STAT_LABEL[k] + ' to reach'), (inputs[k] = h('input', { class: 'inp num', inputmode: 'numeric', placeholder: fmtInt(m.pc.stats[k]), value: vals[k] ? String(vals[k]) : '' }))])),
+            ...STATS.map((k) => h('label', { class: 'field', style: 'width:150px' }, [t('lab', STAT_LABEL[k] + ' to reach'), (inputs[k] = h('input', { class: 'inp num', inputmode: 'numeric', 'aria-label': STAT_LABEL[k] + ' to reach', placeholder: fmtInt(m.pc.stats[k]), value: vals[k] ? String(vals[k]) : '' }))])),
             h('button', {
                 class: 'btn primary',
                 type: 'button',
@@ -6857,13 +6976,13 @@
         const figs = [
             h('div', { class: 'fig' }, [t('lab', days + ' days'), h('b', { class: 'good', text: '+' + fmtShort(best.gained) })]),
             h('div', { class: 'fig' }, [t('lab', 'Cost'), h('b', { text: fmtMoney(best.cost) })]),
-            h('div', { class: 'fig' }, [t('lab', 'Per $1M'), h('b', { text: best.cost > 0 ? chartNum(perMillion(best)) : '—' })]),
+            h('div', { class: 'fig' }, [t('lab', 'Per $1M'), h('b', { text: best.cost > 0 ? chartNum(perMillion(best)) + ' stats' : '—' })]),
             h('div', { class: 'fig' }, [t('lab', pickBy === 'max' ? 'A day' : 'Per day'), h('b', { text: pickBy === 'max' ? fmtMoney(best.cost / days) : planPerDay(best, days) })]),
         ];
         const reasons = rec.reasons.length ? rec.reasons.join(' ') : 'It gains the most stats inside your budget.';
         const spend = m.spend && m.spend.lastsDays !== null && m.spend.cash !== null ? ' Your ' + fmtMoney(m.spend.cash) + ' on hand lasts about ' + Math.round(m.spend.lastsDays) + ' days at ' + fmtMoney(m.spend.perDay) + ' a day.' : '';
         const kids = [
-            sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + (pickBy === 'max' ? 'no budget' : fmtMoney(ctx.settings.budget)) + ' · ' + days + ' days'])),
+            sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + (pickBy === 'max' || !(ctx.settings.budget > 0) ? 'no budget' : fmtMoney(ctx.settings.budget)) + ' · ' + days + ' days'])),
             h('div', { class: 'prime num' }, [
                 h('div', {}, [h('span', { class: 'pill-tag chalk', text: kindOf(rec.recommended) }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: S.what })]),
                 h('div', { class: 'figs' }, figs),
@@ -6906,6 +7025,14 @@
                 h('tr', {
                     class: 'click' + (sel ? ' sel' : ''),
                     tabindex: '0',
+                    role: 'button',
+                    'aria-label': 'Pick ' + st.name,
+                    onkeydown: (e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            e.currentTarget.click();
+                        }
+                    },
                     onclick: () => {
                         const w = pickWarning(best, compare[a.id], { bliss: m.pc.perks.bliss, days });
                         if (w.warn) {
@@ -7491,7 +7618,7 @@
                 h('tr', { class: 'ih' }, [
                     h('td', { colspan: '6' }, [
                         h('b', { text: n.name + ' × ' + fmtInt(n.buy) }),
-                        h('span', { class: 'muted', text: ' · ' + (n.id === POINTS ? refillWords(n, days) : perDay) + ' · you have ' + fmtInt(n.have) + (fill ? ' · ' + fmtMoney(fill.total) : '') }),
+                        h('span', { class: 'muted', text: ' · ' + (n.id === POINTS ? refillWords() : perDay) + ' · you have ' + fmtInt(n.have) + (fill ? ' · ' + fmtMoney(fill.total) : '') }),
                         side ? h('span', { class: 'verdict c-good', style: 'margin-left:10px', text: side.text }) : null,
                     ]),
                 ]),
@@ -7576,7 +7703,7 @@
             const p = prices[id] || {};
             const cheapest = p.listings && p.listings.length ? Math.min(...p.listings.map((l) => l.price)) : null;
             const pct = cheapest && p.avg7 ? (100 * (cheapest - p.avg7)) / p.avg7 : null;
-            return h('tr', {}, [h('td', {}, [h('b', { class: 'w', text: itemName(id) })]), h('td', { style: 'width:96px' }, [sparkline(p.lows7 || [], { w: 90, h: 22, color: planIds.has(String(id)) ? '#efebe2' : '#6c737a' })]), h('td', { class: 'r', text: cheapest ? '$' + fmtInt(cheapest) : '—' }), h('td', { class: 'r ' + (pct !== null && pct < -1 ? 'c-good' : 'muted'), text: pct === null ? '' : (pct >= 0 ? '+' : '−') + Math.abs(pct).toFixed(1) + '%' })]);
+            return h('tr', {}, [h('td', {}, [h('b', { class: 'w', text: itemName(id) })]), h('td', { style: 'width:96px' }, [sparkline(p.lows7 || [], { w: 90, h: 22, color: planIds.has(String(id)) ? '#efebe2' : '#6c737a' })]), h('td', { class: 'r' + (cheapest ? '' : ' muted'), text: cheapest ? '$' + fmtInt(cheapest) : ctx.paused ? 'paused' : p.error ? 'no answer' : 'loading…' }), h('td', { class: 'r ' + (pct !== null && pct < -1 ? 'c-good' : 'muted'), text: pct === null ? '' : (pct >= 0 ? '+' : '−') + Math.abs(pct).toFixed(1) + '%' })]);
         });
         const heldIds = [...new Set([XANAX, POINTS, ECSTASY, EDVD, CANDY_KISSES, FHC, MUNSTER].map(String))];
         const held = heldIds.map((id) => [id === POINTS ? 'Points' : itemName(Number(id)), Number(inv[id === POINTS ? POINTS : Number(id)]) || 0]);
@@ -7643,7 +7770,7 @@
     function seriesFor(m, ctx, range) {
         const hist = ctx.history || {};
         const today = tornDayStart(m.now);
-        const line = ctx.planLine && ctx.planLine.start <= today ? ctx.planLine : null;
+        const line = ctx.planProjection && ctx.planProjection.start <= today ? ctx.planProjection : null;
         let days = Object.keys(hist).map(Number).filter((d) => d <= today).sort((a, b) => a - b);
         if (line) days = days.filter((d) => d >= line.start);
         if (range !== 'all') days = days.slice(-range);
@@ -7804,7 +7931,7 @@
                 h('dt', { text: 'On pace for' }),
                 h('dd', { text: fmtMoney(perDay * days) }),
                 m.spend && m.spend.cash !== null ? h('dt', { text: 'Cash on hand' }) : null,
-                m.spend && m.spend.cash !== null ? h('dd', { text: fmtMoney(m.spend.cash) + (m.spend.lastsDays !== null ? ' · lasts ~' + Math.round(m.spend.lastsDays) + ' days' : '') }) : null,
+                m.spend && m.spend.cash !== null ? h('dd', { text: fmtMoney(m.spend.cash) + (m.spend.lastsDays !== null ? (m.spend.lastsDays < 1 ? ' · lasts under a day' : ' · lasts ~' + Math.round(m.spend.lastsDays) + ' days') : '') }) : null,
             ]),
         ]);
     }
@@ -8527,6 +8654,7 @@
 
 
 
+
     /** SHA-256 of the developer key (the key itself lives only on the owner's laptop). */
     const DEV_KEY_SHA256 = '867b596b74aed64f484c60611ac2b3cc03c7ceb45230a140e4be5a8330d660e2';
 
@@ -8567,7 +8695,8 @@
         if (!ctx.dev) return null;
         const d = ctx.dev.data();
         const unlocked = ctx.dev.unlocked();
-        const keyIn = h('input', { class: 'inp', type: 'password', autocomplete: 'off', placeholder: 'Developer key', 'aria-label': 'Developer key', style: 'width:220px' });
+        const keyIn = h('input', { ...keyInputAttrs(), class: 'inp' + (keyInputAttrs().type === 'text' ? ' masked' : ''), placeholder: 'Developer key', 'aria-label': 'Developer key', style: 'width:220px' });
+        keyMask(keyIn, 'masked');
         const msg = h('span', { class: 'msg' });
         const unlock = async () => {
             msg.textContent = 'Checking…';
@@ -8644,7 +8773,9 @@
         const src = ctx.ui.devSource === 'friend' && friend ? 'friend' : 'mine';
         const now = Date.now();
         // Mine: what the app kept. A friend's export: the learners run on it here (never merged into your model).
-        const set = src === 'friend' ? { samples: friend.samples, fights: friend.fights, learned: { at: now, gym: learnGym(friend.samples, { now }), fights: learnFights(friend.fights, { now }) } } : { samples: mine.samples, fights: mine.fights, learned: mine.learned || { at: now, gym: learnGym(mine.samples, { now }), fights: learnFights(mine.fights, { now }) } };
+        // The learners run once per data set shown (not on every redraw).
+        const runOnce = (holder, samples, fights) => holder.learned || (holder.learned = { at: now, gym: learnGym(samples, { now }), fights: learnFights(fights, { now }) });
+        const set = src === 'friend' ? { samples: friend.samples, fights: friend.fights, learned: runOnce(friend, friend.samples, friend.fights) } : { samples: mine.samples, fights: mine.fights, learned: mine.learned || runOnce(ctx.ui.devMine || (ctx.ui.devMine = {}), mine.samples, mine.fights) };
         const gym = set.learned.gym;
         const fights = set.learned.fights;
 
@@ -8684,7 +8815,7 @@
         ];
 
         // What it learned, in plain words.
-        const lines = [...describeGym(gym), ...describeFights(fights)];
+        const lines = [...describeGym(gym), ...describeFights(fights).filter((l) => !(set.fights.every((x) => !Number.isFinite(x.hpKept)) && /\bHP\b/.test(l)))];
         const learned = h('div', { class: 'lead' }, [
             sectionHead('What it learned', meta(['in plain words · each change was kept only because it predicted newer ' + (src === 'friend' ? 'sessions' : 'trains') + ' better'])),
             h('ul', { class: 'heads num' }, lines.map((l) => h('li', { class: /now counts|corrected|found|Kept/i.test(l) ? 'g' : null }, [h('i'), h('div', { text: l })]))),
@@ -8733,7 +8864,9 @@
         }
         valRows.push(h('tr', {}, [h('td', { text: 'Above-50M formula' }), h('td', { class: 'r', text: gym && gym.model ? gym.model.mode : 'log10' }), h('td', { class: 'muted', text: gym && gym.accepted && gym.model.mode !== (gym.current && gym.current.mode) ? 'changed' : 'kept' })]));
         valRows.push(h('tr', {}, [h('td', { text: 'Win odds ×' }), h('td', { class: 'r', text: fights && fights.accepted ? fights.model.winScale.toFixed(2) : '1.00' }), h('td', { class: 'muted', text: fights && fights.winAccepted ? 'changed' : 'kept' })]));
-        valRows.push(h('tr', {}, [h('td', { text: 'HP kept ×' }), h('td', { class: 'r', text: fights && fights.accepted ? fights.model.hpScale.toFixed(2) : '1.00' }), h('td', { class: 'muted', text: fights && fights.hpAccepted ? 'changed' : 'kept' })]));
+        // HP kept is learned only once fights carry what was really kept (not read yet): no row until then.
+        if (set.fights.some((x) => Number.isFinite(x.hpKept))) valRows.push(h('tr', {}, [h('td', { text: 'HP kept ×' }), h('td', { class: 'r', text: fights && fights.accepted ? fights.model.hpScale.toFixed(2) : '1.00' }), h('td', { class: 'muted', text: fights && fights.hpAccepted ? 'changed' : 'kept' })]));
+        const noHp = !set.fights.some((x) => Number.isFinite(x.hpKept));
 
         const checks = ctx.ui.devChecks || null;
         const sizes = dev.sizes();
@@ -8786,14 +8919,15 @@
 
 
 
+
     /** Torn's API ToS disclosure for the userscript's Torn key. */
     const TOS_TORN = [
         ['Data storage', 'Only locally, in this browser'],
-        ['Data sharing', 'Nobody. (Other data, never this key: player ids you look at go to FFScouter and TornStats if you connect them; your plan\u2019s next steps go to your own Discord service if you set one up; item ids go to TornW3B.)'],
+        ['Data sharing', 'Nobody. (Other data, never this key: player ids you look at go to FFScouter and TornStats if you connect them; item ids go to TornW3B; if you set up your own Discord service, it gets your plan\u2019s next steps, your player and faction id, and Torn Eye\u2019s list: player ids, names, levels and colour bands.)'],
         ['Purpose of use', 'Personal gain: gym planning and fight estimates'],
         ['Key storage & sharing', 'Stored locally / Not shared'],
         ['Key access level', 'Limited (user: bars, cooldowns, refills, battlestats, gym, perks, property, equipment, inventory, attacks, personalstats, discord, profile; torn: gyms, items, itemdetails, attacklog; market: itemmarket, pointsmarket; faction: members; key: info)'],
-        ['Other services', 'This key goes only to api.torn.com. FFScouter and TornStats use the key you give them in their own sections (it may be the same Torn key, which they already hold). TornW3B and your Discord service never receive it.'],
+        ['Other services', 'This key goes only to api.torn.com. FFScouter and TornStats use the key you give them in their own sections (it may be the same Torn key, which they already hold). TornW3B and your Discord service never receive it. The webpage\u2019s font comes from fonts.googleapis.com (no data of yours).'],
     ];
 
     const TOS_FFS = [
@@ -8815,7 +8949,7 @@
     /** The Worker's own key (a custom key made for it), stored on the user's Cloudflare Worker. */
     const TOS_WORKER = [
         ['Data storage', 'On your own Cloudflare Worker (D1), the key encrypted, until you press Forget'],
-        ['Data sharing', 'Nobody: pings and replies only you can see (DMs, replies only you see, or your own webhook channel)'],
+        ['Data sharing', 'Nobody: pings and replies only you can see (DMs, replies only you see, or your own webhook channel). It also holds what Pumping Iron syncs: your plan\u2019s next steps, your player and faction id, and Torn Eye\u2019s list (player ids, names, levels, colour bands) for /targets and /war.'],
         ['Purpose of use', 'Personal gain (gym pings and timers); Competitive advantage (/war, /chain, war pings)'],
         ['Key storage & sharing', 'Stored / Used only for automation and the commands you type'],
         ['Key access level', 'Custom (user: basic, bars, cooldowns, refills, travel · faction: members, chain, wars · market: itemmarket)'],
@@ -8857,6 +8991,53 @@
 
     function stateTag(tone, text) {
         return h('span', { class: 'state ' + tone }, [h('i'), text]);
+    }
+
+    /**
+     * Keep the colour bands in order after an edit: Stomp ≥ Good ≥ Tough (win),
+     * Stomp ≥ Good (HP kept). The band just edited wins; its neighbours move.
+     */
+    function orderedBands(l, edited = null) {
+        const b = { stomp: { ...l.stomp }, good: { ...l.good }, tough: { ...l.tough } };
+        if (edited === 'stomp') {
+            b.good.win = Math.min(b.good.win, b.stomp.win);
+            b.good.keep = Math.min(b.good.keep, b.stomp.keep);
+            b.tough.win = Math.min(b.tough.win, b.good.win);
+        } else if (edited === 'tough') {
+            b.good.win = Math.max(b.good.win, b.tough.win);
+            b.stomp.win = Math.max(b.stomp.win, b.good.win);
+        } else {
+            b.stomp.win = Math.max(b.stomp.win, b.good.win);
+            b.stomp.keep = Math.max(b.stomp.keep, b.good.keep);
+            b.tough.win = Math.min(b.tough.win, b.good.win);
+        }
+        return { ...l, ...b };
+    }
+
+    /** A button that deletes asks once more ("Sure? Forget keys") for 5 seconds; a second click does it. */
+    function confirmButton(ctx, id, text, run) {
+        const c = ctx.ui.confirm;
+        const armed = c && c.id === id && Date.now() < c.until;
+        return h('button', {
+            class: 'btn sm' + (armed ? ' primary' : ''),
+            type: 'button',
+            onclick: () => {
+                if (armed) {
+                    ctx.ui.confirm = null;
+                    run();
+                } else {
+                    ctx.ui.confirm = { id, until: Date.now() + 5000 };
+                    ctx.rerender();
+                    setTimeout(() => {
+                        if (ctx.ui.confirm && ctx.ui.confirm.id === id) {
+                            ctx.ui.confirm = null;
+                            ctx.rerender();
+                        }
+                    }, 5100);
+                }
+            },
+            text: armed ? 'Sure? ' + text : text,
+        });
     }
 
     function settingsSection(title, state, body) {
@@ -8951,10 +9132,10 @@
             }, 'Connected. Your plan syncs by itself when it changes.');
         const rows = [
             h('p', { text: 'A small free service on your Cloudflare account checks your timers every minute and tags you, even with your PC off: "Drug cooldown ends in 5 min · Xanax #2, then DEX × 27". Pings never come from a Torn tab.' }),
-            h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('base', 'Service address', { placeholder: 'https://pumping-iron.you.workers.dev', value: st ? st.base : '' }), field('invite', 'Invite code (first time)', { placeholder: 'from SETUP.md', ...keyAttrs, class: secretCls })]),
-            h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('hook', 'Discord webhook', { placeholder: st ? 'Saved on your Worker · paste to change' : 'https://discord.com/api/webhooks/…', ...keyAttrs, class: secretCls }), field('key', 'Torn key for the Worker', { placeholder: st ? 'Saved on your Worker · paste to change' : 'Custom key made for the Worker (see below)', ...keyAttrs, class: secretCls })]),
+            h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('base', 'Service address' + (st ? '' : ' (needed)'), { placeholder: 'https://pumping-iron.you.workers.dev', value: st ? st.base : '', onblur: (e) => { const v = e.target.value.trim(); if (!v) return; try { workerBase(v); msg.className = 'msg'; msg.textContent = 'Your Worker key and webhook will be stored on ' + new URL(v).hostname + '.'; } catch (err) { msg.className = 'msg bad'; msg.textContent = String(err.message || err); } } }), field('invite', 'Invite code' + (st ? ' (first time only)' : ' (needed the first time)'), { placeholder: 'from SETUP.md', ...keyAttrs, class: secretCls })]),
+            h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('hook', 'Discord webhook', { placeholder: st ? 'Saved on your Worker · paste to change' : 'https://discord.com/api/webhooks/…', ...keyAttrs, class: secretCls }), field('key', 'Torn key for the Worker' + (st ? '' : ' (needed)'), { placeholder: st ? 'Saved on your Worker · paste to change' : 'Custom key made for the Worker (see below)', ...keyAttrs, class: secretCls })]),
             h('div', { class: 'row', style: 'max-width:760px' }, [field('discordId', 'Your Discord user id', { placeholder: 'Blank: the one linked in Torn', value: st && st.discordId ? st.discordId : '', inputmode: 'numeric' })]),
-            h('div', { class: 'row' }, [h('button', { class: 'btn primary', type: 'button', onclick: connect, text: st ? 'Save' : 'Connect' }), h('button', { class: 'btn', type: 'button', disabled: !st, onclick: () => run(() => d.test(), 'Test ping sent. Check your channel.'), text: 'Send a test ping' }), st ? h('button', { class: 'btn ghost', type: 'button', onclick: () => run(async () => { await d.forget(); ctx.rerender(); }, 'Forgotten here and on your Worker.'), text: 'Forget' }) : null, h('a', { href: d.setupUrl, target: '_blank', rel: 'noopener', text: 'Set it up (10 minutes)' })]),
+            h('div', { class: 'row' }, [h('button', { class: 'btn primary', type: 'button', onclick: connect, text: st ? 'Save' : 'Connect' }), h('button', { class: 'btn', type: 'button', disabled: !st, onclick: () => run(() => d.test(), 'Test ping sent. Check your channel.'), text: 'Send a test ping' }), st ? confirmButton(ctx, 'discord-forget', 'Forget', () => run(async () => { await d.forget(); ctx.rerender(); }, 'Forgotten here and on your Worker.')) : null, h('a', { href: d.setupUrl, target: '_blank', rel: 'noopener', text: 'Set it up (10 minutes)' })]),
             msg,
             st ? h('p', { class: 'num', text: 'Last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') + (st.lastError ? ' · ' + st.lastError : '') + (st.bot ? ' · the bot is set up: DMs with Done / Snooze / Skip, /plan, /timers' : '') }) : null,
             st && st.bot && !st.linked ? linkRow(ctx) : null,
@@ -9002,7 +9183,7 @@
         // Torn Eye's colour bands (moved here from the Torn Eye pane).
         const limits = { ...DEFAULT_BAND_LIMITS, ...(s.bands || {}) };
         const bandCell = (band) => h('span', { class: 'band2' }, [h('i', { style: 'background:' + BAND_COLORS[band] }), BAND_WORDS[band]]);
-        const bandInput = (band, key) => h('input', { class: 'inp num', style: 'width:52px', inputmode: 'numeric', value: String(limits[band][key]), 'aria-label': BAND_WORDS[band] + ' ' + key, onchange: (ev) => { const v = Math.max(0, Math.min(100, Number(ev.target.value) || 0)); ctx.setSettings({ bands: { ...limits, [band]: { ...limits[band], [key]: v } } }); } });
+        const bandInput = (band, key) => h('input', { class: 'inp num', style: 'width:52px', inputmode: 'numeric', value: String(limits[band][key]), 'aria-label': BAND_WORDS[band] + ' ' + key, onchange: (ev) => { const v = Math.max(0, Math.min(100, Number(ev.target.value) || 0)); ctx.setSettings({ bands: orderedBands({ ...limits, [band]: { ...limits[band], [key]: v } }, band) }); } });
         const bandsSec = settingsSection('Torn Eye colours', h('span', { class: 'state off', text: 'your limits' }), [
             h('table', { class: 'tbl num', style: 'max-width:520px' }, [
                 h('thead', {}, [h('tr', {}, [h('th', { text: 'Band' }), h('th', { text: 'Win at least' }), h('th', { text: 'Keep HP at least' })])]),
@@ -9041,7 +9222,7 @@
         ];
         const pane = [
             diagSec,
-            h('div', {}, [sectionHead('Your data', h('span', { class: 'meta', text: 'all on this computer' })), h('div', { class: 'data num' }, dataRows.map(([g, name, sub, act]) => h('div', { class: 'dr' }, [h('div', {}, [h('b', { text: name }), h('br'), h('small', { text: sub })]), h('button', { class: 'btn sm', type: 'button', onclick: () => ctx.clearGroup(g), text: act })])))]),
+            h('div', {}, [sectionHead('Your data', h('span', { class: 'meta', text: 'all on this computer' })), h('div', { class: 'data num' }, dataRows.map(([g, name, sub, act]) => h('div', { class: 'dr' }, [h('div', {}, [h('b', { text: name }), h('br'), h('small', { text: sub })]), confirmButton(ctx, 'clear:' + g, act, () => ctx.clearGroup(g))])))]),
             h('div', {}, [sectionHead('What it never does', null, null, 'h3'), headsList([{ tone: 'plain', text: 'Train, buy, use or attack', sub: 'Fill only types a number' }, { tone: 'plain', text: 'Load a Torn page by itself' }, { tone: 'plain', text: 'Ping from a Torn tab', sub: 'only your Discord service does' }])]),
         ];
         // One card per section, ordered by use.
@@ -9132,6 +9313,35 @@
             this.host.scrollTop = 0;
         }
 
+        /** The box being typed in: which one (its label), what's in it and where the cursor is. */
+        focusedInput() {
+            const a = this.shadow && this.shadow.activeElement;
+            if (!a || !(a.tagName === 'INPUT' || a.tagName === 'TEXTAREA') || a.type === 'checkbox' || a.type === 'file') return null;
+            const key = a.getAttribute('aria-label') || a.getAttribute('placeholder') || a.getAttribute('name');
+            if (!key) return null;
+            let s = null;
+            let e = null;
+            try {
+                s = a.selectionStart;
+                e = a.selectionEnd;
+            } catch {
+                // Some input types have no selection.
+            }
+            return { key, value: a.value, s, e, masked: a.classList.contains('masked') };
+        }
+
+        restoreInput(k) {
+            const el = [...this.root.querySelectorAll('input, textarea')].find((x) => (x.getAttribute('aria-label') || x.getAttribute('placeholder') || x.getAttribute('name')) === k.key);
+            if (!el) return;
+            el.value = k.value;
+            el.focus();
+            try {
+                if (k.s !== null) el.setSelectionRange(k.s, k.e);
+            } catch {
+                // Not every input keeps a cursor.
+            }
+        }
+
         /** True while the user is typing in the page: a redraw would lose the cursor. */
         typing() {
             const a = this.shadow && this.shadow.activeElement;
@@ -9185,7 +9395,10 @@
             if (out.strip && m && m.ready) app.appendChild(statusStrip(m, s));
             this.updText = out.upd || null;
             app.appendChild(h('div', { class: 'body' }, [h('div', { class: 'main' }, out.main || []), h('div', { class: 'pane' }, out.pane || [])]));
+            // A background redraw (prices, Torn Eye, the war read) never takes what you're typing: the box, its text and the cursor come back.
+            const keep = this.focusedInput();
             fill(this.root, [app]);
+            if (keep) this.restoreInput(keep);
             this.tick();
         }
 
@@ -9555,9 +9768,9 @@
             let fidIn;
             bar1.push(
                 t('lab', 'Enemy faction'),
-                (fidIn = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:90px', placeholder: 'faction id', value: w.fid ? String(w.fid) : '' })),
-                h('button', { class: 'btn sm', type: 'button', onclick: () => { const v = Number(String(fidIn.value).replace(/\D/g, '')); if (v && e.war) e.war.watch(v); }, text: w.fid ? 'Watch' : 'Watch' }),
-                w.fid ? h('span', { class: 'muted', text: (w.name || 'faction ' + w.fid) + ' · read every 10 s while open' }) : null,
+                (fidIn = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:90px', placeholder: 'faction id', 'aria-label': 'Enemy faction id', value: w.fid ? String(w.fid) : '' })),
+                h('button', { class: 'btn sm', type: 'button', onclick: () => { const v = Number(String(fidIn.value).replace(/\D/g, '')); if (v && e.war) e.war.watch(v); }, text: w.fid ? 'Watch this one' : 'Watch' }),
+                w.fid ? h('span', { class: 'muted', text: 'Watching ' + (w.name || 'faction ' + w.fid) + ' · read every 10 s while open' }) : null,
             );
         }
         bar1.push(h('span', { class: 'sep' }), t('lab', 'Sort'));
@@ -10147,10 +10360,22 @@
         return Math.round((100 + 50 * Math.max(0, (Number(level) || 1) - 1)) * 1.25);
     }
 
-    const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(), timer: null, listeners: [], mem: new Map() };
+    const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(), timer: null, listeners: [], mem: new Map(), fc: new Map(), flushing: null, again: false };
+
+    /** The one FFScouter client in this tab (Torn Eye and Settings share it, and its dead-key mark). */
+    function sharedFfsClient() {
+        if (!eye.ffs) eye.ffs = makeFfsClient({ getKey: () => getKey(K.ffsKey), isVisible, loadShared: () => get('ffsWindow', {}), saveShared: (s) => set('ffsWindow', s) });
+        return eye.ffs;
+    }
+
+    /** A new FFScouter key: start a fresh client. */
+    function resetFfsClient() {
+        eye.ffs = null;
+        eye.mem.clear();
+    }
 
     function clients() {
-        if (!eye.ffs) eye.ffs = makeFfsClient({ getKey: () => getKey(K.ffsKey), isVisible, loadShared: () => get('ffsWindow', {}), saveShared: (s) => set('ffsWindow', s) });
+        sharedFfsClient();
         if (!eye.ts) eye.ts = makeTsClient({ getKey: () => getKey(K.tsKey), isVisible, loadShared: () => get('tsWindow', {}), saveShared: (s) => set('tsWindow', s) });
         return eye;
     }
@@ -10268,7 +10493,23 @@
         eye.timer = setTimeout(flush, 120);
     }
 
+    /** One sweep at a time: a second call while one runs waits and sweeps what came in meanwhile. */
     async function flush() {
+        if (eye.flushing) {
+            eye.again = true;
+            return eye.flushing;
+        }
+        eye.flushing = flushOnce().finally(() => {
+            eye.flushing = null;
+            if (eye.again) {
+                eye.again = false;
+                flush();
+            }
+        });
+        return eye.flushing;
+    }
+
+    async function flushOnce() {
         // Nothing asked while hidden, or while Torn Trading runs (the two take turns); the ids stay pending.
         if (!isVisible() || isPaused()) return;
         const want = [...eye.pending];
@@ -10361,25 +10602,35 @@
         // Your stats as they fight: merits and passives (Torn's battlestats modifier) included.
         const mods = m.state.statMods || {};
         const meStats = Object.fromEntries(Object.entries(m.pc.stats).map(([k, v]) => [k, v * (1 + (mods[k] || 0) / 100)]));
-        const attacks = (get('myAttacks', null) || {}).list || [];
+        const attacks = (getShared('myAttacks', null) || {}).list || [];
         const fights = attacks.filter((a) => Number(a.def) === Number(id)).sort((a, b) => b.ended - a.ended);
         const pub = r.pub && (prof.rank || extra.rank) ? { rank: prof.rank || extra.rank, level, crimes: r.pub.crimes, networth: r.pub.networth } : null;
         const est = estimatePlayer({ me: meStats, spy: r.spy || null, fights, ffs: r.ffs || null, pub, now: Date.now() });
         const gearRec = c.gear[id];
         const gThem = gearRec ? gearSummary(gearRec.items) : null;
-        const statics = get(K.userStatic, {}) || {};
+        const statics = getShared(K.userStatic, {}) || {};
         const gMe = statics.equipment ? myGear(statics.equipment) : DEFAULT_GEAR;
         const myLife = (m.state.life && m.state.life.maximum) || 7500;
         let f = null;
         let fGear = null;
         if (est) {
-            const target = { id, life, bss: est.bss, stats: est.stats };
-            f = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe });
-            if (gThem) fGear = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe, gearThem: gThem });
+            // The fight Monte Carlo runs again only when something it reads changed (a war page redraws every 10 s).
+            const key = JSON.stringify([est.bss, est.stats, life, myLife, meStats, gearRec ? gearRec.seenAt : 0, statics.equipmentAt || 0]);
+            const memo = eye.fc.get(id);
+            if (memo && memo.key === key) {
+                f = memo.f;
+                fGear = memo.fGear;
+            } else {
+                const target = { id, life, bss: est.bss, stats: est.stats };
+                f = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe });
+                if (gThem) fGear = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe, gearThem: gThem });
+                if (eye.fc.size > 2000) eye.fc.clear();
+                eye.fc.set(id, { key, f, fGear });
+            }
         }
         let main = fGear || f;
         // What the fight learner kept from your own fights (only when it predicted your newest fights better).
-        const fm = learnedModel(get(K.learned, null)).fight;
+        const fm = learnedModel(getShared(K.learned, null)).fight;
         if (main && fm) main = { ...main, ...applyFightModel(fm, { pWin: main.pWin, keep: main.keep }), learned: true };
         const band = bandOf(main, getSettings().bands);
         const ff = est ? fairFight(est.bss, bssOf(meStats)) : null;
@@ -10529,15 +10780,16 @@
     }
 
     function ffsClient() {
-        if (!page.ffs) page.ffs = makeFfsClient({ getKey: () => getKey(K.ffsKey), isVisible, loadShared: () => get('ffsWindow', {}), saveShared: (s) => set('ffsWindow', s) });
+        page.ffs = sharedFfsClient();
         return page.ffs;
     }
 
     /** Fetch listings for the items the Buy list shows, if older than 5 minutes. */
     async function loadPrices(ids) {
         // Nothing from Torn or TornW3B while Torn Trading runs (the two take turns).
-        if (!getKey(K.apiKey) || isPaused()) return;
+        if (!getKey(K.apiKey) || isPaused() || get(K.apiKeyDead, false)) return;
         const prices = { ...(getPrices()) };
+        const skip = new Set();
         const now = Date.now();
         const due = [...new Set(ids.map(String))].filter((id) => !page.loading.has(id) && !(prices[id] && now - (prices[id].at || 0) < PRICE_FRESH_MS));
         if (!due.length) return;
@@ -10546,6 +10798,7 @@
         for (const id of due) {
             // Paused mid-load: keep what's stored, ask again once Torn Trading stops.
             if (isPaused()) {
+                skip.add(id);
                 page.loading.delete(id);
                 continue;
             }
@@ -10570,10 +10823,20 @@
                 }
             } catch (error) {
                 if (error && error.takingTurns) {
+                    skip.add(id);
                     page.loading.delete(id);
                     continue;
                 }
                 row.error = redactKey(String((error && error.message) || error), getKey(K.apiKey));
+                // A failed load keeps the last good listings, and is asked again in 30 s, not 5 min.
+                const old = prices[id];
+                const retryAt = Date.now() - PRICE_FRESH_MS + 30000;
+                if (old && Array.isArray(old.listings) && old.listings.length) {
+                    prices[id] = { ...old, error: row.error, at: retryAt };
+                    page.loading.delete(id);
+                    continue;
+                }
+                row.at = retryAt;
             }
             // Kept small: the cheapest listings only (GM storage is read on every Torn page).
             row.listings = row.listings.sort((a, b) => a.price - b.price).slice(0, PRICE_LISTINGS_KEPT);
@@ -10586,7 +10849,7 @@
             page.loading.delete(id);
         }
         set(K.priceHistory, hist);
-        const merged = { ...(getPrices()), ...Object.fromEntries(due.filter((id) => prices[id] && prices[id].at >= now).map((id) => [id, prices[id]])) };
+        const merged = { ...(getPrices()), ...Object.fromEntries(due.filter((id) => prices[id] && !skip.has(id)).map((id) => [id, prices[id]])) };
         set(K.prices, merged);
         refresh();
         if (page.app) page.app.render(true);
@@ -10617,6 +10880,7 @@
     async function saveFfsKey(v) {
         if (!v) return { ok: false, text: 'Paste your FFScouter key first.' };
         setKey(K.ffsKey, v);
+        resetFfsClient();
         page.ffs = null;
         try {
             const r = await checkFfsKey(ffsClient());
@@ -10678,8 +10942,10 @@
         if (!page.app || page.app.tab !== 'eye' || (page.app.ui.eyeMode || 'targets') !== 'war') return;
         if (Date.now() - war.at < WAR_TAB_POLL_MS) return;
         war.loading = true;
+        const fid = war.fid;
         try {
-            const members = await fetchFactionMembers(tornClient(), war.fid);
+            const members = await fetchFactionMembers(tornClient(), fid);
+            if (war.fid !== fid) return;
             const nowMs = Date.now();
             war.early = outEarly(war.members, members, Math.floor(nowMs / 1000));
             // When each flight was first seen: the landing estimate counts from it.
@@ -10698,9 +10964,10 @@
             wantPlayers(members.map((m) => Number(m.id)));
         } catch (error) {
             war.error = String((error && error.message) || error);
+        } finally {
+            war.loading = false;
         }
         war.at = Date.now();
-        war.loading = false;
         if (page.app) page.app.render(true);
     }
 
@@ -10708,7 +10975,7 @@
         const stored = get('eyeTargets', null);
         if (!stored) return [];
         const rows = stored.list.map((x) => ({ ...(eyeView(x.playerId, { level: x.level, name: x.name }) || { id: x.playerId, band: 'none' }), name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId }));
-        // The bot's /targets and /war read Torn Eye's list and bands (only if you set up Discord; ids and bands only).
+        // The bot's /targets and /war read Torn Eye's list (ids, names, levels, bands; disclosed in Settings), only if you set up Discord.
         if (discordState()) {
             const bands = {};
             for (const r of rows) if (r.band) bands[r.id] = r.band;
@@ -10740,7 +11007,7 @@
             dayTotals: get(K.dayTotals, {}) || {},
             gymProgress: get(K.gymProgress, null),
             calibration: get('calibration', null),
-            planLine: get(K.planLine, null),
+            planProjection: get(K.planLine, null),
             flags: { hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)), hasFfs: Boolean(getKey(K.ffsKey)), ffsDead: Boolean(ffsState && ffsState.registered === false), hasTs: Boolean(getKey(K.tsKey)) },
             keyProblem: keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: statics.keyInfo || null }),
             planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
@@ -10751,7 +11018,9 @@
                 page.app.render(true);
             },
             setPlan: (p) => {
-                setPlan({ ...getPlan(), ...p, createdAt: Date.now() });
+                const cur = getPlan();
+                const restart = (p.strategy !== undefined && p.strategy !== cur.strategy) || (p.build !== undefined && p.build !== cur.build) || !cur.createdAt;
+                setPlan({ ...cur, ...p, createdAt: restart ? Date.now() : cur.createdAt });
                 refresh();
                 page.app.render(true);
             },
@@ -10779,7 +11048,7 @@
                 setupUrl: WORKER_SETUP_URL,
             },
             dev: {
-                data: () => ({ samples: ((get('calibration', null) || {}).samples) || [], fights: joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []), learned: get(K.learned, null) || maybeLearn(Date.now(), true), version: PI_BUILD_VERSION }),
+                data: () => ({ samples: ((get('calibration', null) || {}).samples) || [], fights: joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []), learned: get(K.learned, null), version: PI_BUILD_VERSION }),
                 unlocked: () => Boolean(get(K.devUnlocked, false)),
                 setUnlocked: (v) => (v ? set(K.devUnlocked, true) : del(K.devUnlocked)),
                 log: () => get(K.learnLog, []) || [],
@@ -11909,7 +12178,7 @@
     .pi-chip { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px 0 8px; margin: 6px 0; border-radius: 14px; background: #1e2124; border: 1px solid #3a4046; font: 12px Arial, sans-serif; color: #e3e5e8; white-space: nowrap; cursor: default; vertical-align: middle; }
     .pi-chip .pi-dot { width: 12px; height: 12px; border-radius: 50%; box-shadow: inset 0 0 0 3px currentColor; background: #111; flex: none; }
     .pi-chip b { font-weight: bold; }
-    .pi-chip .pi-src { color: #6c737a; font-size: 11px; }
+    .pi-chip .pi-src { color: #939aa1; font-size: 11px; }
     .pi-chip.pi-mini { height: 22px; margin: 0 0 0 6px; padding: 0 8px 0 6px; gap: 6px; font-size: 11px; }
     .pi-chip.pi-mini .pi-dot { width: 10px; height: 10px; }
     .pi-eyecard { position: fixed; z-index: 99991; width: 330px; background: #1c1f22; border: 1px solid #3a4046; border-radius: 10px; padding: 12px 14px; box-shadow: 0 8px 24px rgba(0,0,0,.45); display: flex; flex-direction: column; gap: 10px; font: 12px/1.4 Arial, sans-serif; color: #e3e5e8; pointer-events: none; }
@@ -11956,7 +12225,7 @@
         if (!mini && v && v.source) kids.push(h('span', { class: 'pi-src', text: v.source }));
         // The player id is always on the chip, estimate or not: redraw checks compare it.
         const title = v && v.est ? 'Torn Eye · stats: ' + (v.est.source === 'ffscouter' ? 'FFScouter (ffscouter.com)' : v.source) : 'Torn Eye';
-        return h('span', { class: 'pi-mark pi-chip' + (mini ? ' pi-mini' : ''), 'data-pi-player': String(id || (v && v.id) || ''), title }, kids);
+        return h('span', { class: 'pi-mark pi-chip' + (mini ? ' pi-mini' : ''), 'data-pi-player': String(id || (v && v.id) || ''), title, tabindex: '0', role: 'button', 'aria-label': title + ' · ' + BAND_WORDS[band] }, kids);
     }
 
     /** The hover card: HP kept by likely build, gear, sources with credit. */
@@ -11993,7 +12262,8 @@
             if (card) card.remove();
             card = null;
         };
-        doc.addEventListener('mouseover', (e) => {
+        // Hover, keyboard focus or a tap shows the card; Escape or leaving hides it.
+        const show = (e) => {
             const chip = e.target && e.target.closest ? e.target.closest('.pi-chip[data-pi-player]') : null;
             if (!chip) return hide();
             const v = getView(Number(chip.getAttribute('data-pi-player')));
@@ -12006,6 +12276,14 @@
             const below = r.bottom + 8 + card.offsetHeight < window.innerHeight;
             card.style.left = x + 'px';
             card.style.top = (below ? r.bottom + 6 : Math.max(8, r.top - card.offsetHeight - 6)) + 'px';
+        };
+        doc.addEventListener('mouseover', show);
+        doc.addEventListener('focusin', show);
+        doc.addEventListener('click', (e) => {
+            if (e.target && e.target.closest && e.target.closest('.pi-chip[data-pi-player]')) show(e);
+        });
+        doc.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') hide();
         });
         doc.addEventListener('scroll', hide, true);
     }
@@ -12030,7 +12308,7 @@
     function attackPanelContent(v, s) {
         const kids = [h('span', { class: 'row' }, [h('span', { class: 'plate' }, [h('i')]), h('b', { class: 'white', text: 'Torn Eye' })])];
         if (!v) {
-            kids.push(h('span', { class: 'muted', text: 'No estimate yet.' }));
+            kids.push(h('span', { class: 'muted', text: 'Reading this player… (your fights, FFScouter, public stats)' }));
             return kids;
         }
         const f = v.forecast;

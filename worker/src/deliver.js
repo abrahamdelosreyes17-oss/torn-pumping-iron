@@ -36,7 +36,8 @@ function embeds(rows) {
     return rows.map((r) => {
         const b = bodyOf(r);
         const line = stateLine(r);
-        const e = { title: String(b.title || '').slice(0, 256), description: String(b.text || '').slice(0, 4000), color: active(r) ? CHALK : r.state === 'snoozed' ? AMBER : GREY };
+        // Kept well under Discord's 6,000 characters for all embeds of one message.
+        const e = { title: String(b.title || '').slice(0, 256), description: String(b.text || '').slice(0, 600), color: active(r) ? CHALK : r.state === 'snoozed' ? AMBER : GREY };
         if (b.link) e.url = b.link;
         if (line) e.footer = { text: line };
         return e;
@@ -57,7 +58,7 @@ function liveMessage(r) {
     if (active(r)) btns.push(button('Done', 'done:' + r.alert, 3));
     for (const t of (Array.isArray(b.attack) ? b.attack : []).slice(0, 4)) btns.push(linkButton('Attack ' + t.name, PAGES.attack(t.id)));
     if (btns.length < 5 && b.link) btns.push(linkButton('Open in Torn', b.link));
-    return { content: String(b.title || '').slice(0, 2000), embeds: embeds([r]), components: btns.length ? [actionRow(btns)] : [], allowed_mentions: { parse: [] } };
+    return { content: String(b.title || '').slice(0, 1900), embeds: embeds([r]), components: btns.length ? [actionRow(btns)] : [], allowed_mentions: { parse: [] } };
 }
 
 /** The bot's message (DMs): buttons per ping, the Torn link on each. */
@@ -79,14 +80,14 @@ export function alertMessage(rows) {
         if (b.link) btns.push(linkButton('Open in Torn' + tag, b.link));
         if (btns.length) components.push(actionRow(btns));
     }
-    return { content: headline(rows).slice(0, 2000), embeds: embeds(rows), components, allowed_mentions: { parse: [] } };
+    return { content: headline(rows).slice(0, 1900), embeds: embeds(rows), components, allowed_mentions: { parse: [] } };
 }
 
 /** The channel webhook's message: the mention in content (embeds don't ping), no buttons (a plain webhook can't have them). */
 export function webhookMessage(rows, discordId) {
     const id = String(discordId || '').replace(/\D/g, '');
     const text = headline(rows);
-    return { content: ((id ? '<@' + id + '> ' : '') + text.charAt(0).toLowerCase() + text.slice(1)).slice(0, 2000), embeds: embeds(rows), allowed_mentions: { users: id ? [id] : [], parse: [] } };
+    return { content: ((id ? '<@' + id + '> ' : '') + text.charAt(0).toLowerCase() + text.slice(1)).slice(0, 1900), embeds: embeds(rows), allowed_mentions: { users: id ? [id] : [], parse: [] } };
 }
 
 const dry = (env) => String(env.DRY_RUN || '') === '1';
@@ -137,6 +138,7 @@ export async function deliver(env, fetchImpl, db, user, rows, nowS) {
         if (ch) {
             const r = await discordCall(env, fetchImpl, db, { url: DISCORD_API + '/channels/' + ch + '/messages', body: alertMessage(rows), route: 'dm:' + user.discord_id });
             if (r.ok) return { ok: true, via: dry(env) ? 'dry' : 'dm', channel: ch, message: r.data && r.data.id ? String(r.data.id) : null };
+            if (r.status === 400) return { ok: false, bad: true };
             if (r.code === CANNOT_DM || r.status === 403 || r.status === 404) blocked = true;
             else if (!user.webhook) return { ok: false, retry: true };
         }
@@ -149,6 +151,7 @@ export async function deliver(env, fetchImpl, db, user, rows, nowS) {
     if (user.webhook) {
         const r = await discordCall(env, fetchImpl, db, { url: hookUrl(user.webhook, '', { wait: 'true' }), body: webhookMessage(rows, user.discord_id), bot: false, route: 'hook' });
         if (r.ok) return { ok: true, via: dry(env) ? 'dry' : 'hook', channel: null, message: r.data && r.data.id ? String(r.data.id) : null };
+        if (r.status === 400) return { ok: false, bad: true };
         return { ok: false, retry: true };
     }
     return { ok: false };

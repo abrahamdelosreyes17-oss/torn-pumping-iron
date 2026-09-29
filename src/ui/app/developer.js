@@ -9,6 +9,7 @@
  */
 
 import { h, t } from '../dom.js';
+import { keyInputAttrs, keyMask } from '../mask.js';
 import { STATS, STAT_LABEL, gainPerTrain } from '../../core/gain.js';
 import { fmtInt, fmtPct } from '../../core/format.js';
 import { learnGym, learnFights, describeGym, describeFights } from '../../core/learn.js';
@@ -57,7 +58,8 @@ export function developerSection(m, ctx) {
     if (!ctx.dev) return null;
     const d = ctx.dev.data();
     const unlocked = ctx.dev.unlocked();
-    const keyIn = h('input', { class: 'inp', type: 'password', autocomplete: 'off', placeholder: 'Developer key', 'aria-label': 'Developer key', style: 'width:220px' });
+    const keyIn = h('input', { ...keyInputAttrs(), class: 'inp' + (keyInputAttrs().type === 'text' ? ' masked' : ''), placeholder: 'Developer key', 'aria-label': 'Developer key', style: 'width:220px' });
+    keyMask(keyIn, 'masked');
     const msg = h('span', { class: 'msg' });
     const unlock = async () => {
         msg.textContent = 'Checking…';
@@ -134,7 +136,9 @@ export function renderDeveloper(m, ctx) {
     const src = ctx.ui.devSource === 'friend' && friend ? 'friend' : 'mine';
     const now = Date.now();
     // Mine: what the app kept. A friend's export: the learners run on it here (never merged into your model).
-    const set = src === 'friend' ? { samples: friend.samples, fights: friend.fights, learned: { at: now, gym: learnGym(friend.samples, { now }), fights: learnFights(friend.fights, { now }) } } : { samples: mine.samples, fights: mine.fights, learned: mine.learned || { at: now, gym: learnGym(mine.samples, { now }), fights: learnFights(mine.fights, { now }) } };
+    // The learners run once per data set shown (not on every redraw).
+    const runOnce = (holder, samples, fights) => holder.learned || (holder.learned = { at: now, gym: learnGym(samples, { now }), fights: learnFights(fights, { now }) });
+    const set = src === 'friend' ? { samples: friend.samples, fights: friend.fights, learned: runOnce(friend, friend.samples, friend.fights) } : { samples: mine.samples, fights: mine.fights, learned: mine.learned || runOnce(ctx.ui.devMine || (ctx.ui.devMine = {}), mine.samples, mine.fights) };
     const gym = set.learned.gym;
     const fights = set.learned.fights;
 
@@ -174,7 +178,7 @@ export function renderDeveloper(m, ctx) {
     ];
 
     // What it learned, in plain words.
-    const lines = [...describeGym(gym), ...describeFights(fights)];
+    const lines = [...describeGym(gym), ...describeFights(fights).filter((l) => !(set.fights.every((x) => !Number.isFinite(x.hpKept)) && /\bHP\b/.test(l)))];
     const learned = h('div', { class: 'lead' }, [
         sectionHead('What it learned', meta(['in plain words · each change was kept only because it predicted newer ' + (src === 'friend' ? 'sessions' : 'trains') + ' better'])),
         h('ul', { class: 'heads num' }, lines.map((l) => h('li', { class: /now counts|corrected|found|Kept/i.test(l) ? 'g' : null }, [h('i'), h('div', { text: l })]))),
@@ -223,7 +227,9 @@ export function renderDeveloper(m, ctx) {
     }
     valRows.push(h('tr', {}, [h('td', { text: 'Above-50M formula' }), h('td', { class: 'r', text: gym && gym.model ? gym.model.mode : 'log10' }), h('td', { class: 'muted', text: gym && gym.accepted && gym.model.mode !== (gym.current && gym.current.mode) ? 'changed' : 'kept' })]));
     valRows.push(h('tr', {}, [h('td', { text: 'Win odds ×' }), h('td', { class: 'r', text: fights && fights.accepted ? fights.model.winScale.toFixed(2) : '1.00' }), h('td', { class: 'muted', text: fights && fights.winAccepted ? 'changed' : 'kept' })]));
-    valRows.push(h('tr', {}, [h('td', { text: 'HP kept ×' }), h('td', { class: 'r', text: fights && fights.accepted ? fights.model.hpScale.toFixed(2) : '1.00' }), h('td', { class: 'muted', text: fights && fights.hpAccepted ? 'changed' : 'kept' })]));
+    // HP kept is learned only once fights carry what was really kept (not read yet): no row until then.
+    if (set.fights.some((x) => Number.isFinite(x.hpKept))) valRows.push(h('tr', {}, [h('td', { text: 'HP kept ×' }), h('td', { class: 'r', text: fights && fights.accepted ? fights.model.hpScale.toFixed(2) : '1.00' }), h('td', { class: 'muted', text: fights && fights.hpAccepted ? 'changed' : 'kept' })]));
+    const noHp = !set.fights.some((x) => Number.isFinite(x.hpKept));
 
     const checks = ctx.ui.devChecks || null;
     const sizes = dev.sizes();

@@ -6,6 +6,7 @@
  */
 
 import { TornApiError } from './client.js';
+import { TRAINING_EVENTS } from '../core/events.js';
 
 /** Torn's "incorrect category" and "access level too low". */
 export const TORN_ERROR_WRONG_FIELDS = 4;
@@ -113,7 +114,9 @@ export async function fetchCalendar(client) {
     } catch (error) {
         if (!(error instanceof TornApiError && (error.code === TORN_ERROR_ACCESS_LEVEL || error.code === TORN_ERROR_WRONG_FIELDS))) throw error;
     }
-    return { calendar: (d && d.calendar) || { events: [], competitions: [] }, startTime };
+    // Only the events the plan cares about are kept (the whole calendar would ride along on every Torn page).
+    const events = ((d && d.calendar && d.calendar.events) || []).filter((e) => TRAINING_EVENTS.some((t) => t.match.test(String((e && e.title) || ''))));
+    return { calendar: { events, competitions: [] }, startTime };
 }
 
 /** Your recent attacks (newest first), with Torn's fair-fight modifier and respect. */

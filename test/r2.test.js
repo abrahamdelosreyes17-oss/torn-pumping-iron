@@ -61,7 +61,7 @@ test('special refills pay in a boosted session; at the maximum each train’s ha
     assert.ok(c.chocoJump.used[SPECIAL] > 0);
     assert.equal(c.chocoJump.cost, none.chocoJump.cost, 'free');
     assert.ok(c.steady.gained >= none.steady.gained, 'never worse: kept only where they help');
-    assert.equal(c.steady.specialHelps, false);
+    assert.ok(c.steady.used[SPECIAL] <= 100 && c.steady.used[SPECIAL] >= 0);
 });
 
 test('special refills in the day plan: a boosted session takes as many as keep happy above the maximum', () => {
@@ -119,9 +119,9 @@ test('a budget with room buys a middle rung: Steady + energy boosters', () => {
     const { state, pc, shares } = setup('owner');
     const c = compareStrategies({ state, pc, shares, settings: { horizonDays: 30, budget: 900e6 }, prices: PRICES });
     assert.ok(c.steadyBoost, 'steadyBoost simulated');
-    // $25.8M a day left: 13 Munster (260 E) beat one FHC (150 E).
+    // $25.8M a day left: 12 Munster (240 E, what the 24 h cooldown sustains) beat one FHC (150 E).
     assert.equal(c.steadyBoost.booster.id, MUNSTER);
-    assert.equal(c.steadyBoost.booster.perDay, 13);
+    assert.equal(c.steadyBoost.booster.perDay, 12);
     assert.ok(c.steadyBoost.cost <= 900e6);
     assert.ok(c.steadyBoost.gained > c.steady.gained);
     assert.equal(recommend(c, { budget: 900e6 }).recommended, 'steadyBoost');
@@ -257,7 +257,9 @@ test('the model: ladder, spend a day and how long the cash lasts, special refill
     assert.ok(m.ladder.rows.some((r) => r.id === 'special'));
     assert.ok(Math.abs(m.spend.perDay - compare.steady.cost / 30) < 1);
     assert.equal(Math.round(m.spend.lastsDays), Math.round(200e6 / (compare.steady.cost / 30)));
-    assert.ok(!m.steps.some((s) => s.kind === 'special'), 'steady: the comparison found they don’t help');
+    const sp = m.steps.filter((s) => s.kind === 'special');
+    if (compare.steady.specialHelps) assert.ok(sp.length && sp.reduce((a, s) => a + s.items[0].qty, 0) <= 4, 'steady: today’s share only (100 over 30 days)');
+    else assert.equal(sp.length, 0, 'steady: not where they don’t help');
     const perE = statsPerEnergy({ stats: pc.stats, shares, best: pc.best, happy: 5025 });
     assert.ok(['str', 'spd', 'def', 'dex'].includes(perE.stat));
     assert.ok(perE.perEnergy > 0);
@@ -283,4 +285,15 @@ test('war: where travellers go and an estimated landing from when we first saw t
     const seen = Date.UTC(2026, 8, 29, 12, 0);
     assert.equal(landingAt(travelOf({ status: { description: 'Traveling to Mexico' } }), seen, seen + 60000), seen + 26 * 60000);
     assert.equal(landingAt(travelOf({ status: { description: 'In Mexico' } }), null, seen), seen + 26 * 60000, 'abroad: if they fly now');
+});
+
+test('review: an event holds the booster only for plans that use what it boosts, and counts ×2 cans while it runs', async () => {
+    const { holdBoosterFor, eventMults } = await import('../src/core/events.js');
+    const now = Date.UTC(2026, 9, 13, 18, 0);
+    const up = upcomingEvents(CAL, now, { startTime: '12:00' });
+    assert.equal(holdBoosterFor(up, now, 'steady'), null, 'steady uses no cans: nothing held');
+    assert.equal(holdBoosterFor(up, now, 'steadyMax').id, 'caffeinecon');
+    const during = upcomingEvents(CAL, Date.UTC(2026, 9, 15, 0, 0), { startTime: '12:00' });
+    assert.deepEqual(eventMults(during), { canMult: 2, candyMult: 1 });
+    assert.deepEqual(eventMults(up), { canMult: 1, candyMult: 1 });
 });

@@ -112,9 +112,30 @@ export function upcomingEvents(calendar, now, { startTime = null } = {}) {
     return out.sort((a, b) => a.start - b.start);
 }
 
-/** Should the plan keep the booster cooldown free now (an event that uses it starts within a day)? */
-export function holdBoosterFor(events, now) {
-    return (events || []).find((e) => e.usesBooster && !e.active && e.start - now <= EVENT_BOOSTER_HOLD_MS) || null;
+/** Which plans each event helps (the rest train as usual through it). */
+export const EVENT_PLANS = {
+    caffeinecon: ['steadyBoost', 'steadyMax'],
+    diabetes: ['dailyChoco', 'chocoJump', 'candyXanax', 'consoleJump', 'consoleJumpToy'],
+    easter: ['steadyBoost', 'steadyMax', 'edvdJump', 'edvdJumpAN', 'happy99k', 'blissSteady'],
+};
+
+/**
+ * Should the plan keep the booster cooldown free now: an event that uses it
+ * starts within a day, and this plan uses what the event boosts.
+ */
+export function holdBoosterFor(events, now, strategy = null) {
+    return (events || []).find((e) => e.usesBooster && !e.active && e.start - now <= EVENT_BOOSTER_HOLD_MS && (!strategy || (EVENT_PLANS[e.id] || []).includes(strategy))) || null;
+}
+
+/** While an event runs: × on can energy and candy happy (on top of perks). */
+export function eventMults(events) {
+    const out = { canMult: 1, candyMult: 1 };
+    for (const e of events || []) {
+        if (!e.active) continue;
+        if (e.canMult) out.canMult *= e.canMult;
+        if (e.candyMult) out.candyMult *= e.candyMult;
+    }
+    return out;
 }
 
 /** Home's line: "CaffeineCon in 2 days: …" / "CaffeineCon now (until 16 Oct 12:00)". */

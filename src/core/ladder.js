@@ -75,12 +75,12 @@ export function boosterChoice({ perDay, maxE, prices, canMult = 1, capH = BOOSTE
     const out = [];
     const fhcP = priceFor(FHC, prices);
     if (fhcP) {
-        const n = Math.min(boostersThatFit(FHC, capH), Math.floor(perDay / fhcP));
+        const n = Math.min(Math.floor(capH / ITEMS[FHC].boosterH), Math.floor(perDay / fhcP));
         if (n > 0) out.push({ id: FHC, perDay: n, energy: n * maxE, cost: n * fhcP });
     }
     const can = bestCan(prices, { canMult });
     if (can) {
-        const n = Math.min(boostersThatFit(can.id, capH), Math.floor(perDay / can.price));
+        const n = Math.min(Math.floor(capH / ITEMS[can.id].boosterH), Math.floor(perDay / can.price));
         if (n > 0) out.push({ id: can.id, perDay: n, energy: n * can.energy, cost: n * can.price });
     }
     out.sort((a, b) => b.energy - a.energy || a.cost - b.cost);

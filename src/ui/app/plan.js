@@ -71,8 +71,8 @@ function planChooser(ctx) {
     return det;
 }
 
-function numberInput(value, width, onSet, { money = false, min = 0, max = Infinity } = {}) {
-    const inp = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:' + width + 'px', value: money ? '$' + fmtInt(value) : String(value) });
+function numberInput(value, width, onSet, { money = false, min = 0, max = Infinity, label = null } = {}) {
+    const inp = h('input', { class: 'inp num', inputmode: 'numeric', 'aria-label': label, style: 'width:' + width + 'px', value: money ? '$' + fmtInt(value) : String(value) });
     inp.addEventListener('change', () => {
         const v = Number(String(inp.value).replace(/[^\d]/g, ''));
         if (Number.isFinite(v)) onSet(Math.max(min, Math.min(max, v)));
@@ -94,10 +94,10 @@ function controls(m, ctx) {
     const bar1 = [
         planChooser(ctx),
         t('lab', 'for'),
-        numberInput(days, 52, (v) => ctx.setSettings({ horizonDays: Math.max(3, Math.min(90, v || 30)) })),
+        numberInput(days, 52, (v) => ctx.setSettings({ horizonDays: Math.max(3, Math.min(90, v || 30)) }), { label: 'Days' }),
         h('span', { class: 'muted', text: 'days' }),
         ctx.plan.pickBy === 'max' ? h('span', { class: 'muted', text: '· no budget' }) : t('lab', 'with'),
-        ctx.plan.pickBy === 'max' ? null : numberInput(s.budget || 0, 130, (v) => ctx.setSettings({ budget: v }), { money: true }),
+        ctx.plan.pickBy === 'max' ? null : numberInput(s.budget || 0, 130, (v) => (v > 0 ? ctx.setSettings({ budget: v }) : ctx.rerender()), { money: true, label: 'Budget' }),
         ctx.plan.pickBy === 'max' ? null : h('span', { class: 'muted', text: 'budget' }),
         h('span', { class: 'sep' }),
         t('lab', 'Train toward'),
@@ -115,7 +115,7 @@ function controls(m, ctx) {
         bar2.push(
             t('lab', 'Special refills'),
             h('span', { class: 'muted' }, ['you have ', h('b', { class: 'white', text: fmtInt(sp.have) }), ' · use']),
-            numberInput(sp.use || 0, 58, (v) => ctx.setPlan({ specialUse: Math.min(v, sp.have), specialStart: sp.have, specialSetAt: Date.now() })),
+            numberInput(sp.use || 0, 58, (v) => ctx.setPlan({ specialUse: Math.min(v, sp.have), specialStart: sp.have, specialSetAt: Date.now() }), { label: 'Special refills to use' }),
             h('span', { class: 'muted', text: 'in this plan · each adds ' + each + ' energy' + (perE ? ' (about +' + fmtShort(perE * each) + ' stats for you)' : '') + (sp.use ? ' · ' + sp.left + ' left' : ' · set how many to use') }),
             h('span', { class: 'info', title: 'Shown because Torn says your account has special refills. They aren’t limited to one a day: the plan puts them where they add the most (in a happy jump or boost, where the happy they cost resets anyway) and keeps the rest.', text: 'i' }),
             h('span', { class: 'sep' }),
@@ -131,7 +131,7 @@ function goalForm(m, ctx) {
     const vals = (plan.goal && plan.goal.kind === 'statTargets' && plan.goal.targets) || {};
     const inputs = {};
     return h('div', { class: 'row num', style: 'margin-top:12px;flex-wrap:wrap;gap:12px' }, [
-        ...STATS.map((k) => h('label', { class: 'field', style: 'width:150px' }, [t('lab', STAT_LABEL[k] + ' to reach'), (inputs[k] = h('input', { class: 'inp num', inputmode: 'numeric', placeholder: fmtInt(m.pc.stats[k]), value: vals[k] ? String(vals[k]) : '' }))])),
+        ...STATS.map((k) => h('label', { class: 'field', style: 'width:150px' }, [t('lab', STAT_LABEL[k] + ' to reach'), (inputs[k] = h('input', { class: 'inp num', inputmode: 'numeric', 'aria-label': STAT_LABEL[k] + ' to reach', placeholder: fmtInt(m.pc.stats[k]), value: vals[k] ? String(vals[k]) : '' }))])),
         h('button', {
             class: 'btn primary',
             type: 'button',
@@ -158,13 +158,13 @@ function recommendedCard(m, ctx, rec, compare, days) {
     const figs = [
         h('div', { class: 'fig' }, [t('lab', days + ' days'), h('b', { class: 'good', text: '+' + fmtShort(best.gained) })]),
         h('div', { class: 'fig' }, [t('lab', 'Cost'), h('b', { text: fmtMoney(best.cost) })]),
-        h('div', { class: 'fig' }, [t('lab', 'Per $1M'), h('b', { text: best.cost > 0 ? chartNum(perMillion(best)) : '—' })]),
+        h('div', { class: 'fig' }, [t('lab', 'Per $1M'), h('b', { text: best.cost > 0 ? chartNum(perMillion(best)) + ' stats' : '—' })]),
         h('div', { class: 'fig' }, [t('lab', pickBy === 'max' ? 'A day' : 'Per day'), h('b', { text: pickBy === 'max' ? fmtMoney(best.cost / days) : planPerDay(best, days) })]),
     ];
     const reasons = rec.reasons.length ? rec.reasons.join(' ') : 'It gains the most stats inside your budget.';
     const spend = m.spend && m.spend.lastsDays !== null && m.spend.cash !== null ? ' Your ' + fmtMoney(m.spend.cash) + ' on hand lasts about ' + Math.round(m.spend.lastsDays) + ' days at ' + fmtMoney(m.spend.perDay) + ' a day.' : '';
     const kids = [
-        sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + (pickBy === 'max' ? 'no budget' : fmtMoney(ctx.settings.budget)) + ' · ' + days + ' days'])),
+        sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + (pickBy === 'max' || !(ctx.settings.budget > 0) ? 'no budget' : fmtMoney(ctx.settings.budget)) + ' · ' + days + ' days'])),
         h('div', { class: 'prime num' }, [
             h('div', {}, [h('span', { class: 'pill-tag chalk', text: kindOf(rec.recommended) }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: S.what })]),
             h('div', { class: 'figs' }, figs),
@@ -207,6 +207,14 @@ function otherPlans(m, ctx, rec, compare, days) {
             h('tr', {
                 class: 'click' + (sel ? ' sel' : ''),
                 tabindex: '0',
+                role: 'button',
+                'aria-label': 'Pick ' + st.name,
+                onkeydown: (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        e.currentTarget.click();
+                    }
+                },
                 onclick: () => {
                     const w = pickWarning(best, compare[a.id], { bliss: m.pc.perks.bliss, days });
                     if (w.warn) {

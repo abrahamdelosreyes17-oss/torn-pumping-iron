@@ -144,7 +144,9 @@ export class StateFeed {
         if (!state.stats) return;
         const h = this.store.get(this.keys.history, {}) || {};
         const day = tornDayStart(state.at);
-        h[day] = { ...state.stats, total: totalOf(state.stats) };
+        // Special refills as the day started (how many the plan used today).
+        const special = h[day] && h[day].special !== undefined ? h[day].special : state.specialRefills;
+        h[day] = { ...state.stats, total: totalOf(state.stats), ...(special !== null && special !== undefined ? { special } : {}) };
         const days = Object.keys(h).map(Number).sort((a, b) => a - b);
         while (days.length > 120) delete h[days.shift()];
         this.store.set(this.keys.history, h);

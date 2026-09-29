@@ -86,7 +86,7 @@ export function statRowsBlock(m, { todayCol = 'gain' } = {}) {
             const gapTxt = (r.share * 100).toFixed(1) + '% · ' + (r.over ? 'over' : r.gap > 0 ? '+' + fmtInt(r.gap) : 'on build');
             let tod;
             if (todayCol === 'trains') tod = h('span', { class: 'gap' + (r.plannedTrains ? ' s-' + k : ''), text: r.plannedTrains + ' trains' });
-            else tod = h('span', { class: 'tod' + (r.today ? ' s-' + k : ''), style: r.today ? null : 'color:var(--dim)', text: r.today ? fmtSigned(r.today) + ' today' : r.plannedTrains ? r.plannedTrains + ' planned' : '+0 today' });
+            else tod = h('span', { class: 'tod' + (r.today ? ' s-' + k : ''), style: r.today ? null : 'color:var(--muted)', text: r.today ? fmtSigned(r.today) + ' today' : r.plannedTrains ? r.plannedTrains + ' planned' : '+0 today' });
             return h('div', { class: 'sgr' }, [
                 h('b', { class: 'n s-' + k, text: STAT_LABEL[k] }),
                 h('span', { class: 'v', text: fmtInt(r.value) }),
@@ -100,10 +100,14 @@ export function statRowsBlock(m, { todayCol = 'gain' } = {}) {
 }
 
 /** A dot-and-line list (Heads-up). */
-export function headsList(items) {
+export function headsList(items, go = null) {
     return h(
         'ul',
         { class: 'heads num' },
-        items.map((x) => h('li', { class: x.tone === 'warn' ? 'w' : x.tone === 'good' ? 'g' : null }, [h('i'), h('div', {}, [x.text, x.sub ? h('span', { text: ' · ' + x.sub }) : null])])),
+        items.map((x) => {
+            const link = go && x.go;
+            const open = () => go(x.go);
+            return h('li', { class: [x.tone === 'warn' ? 'w' : x.tone === 'good' ? 'g' : null, link ? 'go' : null].filter(Boolean).join(' ') || null, role: link ? 'link' : null, tabindex: link ? '0' : null, onclick: link ? open : null, onkeydown: link ? (e) => { if (e.key === 'Enter') open(); } : null }, [h('i'), h('div', {}, [x.text, x.sub ? h('span', { text: ' · ' + x.sub }) : null])]);
+        }),
     );
 }

@@ -60,6 +60,11 @@ export async function sendAlerts(env, f, db, user, alerts, nowS) {
         if (typeof db.left === 'function' && db.left() < group.length * 2 + 2) throw new BudgetError();
         const rows = group.map((a) => ({ user: user.id, alert: a.id, at: nowS, state: 'sent', until: null, body: { title: a.title, text: a.text, kind: a.kind, link: a.link || null, step: a.step && a.skip !== false ? { at: a.step.at, kind: a.step.kind, label: a.step.label } : null, ...(a.attack ? { attack: a.attack } : {}) } }));
         const d = await deliver(env, f, db, user, rows, nowS);
+        // Discord refused the message itself (400): record it as failed instead of retrying it every minute.
+        if (!d.ok && d.bad) {
+            for (const r of rows) await db.prepare(Q.sentPut).bind(user.id, r.alert, nowS, 'resolved', null, null, null, JSON.stringify(r.body), 'failed').run();
+            continue;
+        }
         if (!d.ok) break;
         for (const r of rows) await db.prepare(Q.sentPut).bind(user.id, r.alert, nowS, 'sent', null, d.channel, d.message, JSON.stringify(r.body), d.via).run();
         sent += rows.length;
@@ -251,6 +256,12 @@ export async function runCron(env, nowS = Math.floor(Date.now() / 1000), fetchIm
                 out.push(await runUser(env, row, nowS, f, db));
             } catch (e) {
                 if (!(e instanceof BudgetError)) {
+                    // A network or Discord failure: to the back of the line, so one row can't hold the front every minute.
+                    try {
+                        await touch(db, row, nowS);
+                    } catch {
+                        // The next run tries again.
+                    }
                     out.push({ sent: 0, error: String((e && e.message) || e) });
                     continue;
                 }

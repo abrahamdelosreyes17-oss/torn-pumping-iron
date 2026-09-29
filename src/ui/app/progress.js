@@ -30,7 +30,7 @@ export function planColor(ratio) {
 function seriesFor(m, ctx, range) {
     const hist = ctx.history || {};
     const today = tornDayStart(m.now);
-    const line = ctx.planLine && ctx.planLine.start <= today ? ctx.planLine : null;
+    const line = ctx.planProjection && ctx.planProjection.start <= today ? ctx.planProjection : null;
     let days = Object.keys(hist).map(Number).filter((d) => d <= today).sort((a, b) => a - b);
     if (line) days = days.filter((d) => d >= line.start);
     if (range !== 'all') days = days.slice(-range);
@@ -191,7 +191,7 @@ function budgetFacts(m, ctx, s) {
             h('dt', { text: 'On pace for' }),
             h('dd', { text: fmtMoney(perDay * days) }),
             m.spend && m.spend.cash !== null ? h('dt', { text: 'Cash on hand' }) : null,
-            m.spend && m.spend.cash !== null ? h('dd', { text: fmtMoney(m.spend.cash) + (m.spend.lastsDays !== null ? ' · lasts ~' + Math.round(m.spend.lastsDays) + ' days' : '') }) : null,
+            m.spend && m.spend.cash !== null ? h('dd', { text: fmtMoney(m.spend.cash) + (m.spend.lastsDays !== null ? (m.spend.lastsDays < 1 ? ' · lasts under a day' : ' · lasts ~' + Math.round(m.spend.lastsDays) + ' days') : '') }) : null,
         ]),
     ]);
 }

@@ -140,7 +140,8 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     let t = now;
     let E = energyAt(state, now);
     let H = happyAt(state, now, { bliss });
-    let drugAt = Math.max(now, drugFreeAt(state));
+    // A drug step skipped in Discord moves the next one to the cooldown that would have followed it.
+    let drugAt = Math.max(now, drugFreeAt(state), ctx.drugNotBefore || 0);
     let refillLeft = refillAvailable(state, now);
     let xanN = (ctx.drugsToday || 0) + 1;
     const steps = [];
@@ -165,13 +166,15 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     };
     const fullAt = () => (E >= maxE ? t : t + Math.ceil((maxE - E) / inc) * interval);
     // Special refills the plan may use: all in the session that gains most (a jump or boost; else the next Xanax session).
-    // In a boosted session: as many as keep happy above the maximum; otherwise today's share (ctx.specialPerDay).
+    // In a boosted session: as many as keep happy above the maximum; otherwise what's left of today's share.
     let specialLeft = Math.max(0, Math.floor(ctx.specialLeft || 0));
+    let shareLeft = Math.max(0, Math.floor((ctx.specialPerDay || 0) - (ctx.specialToday || 0)));
     const special = (at) => {
         if (!specialLeft) return;
         const drain = HAPPY_LOSS_PER_ENERGY * maxE * (ctx.happyLossMult || 1);
-        let qty = Math.min(specialLeft, Math.max(0, Math.floor(ctx.specialPerDay || 0)));
+        let qty = Math.min(specialLeft, shareLeft);
         while (qty < specialLeft && H - drain * (qty + 1) > happyMax) qty++;
+        shareLeft = Math.max(0, shareLeft - qty);
         if (!qty) return;
         E += qty * maxE;
         train(at, 'special', 'Special refills × ' + qty, [{ id: SPECIAL, qty }], { note: 'free: they come with your account' });
@@ -194,7 +197,8 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             drugAt += xanCD;
         }
         // The boost lands just after a quarter tick, once the drug cooldown allows the Ecstasy.
-        const tick = nextQuarterTick(drugAt - 1);
+        // An event that boosts this plan's items starts soon: the boost waits for it.
+        const tick = nextQuarterTick(Math.max(drugAt, ctx.holdBooster ? ctx.holdUntil || 0 : 0) - 1);
         const at = tick + MIN;
         advance(at);
         const capH = ctx.boosterCapH || BOOSTER_CAP_H;
@@ -237,9 +241,10 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
 
     // Daily choco: one Xanax a day is held (its energy kept, not trained); at
     // its cooldown end, candy + Ecstasy just after a tick, train it all, refill.
-    const daily = s === 'dailyChoco';
+    // Before an event that boosts candy, today's candy waits for it (plain Xanax sessions meanwhile).
+    const daily = s === 'dailyChoco' && !ctx.holdBooster;
     // Candy + Xanax: once a day the Xanax waits for a quarter tick, then candy fills the booster cooldown (no Ecstasy).
-    const candyDaily = s === 'candyXanax';
+    const candyDaily = s === 'candyXanax' && !ctx.holdBooster;
     // Energy boosters on the booster cooldown after each Xanax session (steadyBoost from the ladder; steadyMax: FHC as often as it allows).
     const eb = ctx.holdBooster ? null : s === 'steadyMax' ? { id: FHC, perDay: Infinity } : s === 'steadyBoost' && ctx.energyBooster && ITEMS[ctx.energyBooster.id] ? ctx.energyBooster : null;
     let ebToday = ctx.boostersToday || 0;
@@ -259,7 +264,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             advance(at);
             const candyId = ctx.candyId || CANDY_KISSES;
             const qty = ctx.candyCount || boostersThatFit(candyId, ctx.boosterCapH || BOOSTER_CAP_H);
-            H = Math.min(HAPPY_CAP, (H + qty * ITEMS[candyId].happy) * ITEMS[ECSTASY].happyMult);
+            H = Math.min(HAPPY_CAP, (H + qty * ITEMS[candyId].happy * candyMult) * ITEMS[ECSTASY].happyMult);
             train(at, 'boost', 'Candy × ' + qty + ' + Ecstasy, then train it all', [{ id: candyId, qty }, { id: ECSTASY, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick });
             if (refillLeft) {
                 E += Math.max(0, maxE - E);

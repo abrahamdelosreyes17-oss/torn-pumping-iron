@@ -115,7 +115,7 @@ function youVsBuild(m) {
         const k = r.stat;
         const trains = tot[k] || 0;
         const toGo = r.over ? 'over' : r.gap > 0 ? '+' + fmtShort(r.gap) + ' to go' : 'on target';
-        const tod = trains ? h('span', { class: 'tod s-' + k, text: trains + ' train' + (trains === 1 ? '' : 's') }) : h('span', { class: 'tod', style: 'color:var(--dim)', text: r.over ? 'skip' : 'later' });
+        const tod = trains ? h('span', { class: 'tod s-' + k, text: trains + ' train' + (trains === 1 ? '' : 's') }) : h('span', { class: 'tod muted', text: r.over ? 'skip' : 'later' });
         return h('div', { class: 'sgr' }, [
             h('b', { class: 'n s-' + k, text: STAT_LABEL[k] }),
             h('span', { class: 'v', text: fmtInt(r.value) }),
@@ -260,6 +260,6 @@ export function renderHome(m, ctx) {
     return {
         strip: true,
         main: [lead, youVsBuild(m), week].filter(Boolean),
-        pane: [buyCard(m, ctx), h('div', {}, [sectionHead('Heads-up', null, null, 'h3'), headsList(m.heads.length ? m.heads : [{ tone: 'good', text: 'Nothing needs you' }])]), planLine(m, ctx), weekCard(m, ctx)],
+        pane: [buyCard(m, ctx), h('div', {}, [sectionHead('Heads-up', null, null, 'h3'), headsList(m.heads.length ? m.heads : [{ tone: 'good', text: 'Nothing needs you' }], (tab) => ctx.go(tab))]), planLine(m, ctx), weekCard(m, ctx)],
     };
 }

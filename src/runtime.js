@@ -5,7 +5,7 @@
  */
 
 import { gmOnChange } from './platform/gm.js';
-import { K, get, set, del, getKey, getSettings, getPlan, getPrices } from './platform/store.js';
+import { K, get, set, del, getKey, getSettings, getPlan, getPrices, getShared } from './platform/store.js';
 import { tabWindow } from './platform/tab-window.js';
 import { makeTabId, LEADER_HEARTBEAT_MS } from './core/leader.js';
 import { TornApiClient } from './api/client.js';
@@ -18,6 +18,7 @@ import { TORN_PER_MINUTE_ALONE } from './core/turns.js';
 import { isPaused } from './turns.js';
 import { useDampingMode } from './core/gain.js';
 import { joinFights, runLearning, learnedModel } from './core/learndata.js';
+import { applyGymModel } from './core/learn.js';
 
 export const pi = {
     tabId: makeTabId(),
@@ -102,7 +103,7 @@ export function currentModel(now = Date.now()) {
     const s = get(K.userState, null);
     const state = s && s.api ? normalizeState(s.api, s.at) : null;
     if (!state) return { ready: false, hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)) };
-    const statics = get(K.userStatic, {}) || {};
+    const statics = getShared(K.userStatic, {}) || {};
     const plan = getPlan();
     const settings = getSettings();
     const { compare, pc } = comparisonFor(state, statics, plan, settings);
@@ -178,15 +179,17 @@ export function maybeLearn(now = Date.now(), force = false) {
     const samples = cal.samples || [];
     const fights = joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []);
     const prev = get(K.learned, null);
-    const sig = samples.length + ':' + fights.length;
+    // New trains or fights since the last run (counts stop growing at the cap; the newest time doesn't).
+    const sig = [samples.length, samples.length ? samples[samples.length - 1].at || 0 : 0, fights.length, fights.length ? fights[fights.length - 1].at : 0].join(':');
     if (!force && prev && (now - prev.at < LEARN_EVERY_MS || prev.sig === sig)) return prev;
     set(K.fightLog, fights);
-    const current = prev && prev.gym && prev.gym.accepted ? prev.gym.model : null;
+    // The model in use (kept earlier, or kept over and over since) is the one a new one must beat.
+    const current = prev && prev.gym ? applyGymModel(prev.gym) : null;
     const res = { ...runLearning({ samples, fights, now, current }), sig };
     set(K.learned, res);
     const log = get(K.learnLog, []) || [];
     log.push({ at: now, gym: { accepted: res.gym.accepted, heldOut: res.gym.heldOut, mode: res.gym.model.mode, mult: res.gym.model.mult, sessions: res.gym.sessions, candidates: res.gym.candidates }, fights: { accepted: res.fights.accepted, model: res.fights.model, fights: res.fights.fights, heldOut: res.fights.heldOut } });
-    set(K.learnLog, log.slice(-60));
+    set(K.learnLog, log.slice(-30));
     return res;
 }
 

@@ -47,13 +47,14 @@ export async function handleInteraction(interaction, env, fetchImpl, ctx, nowS =
     if (i.type === T.PING) return json({ type: R.PONG });
     if (!interactionUser(i)) return json({ error: 'No user' }, 400);
     if (i.type === T.COMMAND) {
-        const h = COMMANDS[i.data && i.data.name];
+        const name = i.data && i.data.name;
+        const h = typeof name === 'string' && Object.hasOwn(COMMANDS, name) ? COMMANDS[name] : null;
         return h ? h(i, env, fetchImpl, ctx, nowS) : reply('I don’t know that command. Try /help.');
     }
     if (i.type === T.COMPONENT) {
         const id = String((i.data && i.data.custom_id) || '');
         const verb = id.split(':')[0];
-        const h = BUTTONS[verb];
+        const h = Object.hasOwn(BUTTONS, verb) ? BUTTONS[verb] : null;
         return h ? h(i, id.slice(verb.length + 1), env, fetchImpl, ctx, nowS) : reply('That button no longer works.');
     }
     return json({ error: 'Unsupported interaction' }, 400);

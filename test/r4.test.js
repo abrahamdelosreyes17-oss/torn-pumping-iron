@@ -86,3 +86,10 @@ test('developer key: only its SHA-256 is in the script; a wrong key is refused',
     assert.equal(await checkDevKey('not the key'), false);
     assert.equal(await checkDevKey(''), false);
 });
+
+test('review: a model kept earlier stays in use when a later run keeps it again (not only when "accepted")', () => {
+    const kept = { accepted: false, model: { mult: { str: 1, spd: 1.01, def: 1, dex: 1 }, mode: 'log10' }, current: { mult: { str: 1, spd: 1.04, def: 1, dex: 1 }, mode: 'power' } };
+    const l = learnedModel({ gym: kept, fights: null });
+    assert.equal(l.mult.spd, 1.04);
+    assert.equal(l.mode, 'power', 'the damping mode travels with the multipliers');
+});

@@ -14,7 +14,7 @@ export const EYE_CSS = `
 .pi-chip { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px 0 8px; margin: 6px 0; border-radius: 14px; background: #1e2124; border: 1px solid #3a4046; font: 12px Arial, sans-serif; color: #e3e5e8; white-space: nowrap; cursor: default; vertical-align: middle; }
 .pi-chip .pi-dot { width: 12px; height: 12px; border-radius: 50%; box-shadow: inset 0 0 0 3px currentColor; background: #111; flex: none; }
 .pi-chip b { font-weight: bold; }
-.pi-chip .pi-src { color: #6c737a; font-size: 11px; }
+.pi-chip .pi-src { color: #939aa1; font-size: 11px; }
 .pi-chip.pi-mini { height: 22px; margin: 0 0 0 6px; padding: 0 8px 0 6px; gap: 6px; font-size: 11px; }
 .pi-chip.pi-mini .pi-dot { width: 10px; height: 10px; }
 .pi-eyecard { position: fixed; z-index: 99991; width: 330px; background: #1c1f22; border: 1px solid #3a4046; border-radius: 10px; padding: 12px 14px; box-shadow: 0 8px 24px rgba(0,0,0,.45); display: flex; flex-direction: column; gap: 10px; font: 12px/1.4 Arial, sans-serif; color: #e3e5e8; pointer-events: none; }
@@ -61,7 +61,7 @@ export function chipEl(v, { mini = false, id = null } = {}) {
     if (!mini && v && v.source) kids.push(h('span', { class: 'pi-src', text: v.source }));
     // The player id is always on the chip, estimate or not: redraw checks compare it.
     const title = v && v.est ? 'Torn Eye · stats: ' + (v.est.source === 'ffscouter' ? 'FFScouter (ffscouter.com)' : v.source) : 'Torn Eye';
-    return h('span', { class: 'pi-mark pi-chip' + (mini ? ' pi-mini' : ''), 'data-pi-player': String(id || (v && v.id) || ''), title }, kids);
+    return h('span', { class: 'pi-mark pi-chip' + (mini ? ' pi-mini' : ''), 'data-pi-player': String(id || (v && v.id) || ''), title, tabindex: '0', role: 'button', 'aria-label': title + ' · ' + BAND_WORDS[band] }, kids);
 }
 
 /** The hover card: HP kept by likely build, gear, sources with credit. */
@@ -98,7 +98,8 @@ export function bindCard(doc, getView) {
         if (card) card.remove();
         card = null;
     };
-    doc.addEventListener('mouseover', (e) => {
+    // Hover, keyboard focus or a tap shows the card; Escape or leaving hides it.
+    const show = (e) => {
         const chip = e.target && e.target.closest ? e.target.closest('.pi-chip[data-pi-player]') : null;
         if (!chip) return hide();
         const v = getView(Number(chip.getAttribute('data-pi-player')));
@@ -111,6 +112,14 @@ export function bindCard(doc, getView) {
         const below = r.bottom + 8 + card.offsetHeight < window.innerHeight;
         card.style.left = x + 'px';
         card.style.top = (below ? r.bottom + 6 : Math.max(8, r.top - card.offsetHeight - 6)) + 'px';
+    };
+    doc.addEventListener('mouseover', show);
+    doc.addEventListener('focusin', show);
+    doc.addEventListener('click', (e) => {
+        if (e.target && e.target.closest && e.target.closest('.pi-chip[data-pi-player]')) show(e);
+    });
+    doc.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') hide();
     });
     doc.addEventListener('scroll', hide, true);
 }
@@ -135,7 +144,7 @@ export function warSummaryEl(sum, updatedAgoS, fromFfs = false) {
 export function attackPanelContent(v, s) {
     const kids = [h('span', { class: 'row' }, [h('span', { class: 'plate' }, [h('i')]), h('b', { class: 'white', text: 'Torn Eye' })])];
     if (!v) {
-        kids.push(h('span', { class: 'muted', text: 'No estimate yet.' }));
+        kids.push(h('span', { class: 'muted', text: 'Reading this player… (your fights, FFScouter, public stats)' }));
         return kids;
     }
     const f = v.forecast;

@@ -222,6 +222,13 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     ok(/attack now/.test(war.text) && /Next out of hospital/.test(war.text), 'eye war: members listed with who to hit now');
     ok(/Traveling|In |Returning/.test(war.text), 'eye war: travellers shown');
     await o.page.screenshot({ path: resolve(shots, 'app-eye-war.png'), fullPage: true });
+    // Typing survives the 10 s war read (a forced redraw used to wipe it).
+    await o.page.locator('#pi-app input[placeholder="faction id"]').fill('88');
+    await o.page.locator('#pi-app input[placeholder="faction id"]').press('End');
+    await o.page.keyboard.type('8');
+    await o.page.waitForTimeout(12000);
+    const kept = await o.page.evaluate(() => { const sr = document.getElementById('pi-app').shadowRoot; const el = sr.querySelector('input[placeholder="faction id"]'); return { value: el.value, focused: sr.activeElement === el }; });
+    ok(kept.value === '888' && kept.focused, 'typing survives a background redraw (' + JSON.stringify(kept) + ')');
     await o.page.close();
 }
 

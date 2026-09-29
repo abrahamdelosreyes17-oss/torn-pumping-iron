@@ -161,14 +161,19 @@ export function simulateStrategy(id, o) {
     // Special refills: in a boosted session as many as keep happy above the maximum (it resets there anyway);
     // otherwise a day's share. Each train costs happy, so dumping them all at the maximum drains it for days.
     const specialPerDay = Math.ceil(Math.max(0, Math.floor(o.special || 0)) / days);
-    const spendSpecial = () => {
-        let n = 0;
+    let spDay = -1;
+    let spToday = 0;
+    const spendSpecial = (day) => {
+        if (day !== spDay) {
+            spDay = day;
+            spToday = 0;
+        }
         const drain = HAPPY_LOSS_PER_ENERGY * maxE * lossMult;
-        while (specialLeft > 0 && (n < specialPerDay || H - drain > maxH)) {
+        while (specialLeft > 0 && (spToday < specialPerDay || H - drain > maxH)) {
             E += maxE;
             specialLeft--;
             used[SPECIAL]++;
-            n++;
+            spToday++;
             train();
         }
     };
@@ -221,7 +226,7 @@ export function simulateStrategy(id, o) {
             }
             if (day !== refillDay && E < 20) refill(day);
             train();
-            if (took) spendSpecial();
+            if (took) spendSpecial(day);
             energyBoost(t, day);
         } else if (id === 'candyXanax') {
             // Once a day the Xanax waits for a tick, then candy + Xanax and train it (no Ecstasy: the candy happy lasts one session).
@@ -236,7 +241,7 @@ export function simulateStrategy(id, o) {
                         refill(day);
                         train();
                     }
-                    spendSpecial();
+                    spendSpecial(day);
                     doneDay = day;
                 }
             } else {
@@ -254,7 +259,7 @@ export function simulateStrategy(id, o) {
                 train();
                 refill(day);
                 train();
-                spendSpecial();
+                spendSpecial(day);
                 phase = 'done';
                 doneDay = day;
             } else if (phase !== 'hold' && t >= drugFree) {
@@ -291,7 +296,7 @@ export function simulateStrategy(id, o) {
                     refill(day);
                     train();
                 }
-                spendSpecial();
+                spendSpecial(day);
                 phase = 'stack';
                 stacked = 0;
             }

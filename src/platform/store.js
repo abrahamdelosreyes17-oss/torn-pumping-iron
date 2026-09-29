@@ -116,6 +116,12 @@ export function get(name, fallback = null) {
     return gmGet(name, fallback);
 }
 
+/** A big stored value, parsed once per change (read-only: copy before changing). */
+export function getShared(name, fallback = null) {
+    const v = gmGetShared(name, fallback);
+    return v === null || v === undefined ? fallback : v;
+}
+
 /** Prices, parsed once per change (read-only: copy before changing). */
 export function getPrices() {
     return gmGetShared(K.prices, {}) || {};

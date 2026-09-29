@@ -86,6 +86,14 @@ export async function connectDiscord(f, model) {
     const base = workerBase(f.base);
     if (f.tornKey && [getKey(K.apiKey), getKey(K.ffsKey), getKey(K.tsKey)].filter(Boolean).includes(f.tornKey.trim())) throw new Error('That is your main key. Make a separate custom key for the Worker (user: basic, bars, cooldowns, refills, travel · faction: members, chain, wars · market: itemmarket).');
     const prev = discordState();
+    // A new address: the old Worker forgets you (best-effort), so your key and webhook don't stay there.
+    if (prev && prev.base !== base) {
+        try {
+            await workerForget({ base: prev.base, secret: prev.secret });
+        } catch {
+            // It may be gone already.
+        }
+    }
     const secret = prev && prev.base === base ? prev.secret : newSecret();
     const body = { base, secret, invite: f.invite || null, plan: planPayload(model) };
     if (f.webhookUrl) body.webhookUrl = f.webhookUrl.trim();
@@ -150,6 +158,7 @@ export function maybeSyncPlan(m, now = Date.now()) {
             const acked = applyAcks(r.acks, Date.now());
             set(K.worker, { ...(get(K.worker, {}) || {}), lastError: pausedText(r), ready: Boolean(r.ready), linked: Boolean(r.linked), bot: Boolean(r.bot), pendingAcks: acked });
         })
-        .catch((e) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks }));
+        // Failed: the plan counts as unsent (next minute tries again); the acks wait too.
+        .catch((e) => set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks, lastSig: w.lastSig }));
     return true;
 }

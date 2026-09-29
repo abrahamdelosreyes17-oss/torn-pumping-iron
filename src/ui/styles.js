@@ -83,7 +83,7 @@ a:hover { text-decoration: underline; }
 
 /* tables (steps, sources, targets, war) */
 .tbl { width: 100%; border-collapse: collapse; }
-.tbl th { text-align: left; font-size: 11px; font-weight: bold; letter-spacing: .5px; text-transform: uppercase; color: var(--dim); padding: 0 8px 6px; white-space: nowrap; }
+.tbl th { text-align: left; font-size: 11px; font-weight: bold; letter-spacing: .5px; text-transform: uppercase; color: var(--muted); padding: 0 8px 6px; white-space: nowrap; }
 .tbl td { height: var(--row); padding: 0 8px; border-top: 1px solid var(--line); }
 .tbl .r { text-align: right; }
 .tbl .t { font: 600 15px var(--display); color: var(--muted); width: 56px; }
@@ -330,7 +330,7 @@ details.dis[open] > summary::before { content: "▾ "; }
 .tbl tr.sub td:first-child { padding-left: 22px; }
 .verdict { font-size: 12px; }
 svg.ch { width: 100%; display: block; overflow: visible; }
-svg.ch text { font: 11px Arial; fill: var(--dim); }
+svg.ch text { font: 11px Arial; fill: var(--muted); }
 svg.ch .ax { stroke: var(--line2); stroke-width: 1; }
 svg.ch .grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
 .legend2 { display: flex; gap: 14px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
@@ -380,6 +380,20 @@ svg.ch .grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
 .plansel .opt span { color: var(--muted); font-size: 12px; }
 .plansel .opt.on { outline: 1px solid var(--chalk); }
 .main > .sec, .main > .sec:first-child { padding: 18px 20px; }
+.heads li.go { cursor: pointer; }
+.heads li.go:hover div, .heads li.go:focus-visible div { color: var(--white); }
+.heads li.go:focus-visible { outline: 2px solid var(--chalk); outline-offset: 2px; }
+.tbl tr.click:focus-visible td { box-shadow: inset 0 0 0 2px var(--chalk); }
+.pi-chip:focus-visible { outline: 2px solid var(--chalk); }
+/* Narrow windows (a tablet): bars wrap, the pane goes under the page. */
+@media (max-width: 1000px) {
+  .app { min-width: 0; }
+  .top { flex-wrap: wrap; height: auto; padding: 6px 16px; }
+  .strip, .strip.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .body { grid-template-columns: minmax(0, 1fr); padding: 16px; }
+  .mult { grid-template-columns: minmax(0, 1fr); }
+  .tbl { display: block; overflow-x: auto; }
+}
 .warnb.paused { border-radius: 0; margin: 0; padding: 12px 24px; }
 .dev-scatter { max-width: 520px; }
 `;

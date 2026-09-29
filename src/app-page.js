@@ -13,7 +13,7 @@ import { outEarly, memberState } from './core/eye/war.js';
 import { W3bClient, fetchW3bListings } from './api/w3b.js';
 import { makeFfsClient, checkFfsKey, fetchFfsTargets } from './api/ffscouter.js';
 import { renderEye } from './ui/app/eye-tab.js';
-import { wantPlayers, eyeView, onEye, gearCount, clearEye } from './eye-service.js';
+import { wantPlayers, eyeView, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient } from './eye-service.js';
 import { discordState, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId, linkDiscord, setTargetsForSync } from './discord.js';
 import { WORKER_SETUP_URL } from './api/worker.js';
 import { tabWindow } from './platform/tab-window.js';
@@ -42,15 +42,16 @@ function w3bClient() {
 }
 
 export function ffsClient() {
-    if (!page.ffs) page.ffs = makeFfsClient({ getKey: () => getKey(K.ffsKey), isVisible, loadShared: () => get('ffsWindow', {}), saveShared: (s) => set('ffsWindow', s) });
+    page.ffs = sharedFfsClient();
     return page.ffs;
 }
 
 /** Fetch listings for the items the Buy list shows, if older than 5 minutes. */
 export async function loadPrices(ids) {
     // Nothing from Torn or TornW3B while Torn Trading runs (the two take turns).
-    if (!getKey(K.apiKey) || isPaused()) return;
+    if (!getKey(K.apiKey) || isPaused() || get(K.apiKeyDead, false)) return;
     const prices = { ...(getPrices()) };
+    const skip = new Set();
     const now = Date.now();
     const due = [...new Set(ids.map(String))].filter((id) => !page.loading.has(id) && !(prices[id] && now - (prices[id].at || 0) < PRICE_FRESH_MS));
     if (!due.length) return;
@@ -59,6 +60,7 @@ export async function loadPrices(ids) {
     for (const id of due) {
         // Paused mid-load: keep what's stored, ask again once Torn Trading stops.
         if (isPaused()) {
+            skip.add(id);
             page.loading.delete(id);
             continue;
         }
@@ -83,10 +85,20 @@ export async function loadPrices(ids) {
             }
         } catch (error) {
             if (error && error.takingTurns) {
+                skip.add(id);
                 page.loading.delete(id);
                 continue;
             }
             row.error = redactKey(String((error && error.message) || error), getKey(K.apiKey));
+            // A failed load keeps the last good listings, and is asked again in 30 s, not 5 min.
+            const old = prices[id];
+            const retryAt = Date.now() - PRICE_FRESH_MS + 30000;
+            if (old && Array.isArray(old.listings) && old.listings.length) {
+                prices[id] = { ...old, error: row.error, at: retryAt };
+                page.loading.delete(id);
+                continue;
+            }
+            row.at = retryAt;
         }
         // Kept small: the cheapest listings only (GM storage is read on every Torn page).
         row.listings = row.listings.sort((a, b) => a.price - b.price).slice(0, PRICE_LISTINGS_KEPT);
@@ -99,7 +111,7 @@ export async function loadPrices(ids) {
         page.loading.delete(id);
     }
     set(K.priceHistory, hist);
-    const merged = { ...(getPrices()), ...Object.fromEntries(due.filter((id) => prices[id] && prices[id].at >= now).map((id) => [id, prices[id]])) };
+    const merged = { ...(getPrices()), ...Object.fromEntries(due.filter((id) => prices[id] && !skip.has(id)).map((id) => [id, prices[id]])) };
     set(K.prices, merged);
     refresh();
     if (page.app) page.app.render(true);
@@ -130,6 +142,7 @@ async function saveTornKey(v) {
 async function saveFfsKey(v) {
     if (!v) return { ok: false, text: 'Paste your FFScouter key first.' };
     setKey(K.ffsKey, v);
+    resetFfsClient();
     page.ffs = null;
     try {
         const r = await checkFfsKey(ffsClient());
@@ -191,8 +204,10 @@ async function pollWarTab() {
     if (!page.app || page.app.tab !== 'eye' || (page.app.ui.eyeMode || 'targets') !== 'war') return;
     if (Date.now() - war.at < WAR_TAB_POLL_MS) return;
     war.loading = true;
+    const fid = war.fid;
     try {
-        const members = await fetchFactionMembers(tornClient(), war.fid);
+        const members = await fetchFactionMembers(tornClient(), fid);
+        if (war.fid !== fid) return;
         const nowMs = Date.now();
         war.early = outEarly(war.members, members, Math.floor(nowMs / 1000));
         // When each flight was first seen: the landing estimate counts from it.
@@ -211,9 +226,10 @@ async function pollWarTab() {
         wantPlayers(members.map((m) => Number(m.id)));
     } catch (error) {
         war.error = String((error && error.message) || error);
+    } finally {
+        war.loading = false;
     }
     war.at = Date.now();
-    war.loading = false;
     if (page.app) page.app.render(true);
 }
 
@@ -221,7 +237,7 @@ function eyeRows() {
     const stored = get('eyeTargets', null);
     if (!stored) return [];
     const rows = stored.list.map((x) => ({ ...(eyeView(x.playerId, { level: x.level, name: x.name }) || { id: x.playerId, band: 'none' }), name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId }));
-    // The bot's /targets and /war read Torn Eye's list and bands (only if you set up Discord; ids and bands only).
+    // The bot's /targets and /war read Torn Eye's list (ids, names, levels, bands; disclosed in Settings), only if you set up Discord.
     if (discordState()) {
         const bands = {};
         for (const r of rows) if (r.band) bands[r.id] = r.band;
@@ -253,7 +269,7 @@ function getCtx() {
         dayTotals: get(K.dayTotals, {}) || {},
         gymProgress: get(K.gymProgress, null),
         calibration: get('calibration', null),
-        planLine: get(K.planLine, null),
+        planProjection: get(K.planLine, null),
         flags: { hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)), hasFfs: Boolean(getKey(K.ffsKey)), ffsDead: Boolean(ffsState && ffsState.registered === false), hasTs: Boolean(getKey(K.tsKey)) },
         keyProblem: keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: statics.keyInfo || null }),
         planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
@@ -264,7 +280,9 @@ function getCtx() {
             page.app.render(true);
         },
         setPlan: (p) => {
-            setPlan({ ...getPlan(), ...p, createdAt: Date.now() });
+            const cur = getPlan();
+            const restart = (p.strategy !== undefined && p.strategy !== cur.strategy) || (p.build !== undefined && p.build !== cur.build) || !cur.createdAt;
+            setPlan({ ...cur, ...p, createdAt: restart ? Date.now() : cur.createdAt });
             refresh();
             page.app.render(true);
         },
@@ -292,7 +310,7 @@ function getCtx() {
             setupUrl: WORKER_SETUP_URL,
         },
         dev: {
-            data: () => ({ samples: ((get('calibration', null) || {}).samples) || [], fights: joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []), learned: get(K.learned, null) || maybeLearn(Date.now(), true), version: PI_BUILD_VERSION }),
+            data: () => ({ samples: ((get('calibration', null) || {}).samples) || [], fights: joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []), learned: get(K.learned, null), version: PI_BUILD_VERSION }),
             unlocked: () => Boolean(get(K.devUnlocked, false)),
             setUnlocked: (v) => (v ? set(K.devUnlocked, true) : del(K.devUnlocked)),
             log: () => get(K.learnLog, []) || [],

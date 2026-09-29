@@ -24,8 +24,11 @@ import { pendingAcks } from './buttons.js';
 import { sealKey, openKey, isSealed } from './keys.js';
 import { cleanTargets } from './cmd-torn.js';
 
-/** A plan, its targets and bands fit easily in this. */
-const MAX_BODY = 100000;
+/** A plan, its targets and bands fit easily in this (a 24-step plan + 50 targets + 500 bands is under 10 kB). */
+const MAX_BODY = 30000;
+
+/** People one Worker serves (a leaked invite can't fill it); MAX_USERS in wrangler.toml [vars] changes it. */
+export const DEFAULT_MAX_USERS = 10;
 import { Q, SCHEMA, ensureSchema, ackDeleteMany, MAX_ACK_IDS } from './db.js';
 import { guard } from './net.js';
 import { interactionsRoute } from './interactions.js';
@@ -71,6 +74,11 @@ async function putPlan(req, env) {
     const { id, row, error } = await userFor(req, env);
     if (error) return error;
     if (!row && !(env.INVITE_CODE && (await sameSecret(req.headers.get('x-invite'), env.INVITE_CODE)))) return json({ ok: false, error: 'Unknown secret: the first sync needs the invite code' }, 403);
+    if (!row) {
+        const max = Number(env.MAX_USERS) > 0 ? Number(env.MAX_USERS) : DEFAULT_MAX_USERS;
+        const n = await env.DB.prepare(Q.usersCount).first();
+        if (Number(n && n.n) >= max) return json({ ok: false, error: 'This Worker is full (' + max + ' people). Ask its owner, or deploy your own (SETUP.md).' }, 403);
+    }
     let body;
     const text = await req.text();
     if (text.length > MAX_BODY) return json({ ok: false, error: 'Too much data in one sync' }, 413);

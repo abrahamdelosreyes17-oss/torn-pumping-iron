@@ -20,6 +20,7 @@ export const Q = {
     userGet: 'SELECT * FROM users WHERE id = ?',
     userByDiscord: 'SELECT * FROM users WHERE discord_id = ? AND linked = 1',
     // Only users the cron can serve (a key, and a webhook or a Discord link): others never block the line.
+    usersCount: 'SELECT COUNT(*) AS n FROM users',
     usersDue: "SELECT * FROM users WHERE paused = 0 AND torn_key != '' AND (webhook != '' OR linked = 1) ORDER BY ran ASC LIMIT ?",
     usersPlainKeys: "SELECT id, torn_key FROM users WHERE torn_key != '' AND torn_key NOT LIKE 'v1.%' LIMIT 5",
     userInsert: 'INSERT INTO users (id, torn_key, discord_id, webhook, plan, rules, paused, last_error, updated, plan_at, targets, faction_id, player_id, linked, ran) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)',

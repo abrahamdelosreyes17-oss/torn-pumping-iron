@@ -81,6 +81,35 @@ export class PiApp {
         this.host.scrollTop = 0;
     }
 
+    /** The box being typed in: which one (its label), what's in it and where the cursor is. */
+    focusedInput() {
+        const a = this.shadow && this.shadow.activeElement;
+        if (!a || !(a.tagName === 'INPUT' || a.tagName === 'TEXTAREA') || a.type === 'checkbox' || a.type === 'file') return null;
+        const key = a.getAttribute('aria-label') || a.getAttribute('placeholder') || a.getAttribute('name');
+        if (!key) return null;
+        let s = null;
+        let e = null;
+        try {
+            s = a.selectionStart;
+            e = a.selectionEnd;
+        } catch {
+            // Some input types have no selection.
+        }
+        return { key, value: a.value, s, e, masked: a.classList.contains('masked') };
+    }
+
+    restoreInput(k) {
+        const el = [...this.root.querySelectorAll('input, textarea')].find((x) => (x.getAttribute('aria-label') || x.getAttribute('placeholder') || x.getAttribute('name')) === k.key);
+        if (!el) return;
+        el.value = k.value;
+        el.focus();
+        try {
+            if (k.s !== null) el.setSelectionRange(k.s, k.e);
+        } catch {
+            // Not every input keeps a cursor.
+        }
+    }
+
     /** True while the user is typing in the page: a redraw would lose the cursor. */
     typing() {
         const a = this.shadow && this.shadow.activeElement;
@@ -134,7 +163,10 @@ export class PiApp {
         if (out.strip && m && m.ready) app.appendChild(statusStrip(m, s));
         this.updText = out.upd || null;
         app.appendChild(h('div', { class: 'body' }, [h('div', { class: 'main' }, out.main || []), h('div', { class: 'pane' }, out.pane || [])]));
+        // A background redraw (prices, Torn Eye, the war read) never takes what you're typing: the box, its text and the cursor come back.
+        const keep = this.focusedInput();
         fill(this.root, [app]);
+        if (keep) this.restoreInput(keep);
         this.tick();
     }
 

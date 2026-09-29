@@ -33,6 +33,7 @@ export function fakeD1() {
 
         [Q.userGet]: ([id]) => ({ first: users.get(id) || null }),
         [Q.userByDiscord]: ([d]) => ({ first: [...users.values()].find((u) => u.discord_id === d && Number(u.linked) === 1) || null }),
+        [Q.usersCount]: () => ({ first: { n: users.size } }),
         [Q.usersDue]: ([limit]) => ({ all: [...users.values()].filter((u) => !Number(u.paused) && u.torn_key && (u.webhook || Number(u.linked) === 1)).sort((a, b) => (Number(a.ran) || 0) - (Number(b.ran) || 0)).slice(0, limit) }),
         [Q.userInsert]: ([id, torn_key, discord_id, webhook, plan, rules, paused, last_error, updated, plan_at, targets, faction_id, player_id]) => {
             if (users.has(id)) throw new Error('UNIQUE constraint failed: users.id');

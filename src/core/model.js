@@ -15,9 +15,9 @@ import { simulateStrategy, feasibleStrategies, STRATEGIES } from './strategies.j
 import { recommend, pickWarning } from './recommend.js';
 import { needList, livePrices } from './market.js';
 import { energyLadder, boosterChoice, priceFor } from './ladder.js';
-import { upcomingEvents, holdBoosterFor, eventHeadsUp } from './events.js';
+import { upcomingEvents, holdBoosterFor, eventHeadsUp, eventMults } from './events.js';
 import { PICK_BY } from './recommend.js';
-import { XANAX, SAMPLE_PRICES, ITEMS } from './items.js';
+import { XANAX, SAMPLE_PRICES, ITEMS, XANAX_CD_MIN } from './items.js';
 import { HAPPY_CAP } from './gain.js';
 import { JUMP_STACK } from './strategies.js';
 
@@ -71,6 +71,12 @@ export function playerContext(state, statics = {}, extra = {}) {
 /** The booster cap: 24 h, plus faction Voracity's extra hours, or the setting if higher. */
 export function boosterCapOf(pc, settings = {}) {
     return Math.max(settings.boosterCapH || 24, 24 + ((pc.perks && pc.perks.boosterCapExtraH) || 0));
+}
+
+/** Days left to spread special refills over (the whole horizon again once it has passed, never one day). */
+export function specialDaysLeft(horizon, daysSince) {
+    const left = horizon - daysSince;
+    return left >= 1 ? left : horizon;
 }
 
 /** Special refills the plan may still use: the number set, less what the account has used since. */
@@ -179,7 +185,17 @@ export function blissWhatIf({ state, pc, shares, settings, prices, special = 0 }
  */
 export function withoutSkipped(steps, skipped = []) {
     if (!skipped || !skipped.length) return steps;
-    return steps.filter((s) => !skipped.some((x) => x.kind === s.kind && (Math.abs((x.stepAt || 0) - s.at) <= 10 * 60 * 1000 || (x.label && x.label === s.label))));
+    // Same Torn day only (labels like "Xanax #2" repeat every day), within 30 minutes of the skipped step's time.
+    return steps.filter((s) => !skipped.some((x) => x.kind === s.kind && tornDayStart(x.stepAt || x.at) === tornDayStart(s.at) && Math.abs((x.stepAt || 0) - s.at) <= 30 * 60 * 1000));
+}
+
+/** Drug steps skipped today: the next drug is planned from the cooldown that would have followed. */
+export const DRUG_STEP_KINDS = new Set(['xanax', 'stack', 'hold', 'boost', 'jump']);
+
+export function drugNotBefore(skipped, now) {
+    const today = (skipped || []).filter((x) => DRUG_STEP_KINDS.has(x.kind) && tornDayStart(x.stepAt || 0) === tornDayStart(now));
+    if (!today.length) return 0;
+    return Math.max(...today.map((x) => x.stepAt)) + XANAX_CD_MIN * 60 * 1000;
 }
 
 export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, now }) {
@@ -210,7 +226,9 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         boosterCapH: boosterCapOf(pc, settings),
         // Only where the comparison found they add stats (they cost happy like any train).
         specialLeft: compare && compare[plan.strategy] && compare[plan.strategy].specialHelps === false ? 0 : specialLeft(plan, state),
-        specialPerDay: Math.ceil(specialLeft(plan, state) / Math.max(1, (settings.horizonDays || 30) - Math.floor((now - (plan.specialSetAt || now)) / DAY))),
+        // Special refills used since the Torn day began (the count at the day's first read, less now).
+        specialToday: history && history[tornDayStart(now)] && history[tornDayStart(now)].special !== undefined && state.specialRefills !== null ? Math.max(0, history[tornDayStart(now)].special - state.specialRefills) : 0,
+        specialPerDay: Math.ceil(specialLeft(plan, state) / specialDaysLeft(settings.horizonDays || 30, Math.floor((now - (plan.specialSetAt || now)) / DAY))),
         energyBooster: compare && compare.steadyBoost ? compare.steadyBoost.booster : null,
         boostersToday: today.filter((e) => e.kind === 'booster').length,
         candyMult: pc.perks.candyMult || 1,
@@ -220,8 +238,16 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     };
     // Torn events that change training: a heads-up, and no boosters in the day before one that needs the booster cooldown.
     const events = statics.calendar ? upcomingEvents(statics.calendar.calendar, now, { startTime: statics.calendar.startTime }) : [];
-    const hold = holdBoosterFor(events, now);
-    if (hold) ctx.holdBooster = hold.id;
+    const hold = holdBoosterFor(events, now, plan.strategy);
+    if (hold) {
+        ctx.holdBooster = hold.id;
+        ctx.holdUntil = hold.start;
+    }
+    ctx.drugNotBefore = drugNotBefore(skipped, now);
+    // During CaffeineCon / World Diabetes Day the day plan counts the event's cans or candy.
+    const em = eventMults(events);
+    ctx.canMult = (ctx.canMult || 1) * em.canMult;
+    ctx.candyMult = (ctx.candyMult || 1) * em.candyMult;
     const steps = withoutSkipped(dayTimeline({ state, now, strategy: plan.strategy, ctx }), skipped);
     const next = steps[0] || null;
 
@@ -280,15 +306,15 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
 
     // Heads-up
     const heads = [];
-    if (!plan.buildPicked) heads.push({ tone: 'warn', text: 'Pick your build type', sub: 'Plan › Build: the plan trains toward it' });
+    if (!plan.buildPicked) heads.push({ tone: 'warn', text: 'Pick your build type', sub: 'Plan › Build: the plan trains toward it', go: 'plan' });
     for (const w of strictWarnings(steps, now)) heads.push({ tone: 'warn', text: w.text });
     if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
-    if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.known ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost) });
+    if (ng && ng.gym) heads.push({ tone: 'plain', text: ng.gym.name + (ng.known ? ' in about ' + Math.max(1, Math.round(ng.days)) + ' days' : ' is next'), sub: 'buy it for $' + (ng.cost >= 1e6 ? ng.cost / 1e6 + 'M' : ng.cost), go: 'progress' });
     for (const e of events.slice(0, 2)) {
         const hu = eventHeadsUp(e, now);
-        heads.push({ tone: e.active ? 'good' : 'plain', text: hu.text, sub: hu.sub, event: e.id });
+        heads.push({ tone: e.active ? 'good' : 'plain', text: hu.text, sub: hu.sub, event: e.id, go: 'plan' });
     }
-    if (hold && steps.some((s2) => (s2.items || []).some((it) => ITEMS[it.id] && ITEMS[it.id].kind === 'booster'))) heads.push({ tone: 'warn', text: 'Keep the booster cooldown free', sub: hold.name + ' starts within a day' });
+    if (hold) heads.push({ tone: 'warn', text: 'Booster cooldown kept free', sub: hold.name + ' starts within a day: your plan’s ' + (hold.id === 'diabetes' ? 'candy' : 'cans and FHC') + ' count ' + (hold.canMult || hold.candyMult || 1) + '× then' });
     let rec = null;
     let ladder = null;
     const pickBy = PICK_BY[plan.pickBy] ? plan.pickBy : 'most';
@@ -299,7 +325,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         if (r.recommended === plan.strategy) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is still best' });
         else if (mine) {
             const w = pickWarning(compare[r.recommended], mine, { bliss: pc.perks.bliss, days: settings.horizonDays || 30 });
-            if (w.warn) heads.push({ tone: 'warn', text: (STRATEGIES[r.recommended] || {}).name + ' would gain more', sub: 'see Plan' });
+            if (w.warn) heads.push({ tone: 'warn', text: (STRATEGIES[r.recommended] || {}).name + ' would gain more', sub: 'see Plan', go: 'plan' });
         }
         ladder = energyLadder({ state, pc, shares, prices, compare, recommended: r.recommended, days: settings.horizonDays || 30, budget: settings.budget || Infinity, specialHave: state.specialRefills || 0, specialUse: specialLeft(plan, state) });
     }

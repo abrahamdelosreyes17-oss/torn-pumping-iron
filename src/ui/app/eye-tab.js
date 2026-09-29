@@ -206,9 +206,9 @@ export function renderEye(m, ctx) {
         let fidIn;
         bar1.push(
             t('lab', 'Enemy faction'),
-            (fidIn = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:90px', placeholder: 'faction id', value: w.fid ? String(w.fid) : '' })),
-            h('button', { class: 'btn sm', type: 'button', onclick: () => { const v = Number(String(fidIn.value).replace(/\D/g, '')); if (v && e.war) e.war.watch(v); }, text: w.fid ? 'Watch' : 'Watch' }),
-            w.fid ? h('span', { class: 'muted', text: (w.name || 'faction ' + w.fid) + ' · read every 10 s while open' }) : null,
+            (fidIn = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:90px', placeholder: 'faction id', 'aria-label': 'Enemy faction id', value: w.fid ? String(w.fid) : '' })),
+            h('button', { class: 'btn sm', type: 'button', onclick: () => { const v = Number(String(fidIn.value).replace(/\D/g, '')); if (v && e.war) e.war.watch(v); }, text: w.fid ? 'Watch this one' : 'Watch' }),
+            w.fid ? h('span', { class: 'muted', text: 'Watching ' + (w.name || 'faction ' + w.fid) + ' · read every 10 s while open' }) : null,
         );
     }
     bar1.push(h('span', { class: 'sep' }), t('lab', 'Sort'));

@@ -76,8 +76,9 @@ export function runLearning({ samples = [], fights = [], now, current = null }) 
 /** What the engine uses from a learning run: per-stat multipliers, the damping mode, the fight model. */
 export function learnedModel(learned) {
     if (!learned) return { mult: { str: 1, spd: 1, def: 1, dex: 1 }, mode: null, fight: null };
+    // The model in use: the learned one when kept, else the one it was checked against (itself possibly learned earlier).
     const g = applyGymModel(learned.gym || null);
-    return { mult: g.mult, mode: learned.gym && learned.gym.accepted ? g.mode : null, fight: learned.fights && learned.fights.accepted ? learned.fights.model : null };
+    return { mult: g.mult, mode: learned.gym ? g.mode : null, fight: learned.fights && learned.fights.accepted ? learned.fights.model : null };
 }
 
 /**
@@ -97,6 +98,22 @@ export function exportFiles({ samples = [], fights = [], learned = null, version
     ];
 }
 
+const STAT_KEYS = ['str', 'spd', 'def', 'dex'];
+const inRange = (v, lo, hi) => Number.isFinite(v) && v >= lo && v <= hi;
+
+/** One imported gym sample, or null when it doesn't look like one (a crafted file can't hang the page). */
+export function cleanSample(s) {
+    if (!s || typeof s !== 'object' || !STAT_KEYS.includes(s.stat) || !inRange(s.trains, 1, 2000) || !inRange(s.actual, 0, 1e10)) return null;
+    const out = { at: inRange(s.at, 0, 1e13) ? s.at : null, stat: s.stat, trains: Math.floor(s.trains), actual: s.actual, predicted: inRange(s.predicted, 0, 1e10) ? s.predicted : null };
+    if (inRange(s.S, 0, 1e13) && inRange(s.H, 0, 99999) && inRange(s.dots, 0, 20) && inRange(s.E, 1, 50)) Object.assign(out, { S: s.S, H: s.H, dots: s.dots, E: s.E, perks: inRange(s.perks, 0.1, 10) ? s.perks : 1 });
+    return out;
+}
+
+export function cleanFight(f) {
+    if (!f || typeof f !== 'object' || !inRange(f.predictedWin, 0, 1) || typeof f.won !== 'boolean') return null;
+    return { at: inRange(f.at, 0, 1e13) ? f.at : null, who: typeof f.who === 'string' ? f.who.slice(0, 20) : null, predictedWin: f.predictedWin, won: f.won, predictedHpKept: inRange(f.predictedHpKept, 0, 1) ? f.predictedHpKept : null, hpKept: inRange(f.hpKept, 0, 1) ? f.hpKept : null };
+}
+
 /** A friend's export, read back (never merged into your own data). */
 export function importFiles(files) {
     const read = (n) => {
@@ -110,5 +127,9 @@ export function importFiles(files) {
     const fights = read('fights.json');
     const meta = read('meta.json');
     if (!Array.isArray(samples) && !Array.isArray(fights)) throw new Error('This zip has no learning data (gym-samples.json / fights.json).');
-    return { samples: Array.isArray(samples) ? samples : [], fights: Array.isArray(fights) ? fights : [], meta: meta || {} };
+    return {
+        samples: (Array.isArray(samples) ? samples : []).map(cleanSample).filter(Boolean).slice(-5000),
+        fights: (Array.isArray(fights) ? fights : []).map(cleanFight).filter(Boolean).slice(-5000),
+        meta: meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {},
+    };
 }

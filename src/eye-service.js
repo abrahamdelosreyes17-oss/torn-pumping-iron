@@ -6,7 +6,7 @@
  * min in memory and 1 h stored, as its guidance asks).
  */
 
-import { K, get, set, getKey, getSettings } from './platform/store.js';
+import { K, get, set, getKey, getSettings, getShared } from './platform/store.js';
 import { learnedModel } from './core/learndata.js';
 import { applyFightModel } from './core/learn.js';
 import { idbGet, idbSet } from './platform/idb.js';
@@ -31,10 +31,22 @@ export function lifeFromLevel(level) {
     return Math.round((100 + 50 * Math.max(0, (Number(level) || 1) - 1)) * 1.25);
 }
 
-const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(), timer: null, listeners: [], mem: new Map() };
+const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(), timer: null, listeners: [], mem: new Map(), fc: new Map(), flushing: null, again: false };
+
+/** The one FFScouter client in this tab (Torn Eye and Settings share it, and its dead-key mark). */
+export function sharedFfsClient() {
+    if (!eye.ffs) eye.ffs = makeFfsClient({ getKey: () => getKey(K.ffsKey), isVisible, loadShared: () => get('ffsWindow', {}), saveShared: (s) => set('ffsWindow', s) });
+    return eye.ffs;
+}
+
+/** A new FFScouter key: start a fresh client. */
+export function resetFfsClient() {
+    eye.ffs = null;
+    eye.mem.clear();
+}
 
 function clients() {
-    if (!eye.ffs) eye.ffs = makeFfsClient({ getKey: () => getKey(K.ffsKey), isVisible, loadShared: () => get('ffsWindow', {}), saveShared: (s) => set('ffsWindow', s) });
+    sharedFfsClient();
     if (!eye.ts) eye.ts = makeTsClient({ getKey: () => getKey(K.tsKey), isVisible, loadShared: () => get('tsWindow', {}), saveShared: (s) => set('tsWindow', s) });
     return eye;
 }
@@ -152,7 +164,23 @@ export function wantPlayers(ids, { profiles = false } = {}) {
     eye.timer = setTimeout(flush, 120);
 }
 
+/** One sweep at a time: a second call while one runs waits and sweeps what came in meanwhile. */
 async function flush() {
+    if (eye.flushing) {
+        eye.again = true;
+        return eye.flushing;
+    }
+    eye.flushing = flushOnce().finally(() => {
+        eye.flushing = null;
+        if (eye.again) {
+            eye.again = false;
+            flush();
+        }
+    });
+    return eye.flushing;
+}
+
+async function flushOnce() {
     // Nothing asked while hidden, or while Torn Trading runs (the two take turns); the ids stay pending.
     if (!isVisible() || isPaused()) return;
     const want = [...eye.pending];
@@ -245,25 +273,35 @@ export function eyeView(id, extra = {}, { war = false } = {}) {
     // Your stats as they fight: merits and passives (Torn's battlestats modifier) included.
     const mods = m.state.statMods || {};
     const meStats = Object.fromEntries(Object.entries(m.pc.stats).map(([k, v]) => [k, v * (1 + (mods[k] || 0) / 100)]));
-    const attacks = (get('myAttacks', null) || {}).list || [];
+    const attacks = (getShared('myAttacks', null) || {}).list || [];
     const fights = attacks.filter((a) => Number(a.def) === Number(id)).sort((a, b) => b.ended - a.ended);
     const pub = r.pub && (prof.rank || extra.rank) ? { rank: prof.rank || extra.rank, level, crimes: r.pub.crimes, networth: r.pub.networth } : null;
     const est = estimatePlayer({ me: meStats, spy: r.spy || null, fights, ffs: r.ffs || null, pub, now: Date.now() });
     const gearRec = c.gear[id];
     const gThem = gearRec ? gearSummary(gearRec.items) : null;
-    const statics = get(K.userStatic, {}) || {};
+    const statics = getShared(K.userStatic, {}) || {};
     const gMe = statics.equipment ? myGear(statics.equipment) : DEFAULT_GEAR;
     const myLife = (m.state.life && m.state.life.maximum) || 7500;
     let f = null;
     let fGear = null;
     if (est) {
-        const target = { id, life, bss: est.bss, stats: est.stats };
-        f = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe });
-        if (gThem) fGear = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe, gearThem: gThem });
+        // The fight Monte Carlo runs again only when something it reads changed (a war page redraws every 10 s).
+        const key = JSON.stringify([est.bss, est.stats, life, myLife, meStats, gearRec ? gearRec.seenAt : 0, statics.equipmentAt || 0]);
+        const memo = eye.fc.get(id);
+        if (memo && memo.key === key) {
+            f = memo.f;
+            fGear = memo.fGear;
+        } else {
+            const target = { id, life, bss: est.bss, stats: est.stats };
+            f = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe });
+            if (gThem) fGear = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe, gearThem: gThem });
+            if (eye.fc.size > 2000) eye.fc.clear();
+            eye.fc.set(id, { key, f, fGear });
+        }
     }
     let main = fGear || f;
     // What the fight learner kept from your own fights (only when it predicted your newest fights better).
-    const fm = learnedModel(get(K.learned, null)).fight;
+    const fm = learnedModel(getShared(K.learned, null)).fight;
     if (main && fm) main = { ...main, ...applyFightModel(fm, { pWin: main.pWin, keep: main.keep }), learned: true };
     const band = bandOf(main, getSettings().bands);
     const ff = est ? fairFight(est.bss, bssOf(meStats)) : null;

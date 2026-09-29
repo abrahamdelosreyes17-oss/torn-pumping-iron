@@ -65,7 +65,7 @@ Torn allows scripts that use the API or the page you loaded yourself, and that n
 5. **Each key only where it belongs** (see above), never written to a log or an error message, and masked in its box.
 6. **Stops on a dead key.** If Torn says a key is invalid, disabled or paused, nothing more is sent until you save a new one.
 7. **The attack page is only read.** To remember the gear Torn shows you after Start Fight, the script reads a copy of Torn's answer; Torn gets its own answer untouched, and nothing is changed on the page or in Torn's data.
-8. **Your data stays on your computer**, except what you send to your own Discord service. Settings → Your data shows it and clears it.
+8. **Your data stays on your computer**, except what you send to your own Discord service (your plan's next steps, your player and faction id, and Torn Eye's list: player ids, names, levels and colour bands, for `/targets` and `/war`). Settings → Your data shows it and clears it.
 
 ## For development
 

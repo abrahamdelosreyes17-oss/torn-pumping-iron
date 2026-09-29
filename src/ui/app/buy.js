@@ -117,7 +117,7 @@ export function renderBuy(m, ctx) {
             h('tr', { class: 'ih' }, [
                 h('td', { colspan: '6' }, [
                     h('b', { text: n.name + ' × ' + fmtInt(n.buy) }),
-                    h('span', { class: 'muted', text: ' · ' + (n.id === POINTS ? refillWords(n, days) : perDay) + ' · you have ' + fmtInt(n.have) + (fill ? ' · ' + fmtMoney(fill.total) : '') }),
+                    h('span', { class: 'muted', text: ' · ' + (n.id === POINTS ? refillWords() : perDay) + ' · you have ' + fmtInt(n.have) + (fill ? ' · ' + fmtMoney(fill.total) : '') }),
                     side ? h('span', { class: 'verdict c-good', style: 'margin-left:10px', text: side.text }) : null,
                 ]),
             ]),
@@ -202,7 +202,7 @@ export function renderBuy(m, ctx) {
         const p = prices[id] || {};
         const cheapest = p.listings && p.listings.length ? Math.min(...p.listings.map((l) => l.price)) : null;
         const pct = cheapest && p.avg7 ? (100 * (cheapest - p.avg7)) / p.avg7 : null;
-        return h('tr', {}, [h('td', {}, [h('b', { class: 'w', text: itemName(id) })]), h('td', { style: 'width:96px' }, [sparkline(p.lows7 || [], { w: 90, h: 22, color: planIds.has(String(id)) ? '#efebe2' : '#6c737a' })]), h('td', { class: 'r', text: cheapest ? '$' + fmtInt(cheapest) : '—' }), h('td', { class: 'r ' + (pct !== null && pct < -1 ? 'c-good' : 'muted'), text: pct === null ? '' : (pct >= 0 ? '+' : '−') + Math.abs(pct).toFixed(1) + '%' })]);
+        return h('tr', {}, [h('td', {}, [h('b', { class: 'w', text: itemName(id) })]), h('td', { style: 'width:96px' }, [sparkline(p.lows7 || [], { w: 90, h: 22, color: planIds.has(String(id)) ? '#efebe2' : '#6c737a' })]), h('td', { class: 'r' + (cheapest ? '' : ' muted'), text: cheapest ? '$' + fmtInt(cheapest) : ctx.paused ? 'paused' : p.error ? 'no answer' : 'loading…' }), h('td', { class: 'r ' + (pct !== null && pct < -1 ? 'c-good' : 'muted'), text: pct === null ? '' : (pct >= 0 ? '+' : '−') + Math.abs(pct).toFixed(1) + '%' })]);
     });
     const heldIds = [...new Set([XANAX, POINTS, ECSTASY, EDVD, CANDY_KISSES, FHC, MUNSTER].map(String))];
     const held = heldIds.map((id) => [id === POINTS ? 'Points' : itemName(Number(id)), Number(inv[id === POINTS ? POINTS : Number(id)]) || 0]);

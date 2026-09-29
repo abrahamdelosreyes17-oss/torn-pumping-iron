@@ -105,6 +105,7 @@ A webhook (optional with the bot): in your Discord server, channel settings → 
 
 ## Sharing one Worker, or one each
 
+- **How many people:** one Worker serves up to 10 people (a leaked invite code can't fill it). Change it with `MAX_USERS = "20"` under `[vars]` in `wrangler.toml`.
 - **One Worker for both of you (default):** give your friend the service address and the invite code. They connect with *their own* Torn key (and webhook), and `/link` their own Discord account. Their key is stored, encrypted, on your Worker, so tell them, and show them the table above. One person's key is only ever used for that person's own pings and commands.
 - **One each:** your friend deploys their own copy with these same steps. Nothing is shared.
 
