@@ -65,8 +65,6 @@ export const DEFAULT_SETTINGS = {
     horizonDays: 30,
     buyWindow: 'three',
     bands: DEFAULT_BANDS,
-    donator: true,
-    odRisk: 0,
     w3b: true,
     // Auto mode: energy kept for a faction war (0 = you decide).
     warReserve: 0,

@@ -5,7 +5,7 @@
  * tab, never while Torn Trading runs.
  */
 
-import { K, get, set, del, getKey, setKey } from './platform/store.js';
+import { K, get, set, del, getKey, setKey, getPlan } from './platform/store.js';
 import { fetchKeyInfo, fetchLogCategories, fetchMoneyLog, ACCESS_FULL } from './api/torn.js';
 import { MONEY_LOG_CATEGORY } from './core/auto.js';
 import { fullKeyClient, tornClient, pi } from './runtime.js';
@@ -33,7 +33,7 @@ export async function saveFullKey(v) {
         set(K.fullKeyState, { ok: true, at: Date.now(), type: info.type || 'Full Access' });
         del(K.moneyLog);
         refreshMoneyLog({ force: true }).catch(() => {});
-        return { ok: true, text: 'Saved · Full key. Auto mode is on.' };
+        return { ok: true, text: getPlan().pickBy === 'auto' ? 'Saved · Full key. Auto mode is on.' : 'Saved · Full key. Pick Auto (from your income) on Plan to use it.' };
     } catch (error) {
         set(K.fullKeyState, { ok: false, error: String((error && error.message) || error), at: Date.now() });
         return { ok: false, text: String((error && error.message) || error) };

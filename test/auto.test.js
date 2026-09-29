@@ -241,3 +241,17 @@ test('war days: the day plan never trains below the energy kept for a war (Setti
     assert.ok(e1 <= e0 - 100 + 5, 'about 100 energy fewer trained (' + e0 + ' → ' + e1 + ')');
     assert.ok(kept.some((s) => /keeps 100 energy for the war/.test(s.note || '')));
 });
+
+test('Auto: with the money log, income is money in less money out plus the gym spend; networth is the fallback', () => {
+    const plan = { pickBy: 'auto' };
+    const settings = { horizonDays: 30 };
+    const income = { perDay: 50e6, days: 30 };
+    const log = { days: 30, inPerDay: 90e6, outPerDay: 60e6, lines: [{ title: 'Bazaar sell', dir: 'in', perDay: 90e6, n: 9 }, { title: 'Item market buy', dir: 'out', perDay: 60e6, n: 30 }] };
+    const a = autoState({ plan, settings, hasFullKey: true, income, log, spentPerDay: 5e6 });
+    assert.equal(a.source, 'log');
+    assert.equal(a.perDay, 90e6 - 60e6 + 5e6);
+    assert.equal(a.networthPerDay, 50e6);
+    const b = autoState({ plan, settings, hasFullKey: true, income, log: { days: 30, inPerDay: 0, outPerDay: 0, lines: [] }, spentPerDay: 5e6 });
+    assert.equal(b.source, 'networth');
+    assert.equal(b.perDay, 50e6);
+});

@@ -104,10 +104,12 @@ export function hasFullKey() {
 function autoFor(plan, settings, statics) {
     const horizon = settings.horizonDays || 30;
     const r = pi.compare && pi.compare[plan.strategy];
-    const income = incomeFrom(statics.income || [], { spentPerDay: r ? r.cost / horizon : 0 });
-    const auto = autoState({ plan, settings, hasFullKey: hasFullKey(), income });
+    const spentPerDay = r ? r.cost / horizon : 0;
+    const income = incomeFrom(statics.income || [], { spentPerDay });
     const ml = get(K.moneyLog, null);
-    auto.breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now(), ml.days || null) : null;
+    const breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now(), ml.days || null) : null;
+    const auto = autoState({ plan, settings, hasFullKey: hasFullKey(), income, log: breakdown, spentPerDay });
+    auto.breakdown = breakdown;
     auto.income = income;
     return auto;
 }

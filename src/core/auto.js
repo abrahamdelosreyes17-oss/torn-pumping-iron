@@ -2,11 +2,12 @@
  * Auto mode (the Plan dropdown's default): the plan picks itself from what
  * you can afford. Pure. ROUND4-PLAN §E.
  *
- * Income is how fast your networth grows, read from Torn's own history
- * (personal stats at past dates), plus what the gym already cost you over
- * those days (it left your networth). The plan may spend up to that a day:
- * "you can afford this with your income". Auto needs the Full key (owner's
- * rule): the key reads your money log for where the money comes from.
+ * Income comes from your money log (the Full key, owner's rule): money in
+ * less money out a day, plus what the gym plan spent (its purchases are in
+ * the "out" lines). Networth growth from Torn's own history (personal stats
+ * at past dates, plus the gym spend) is the cross-check, and the fallback
+ * while the log has nothing readable. The plan may spend up to that a day:
+ * "you can afford this with your income".
  *
  * Events: when an event multiplies what a plan uses (World Diabetes Day's
  * candy ×3, CaffeineCon's cans ×2), Auto compares the event plans over the
@@ -61,17 +62,22 @@ export function incomeFrom(snaps, { spentPerDay = 0 } = {}) {
  * @param {object} o.plan - stored plan ({pickBy})
  * @param {object} o.settings
  * @param {boolean} o.hasFullKey
- * @param {object|null} o.income - incomeFrom()
- * @returns {{on:boolean, ready:boolean, needsKey:boolean, waiting:boolean, perDay:number|null, budgetPerDay:number|null, budget:number|null}}
+ * @param {object|null} o.income - incomeFrom() (networth)
+ * @param {object|null} [o.log] - incomeBreakdown() of the money log
+ * @param {number} [o.spentPerDay] - what the gym plan spends a day (added back to the log's net)
+ * @returns {{on:boolean, ready:boolean, needsKey:boolean, waiting:boolean, perDay:number|null, budgetPerDay:number|null, budget:number|null, source:'log'|'networth'|null, networthPerDay:number|null}}
  */
-export function autoState({ plan, settings, hasFullKey, income }) {
+export function autoState({ plan, settings, hasFullKey, income, log = null, spentPerDay = 0 }) {
     const on = Boolean(plan && plan.pickBy === 'auto');
     const horizon = (settings && settings.horizonDays) || 30;
     if (!on) return { on, ready: false, needsKey: false, waiting: false, perDay: null, budgetPerDay: null, budget: null };
     if (!hasFullKey) return { on, ready: false, needsKey: true, waiting: false, perDay: null, budgetPerDay: null, budget: null };
-    if (!income || !Number.isFinite(income.perDay)) return { on, ready: false, needsKey: false, waiting: true, perDay: null, budgetPerDay: null, budget: null };
-    const budgetPerDay = Math.max(0, income.perDay);
-    return { on, ready: true, needsKey: false, waiting: false, perDay: income.perDay, budgetPerDay, budget: budgetPerDay * horizon, days: income.days };
+    const nw = income && Number.isFinite(income.perDay) ? income.perDay : null;
+    const fromLog = log && log.lines && log.lines.some((l) => l.dir === 'in') ? log.inPerDay - log.outPerDay + Math.max(0, spentPerDay || 0) : null;
+    const perDay = fromLog !== null ? fromLog : nw;
+    if (perDay === null) return { on, ready: false, needsKey: false, waiting: true, perDay: null, budgetPerDay: null, budget: null, source: null, networthPerDay: null };
+    const budgetPerDay = Math.max(0, perDay);
+    return { on, ready: true, needsKey: false, waiting: false, perDay, budgetPerDay, budget: budgetPerDay * horizon, days: fromLog !== null ? log.days : income.days, source: fromLog !== null ? 'log' : 'networth', networthPerDay: nw };
 }
 
 /**

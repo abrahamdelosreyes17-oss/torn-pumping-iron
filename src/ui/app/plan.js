@@ -127,7 +127,7 @@ function budgetControls(m, ctx) {
     const a = m.auto;
     if (pickBy === 'max') return [h('span', { class: 'muted', text: '· no budget' })];
     if (pickBy === 'auto' && a && a.ready) {
-        return [t('lab', 'with'), h('b', { class: 'white num', text: fmtMoney(Math.round(a.budgetPerDay)) + ' a day' }), h('span', { class: 'muted', text: 'from your income (last ' + Math.round(a.days) + ' days)' }), h('span', { class: 'info', title: 'Income = how fast your networth grew, read from Torn’s own history, plus what the gym cost you in that time. Auto spends at most that a day.', text: 'i' })];
+        return [t('lab', 'with'), h('b', { class: 'white num', text: fmtMoney(Math.round(a.budgetPerDay)) + ' a day' }), h('span', { class: 'muted', text: 'from your income (last ' + Math.round(a.days) + ' days' + (a.source === 'log' ? ', money log' : ', networth') + ')' }), h('span', { class: 'info', title: (a.source === 'log' ? 'Income = money in less money out a day in your money log (Full key), plus what the gym plan spends.' : 'Income = how fast your networth grew (Torn’s own history), plus what the gym plan spends; your money log has nothing readable yet.') + (a.networthPerDay !== null && a.source === 'log' ? ' Cross-check: your networth grew ' + fmtMoney(Math.round(a.networthPerDay)) + ' a day.' : '') + ' Auto spends at most that a day.', text: 'i' })];
     }
     const box = [t('lab', 'with'), numberInput(s.budget || 0, 130, (v) => (v > 0 ? ctx.setSettings({ budget: v }) : ctx.rerender()), { money: true, label: 'Budget' }), h('span', { class: 'muted', text: 'budget' })];
     if (pickBy === 'auto' && a && a.wait) box.push(h('span', { class: 'tag warn', title: a.wait, text: a.needsKey ? 'Auto needs a Full key' : 'Reading your income…' }));
