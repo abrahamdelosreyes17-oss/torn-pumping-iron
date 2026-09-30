@@ -277,8 +277,12 @@ async function flushOnce() {
     }
     for (const id of ids) rec(id).seen = Date.now();
     saveSoon();
-    await myAttacks();
-    await myEquipment();
+    // Your own attacks and gear: read on the webpage's Torn Eye tab only (owner, round 6: Torn's pages ask about the
+    // player you view or attack, nothing else).
+    if (pi.where === 'app') {
+        await myAttacks();
+        await myEquipment();
+    }
     notify();
 }
 

@@ -7,23 +7,19 @@
 
 import { K, get, set, getSettings } from './platform/store.js';
 import { addPrediction } from './core/learndata.js';
-import { onModel, tornClient, isVisible } from './runtime.js';
+import { onModel, isVisible } from './runtime.js';
 import { isPaused, onPauseChange } from './turns.js';
 import { installAttackHook } from './platform/page-hook.js';
-import { wantPlayers, eyeView, onEye, saveGear, rememberFlights, flightsSeen, getWatch, toggleWatch, setWatchTag, pollWatch } from './eye-service.js';
+import { wantPlayers, eyeView, onEye, saveGear, flightsSeen, getWatch, toggleWatch, setWatchTag } from './eye-service.js';
 import { WATCH_MAX } from './core/eye/watch.js';
-import { fetchFactionMembers } from './api/torn.js';
 import { parseAttackData } from './core/eye/gear.js';
 import { sortWar, warSummary, outEarly, statusParts } from './core/eye/war.js';
-import { profileLevel, profileAnchor, readFactionRows, readWarRows, enemyFactionId, miniProfileId } from './sources/dom/eye.js';
+import { profileLevel, profileAnchor, readFactionRows, readWarRows, miniProfileId } from './sources/dom/eye.js';
 import { ensureEyeCss, chipEl, bindCard, warSummaryEl, attackPanel, attackPanelContent, watchControl } from './ui/eye/eye-ui.js';
 import { tornClock } from './core/bars.js';
 import { ensureMarkCss } from './ui/marks/marks.js';
 import { fill } from './ui/dom.js';
 import { detectPage, profileIdOf, attackTargetOf, PAGE_PROFILE, PAGE_FACTION, PAGE_ATTACK } from './sources/route.js';
-
-/** War mode asks for the enemy faction this often, and only from a visible tab. */
-export const WAR_POLL_MS = 10000;
 
 const ep = { extras: new Map(), war: { factionId: null, members: null, prev: null, at: 0, polling: false }, attack: { gearVisible: false, gearSaved: false }, drawing: false };
 
@@ -101,30 +97,6 @@ function drawFaction() {
     for (const r of rows) {
         for (const c of r.cell.querySelectorAll('.pi-chip')) c.remove();
         r.cell.appendChild(chipEl(view(r.id), { mini: true, id: r.id }));
-    }
-}
-
-async function pollWar() {
-    const fid = enemyFactionId();
-    if (!fid || ep.war.polling || !isVisible()) return;
-    if (ep.war.factionId === fid && Date.now() - ep.war.at < WAR_POLL_MS) return;
-    ep.war.polling = true;
-    try {
-        const members = await fetchFactionMembers(tornClient(), fid);
-        ep.war.prev = ep.war.factionId === fid ? ep.war.members : null;
-        ep.war.members = members;
-        ep.war.factionId = fid;
-        ep.war.at = Date.now();
-        for (const m of members) ep.extras.set(Number(m.id), { level: m.level, name: m.name });
-        // When each flight was first seen, shared with the webpage: landings survive a reload.
-        rememberFlights(members);
-        wantPlayers(members.map((m) => Number(m.id)));
-        drawWar();
-        pollWatch({ members }).catch(() => {});
-    } catch {
-        ep.war.at = Date.now();
-    } finally {
-        ep.war.polling = false;
     }
 }
 
@@ -254,17 +226,14 @@ export function bootEyePage() {
         const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
         installAttackHook(pageWin, onAttackData);
     }
+    // Owner (round 6): on Torn's pages Torn Eye asks only about the player you're viewing (their profile) or
+    // attacking. Faction and war lists, mini-profiles and the watch list show what is already known; the list sweeps,
+    // war mode's reads and the watch list run on the webpage's Torn Eye tab, only while it is open.
     const ask = () => {
         if (!getSettings().eyeChips || !isVisible() || isPaused()) return;
         const pg = detectPage(location.href);
         if (pg === PAGE_PROFILE) wantPlayers([Number(profileIdOf(location.href))], { profiles: true });
         if (pg === PAGE_ATTACK) wantPlayers([Number(attackTargetOf(location.href))], { profiles: true });
-        if (pg === PAGE_FACTION) {
-            wantPlayers(readFactionRows().map((r) => r.id));
-            if (document.getElementById('faction_war_list_id')) pollWar();
-        }
-        const mini = miniProfileId();
-        if (mini) wantPlayers([mini], { profiles: true });
     };
     onEye(() => drawAll());
     let lastSig = '';
@@ -277,11 +246,6 @@ export function bootEyePage() {
             drawAll();
         }
     });
-    // War mode: every 10 s while visible. The watch list: read every 60 s while a Torn tab is visible (each player when due).
-    setInterval(() => {
-        if (!isPaused() && detectPage(location.href) === PAGE_FACTION && document.getElementById('faction_war_list_id')) pollWar();
-        if (!isPaused() && isVisible() && getSettings().eyeChips && getWatch().list.length) pollWatch().catch(() => {});
-    }, 2000);
     onPauseChange(() => {
         lastSig = '';
         drawAll();
@@ -300,7 +264,6 @@ export function bootEyePage() {
         if (id && (!shown || shown.getAttribute('data-pi-player') !== String(id)) && !(ep.miniAt && ep.miniId === id && Date.now() - ep.miniAt < 500)) {
             ep.miniId = id;
             ep.miniAt = Date.now();
-            wantPlayers([id], { profiles: true });
             ep.drawing = true;
             try {
                 drawMini();

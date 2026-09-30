@@ -544,9 +544,19 @@ export function bootAppPage({ renderers = {} } = {}) {
         page.app.render(true);
     });
     gearCount().then((n) => (page.eye.gear = n));
-    const stored = pageGet(TARGETS_KEY, null);
-    if (stored && Array.isArray(stored.list)) setTimeout(() => wantPlayers(stored.list.map((x) => x.playerId)), 500);
     page.app.mount();
+    // Torn Eye works only while its tab is open (owner, round 6): the targets' estimates are asked for when it opens.
+    let eyeOpen = false;
+    const eyeTab = () => {
+        const open = page.app.tab === 'eye';
+        if (open && !eyeOpen) {
+            const stored = pageGet(TARGETS_KEY, null);
+            if (stored && Array.isArray(stored.list)) setTimeout(() => wantPlayers(stored.list.map((x) => x.playerId)), 500);
+        }
+        eyeOpen = open;
+    };
+    window.addEventListener('hashchange', eyeTab);
+    loadArchives().then(eyeTab).catch(() => {});
     onModel(() => page.app.render());
     // The webpage keeps the older history and its own data in its IndexedDB (GM stays small for Torn's pages).
     loadArchives()
@@ -567,10 +577,12 @@ export function bootAppPage({ renderers = {} } = {}) {
     const auto = get('eyeWarAuto', null);
     if (auto && Array.isArray(auto.enemies) && auto.myFaction === myFactionId()) war.enemies = auto.enemies;
     setInterval(() => {
+        // Nothing of Torn Eye's runs unless its tab is open (owner, round 6: it only runs on the Torn Eye tab).
+        if (page.app.tab !== 'eye') return;
         pollOwnWars().catch(() => {});
         pollWarTab().catch(() => {});
         // The Watched view reads its players every 60 s while it shows (the war list just read costs nothing).
-        if (page.app.tab === 'eye' && page.app.ui.eyeMode === 'watched') pollWatch({ members: war.members }).catch(() => {});
+        if (page.app.ui.eyeMode === 'watched') pollWatch({ members: war.members }).catch(() => {});
         syncEye();
     }, 2000);
     // A Log in with Discord that was under way when the page reloaded: keep waiting for it.

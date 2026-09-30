@@ -243,8 +243,11 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     await page.waitForTimeout(200);
     const card = (await text(page, '.pi-eyecard'))[0] || '';
     ok(/HP you keep, by their likely build/.test(card) && /FFScouter/.test(card), 'eye: hover card with builds and the FFScouter credit');
+    // Round 6 (owner): Torn's pages ask only about the player viewed or attacked; a mini-profile shows what is known.
     const mini = (await text(page, '#profile-mini-root .pi-chip'))[0] || '';
-    ok(/^(Stomp|Good|Tough|Can't win)/.test(mini), 'eye: mini-profile chip (' + mini + ')');
+    ok(mini.length > 0, 'eye: mini-profile chip from what is known (' + mini + ')');
+    const asked = await page.evaluate(() => window.__calls.filter((c) => /\/user\/\d+\/profile/.test(c)).map((c) => c.match(/\/user\/(\d+)\//)[1]));
+    ok(asked.every((id) => id === '605123'), 'eye: the only player asked about is the one viewed (' + [...new Set(asked)] + ')');
     ok(errors.length === 0, 'eye: no page errors ' + JSON.stringify(errors));
     ok(tornHits() === 0, 'eye: nothing loaded from torn.com');
     await page.screenshot({ path: resolve(shots, 'torn-eye-profile.png'), fullPage: true });
@@ -256,17 +259,18 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     const order = await page.evaluate(() => [...document.querySelectorAll('#faction_war_list_id li.enemy')].sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top).map((li) => li.querySelector('.member a[href*="XID"]').getAttribute('aria-label').replace('View profile of ', '')));
     const domOrder = await page.evaluate(() => [...document.querySelectorAll('#faction_war_list_id li.enemy .member a[href*="XID"]')].map((a) => a.getAttribute('aria-label').replace('View profile of ', '')));
     ok(JSON.stringify(domOrder) === JSON.stringify(['Flyer', 'Mira_Vex', 'Rival', 'Brix']), "war: Torn's rows are not moved in the page");
-    ok(JSON.stringify(order) === JSON.stringify(['Rival', 'Brix', 'Mira_Vex', 'Flyer']), 'war: Okay first, then Hospital by time out, then Traveling (' + order + ')');
+    ok(order[0] === 'Rival' && order[3] === 'Flyer', 'war: Okay first, Traveling last, from what the page shows (' + order + ')');
     const sum = (await text(page, '.pi-warsum'))[0] || '';
-    ok(/1 attackable now/.test(sum) && /0:4\d until the next one is out/.test(sum) && /1 traveling/.test(sum), 'war: summary line (' + sum + ')');
+    ok(/1 attackable now/.test(sum) && /1 traveling/.test(sum) && /live war mode on Pumping Iron’s Torn Eye tab/.test(sum), 'war: summary line (' + sum + ')');
     const chips = await page.evaluate(() => document.querySelectorAll('#faction_war_list_id li.enemy .pi-chip').length);
     ok(chips === 4, 'war: a chip on every enemy row (' + chips + ')');
     const yours = await page.evaluate(() => document.querySelectorAll('#faction_war_list_id li.your .pi-chip').length);
     ok(yours === 0, 'war: your own side is left alone');
     const memberChips = await page.evaluate(() => document.querySelectorAll('.members-list .table-body .pi-chip').length);
     ok(memberChips === 2, 'faction list: chips on members, not the fallen one (' + memberChips + ')');
-    const calls = await page.evaluate(() => window.__calls.filter((c) => c.includes('/faction/7777/members')).length);
-    ok(calls >= 1 && calls <= 2, 'war: the enemy faction read at most every 10 s (' + calls + ' in ~6 s)');
+    // Round 6 (owner): no Torn Eye reads for faction or war lists on Torn's pages (the Torn Eye tab does war mode).
+    const calls = await page.evaluate(() => window.__calls.filter((c) => /faction|\/profile|get-stats/.test(c)).length);
+    ok(calls === 0, 'war: nothing asked on a faction page (' + calls + ')');
     ok(errors.length === 0, 'war: no page errors ' + JSON.stringify(errors));
     await page.screenshot({ path: resolve(shots, 'torn-eye-war.png'), fullPage: true });
     await page.close();

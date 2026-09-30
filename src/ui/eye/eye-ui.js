@@ -169,7 +169,8 @@ export function warSummaryEl(sum, updatedAgoS, fromFfs = false) {
         h('span', {}, [h('b', { text: String(sum.attackable) }), ' attackable now' + (sum.early ? ' (' + sum.early + ' out early)' : '')]),
         sum.nextOutS !== null ? h('span', {}, [h('b', { text: mmss(sum.nextOutS) }), ' until the next one is out']) : null,
         h('span', {}, [h('b', { text: String(sum.traveling) }), ' traveling']),
-        h('span', { class: 'pi-muted' }, ['updated ' + (updatedAgoS ?? 0) + 's ago · every 10 s while this tab is open', fromFfs ? ' · stats: ' : '', fromFfs ? h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }) : null]),
+        // Torn's pages read nothing for the war (owner, round 6): what this page shows; the live read is on the Torn Eye tab.
+        h('span', { class: 'pi-muted' }, [updatedAgoS === null || updatedAgoS === undefined ? 'from this page · live war mode on Pumping Iron’s Torn Eye tab' : 'updated ' + updatedAgoS + 's ago · every 10 s while this tab is open', fromFfs ? ' · stats: ' : '', fromFfs ? h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }) : null]),
     ]);
 }
 
