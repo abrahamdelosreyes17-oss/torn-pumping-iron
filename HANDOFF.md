@@ -37,7 +37,19 @@ Links:
 - Repo: https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron (public; `main` + `gh-pages`)
 - Discord service: https://pumping-iron.pumping-iron-worker.workers.dev (the owner's Cloudflare; bot in the owner's server)
 
-**Round 6 is built and released as 1.3.0 (2026-09-30; newest session entry below).** Owner picked "a mix of A and C" for the Plan page; built and released on "push and commit". Next: the owner's live check of 1.3.0 (is Torn still laggy? do Create plan / Recalibrate make sense?), then the backlog below. Lag at 4× CPU (median of 3, 1.2.3 and now back to back): page load 2.0–2.3 s → 0.15–0.26 s of script, worst task ~0.5 s → 0.1–0.15 s, steady 230–340 → 22 ms per 10 s, GM 696 → 57 KB, GM writes ~10–42 → 1–2 per 10 s. 
+**Next session, start here (after 1.3.0, 2026-09-30 late):**
+1. **Owner's report: "I switched tab to Torn Eye, took forever to load."** Not investigated yet. Likely cause: 1.3.0 moved every Torn Eye read to "only while the Torn Eye tab is open" (the owner's rule), so opening the tab now starts everything at once instead of it being warm:
+   - the IndexedDB eye cache (up to 3,000 players) loads on first use;
+   - `eyeTab()` asks FFScouter for every stored target (`wantPlayers`), and the 2 s interval starts `pollOwnWars`, `pollWarTab`, the watch list and `syncEye`;
+   - `flushOnce` then reads your attacks and gear (`myAttacks`/`myEquipment`, webpage-only now);
+   - the tab's render runs `eyeView` (the fight Monte Carlo) for every row;
+   - and `eyeTab()` only fires from the 2 s interval after a click (the tab bar uses `replaceState`, no `hashchange`), so up to 2 s pass before anything starts.
+   **Do first:** measure it (perf-check-style CDP profile on `harness-live.html?pi=app#eye` with the realistic seed, 4× CPU), then fix. Candidates: start the eye work the moment the tab is clicked (a PiApp tab-change callback instead of the 2 s poll); show the stored targets at once, then fill estimates in; forecast only the rows on screen, in slices; load the eye cache when the webpage opens (a local read, no API call, still within the owner's rule). Keep the rule: no Torn Eye API calls unless its tab is open.
+2. The owner's live check of 1.3.0: is Torn still laggy? Do Create plan / Recalibrate / New plan make sense on real data?
+3. Owner asked this session, answered (no change needed): the Plan dropdown's rule (Auto, Most stats, Max gains…) only applies at the next **Create plan** or **Recalibrate**; Recalibrate reads the rule as it is when clicked (checked: a 12-month Max-gains plan → Auto → Recalibrate re-plans on the income, same end date). Offered, not built: a line after changing the rule, "Plan rule changed to Auto · Recalibrate to use it".
+4. Then the backlog below.
+
+**Round 6 is built and released as 1.3.0 (2026-09-30; newest session entry below).** Owner picked "a mix of A and C" for the Plan page; built and released on "push and commit". Lag at 4× CPU (median of 3, 1.2.3 and now back to back): page load 2.0–2.3 s → 0.15–0.26 s of script, worst task ~0.5 s → 0.1–0.15 s, steady 230–340 → 22 ms per 10 s, GM 696 → 57 KB, GM writes ~10–42 → 1–2 per 10 s. 
 
 **Next session, start here (round 6, 2026-09-30):**
 0. **Read `docs/ROUND6-PLAN.md` first.** 1.2.3 is still laggy on real Torn. The owner decided: **no more automatic** (the plan is made on a click and saved: Create plan for 1/3/6/12 months; Recalibrate keeps the end date, re-reads everything, and works any time, a day later too; everything else follows the saved plan as now). §8 of the plan is the build order. No spending, not on phones, stick to Tampermonkey (no extension); the owner's answers are in the plan's §7a.
@@ -240,6 +252,18 @@ Done on the owner's yes. For later releases, the same steps minus the one-time r
 ---
 
 ## What each session did (newest first)
+
+### 2026-09-30 (late night): Plan page buttons (A + C), release 1.3.0
+- Owner: "mix of A and C, build that, make sure button works, push and commit", then "send me the link".
+- **Plan page** (`src/ui/app/plan.js` `planCard`, `monthsRow`, `lengthChoice`; styles in `src/ui/styles.js`):
+  - **No plan:** "No plan yet", the lengths (1 / 3 / 6 / 12 months) and Create plan.
+  - **With a plan:** the card "N-month plan · <today's plan>", dates, day X of Y, made/recalibrated (with the budget change), a progress line, **Recalibrate** (disabled once ended) and **New plan…**. New plan… opens the lengths and Create plan, which asks "Replace your N-month plan?" (Replace it / Keep mine).
+  - **Months row (C):** total stats planned at each month's end, "you are here", "~" after month 3, the cost a month, the whole plan's range, the gyms opening.
+  - **Control bar:** the budget is "$ a day" (the plan's length comes from Create plan), with "used by the next Create plan or Recalibrate".
+  - **Recommended card:** while you follow the saved plan it says so instead of "Use it"; after a pick of your own it offers "Back to the saved plan".
+- ux-check clicks every button (`&noplan=1` start): Home's "Create your plan", Create plan 3 months (91 days saved), Recalibrate (same end, new rev), New plan… 12 months → the replace confirm → Replace it (365 days).
+- README: the Plan section (Create plan / Recalibrate, no automatic, the certain income), and Torn Eye's API rule.
+- **Released 1.3.0** (f0b448a, handoff 8bcadc6, pushed): 594 tests, ux-check and torn-check ALL PASSED, perf (gym, 4×): load 138 ms, steady 17 ms/10 s, GM 58 KB. Pinned raw file and `main` checked at `@version 1.3.0`. Worker and gh-pages unchanged.
 
 ### 2026-09-30 (night): round 6 build: perf check, saved plans, store diet, gym page, Torn Eye on its tab (not released)
 Owner: build round 6 in the plan's §8 order, prove each lag fix with perf-check numbers, mockup first for the Plan page buttons, local commits only.
