@@ -130,6 +130,21 @@ test('Recalibrate keeps the end date and re-plans the days left from what is tru
     assert.equal(again.compare.steady.daily.length, again.days);
 });
 
+test('Recalibrate works any time: a day later, and twice the same day (owner: "sometimes a day later")', async () => {
+    setup('steady');
+    const t0 = Date.now();
+    const first = await createPlan({ months: 1, pause: nowPause });
+    const next = await at(t0 + DAY, () => recalibratePlan({ pause: nowPause }));
+    assert.equal(next.end, first.end);
+    assert.equal(next.days, first.days - 1, 'one day fewer to plan');
+    const again = await at(t0 + DAY + 3600e3, () => recalibratePlan({ pause: nowPause }));
+    assert.equal(again.end, first.end);
+    assert.equal(again.history.length, 2, 'each recalibration is kept');
+    // The last day of the plan still re-plans that one day.
+    const last = await at(first.end - 3600e3, () => recalibratePlan({ pause: nowPause }));
+    assert.equal(last.days, 1);
+});
+
 test('Recalibrate with no plan says so; two clicks at once run once', async () => {
     setup('steady');
     await assert.rejects(recalibratePlan({ pause: nowPause }), /create one first/);
