@@ -57,6 +57,10 @@ Links:
    - **Owner's answers (2026-09-30, mid-build):** the beer what-if: **skip it**. The rush-the-next-gym and Music Store what-ifs: **backlog**. New: **Pumping Iron doesn't count rehab fees** (Xanax builds addiction; rehab costs money): **backlog**.
 
 **Backlog (owner, 2026-09-30):**
+- **A player the owner just put in hospital still shows in the list (owner, after 1.3.0).** Probably Torn Eye › Targets (to confirm: Targets, Chain or War?). The targets list comes from FFScouter's get-targets, stored, and nothing marks a player as hospitalized afterwards. Since 1.3.0 statuses are read only while the Torn Eye tab is open. To do:
+  - after your own attack (`myAttacks`: result Hospitalized/Attacked/Mugged, with its time), hide that player or grey them with "in hospital ~until HH:MM", no call needed; Torn's hospital time after a hit is known roughly (research the typical duration, or read it once);
+  - when the tab is open, the rows on screen could get a status read (a profile call each, within the eye lane), and "Hospital" rows go to the bottom or are hidden with a tick to show them;
+  - the same check for Chain and War (War reads the enemy faction's statuses every 10 s while that view is open, so it should already show hospital: confirm).
 - **Torn Eye called a fight "Stomp" that wasn't (owner, after 1.3.0):** the owner ended at ~50% HP and had to use a pepper spray. Stomp means win ≥ 99% and keep ≥ 75% HP (`DEFAULT_BANDS`), so the HP-kept estimate was far off, and maybe the win chance too. To do:
   - get the target (id or name) and what the chip said (win %, keep %, the source tag: FFScouter N d / spy / your fight / public stats) from the owner;
   - find that fight in `myAttacks` / the fight log (Settings › Developer export) and compare it with the prediction saved on the attack page (`eyePredictions`);
