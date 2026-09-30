@@ -57,6 +57,11 @@ Links:
    - **Owner's answers (2026-09-30, mid-build):** the beer what-if: **skip it**. The rush-the-next-gym and Music Store what-ifs: **backlog**. New: **Pumping Iron doesn't count rehab fees** (Xanax builds addiction; rehab costs money): **backlog**.
 
 **Backlog (owner, 2026-09-30):**
+- **Torn Eye called a fight "Stomp" that wasn't (owner, after 1.3.0):** the owner ended at ~50% HP and had to use a pepper spray. Stomp means win ≥ 99% and keep ≥ 75% HP (`DEFAULT_BANDS`), so the HP-kept estimate was far off, and maybe the win chance too. To do:
+  - get the target (id or name) and what the chip said (win %, keep %, the source tag: FFScouter N d / spy / your fight / public stats) from the owner;
+  - find that fight in `myAttacks` / the fight log (Settings › Developer export) and compare it with the prediction saved on the attack page (`eyePredictions`);
+  - check what drives an over-confident Stomp: FFScouter's estimate being stale or low, the build guesses (the Monte Carlo over 5 likely builds), their gear (unseen before Start Fight), and the fight model's [calibrate] constants (base damage, zones, accuracy, default gear);
+  - the HP-kept learner has never run, because `hpKept` is always stored null (R6.6 leftover). Recording the HP left after each fight (from the attack page or the attack log) is what would catch this for real.
 - Rehab fees in the plan's cost (Xanax addiction → rehab in Switzerland): research the fee and how fast addiction builds per Xanax, then add it to every plan that takes Xanax (and to Buy/receipts).
 - Rush-the-next-gym and Music Store 3★ what-ifs (research-gym-unlock.md §5).
 - R6.6 leftovers that need real data: log-joined gym samples (P2: the gym log's DEF/SPD/DEX field names must be confirmed on one real answer), the split re-tune (P7: must win on held-out real days), the fight HP-kept learner (hpKept is never recorded).
