@@ -223,6 +223,12 @@ Done on the owner's yes. For later releases, the same steps minus the one-time r
 
 ## What each session did (newest first)
 
+### 2026-09-30: bot timing, lag diagnosis (no release)
+- **Bot pings were sent, not missing:** the `sent` table shows "Energy is full" at 07:40:52 UTC and hourly after, drug at 09:34, "Plan out of date" at 08:42, all `via dm`. The owner got no phone notification: Discord settings on their side (asked them to check the bot DM).
+- **Energy ping early (deployed, version 37b0bae6, commit 9ebb0e7):** cron runs land ~52 s into each minute, so the full-only ping came up to a minute after the tick. Now it goes when Torn's `full_time` ≤ 90 s (30–90 s ahead); the id is the hour it fills, and it isn't auto-closed before the fill time. The first run after the deploy was clean.
+- **Offered, waiting for the owner:** plan-free booster and "drug unused" pings (today they need a synced plan, and the plan goes stale 12 h after the laptop closes); keeping the 48 h plan valid longer; filling in phone trains from Torn's gym log (`v2/user/log`; gains already count them, Last trains/learner don't).
+- **Lag ("masyadong laggy", the friend):** profiled the built script in the harness (Edge, CDP, 1× and 4× CPU). Every Torn page load runs the whole strategy comparison in one go: 160–180 ms at 1×, **~1.1 s at 4×**, then a second run ~5 s later (setting `candyPick` changes its own key; statics arriving too). The comparison lives only in page memory (`runtime.js:242`), so every Torn click recomputes it. Not the learner (a few ms, every 6 h), not the gym redraw after a train (under 50 ms at 4×); the 958 KB unminified parse is ~35 ms at 1× and ~130 ms at 4×. Proposed fix (waiting for go-ahead): store the comparison with its input key and reuse it across pages; never compute in one go on load; stop the candyPick self-trigger; maybe minify. Profiler scripts were in the session scratchpad (`perf.mjs`, `train.mjs`: harness + `Profiler.start` + longtask observer).
+
 ### 2026-09-29 (after 1.2.1): the owner's reports 7–13 → 1.2.2
 - **Owner's answers this session:** Sally's Sweet Shop counts **by default** (the Buy tick switches it off; replaces "newbies only"). The booster plan below was approved as asked.
 - **1. Booster cooldown (item 12), built:**
