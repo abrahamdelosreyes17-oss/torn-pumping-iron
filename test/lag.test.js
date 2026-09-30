@@ -1,15 +1,18 @@
 /*
- * The lag fix (owner's friend, 2026-09-30: "masyadong laggy yung gym script"): every Torn page worked the whole
- * plan comparison out again in one go (~1 s on a slow machine). It's kept between pages now (K.compareCache), a
- * page opens on the kept one, today's candy being saved doesn't run it a second time, and a kept comparison for
- * other inputs never lets Auto rewrite the plan. Also the engine's happy-terms cache gives the same numbers.
+ * Round 6 (owner, 2026-09-30: "all of Torn is laggy"; "no more automatic"): the plan is made on a click and saved.
+ * Nothing works a comparison out by itself any more: no Auto re-pick, no hourly or per-change run, no event switch.
+ * Create plan (1/3/6/12 months) and Recalibrate (keeps the end date, re-plans the days left) are the only runs;
+ * Torn's pages follow the saved plan's small part and re-time today's steps. Also the engine's happy-terms cache.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { pi, currentModel, storedCompare, refresh, releaseCompareTurn } from '../src/runtime.js';
-import { K, get, set } from '../src/platform/store.js';
+import { pi, currentModel, refresh, createPlan, recalibratePlan, followStrategy, setWhere, planNowStored } from '../src/runtime.js';
+import { K, get, set, dropOldKeys, DROPPED_KEYS } from '../src/platform/store.js';
+import { loadSavedPlan } from '../src/platform/plan-store.js';
 import { gainPerTrain, happyTerms, HAPPY_CAP, STAT_AB, effectiveStat, round4 } from '../src/core/gain.js';
+import { planWindow, daysLeft, addMonths, planProgress, makeSavedPlan, monthlyOf, planNowOf, usablePlanNow, slimResult } from '../src/core/saved-plan.js';
+import { DAY, tornDayStart } from '../src/core/bars.js';
 
 const API = {
     bars: { energy: { current: 20, maximum: 150, increment: 5, interval: 600, tick_time: 120, full_time: 15600 }, happy: { current: 5025, maximum: 5025, increment: 5, interval: 900, tick_time: 300, full_time: 0 } },
@@ -19,95 +22,154 @@ const API = {
     gym: { id: 18, name: 'Gun Shop' },
 };
 
-/** A new Torn page: nothing in this page's memory, the store as the last page left it. */
-function newPage() {
-    clearTimeout(pi.compareTimer);
-    Object.assign(pi, { compare: null, whatIf: null, jobWhatIf: null, compareKey: '', compareKeyNoPrice: '', compareWanted: '', compareScheduled: '' });
-}
+const nowPause = () => Promise.resolve();
 
-function setup(strategy) {
-    newPage();
-    for (const k of [K.compareCache, K.compareBusy, K.candyPick]) set(k, null);
+function setup(strategy = 'steady', extra = {}) {
+    pi.model = null;
+    pi.saved = null;
+    pi.savedLoading = null;
+    pi.planBusy = null;
+    setWhere('app');
+    for (const k of [K.planNow, 'savedPlanFull', K.planLine]) set(k, null);
     set(K.userState, { api: API, at: Date.now() });
-    set(K.plan, { type: 'steady', strategy, build: 'baldr', buildPicked: true, strategyPicked: true, pickBy: 'most', createdAt: 1 });
+    set(K.plan, { type: 'steady', strategy, build: 'baldr', buildPicked: true, strategyPicked: false, pickBy: 'most', createdAt: 1, ...extra });
+    set(K.settings, null);
 }
 
-test('a new page opens on the comparison the last page worked out: nothing is run again', () => {
-    setup('steady');
-    const m1 = currentModel();
-    assert.ok(m1.ready && m1.compare && m1.compare.steady, 'the first page works it out');
-    const kept = storedCompare();
-    assert.ok(kept, 'and keeps it');
-    assert.equal(kept.key, pi.compareKey);
-    newPage();
-    const m2 = currentModel();
-    assert.equal(storedCompare().at, kept.at, 'the next page did not work it out again');
-    assert.deepEqual(m2.compare, m1.compare);
-    assert.equal(pi.compareWanted, pi.compareKey, 'nothing is waiting');
-    assert.ok(!pi.compareScheduled, 'no run scheduled');
-});
+/** Run with the clock moved on (Date.now only; timers are unaffected). */
+async function at(t, fn) {
+    const real = Date.now;
+    Date.now = () => t;
+    try {
+        return await fn();
+    } finally {
+        Date.now = real;
+    }
+}
 
-test('saving today’s candy (an input of the comparison) does not run it a second time', () => {
-    setup('dailyChoco');
-    const m1 = currentModel();
-    const pick = get(K.candyPick, null);
-    assert.ok(pick && m1.compare.dailyChoco.candy && pick.id === m1.compare.dailyChoco.candy.id, 'the candy is saved');
-    const at = storedCompare().at;
-    // The next redraw on the same page and on a new page: the key with the saved candy is the kept key.
-    currentModel();
-    assert.ok(!pi.compareScheduled, 'same page: nothing scheduled');
-    newPage();
-    currentModel();
-    assert.equal(storedCompare().at, at, 'new page: not worked out again');
-    assert.ok(!pi.compareScheduled);
-});
-
-test('a kept comparison for other inputs shows at once, a new one is scheduled, and Auto waits for it', () => {
+test('no plan yet: the model works nothing out, Home asks for one and the steps follow the plan picked', () => {
     setup('steady');
-    currentModel();
-    const kept = storedCompare();
-    // Another hour, or the stats moved: the kept one is for other inputs.
-    set(K.compareCache, { ...kept, key: kept.key + '|older', keyNoPrice: kept.keyNoPrice + '|older' });
-    newPage();
     const m = currentModel();
-    assert.ok(m.compare && m.compare.steady, 'the last comparison shows');
-    assert.notEqual(pi.compareWanted, pi.compareKey, 'not fresh: Auto does not rewrite the plan from it');
-    assert.equal(pi.compareScheduled, pi.compareWanted, 'the new one is scheduled (in slices, after the page paints)');
-    clearTimeout(pi.compareTimer);
+    assert.ok(m.ready);
+    assert.equal(m.compare, null, 'no comparison in the background');
+    assert.equal(m.saved, null);
+    assert.equal(m.heads[0].text, 'Create your plan');
+    assert.ok(m.steps.length, 'today still has steps (steady by default)');
+    assert.equal(get(K.planNow, null), null, 'and nothing was saved');
 });
 
-test('another tab working it out: this tab waits and takes its result', async () => {
-    setup('steady');
-    currentModel();
-    const kept = storedCompare();
-    set(K.compareCache, { ...kept, key: kept.key + '|older', keyNoPrice: kept.keyNoPrice + '|older' });
-    newPage();
-    currentModel();
-    const want = pi.compareWanted;
-    set(K.compareBusy, { key: want, tab: 'other-tab', at: Date.now() });
-    await new Promise((r) => setTimeout(r, 200));
-    assert.equal(storedCompare().key, kept.key + '|older', 'this tab did not run it');
-    assert.equal(pi.compareScheduled, '', 'it looks again at the next redraw');
-    // The other tab finishes: the next redraw takes it.
-    set(K.compareCache, { ...kept, key: want, at: kept.at + 1 });
-    set(K.compareBusy, null);
-    currentModel();
-    assert.equal(pi.compareKey, want);
-    assert.equal(pi.compareWanted, want);
+test('Create plan (12 months): every plan over the year, saved with what it saw; Torn pages get the small part', async () => {
+    setup('dailyChoco');
+    const saved = await createPlan({ months: 12, pause: nowPause });
+    const pn = planNowStored();
+    assert.ok(pn, 'the small part is in GM');
+    assert.equal(pn.rev, saved.rev);
+    assert.equal(saved.days, Math.round((addMonths(tornDayStart(Date.now()), 12) - tornDayStart(Date.now())) / DAY));
+    assert.ok(saved.days >= 365 && saved.days <= 366);
+    assert.equal(saved.compare.steady.daily.length, saved.days, 'day by day over the whole year');
+    assert.equal(saved.monthly.length, 12, 'a line per month');
+    assert.deepEqual(saved.snapshot.stats, { str: 118400, spd: 110900, def: 96200, dex: 82700 }, 'it remembers what it saw');
+    assert.equal(get(K.plan, null).strategy, saved.rec.recommended, 'the plan followed is the recommended one');
+    assert.ok(!('daily' in pn.slim.steady), 'Torn pages never get the day-by-day lines');
+    assert.ok(JSON.stringify(pn).length < 6000, 'planNow stays small: ' + JSON.stringify(pn).length);
+    assert.ok(get(K.planLine, null).daily.length === saved.days, 'Progress has the plan line');
+    // In node there is no IndexedDB: the whole plan went to GM instead.
+    assert.equal((await loadSavedPlan()).rev, saved.rev);
 });
 
-test('a comparison kept by another version is not used', () => {
+test('Torn pages follow the saved plan (light): no ladder, no 30-day projection, nothing re-run on changes', async () => {
     setup('steady');
-    currentModel();
-    const kept = storedCompare();
-    set(K.compareCache, { ...kept, v: '0.0.1' });
-    assert.equal(storedCompare(), null);
-    newPage();
-    currentModel();
-    assert.equal(storedCompare().v, kept.v, 'worked out again by this build');
+    const saved = await createPlan({ months: 1, pause: nowPause });
+    setWhere('torn');
+    pi.saved = null;
+    const m = currentModel();
+    assert.ok(m.ready && m.compare && m.compare[m.recommendation.recommended]);
+    assert.equal(m.ladder, null);
+    assert.ok(m.projection.length <= 2, 'only the next days the gym page shows');
+    assert.equal(m.savedPlan, null, 'the whole plan is never read on a Torn page');
+    // Stats up, a new price, the hour: the saved plan stays as it was (only a click works it out again).
+    set(K.userState, { api: { ...API, battlestats: { ...API.battlestats, strength: { value: 200000 } } }, at: Date.now() });
+    set(K.prices, { 206: { at: Date.now(), listings: [{ source: 'itemmarket', price: 900000, qty: 50 }] } });
+    for (let i = 0; i < 3; i++) refresh();
+    assert.equal(planNowStored().rev, saved.rev, 'nothing re-planned by itself');
+    assert.equal(pi.planBusy, null);
+    setWhere('app');
+});
+
+test('Auto never rewrites the plan by itself any more (the old background re-pick is gone)', async () => {
+    setup('steady', { pickBy: 'auto' });
+    await createPlan({ months: 1, pause: nowPause });
+    const picked = get(K.plan, null).strategy;
+    const alt = Object.keys(pi.saved.compare).find((id) => id !== picked);
+    followStrategy(alt);
+    for (let i = 0; i < 3; i++) refresh();
+    assert.equal(get(K.plan, null).strategy, alt, 'your pick stays');
+    assert.equal(get(K.plan, null).pickBy, 'auto', 'and the Plan rule is untouched');
+    assert.equal(get(K.planLine, null).key.split('|')[1], alt, 'Progress follows the pick');
+});
+
+test('Recalibrate keeps the end date and re-plans the days left from what is true now (2 months into a year)', async () => {
+    setup('steady');
+    const t0 = Date.now();
+    const first = await createPlan({ months: 12, pause: nowPause });
+    const later = t0 + 61 * DAY;
+    // Richer and stronger two months on.
+    set(K.userState, { api: { ...API, battlestats: { ...API.battlestats, strength: { value: 400000 } } }, at: later });
+    const again = await at(later, () => recalibratePlan({ pause: nowPause }));
+    assert.equal(again.start, first.start);
+    assert.equal(again.end, first.end, 'same end date');
+    assert.equal(again.createdAt, first.createdAt);
+    assert.equal(again.days, daysLeft(first, later));
+    assert.equal(again.days, Math.round((first.end - tornDayStart(later)) / DAY), 'about 10 months left');
+    assert.ok(again.days < first.days - 55 && again.days > first.days - 65);
+    assert.equal(again.from, tornDayStart(later));
+    assert.equal(again.snapshot.stats.str, 400000, 'it re-read your stats');
+    assert.equal(again.history.length, 1);
+    assert.equal(again.history[0].from.stats.str, 118400);
+    assert.equal(again.history[0].to.stats.str, 400000);
+    assert.equal(again.compare.steady.daily.length, again.days);
+});
+
+test('Recalibrate with no plan says so; two clicks at once run once', async () => {
+    setup('steady');
+    await assert.rejects(recalibratePlan({ pause: nowPause }), /create one first/);
+    const [a, b] = await Promise.all([createPlan({ months: 1, pause: nowPause }), createPlan({ months: 3, pause: nowPause })]);
+    assert.equal(a.rev, b.rev, 'the second click waits for the first');
+});
+
+test('the saved plan shape: windows, months, progress, the slim part', () => {
+    const now = Date.parse('2026-09-30T15:00:00Z');
+    const w = planWindow(3, now);
+    assert.equal(w.start, Date.parse('2026-09-30T00:00:00Z'));
+    assert.equal(w.end, Date.parse('2026-12-30T00:00:00Z'));
+    assert.equal(w.days, 91);
+    assert.equal(planWindow(7, now).months, 1, 'only 1, 3, 6 or 12');
+    assert.equal(addMonths(Date.parse('2026-01-31T00:00:00Z'), 1), Date.parse('2026-02-28T00:00:00Z'));
+    const r = { id: 'steady', gained: 3000, cost: 90e6, perStat: { str: 3000, spd: 0, def: 0, dex: 0 }, used: { 206: 90 }, daily: Array.from({ length: 91 }, (_, i) => Math.round(((i + 1) * 3000) / 91)) };
+    const months = monthlyOf(r, { start: w.start, days: w.days, stats: { str: 1000, spd: 0, def: 0, dex: 0 } });
+    assert.deepEqual(months.map((x) => x.days), [30, 31, 30], 'Sep 30 → Oct 30 → Nov 30 → Dec 30');
+    assert.equal(months.reduce((a, x) => a + x.gained, 0), 3000);
+    assert.equal(months[2].stats.str, 4000);
+    assert.ok(Math.abs(months.reduce((a, x) => a + x.cost, 0) - 90e6) < 3);
+    assert.equal(months[0].used[206], 29.7);
+    const saved = makeSavedPlan({ compare: { steady: r }, rec: { recommended: 'steady', pickBy: 'most' }, snapshot: { stats: { str: 1000, spd: 0, def: 0, dex: 0 } }, start: w.start, end: w.end, months: 3, days: w.days, budget: Infinity, now });
+    assert.equal(saved.budget, null, 'no budget is stored as null');
+    const pn = planNowOf(saved);
+    assert.ok(usablePlanNow(pn));
+    assert.equal(usablePlanNow({ ...pn, v: 0 }), null);
+    assert.deepEqual(Object.keys(slimResult(r)).sort(), ['cost', 'gained', 'id', 'perStat', 'used']);
+    assert.deepEqual(planProgress(saved, now), { day: 1, of: 91, left: 91, ended: false });
+    assert.equal(planProgress(saved, w.end + 3600e3).ended, true);
+});
+
+test('keys 1.2.3 kept for its background comparison are dropped once', () => {
+    for (const k of DROPPED_KEYS) set(k, { big: 'x'.repeat(100) });
+    dropOldKeys();
+    for (const k of DROPPED_KEYS) assert.equal(get(k, null), null, k);
 });
 
 test('a hidden tab works nothing out; it catches up when shown', () => {
+    setup('steady');
     const had = Object.getOwnPropertyDescriptor(globalThis, 'document');
     globalThis.document = { visibilityState: 'hidden' };
     try {
@@ -119,7 +181,6 @@ test('a hidden tab works nothing out; it catches up when shown', () => {
         if (had) Object.defineProperty(globalThis, 'document', had);
         else delete globalThis.document;
     }
-    set(K.userState, { api: API, at: Date.now() });
     refresh();
     assert.equal(pi.stale, false);
     assert.ok(pi.model && pi.model.ready);
@@ -136,43 +197,4 @@ test('happyTerms (kept for the last few happy values) gives gainPerTrain’s exa
         for (const [stat, S] of [['str', 118400], ['def', 2.88e8], ['dex', 0]]) assert.equal(gainPerTrain(stat, S, H, 7.3, 10), old(stat, S, H, 7.3, 10), stat + ' at happy ' + H);
         assert.strictEqual(happyTerms(H), happyTerms(H), 'kept');
     }
-});
-
-test('a click undone before its run: the run is dropped, nothing waits (Auto may rewrite the plan again)', () => {
-    setup('steady');
-    currentModel();
-    const shown = pi.compareKey;
-    set(K.settings, { budget: 99e6 });
-    currentModel();
-    assert.notEqual(pi.compareWanted, shown);
-    assert.ok(pi.compareScheduled);
-    set(K.settings, null);
-    currentModel();
-    assert.equal(pi.compareKey, shown);
-    assert.equal(pi.compareWanted, shown, 'fresh again');
-    assert.equal(pi.compareScheduled, '', 'the run for the undone click is dropped');
-});
-
-test('a run that newer inputs overtake stops at its next slice and lets go of the turn', async () => {
-    setup('steady');
-    currentModel();
-    const kept = storedCompare();
-    set(K.compareCache, { ...kept, key: kept.key + '|older', keyNoPrice: kept.keyNoPrice + '|older' });
-    newPage();
-    currentModel();
-    // The run starts ~80 ms on; newer inputs arrive while it is under way.
-    await new Promise((r) => setTimeout(r, 90));
-    pi.compareWanted = 'newer';
-    await new Promise((r) => setTimeout(r, 1500));
-    assert.equal(storedCompare().key, kept.key + '|older', 'it did not finish for the old inputs');
-    assert.equal(get(K.compareBusy, null), null, 'and let go of the turn');
-});
-
-test('a page lets go only of its own turn', () => {
-    set(K.compareBusy, { key: 'k', tab: 'other-tab', at: Date.now() });
-    releaseCompareTurn();
-    assert.equal(get(K.compareBusy, null).tab, 'other-tab');
-    set(K.compareBusy, { key: 'k', tab: pi.tabId, at: Date.now() });
-    releaseCompareTurn();
-    assert.equal(get(K.compareBusy, null), null);
 });

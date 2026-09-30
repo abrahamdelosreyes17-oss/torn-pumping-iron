@@ -189,7 +189,7 @@ function chosenFills(m) {
     const s = getSettings();
     const statics = get(K.userStatic, {}) || {};
     const prices = getPrices();
-    const needs = needList(needsForWindow(m, m.compare, getPlan(), s.buyWindow || 'three', s.horizonDays), statics.inventory || {});
+    const needs = needList(needsForWindow(m, m.compare, getPlan(), s.buyWindow || 'three', m.planDays || s.horizonDays), statics.inventory || {});
     // The same list as the Buy tab: its type ticks, and a city shop you ticked joins the listings.
     const show = shownTypes(s, [...new Set(needs.map((n) => typeOf(n.id)))]);
     const ic = itemContext(statics, s, m.now);
@@ -214,7 +214,7 @@ function drawMarket(m, page) {
     if (!m || !m.ready || !getSettings().marketMarks) return;
     // On a market page, the Buy list's prices are refreshed (at most every 5 minutes) so the outline is current.
     const s = getSettings();
-    const want = needList(needsForWindow(m, m.compare, getPlan(), s.buyWindow || 'three', s.horizonDays), (get(K.userStatic, {}) || {}).inventory || {}).filter((n) => n.buy > 0).map((n) => n.id);
+    const want = needList(needsForWindow(m, m.compare, getPlan(), s.buyWindow || 'three', m.planDays || s.horizonDays), (get(K.userStatic, {}) || {}).inventory || {}).filter((n) => n.buy > 0).map((n) => n.id);
     if (want.length) loadPrices(want).catch(() => {});
     const fills = chosenFills(m);
     const label = (r) => 'Take ' + fmtInt(r.qty) + ' · $' + fmtInt(r.subtotal);
@@ -299,7 +299,9 @@ export function bootTornPage() {
             return;
         }
         const p = detectPage(location.href);
-        const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), Object.values(getPrices()).map((x) => x.at).join(), pageRowsCount(p)].join('|');
+        // The saved plan (made, recalibrated or another picked on the webpage) redraws the marks too.
+        const planSig = m && m.ready && m.saved ? m.saved.createdAt + ':' + (m.saved.recalibratedAt || 0) : '';
+        const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), JSON.stringify(getPlan()), planSig, Object.values(getPrices()).map((x) => x.at).join(), pageRowsCount(p)].join('|');
         if (sig !== lastSig) {
             lastSig = sig;
             if (p === PAGE_GYM) {

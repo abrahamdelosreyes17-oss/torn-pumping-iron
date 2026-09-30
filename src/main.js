@@ -10,8 +10,8 @@
  */
 
 import { gmMenu, gmOpenTab } from './platform/gm.js';
-import { set } from './platform/store.js';
-import { pi, startFeed, refresh, onModel } from './runtime.js';
+import { set, dropOldKeys } from './platform/store.js';
+import { pi, startFeed, refresh, onModel, setWhere, createPlan, recalibratePlan, followStrategy } from './runtime.js';
 import { maybeSyncPlan } from './discord.js';
 import { bootAppPage } from './app-page.js';
 import { bootTornPage } from './torn-page.js';
@@ -38,6 +38,10 @@ export function boot() {
     }
     watchTrading();
     menus();
+    // Round 6: what 1.2.3 kept for the comparison it ran on every page goes (Tampermonkey hands every key to every page).
+    dropOldKeys();
+    // The webpage holds the whole saved plan; Torn's pages only follow it.
+    setWhere(where === 'app' ? 'app' : 'torn');
     if (where === 'app') bootAppPage();
     else {
         bootTornPage();
@@ -50,5 +54,5 @@ export function boot() {
     setTimeout(gymLogTick, 20000);
     setInterval(gymLogTick, 60000);
     // Off torn.com (the harness), expose the model for checks. On torn.com the sandbox keeps it private anyway.
-    if (/^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed };
+    if (/^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed, createPlan, recalibratePlan, followStrategy };
 }

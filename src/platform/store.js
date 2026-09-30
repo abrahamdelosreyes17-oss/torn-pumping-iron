@@ -46,13 +46,11 @@ export const K = {
     eyePredictions: 'eyePredictions',
     devUnlocked: 'devUnlocked',
     skipped: 'skippedSteps',
-    // Your real Xanax cooldowns (core/drugcd.js) and the candy picked today (kept steady: core/candy.js).
+    // Your real Xanax cooldowns (core/drugcd.js).
     xanaxCds: 'xanaxCds',
-    candyPick: 'candyPick',
-    // The plan comparison kept between pages (runtime.js), the event comparison, and which tab is working one out.
-    compareCache: 'compareCache',
-    eventCompareCache: 'eventCompareCache',
-    compareBusy: 'compareBusy',
+    // The saved plan's small part that Torn's pages and the bot follow (core/saved-plan.js; the whole plan is in
+    // IndexedDB: platform/plan-store.js).
+    planNow: 'planNow',
     // Your trains from Torn's log (Full key): the sessions no read of ours saw (core/gymlog.js).
     gymLog: 'gymLog',
 };
@@ -162,10 +160,20 @@ export function del(name) {
     gmDel(name);
 }
 
+/**
+ * Keys 1.2.3 kept and round 6 dropped (the comparison worked out on every page, Auto's event comparison, the turn to
+ * work one out, today's candy pick): removed once, so Tampermonkey stops handing them to every page.
+ */
+export const DROPPED_KEYS = ['compareCache', 'eventCompareCache', 'compareBusy', 'candyPick'];
+
+export function dropOldKeys() {
+    for (const k of DROPPED_KEYS) if (gmGet(k, null) !== null) gmDel(k);
+}
+
 /** What "Your data" in Settings can clear, by group. */
 export const DATA_GROUPS = {
     keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker, K.fullKey, K.fullKeyState, K.moneyLog],
-    plan: [K.plan, K.recheck, K.gymSession, K.compareCache, K.eventCompareCache, K.compareBusy],
+    plan: [K.plan, K.recheck, K.gymSession, K.planNow, 'savedPlanFull'],
     progress: [K.statsHistory, K.dayLog, K.dayTotals, K.planLine, K.receipts, K.gymLog],
     learning: ['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions],
     prices: [K.priceHistory, K.prices],

@@ -91,7 +91,7 @@ async function openApp(query) {
         r.abort();
     });
     await page.route(/fonts\.(googleapis|gstatic)\.com/, (r) => r.abort());
-    await page.goto('http://127.0.0.1:8782/test/harness-live.html?pi=app&key=1&at=2026-09-29T10:48:00Z&wait=100000' + (query || ''));
+    await page.goto('http://127.0.0.1:8782/test/harness-live.html?pi=app&key=1&at=2026-09-29T10:48:00Z&wait=100000&plan=1&follow=steady' + (query || ''));
     await page.waitForFunction(() => {
         const sr = document.getElementById('pi-app') && document.getElementById('pi-app').shadowRoot;
         return sr && sr.querySelector('.strip');
@@ -279,8 +279,10 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
 {
     const o = await openApp('&full=1');
     await o.page.evaluate(() => (location.hash = 'plan'));
-    // The money log is read 5 s after the page opens.
+    // The money log is read 5 s after the page opens; then Create plan (round 6: a plan is made on a click, from your income).
     await o.page.waitForTimeout(7000);
+    await o.page.evaluate(() => window.__pi.createPlan({ months: 1 }));
+    await o.page.waitForTimeout(1500);
     const m = await measure(o.page);
     ok(!/Auto mode needs a Full key · Add it/.test(m.text), 'auto: no header warning with a Full key');
     ok(/a day from your income/.test(m.text) && /You can afford this with your income/.test(m.text), 'auto: the plan runs on your income (' + (m.text.match(/[^.]*from your income[^.]*/) || [''])[0].slice(0, 120) + ')');

@@ -6,7 +6,8 @@
 
 import { gmOnChange } from './platform/gm.js';
 import { K, get, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup, getPrices, PRICE_LISTINGS_KEPT } from './platform/store.js';
-import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE, beatFocus, apiFocus } from './runtime.js';
+import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE, beatFocus, apiFocus, createPlan, recalibratePlan, followStrategy } from './runtime.js';
+import { forgetSavedPlan } from './platform/plan-store.js';
 import { PiApp } from './ui/app/app.js';
 import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, fetchFactionMembers, fetchFactionWars, keyIsEnough } from './api/torn.js';
 import { outEarly, enemiesFromWars } from './core/eye/war.js';
@@ -341,6 +342,17 @@ function syncEye(force = false) {
     setEyeForSync({ war: fid && warRows.length ? { factionId: fid, members: warRows } : null, watch: watchRows });
 }
 
+/** A Create plan or Recalibrate click: the page shows it working, then the new plan (or why it couldn't). */
+function runPlan(fn) {
+    page.app.ui.planError = null;
+    page.app.render(true);
+    return fn()
+        .catch((e) => {
+            page.app.ui.planError = String((e && e.message) || e);
+        })
+        .finally(() => page.app.render(true));
+}
+
 function getCtx() {
     const settings = getSettings();
     const plan = getPlan();
@@ -375,12 +387,17 @@ function getCtx() {
             page.app.render(true);
         },
         setPlan: (p) => {
-            const cur = getPlan();
-            const restart = (p.strategy !== undefined && p.strategy !== cur.strategy) || (p.build !== undefined && p.build !== cur.build) || !cur.createdAt;
-            setPlan({ ...cur, ...p, createdAt: restart ? Date.now() : cur.createdAt });
+            const { strategy, strategyPicked, ...rest } = p;
+            // Another of the saved plans: followed at once, nothing worked out again (Progress's line follows it).
+            if (strategy !== undefined && strategy !== getPlan().strategy) followStrategy(strategy);
+            // Build, goal, the Plan rule, special refills: kept for the next Create plan or Recalibrate (a click).
+            if (Object.keys(rest).length) setPlan({ ...getPlan(), ...rest });
             refresh();
             page.app.render(true);
         },
+        // Create plan (1, 3, 6 or 12 months) and Recalibrate: the only things that work a plan out (round 6).
+        createPlan: (months) => runPlan(() => createPlan({ months })),
+        recalibratePlan: () => runPlan(() => recalibratePlan()),
         wantPrices: (ids, slim = []) => {
             if (isVisible()) setTimeout(() => loadPrices(ids, slim).catch(() => {}), 0);
         },
@@ -415,6 +432,10 @@ function getCtx() {
                 return;
             }
             if (g === 'eye') clearEye();
+            if (g === 'plan') {
+                pi.saved = null;
+                forgetSavedPlan().catch(() => {});
+            }
             clearGroup(g);
             refresh();
             page.app.render(true);

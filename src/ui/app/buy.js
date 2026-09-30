@@ -152,7 +152,7 @@ export function renderBuy(m, ctx) {
     const now = m.now;
     const win = s.buyWindow || 'three';
     const inv = ctx.statics.inventory || {};
-    const needs = needList(needsForWindow(m, ctx.compare, ctx.plan, win, s.horizonDays), inv);
+    const needs = needList(needsForWindow(m, ctx.compare, ctx.plan, win, m.planDays || s.horizonDays), inv);
     const planTypes = [...new Set(needs.map((n) => typeOf(n.id)))];
     const show = shownTypes(s, planTypes);
     const toBuy = needs.filter((n) => n.buy > 0 && show.has(typeOf(n.id)));

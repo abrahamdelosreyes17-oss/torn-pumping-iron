@@ -263,7 +263,7 @@ function planLine(m, ctx) {
     const plan = ctx.plan;
     const strat = STRATEGIES[plan.strategy] || STRATEGIES.steady;
     const r = ctx.compare && ctx.compare[plan.strategy];
-    const days = ctx.settings.horizonDays || 30;
+    const days = m.planDays || ctx.settings.horizonDays || 30;
     const perDay = r ? Math.round(((r.used && r.used[XANAX]) || 0) / days) : null;
     const sub = r ? (perDay ? perDay + ' Xanax' : 'no Xanax') + ((r.used && r.used[POINTS]) ? ' + refill' : '') + ' a day · +' + fmtShort(r.gained) + ' in ' + days + ' days' : strat.what;
     return h('div', {}, [

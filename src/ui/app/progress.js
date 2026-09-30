@@ -197,7 +197,7 @@ function weekFacts(m, ctx) {
 }
 
 function budgetFacts(m, ctx, s) {
-    const days = ctx.settings.horizonDays || 30;
+    const days = m.planDays || ctx.settings.horizonDays || 30;
     // Auto mode: the budget is what your income affords over the horizon.
     const auto = m.auto && m.auto.ready && ctx.plan && ctx.plan.pickBy === 'auto' ? m.auto : null;
     const budget = auto ? auto.budget : ctx.settings.budget || 0;
@@ -243,7 +243,7 @@ function buildFacts(m, ctx, s) {
 function milestones(m, ctx) {
     const r = ctx.compare && ctx.compare[ctx.plan.strategy];
     if (!r) return null;
-    const days = ctx.settings.horizonDays || 30;
+    const days = m.planDays || ctx.settings.horizonDays || 30;
     const out = [];
     const main = STATS.filter((k) => r.perStat && r.perStat[k] > 0).sort((a, b) => r.perStat[b] - r.perStat[a])[0];
     const when = (target, cur, daily) => {

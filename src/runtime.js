@@ -12,13 +12,12 @@ import { focusFrom, FOCUS_FRESH_MS } from './core/lanes.js';
 import { TornApiClient } from './api/client.js';
 import { StateFeed } from './feed/state.js';
 import { normalizeState, tornDayStart } from './core/bars.js';
-import { buildModel, compareStrategies, compareStrategiesAsync, blissWhatIf, companyWhatIf, playerContext, buildOf, isDrugEntry, specialLeft, heldBoosters } from './core/model.js';
-import { shopsAllowed } from './core/market.js';
-import { xanaxCdOf } from './core/drugcd.js';
-import { recommend } from './core/recommend.js';
+import { buildModel, compareStrategiesAsync, blissWhatIf, companyWhatIf, playerContext, buildOf, isDrugEntry, specialLeft, heldBoosters, steadyCostPerDay } from './core/model.js';
+import { recommend, pickWarning, PICK_BY } from './core/recommend.js';
 import { targetShares } from './core/plan.js';
-import { upcomingEvents } from './core/events.js';
-import { INCOME_MIN_DAYS, budgetOf, incomeFrom, autoState, effectiveSettings, eventToPlan, eventSwitch, incomeBreakdown } from './core/auto.js';
+import { INCOME_MIN_DAYS, budgetOf, incomeFrom, autoState, effectivePickBy, incomeBreakdown } from './core/auto.js';
+import { planWindow, daysLeft, planProgress, snapshotOf, makeSavedPlan, planNowOf, usablePlanNow, SAVED_PLAN_V } from './core/saved-plan.js';
+import { loadSavedPlan, saveSavedPlan } from './platform/plan-store.js';
 import { summarizeReceipts } from './core/receipts.js';
 import { livePrices } from './core/market.js';
 import { TORN_PER_MINUTE_ALONE } from './core/turns.js';
@@ -32,10 +31,12 @@ export const pi = {
     client: null,
     feed: null,
     model: null,
-    compare: null,
-    whatIf: null,
-    compareKey: '',
-    compareWanted: '',
+    // 'app' (the webpage) or 'torn' (Torn's pages): main.js says which.
+    where: 'app',
+    // The whole saved plan (webpage), and a Create plan / Recalibrate being worked out.
+    saved: null,
+    savedLoading: null,
+    planBusy: null,
     listeners: [],
 };
 
@@ -137,11 +138,12 @@ export function hasFullKey() {
 }
 
 /**
- * Auto mode for this refresh: income from the networth history (plus what
- * the plan spent meanwhile), the budget it affords, and whether a coming
- * event wins enough to switch the plan for it.
+ * Income (Auto, "Plan from my income"): from the money log (Full key) or the
+ * networth history, plus what the gym plan spent meanwhile. Read when a plan
+ * is made or recalibrated, and on the webpage to show it.
+ * @param {function} steadyPerDay - the steady plan's cost a day, while receipts cover under 3 days (it doesn't depend on the budget)
  */
-function autoFor(plan, settings, statics) {
+function autoFor(plan, settings, statics, steadyPerDay) {
     // What the gym really cost over the same days (receipts), added back: it left your networth and shows in the log's "out".
     // Never the plan's own projected cost, which would feed the budget back into itself.
     const now = Date.now();
@@ -149,10 +151,7 @@ function autoFor(plan, settings, statics) {
     const today = tornDayStart(now);
     // 30 Torn days, today included.
     const sum = rc ? summarizeReceipts(rc, today - 29 * 86400e3, today, { prices: getPrices(), priceHistory: get(K.priceHistory, null) }) : null;
-    // Until receipts cover a few days (everyone upgrading starts with none), the steady plan's cost stands in: it
-    // doesn't depend on the budget, so the budget never feeds itself.
-    const steady = pi.compare && pi.compare.steady ? pi.compare.steady.cost / (settings.horizonDays || 30) : 0;
-    const spentPerDay = sum && sum.days >= INCOME_MIN_DAYS ? sum.cost / sum.days : steady;
+    const spentPerDay = sum && sum.days >= INCOME_MIN_DAYS ? sum.cost / sum.days : plan.pickBy === 'auto' && hasFullKey() ? steadyPerDay() : 0;
     const income = incomeFrom(statics.income || [], { spentPerDay });
     const ml = get(K.moneyLog, null);
     const breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now(), ml.days || null) : null;
@@ -173,242 +172,164 @@ export function warOnNow(now = Date.now(), statics = null) {
     return w.enemies.find((e) => (!e.start || e.start - nowS <= 86400) && (!e.end || e.end > nowS)) || null;
 }
 
-/** The comparison over a coming event's days, with and without its multiplier (cached per event and inputs). */
-function eventComparisonFor(event, state, pc, shares, settings, budgetPerDay, statics = {}) {
-    const days = Math.max(1, Math.round((event.end - event.start) / (24 * 3600e3)));
-    const key = [event.id, event.start, pi.compareKey, days, Math.round(budgetPerDay || 0)].join('|');
-    if (pi.eventCompare && pi.eventCompare.key === key) return pi.eventCompare;
-    // Kept between pages like the plan comparison (another page or tab worked it out).
-    const kept = getShared(K.eventCompareCache, null);
-    if (kept && kept.v === BUILD && kept.key === key) {
-        pi.eventCompare = kept;
-        return kept;
-    }
-    // Two more full comparisons: never inside a redraw, and only in a tab you can see. The last answer stands until the new one is ready.
-    // Not from a comparison still being worked out (it would run twice, once for the old inputs).
-    if (pi.eventWanted !== key && isVisible() && (!pi.compareWanted || pi.compareWanted === pi.compareKey)) {
-        pi.eventWanted = key;
-        setTimeout(async () => {
-            if (pi.eventWanted !== key) return;
-            await runEventComparison(key, event, state, pc, shares, settings, budgetPerDay, statics, days);
-            if (pi.eventWanted === key) refresh();
-        }, COMPARE_CLICK_DELAY_MS * 2);
-    }
-    return pi.eventCompare || { eventCompare: null, normalCompare: null };
-}
+/** This build's version (Diagnostics; a saved plan's shape is versioned in core/saved-plan.js). */
+export const BUILD = (typeof PI_BUILD_VERSION !== 'undefined' ? PI_BUILD_VERSION : 'dev') + '+' + (typeof PI_BUILD_HASH !== 'undefined' ? PI_BUILD_HASH : 'dev');
 
-async function runEventComparison(key, event, state, pc, shares, settings, budgetPerDay, statics, days) {
-    const es = { ...settings, horizonDays: days, budget: Number.isFinite(budgetPerDay) ? budgetPerDay * days : Infinity };
-    const prices = getPrices();
-    const special = 0;
-    const boosted = { ...pc, perks: { ...pc.perks, candyMult: (pc.perks.candyMult || 1) * (event.candyMult || 1), canMult: (pc.perks.canMult || 1) * (event.canMult || 1) } };
-    // Same inputs as the plan's own comparison (shops, console held, job), with the event's multiplier on one side.
-    const eventCompare = await compareStrategiesAsync({ state, pc: boosted, shares, settings: es, prices, special, statics, pickBy: 'most' });
-    const normalCompare = await compareStrategiesAsync({ state, pc, shares, settings: es, prices, special, statics, pickBy: 'most' });
-    if (pi.eventWanted === key) {
-        pi.eventCompare = { v: BUILD, key, eventCompare, normalCompare };
-        set(K.eventCompareCache, pi.eventCompare);
-    }
-    return pi.eventCompare;
-}
-
-/** After a click, the plan runs wait this long (the page paints first); after new prices only, this long (batched). */
-export const COMPARE_CLICK_DELAY_MS = 80;
-export const COMPARE_PRICE_DELAY_MS = 5000;
-
-/** This build's version: a comparison kept by another version is never used (its results may have another shape). */
-const BUILD = (typeof PI_BUILD_VERSION !== 'undefined' ? PI_BUILD_VERSION : 'dev') + '+' + (typeof PI_BUILD_HASH !== 'undefined' ? PI_BUILD_HASH : 'dev');
-
-/**
- * A tab working out the comparison holds the turn this long, renewed after
- * every plan it runs; other tabs take its result instead of running their
- * own. Short, so a page left mid-run (a click to another Torn page) holds
- * the others back for seconds, not half a minute; and the page lets go of it
- * as it goes (pagehide).
- */
-export const COMPARE_BUSY_MS = 5000;
-
-/** Thrown inside a run that newer inputs made pointless: it stops at its next slice. */
-const SUPERSEDED = { superseded: true };
-
-/** Let go of the turn to work out the comparison, if this tab holds it. */
-export function releaseCompareTurn() {
-    const busy = get(K.compareBusy, null);
-    if (busy && busy.tab === pi.tabId) del(K.compareBusy);
-}
-
-/** The comparison kept between pages (K.compareCache), if this build wrote it. */
-export function storedCompare() {
-    const c = getShared(K.compareCache, null);
-    return c && c.v === BUILD && c.key && c.compare ? c : null;
-}
-
-/** Use a kept comparison. `exact`: it is for the inputs now, so nothing is waiting. */
-function adoptCompare(c, exact) {
-    pi.compare = c.compare;
-    pi.whatIf = c.whatIf || null;
-    pi.jobWhatIf = c.jobWhatIf || [];
-    pi.compareKey = c.key;
-    pi.compareKeyNoPrice = c.keyNoPrice;
-    if (exact) {
-        pi.compareWanted = c.key;
-        pi.compareScheduled = '';
-    }
+/** The part of the saved plan Torn's pages and the bot follow (GM, a few KB), if there is one. */
+export function planNowStored() {
+    return usablePlanNow(getShared(K.planNow, null));
 }
 
 /**
- * Re-run the strategy comparison at most once per Torn hour or when inputs
- * change, in one tab, and keep it between pages: Torn loads a new page on
- * nearly every click, and each one used to work the whole comparison out
- * again in one go (owner's friend, 2026-09-30: "masyadong laggy"; ~1 s a
- * page on a slow machine). A page opens on the kept one; when the inputs
- * moved, the last one shows while the new one is worked out in slices.
+ * The whole saved plan (webpage): read from IndexedDB once, and again when
+ * another tab saves a new one (planNow's `rev` moves).
  */
-function comparisonFor(state, statics, plan, settings) {
-    const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult });
-    const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
-    const prices = getPrices();
-    // Every input that moves the answer: all four stats (in ~2% steps), prices (2 significant digits), perks, gyms.
-    const statsSig = Object.values(pc.stats).map((v) => Math.round(Math.log1p(v) * 50)).join(',');
-    const priceSig = Object.entries(livePrices(prices)).map(([id, p]) => id + ':' + Number(p.toPrecision(2))).join(',');
-    const special = specialLeft(plan, state);
-    const perkSig = JSON.stringify([learnedNow().mode, pc.perks.mult, pc.perks.happyLossMult, pc.perks.canMult, pc.perks.candyMult, pc.perks.consoleMult, pc.perks.edvdMult, pc.perks.boosterCapExtraH]);
-    // Items and job: the candy rule (Plan dropdown), shops ticked, Torn's item data, a console held, the job, specials held.
-    const pickBy = plan.pickBy || 'most';
-    const keysFor = (candyPick) => {
-        const itemSig = JSON.stringify([pickBy, shopsAllowed(settings), statics.itemsAt || 0, Number((statics.inventory || {})[104]) > 0, statics.job || null, statics.jobPoints || null, state.specialRefills || 0, Math.round((state.boosterCd || 0) / 3600), heldBoosters(statics.inventory), candyPick || null, xanaxCdOf(statics.xanaxCds).min]);
-        const keyNoPrice = [BUILD, Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, pc.unlocked.join(','), special, itemSig].join('|');
-        return { keyNoPrice, key: keyNoPrice + '|' + priceSig };
-    };
-    const { keyNoPrice, key } = keysFor(statics.candyPick);
-    if (key === pi.compareKey) {
-        // Back to the inputs of the comparison shown (a click undone): whatever was scheduled for the others is dropped.
-        if (pi.compareWanted !== key) {
-            pi.compareWanted = key;
-            pi.compareScheduled = '';
-            clearTimeout(pi.compareTimer);
-        }
-        return { compare: pi.compare, pc };
+function savedFor(pn) {
+    if (!pn) return null;
+    if (pi.saved && pi.saved.rev === pn.rev) return pi.saved;
+    if (pi.savedLoading !== pn.rev) {
+        pi.savedLoading = pn.rev;
+        loadSavedPlan()
+            .then((p) => {
+                if (p && p.rev === pn.rev) {
+                    pi.saved = p;
+                    refresh();
+                }
+            })
+            .catch(() => {});
     }
-    const stored = storedCompare();
-    // Worked out already, on another page or in another tab.
-    if (stored && stored.key === key) {
-        adoptCompare(stored, true);
-        return { compare: pi.compare, pc };
-    }
-    // A new page: the last one shows while the new one is worked out.
-    if (!pi.compare && stored) adoptCompare(stored, false);
-    pi.compareWanted = key;
-    const whatIfs = (compare) => {
+    return null;
+}
+
+/**
+ * Create plan (1, 3, 6 or 12 months) or Recalibrate, on a click only: every
+ * plan is worked out over the plan's days from what's true now (stats,
+ * income, prices, gyms), the best one is recommended, and the whole thing is
+ * saved with what it saw. Recalibrate keeps the plan's start and end and
+ * re-plans only the days left. Worked out in slices (the page stays free).
+ * @param {object} o - {months: 1|3|6|12} or {recalibrate: true}
+ * @returns {Promise<object>} the saved plan
+ */
+export async function createPlan({ months = 1, recalibrate = false, pause = pauseForPage } = {}) {
+    if (pi.planBusy) return pi.planBusy.promise;
+    const run = (async () => {
+        const now = Date.now();
+        const s = get(K.userState, null);
+        const state = s && s.api ? normalizeState(s.api, s.at) : null;
+        if (!state) throw new Error('Waiting for the first read of your stats.');
+        const prev = recalibrate ? await loadSavedPlan() : null;
+        if (recalibrate && !(prev && prev.v === SAVED_PLAN_V)) throw new Error('No plan to recalibrate yet: create one first.');
+        const plan = getPlan();
+        const settings = getSettings();
+        // The candy the plan named stays unless another is clearly cheaper now (candy.js's 10% rule).
+        const keptCandy = prev && prev.compare && prev.compare[plan.strategy] && prev.compare[plan.strategy].candy;
+        const statics = { ...(getShared(K.userStatic, {}) || {}), xanaxCds: get(K.xanaxCds, []) || [], candyPick: keptCandy ? { day: tornDayStart(state.at), id: keptCandy.id } : null };
+        const win = recalibrate ? { start: prev.start, end: prev.end, months: prev.months, days: daysLeft(prev, now) } : planWindow(months, now);
+        const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult });
+        const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
+        const prices = getPrices();
+        const special = specialLeft(plan, state);
+        // Money a day: Auto from your income (Full key), "Max gains" none, else the budget you set, per day.
+        const auto = autoFor(plan, settings, statics, () => steadyCostPerDay({ state, pc, shares, settings: { ...settings, horizonDays: 30 }, prices, special, statics }));
+        const perDay = plan.pickBy === 'max' ? Infinity : auto.ready ? auto.budgetPerDay : budgetOf(settings) / (settings.horizonDays || 30);
+        const runSettings = { ...settings, horizonDays: win.days, budget: Number.isFinite(perDay) ? perDay * win.days : Infinity };
+        const pickBy = effectivePickBy(PICK_BY[plan.pickBy] ? plan.pickBy : 'most', auto);
+        const args = { state, pc, shares, settings: runSettings, prices, special, statics, pickBy };
+        const compare = await compareStrategiesAsync(args, { pause });
+        await pause();
+        const goal = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
+        const budget = budgetOf(runSettings);
+        const rec = recommend(compare, { budget, bliss: pc.perks.bliss, pickBy, goal });
         // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
-        const whatIf = pc.perks.bliss ? null : blissWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy });
-        // Company what-ifs: hired where a jump variant would beat the recommended plan.
-        const rec = recommend(compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy });
-        return { whatIf, jobWhatIf: companyWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy, compare, recommended: rec.recommended }) };
-    };
-    const finish = (compare, { whatIf, jobWhatIf }) => {
-        let keys = { key, keyNoPrice };
-        // Today's candy stays named unless another is clearly cheaper (owner: it flipped on every price load). Keeping
-        // it is one of the comparison's own inputs: the key it's kept under says so, so it doesn't run a second time.
-        const mine = compare && compare[plan.strategy] && compare[plan.strategy].candy;
-        const kept = get(K.candyPick, null);
-        const day = tornDayStart(Date.now());
-        if (mine && !(kept && kept.day === day && kept.id === mine.id)) {
-            const pick = { day, id: mine.id };
-            set(K.candyPick, pick);
-            keys = keysFor(pick);
-        }
-        const c = { v: BUILD, key: keys.key, keyNoPrice: keys.keyNoPrice, at: Date.now(), tab: pi.tabId, compare, whatIf, jobWhatIf };
-        set(K.compareCache, c);
-        adoptCompare(c, true);
-        releaseCompareTurn();
-    };
-    const args = { state, pc, shares, settings, prices, special, statics, pickBy };
-    if (!pi.compare) {
-        // Nothing kept yet (the first page after an install or an update): once, in one go.
-        const compare = compareStrategies(args);
-        finish(compare, whatIfs(compare));
-    } else if (pi.compareScheduled !== key && isVisible()) {
-        // A click (build, budget, days, a shop tick) redraws at once and the plan runs follow once the page has
-        // painted. New prices alone (they arrive in batches while Buy loads) are gathered: one run 5 s later.
-        const priceOnly = pi.compareKeyNoPrice === keyNoPrice;
-        pi.compareScheduled = key;
-        clearTimeout(pi.compareTimer);
-        pi.compareTimer = setTimeout(async () => {
-            if (pi.compareWanted !== key) return;
-            // Another tab may have it by now, or be working it out: take its result at the next redraw.
-            const again = storedCompare();
-            if (again && again.key === key) {
-                adoptCompare(again, true);
-                refresh();
-                return;
-            }
-            const busy = get(K.compareBusy, null);
-            if (busy && busy.key === key && busy.tab !== pi.tabId && Date.now() - (busy.at || 0) < COMPARE_BUSY_MS) {
-                pi.compareScheduled = '';
-                return;
-            }
-            set(K.compareBusy, { key, tab: pi.tabId, at: Date.now() });
-            // One plan at a time, with the page free in between: the turn is renewed each time, and a newer change
-            // stops the run at its next slice.
-            const pause = async () => {
-                await pauseForPage();
-                if (pi.compareWanted !== key) throw SUPERSEDED;
-                set(K.compareBusy, { key, tab: pi.tabId, at: Date.now() });
-            };
-            try {
-                const compare = await compareStrategiesAsync(args, { pause });
-                await pause();
-                const w = whatIfs(compare);
-                if (pi.compareWanted !== key) throw SUPERSEDED;
-                finish(compare, w);
-                refresh();
-            } catch (error) {
-                releaseCompareTurn();
-                // Stopped for newer inputs: they have their own run. Failed: kept as failed until the inputs change (not
-                // retried every redraw), the last comparison showing; the error goes to Diagnostics.
-                if (error !== SUPERSEDED) set(K.lastError, { at: Date.now(), where: 'plan comparison', message: String((error && error.message) || error) });
-            }
-        }, priceOnly ? COMPARE_PRICE_DELAY_MS : COMPARE_CLICK_DELAY_MS);
+        const whatIf = pc.perks.bliss ? null : blissWhatIf(args);
+        await pause();
+        const jobWhatIf = companyWhatIf({ ...args, compare, recommended: rec.recommended });
+        const snapshot = snapshotOf({ state, pc, statics, plan, prices: livePrices(prices), income: auto.ready ? { perDay: auto.perDay, source: auto.source, days: auto.days } : null, budgetPerDay: Number.isFinite(perDay) ? perDay : null, held: heldBoosters(statics.inventory), now });
+        const saved = makeSavedPlan({ compare, rec, snapshot, start: win.start, end: win.end, months: win.months, days: win.days, budget, whatIf, jobWhatIf, prev, now });
+        const best = compare[rec.recommended];
+        const warn = {};
+        for (const [id, r] of Object.entries(compare)) if (r && best && id !== rec.recommended) warn[id] = pickWarning(best, r, { bliss: pc.perks.bliss, days: win.days }).warn;
+        await saveSavedPlan(saved);
+        pi.saved = saved;
+        set(K.planNow, planNowOf(saved, warn));
+        // The plan followed: the recommended one (a plan you picked yourself stays through a recalibration).
+        const cur = getPlan();
+        const strategy = recalibrate && cur.strategyPicked && compare[cur.strategy] ? cur.strategy : rec.recommended;
+        setPlan({ ...cur, strategy, strategyPicked: strategy !== rec.recommended && Boolean(cur.strategyPicked), createdAt: now });
+        recordPlanLine(saved, strategy, now);
+        return saved;
+    })();
+    pi.planBusy = { recalibrate, months, at: Date.now(), promise: run };
+    refresh();
+    try {
+        return await run;
+    } finally {
+        pi.planBusy = null;
+        refresh();
     }
-    return { compare: pi.compare, pc };
+}
+
+/** Recalibrate (a click): the plan's end stays, the days left are re-planned from what's true now. */
+export function recalibratePlan(o = {}) {
+    return createPlan({ ...o, recalibrate: true });
+}
+
+/**
+ * Picking another of the saved plans (the Plan page): nothing is worked out
+ * again; Progress's line follows the pick.
+ */
+export function followStrategy(id) {
+    const saved = pi.saved;
+    const cur = getPlan();
+    const rec = saved && saved.rec ? saved.rec.recommended : null;
+    setPlan({ ...cur, strategy: id, strategyPicked: id !== rec, createdAt: Date.now() });
+    if (saved && saved.compare && saved.compare[id]) recordPlanLine(saved, id, Date.now());
+    refresh();
 }
 
 /** A break for the page between two pieces of work. */
 const pauseForPage = () => new Promise((r) => setTimeout(r, 0));
+
+/**
+ * Where this tab runs: 'app' (the webpage: the whole saved plan, Plan,
+ * Progress, Buy) or 'torn' (Torn's pages: today's steps from the saved plan,
+ * re-timed from live timers; nothing else is worked out there).
+ */
+export function setWhere(where) {
+    pi.where = where;
+}
 
 /** The model every surface renders from. */
 export function currentModel(now = Date.now()) {
     const s = get(K.userState, null);
     const state = s && s.api ? normalizeState(s.api, s.at) : null;
     if (!state) return { ready: false, hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)) };
-    // Your Xanax cooldowns and today's candy pick ride along with the stored data (the plan and the comparison read them).
-    const statics = { ...(getShared(K.userStatic, {}) || {}), xanaxCds: get(K.xanaxCds, []) || [], candyPick: get(K.candyPick, null) };
-    let plan = getPlan();
-    const auto = autoFor(plan, getSettings(), statics);
-    // Auto: the plans run inside what your income affords; without its Full key it's "most stats in my budget".
-    const settings = effectiveSettings(getSettings(), auto);
-    const { compare, pc } = comparisonFor(state, statics, plan, settings);
-    let autoSwitch = null;
-    if (auto.ready && compare) {
-        const goal = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
-        let strategy = recommend(compare, { budget: settings.budget, bliss: pc.perks.bliss, pickBy: 'auto', goal }).recommended;
-        // A coming event that multiplies what a plan uses: switch for it when it wins clearly (stacking skips natural energy).
-        const events = statics.calendar ? upcomingEvents(statics.calendar.calendar, now, { startTime: statics.calendar.startTime }) : [];
-        const ev = eventToPlan(events, now);
-        if (ev) {
-            const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
-            const ec = eventComparisonFor(ev, state, pc, shares, settings, auto.budgetPerDay, statics);
-            autoSwitch = eventSwitch({ event: ev, eventCompare: ec.eventCompare, normalCompare: ec.normalCompare, budgetPerDay: auto.budgetPerDay, now });
-            if (autoSwitch && autoSwitch.active) strategy = autoSwitch.id;
-        }
-        // The plan follows Auto's pick (saved, so the day plan, Discord and Progress all see the same plan): written by the
-        // leader tab only, and only from an up-to-date comparison, so tabs never take turns rewriting it.
-        const lead = get(K.leader, null);
-        const fresh = !pi.compareWanted || pi.compareWanted === pi.compareKey;
-        if (strategy && strategy !== plan.strategy && fresh && lead && lead.id === pi.tabId) plan = setPlan({ ...plan, strategy, strategyPicked: false, createdAt: now });
+    // Your Xanax cooldowns ride along with the stored data (the day plan reads them).
+    const statics = { ...(getShared(K.userStatic, {}) || {}), xanaxCds: get(K.xanaxCds, []) || [] };
+    const plan = getPlan();
+    const settings = getSettings();
+    const app = pi.where === 'app';
+    const pn = planNowStored();
+    const saved = app ? savedFor(pn) : null;
+    const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult });
+    // The saved plan's numbers: every plan's whole result on the webpage, the small part on Torn's pages.
+    let compare = null;
+    let rec = null;
+    let planSettings = settings;
+    if (pn) {
+        compare = saved ? saved.compare : pn.slim;
+        rec = saved ? saved.rec : { recommended: pn.recommended, pickBy: pn.pickBy, alternatives: [], reasons: [] };
+        planSettings = { ...settings, horizonDays: pn.days, budget: pn.budget === null ? Infinity : pn.budget };
     }
-    return buildModel({ state, statics, plan, settings, auto, autoSwitch, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, whatIf: pi.whatIf || null, jobWhatIf: pi.jobWhatIf || null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+    // Income (Plan's "Plan from my income"): read on the webpage only, where a plan is made.
+    const auto = app ? autoFor(plan, settings, statics, () => (pn && pn.slim.steady ? pn.slim.steady.cost / pn.days : 0)) : null;
+    const planInfo = pn ? { start: pn.start, end: pn.end, months: pn.months, days: pn.days, from: pn.from, createdAt: pn.createdAt, recalibratedAt: pn.recalibratedAt, progress: planProgress(pn, now), whole: Boolean(saved) } : null;
+    const m = buildModel({ state, statics, plan, settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+    if (m.ready) {
+        m.planBusy = pi.planBusy ? { recalibrate: pi.planBusy.recalibrate, months: pi.planBusy.months, at: pi.planBusy.at } : null;
+        m.savedPlan = saved;
+    }
+    return m;
 }
 
 /**
@@ -437,22 +358,15 @@ function recordDayTotals(m) {
 }
 
 /**
- * The plan's line for Progress: the 30-day projection as it stood when this
- * plan (strategy, build, start) was set. Written once per plan by the leader.
+ * The plan's line for Progress: the projection of the plan followed, from
+ * the day it was made or recalibrated (or picked).
  */
-function recordPlanLine(m) {
-    if (!m || !m.ready || !m.compare) return;
-    // Not while a new comparison is still coming (a click just changed the build).
-    if (pi.compareWanted && pi.compareWanted !== pi.compareKey) return;
+function recordPlanLine(saved, strategy, now) {
+    const r = saved && saved.compare ? saved.compare[strategy] : null;
+    if (!r || !Array.isArray(r.daily)) return;
     const plan = getPlan();
-    const r = m.compare[plan.strategy];
-    if (!r) return;
-    const key = [plan.createdAt || 0, plan.strategy, plan.build].join('|');
-    const cur = get(K.planLine, null);
-    if (cur && cur.key === key) return;
-    const lead = get(K.leader, null);
-    if (!lead || lead.id !== pi.tabId) return;
-    set(K.planLine, { key, start: tornDayStart(m.now), total: m.total, perStat: { ...m.pc.stats }, daily: r.daily, perStatGain: r.perStat, cost: r.cost, days: r.daily.length });
+    const stats = saved.snapshot.stats;
+    set(K.planLine, { key: [plan.createdAt || 0, strategy, plan.build].join('|'), start: tornDayStart(now), total: Object.values(stats).reduce((a, v) => a + v, 0), perStat: { ...stats }, daily: r.daily, perStatGain: r.perStat, cost: r.cost, days: r.daily.length });
 }
 
 /**
@@ -506,7 +420,6 @@ export function refresh() {
         maybeLearn();
         pi.model = currentModel();
         recordDayTotals(pi.model);
-        recordPlanLine(pi.model);
     } catch (error) {
         set(K.lastError, { at: Date.now(), where: 'model', message: String((error && error.message) || error) });
         return;
@@ -551,8 +464,6 @@ export function startFeed() {
     window.addEventListener('pagehide', () => {
         const rec = get(K.leader, null);
         if (rec && rec.id === pi.tabId) set(K.leader, { id: null, ts: 0 });
-        // A comparison this page was working out: another page takes the turn at once.
-        releaseCompareTurn();
     });
     const tick = () => pi.feed.tick().catch(() => {});
     tick();
@@ -571,6 +482,7 @@ export function startFeed() {
     gmOnChange(K.userState, refresh);
     gmOnChange(K.userStatic, refresh);
     gmOnChange(K.plan, refresh);
+    gmOnChange(K.planNow, refresh);
     gmOnChange(K.settings, refresh);
     gmOnChange(K.stateError, refresh);
     gmOnChange(K.apiKeyDead, refresh);

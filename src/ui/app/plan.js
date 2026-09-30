@@ -56,14 +56,9 @@ function kindOf(id) {
     return s ? KIND_TAG[s.kind] || 'Steady' : '';
 }
 
-/**
- * Picking a plan yourself. In Auto the plan follows your income, so a pick
- * of your own switches the Plan dropdown to a manual rule (Most stats in my
- * budget) instead of being undone at the next refresh.
- */
+/** Picking another of the saved plans yourself: followed at once, nothing is worked out again (round 6). */
 export function pickPlan(ctx, id) {
-    const manual = ctx.plan.pickBy === 'auto' ? { pickBy: 'most', pickByPicked: true } : {};
-    ctx.setPlan({ strategy: id, strategyPicked: true, ...manual });
+    ctx.setPlan({ strategy: id, strategyPicked: true });
 }
 
 /** The Plan dropdown: stands out, chalk-edged. */
@@ -219,16 +214,18 @@ function recommendedCard(m, ctx, rec, compare, days) {
     const reasons = rec.reasons.length ? rec.reasons.join(' ') : 'It gains the most stats inside your budget.';
     const spend = m.spend && m.spend.lastsDays !== null && m.spend.cash !== null ? ' Your ' + fmtMoney(m.spend.cash) + ' on hand lasts about ' + Math.round(m.spend.lastsDays) + ' days at ' + fmtMoney(m.spend.perDay) + ' a day.' : '';
     const a = m.auto;
-    const autoOn = Boolean(a && a.ready && ctx.plan.pickBy === 'auto');
-    const money = autoOn ? 'Auto · ' + fmtMoney(Math.round(a.budgetPerDay)) + ' a day from your income' : pickBy === 'max' || !(ctx.settings.budget > 0) ? 'no budget' : fmtMoney(ctx.settings.budget);
+    // What the saved plan was made with (round 6: its budget and income are the ones it saw, until you recalibrate).
+    const snap = m.savedPlan ? m.savedPlan.snapshot : null;
+    const autoOn = Boolean(snap && snap.income && rec.pickBy === 'auto');
+    const money = autoOn ? fmtMoney(Math.round(snap.budgetPerDay)) + ' a day from your income' : snap && snap.budgetPerDay !== null ? fmtMoney(Math.round(snap.budgetPerDay)) + ' a day' : 'no budget';
     const kids = [
         sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + money + ' · ' + days + ' days'])),
         h('div', { class: 'prime num' }, [
             h('div', {}, [h('span', { class: 'pill-tag chalk', text: kindOf(rec.recommended) }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: planWhat(rec.recommended, best) }), best && best.candy && tierWords(best.candy.id) ? h('div', { class: 'd muted', style: 'margin-top:2px;font-size:12px', text: 'Candy: ' + tierWords(best.candy.id) + '; what you hold goes first' }) : null]),
             h('div', { class: 'figs' }, figs),
             h('div', { class: 'why' }, [
-                'Wins because: ' + reasons + (autoOn && a.afford ? ' ' + a.afford : spend) + ' ',
-                autoOn ? h('span', { class: 'c-good', text: 'Auto keeps you on it.' }) : using === rec.recommended ? h('span', { class: 'c-good', text: 'You’re on it.' }) : h('a', { href: '#', onclick: (e) => { e.preventDefault(); ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Use it' }),
+                'Wins because: ' + reasons + (autoOn && a && a.afford ? ' ' + a.afford : spend) + ' ',
+                using === rec.recommended ? h('span', { class: 'c-good', text: 'You’re on it.' }) : h('a', { href: '#', onclick: (e) => { e.preventDefault(); ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Use it' }),
             ]),
         ]),
         ctx.plan.pickBy === 'auto' && a && a.wait ? h('div', { class: 'warnb', style: 'margin-top:10px' }, [h('b', { text: a.needsKey ? 'Auto mode needs a Full key' : 'Reading your income' }), h('p', { text: a.wait }), a.needsKey ? h('div', { class: 'acts' }, [h('button', { class: 'btn primary sm', type: 'button', onclick: () => ctx.go('settings'), text: 'Add it in Settings' })]) : null]) : null,
@@ -244,7 +241,7 @@ function recommendedCard(m, ctx, rec, compare, days) {
         kids.push(
             h('div', { class: 'warnb num', style: 'margin-top:12px' }, [
                 h('b', { text: w.title }),
-                h('p', { text: w.text + ' ' + w.reasons.join(' ') + (ctx.plan.pickBy === 'auto' ? ' Using it yourself turns Auto off (Plan: Most stats in my budget).' : '') }),
+                h('p', { text: w.text + ' ' + w.reasons.join(' ') + '' }),
                 h('div', { class: 'acts' }, [
                     h('button', { class: 'btn primary', type: 'button', onclick: () => { ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Keep ' + S.short.toLowerCase() }),
                     h('button', { class: 'btn', type: 'button', onclick: () => { ctx.ui.planPick = null; pickPlan(ctx, pick); }, text: 'Use it anyway' }),
@@ -490,10 +487,14 @@ function blissCard(m, ctx, rec, compare, days) {
 export function renderPlan(m, ctx) {
     const compare = ctx.compare || {};
     const rec = m.recommendation;
-    const days = ctx.settings.horizonDays || 30;
+    const days = m.planDays || ctx.settings.horizonDays || 30;
     // Every candy a plan might pick is priced (a few listings, every 30 min), so the candy choice follows prices.
     if (ctx.wantPrices) ctx.wantPrices([], CANDY_IDS);
-    if (!rec || !rec.recommended || !compare[rec.recommended]) return { ctl: controls(m, ctx), main: [h('div', { class: 'lead' }, [h('p', { class: 'muted', style: 'margin:0', text: 'Working out the plans…' })])], pane: [] };
+    if (!rec || !rec.recommended || !compare[rec.recommended]) {
+        // Round 6: plans are made on a click (Create plan / Recalibrate) and saved; nothing is worked out by itself.
+        const text = m.planBusy ? 'Working out your plan…' : m.saved ? 'Loading your saved plan…' : 'No plan yet: your steps follow ' + ((STRATEGIES[ctx.plan.strategy] || STRATEGIES.steady).name || '').toLowerCase() + ' until you create one.';
+        return { ctl: controls(m, ctx), main: [h('div', { class: 'lead' }, [h('p', { class: 'muted', style: 'margin:0', text }), ctx.ui.planError ? h('p', { class: 'c-bad', style: 'margin:6px 0 0', text: ctx.ui.planError }) : null])], pane: [] };
+    }
     return {
         ctl: controls(m, ctx),
         main: [recommendedCard(m, ctx, rec, compare, days), otherPlans(m, ctx, rec, compare, days), ladderCard(m, ctx)].filter(Boolean),

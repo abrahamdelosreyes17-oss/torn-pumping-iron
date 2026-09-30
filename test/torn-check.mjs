@@ -55,7 +55,7 @@ async function open(query, { wait = 4500, seed = null } = {}) {
         tornHits++;
         r.abort();
     });
-    await page.goto('http://127.0.0.1:8783/test/harness-live.html?key=1&at=2026-09-29T10:48:00Z&wait=100000&' + query);
+    await page.goto('http://127.0.0.1:8783/test/harness-live.html?key=1&at=2026-09-29T10:48:00Z&wait=100000&plan=1&follow=steady&' + query);
     await page.waitForTimeout(wait);
     return { page, errors, tornHits: () => tornHits };
 }
@@ -111,19 +111,20 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     await page.close();
 }
 
-/* The lag fix: the next Torn page opens on the comparison the last one kept (no run of its own, no long freeze). */
+/* Round 6: the plan is made on a click and saved; the next Torn page follows it and works nothing out. */
 {
-    const first = await open('page=gym&fixture=gym-friend&energy=275&build=balanced', { wait: 9000 });
+    const first = await open('page=gym&fixture=gym-friend&energy=275&build=balanced', { wait: 6000 });
     const store = await first.page.evaluate(() => ({ ..._store }));
     await first.page.close();
-    const kept = JSON.parse(store['pumpingIron.v1.compareCache'] || 'null');
-    ok(kept && kept.key && kept.compare && kept.compare.steady, 'lag: the first page keeps its comparison (' + (kept ? Object.keys(kept.compare).length + ' plans' : 'none') + ')');
+    const saved = JSON.parse(store['pumpingIron.v1.planNow'] || 'null');
+    ok(saved && saved.rev && saved.slim && saved.slim.steady, 'plan: Create plan saved the small part Torn pages follow (' + (saved ? Object.keys(saved.slim).length + ' plans' : 'none') + ')');
+    ok(!store['pumpingIron.v1.compareCache'] && !store['pumpingIron.v1.compareBusy'], 'plan: no background comparison kept or run');
     const { page, errors } = await open('page=items&fixture=items&energy=275&build=balanced', { seed: store, wait: 4000 });
-    const after = await page.evaluate(() => ({ kept: JSON.parse(_store['pumpingIron.v1.compareCache'] || 'null'), busy: _store['pumpingIron.v1.compareBusy'] || null, ready: Boolean(window.__pi && window.__pi.model() && window.__pi.model().compare) }));
-    ok(after.ready, 'lag: the next page has the plans at once');
-    ok(after.kept && after.kept.at === kept.at && after.kept.tab === kept.tab, 'lag: the next page did not work the comparison out again');
-    ok(!after.busy, 'lag: and never took the turn to');
-    ok(errors.length === 0, 'lag: no page errors ' + JSON.stringify(errors));
+    const after = await page.evaluate(() => ({ pn: JSON.parse(_store['pumpingIron.v1.planNow'] || 'null'), ready: Boolean(window.__pi && window.__pi.model() && window.__pi.model().compare), ladder: window.__pi.model().ladder, busy: window.__pi.model().planBusy }));
+    ok(after.ready, 'plan: the next page follows the saved plan at once');
+    ok(after.pn && after.pn.rev === saved.rev && !after.busy, 'plan: the next page did not work a plan out');
+    ok(after.ladder === null, 'plan: Torn pages skip what only the webpage shows (the energy ladder)');
+    ok(errors.length === 0, 'plan: no page errors ' + JSON.stringify(errors));
     await page.close();
 }
 

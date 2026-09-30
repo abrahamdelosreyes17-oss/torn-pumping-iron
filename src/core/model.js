@@ -24,7 +24,7 @@ import { xanaxCdOf } from './drugcd.js';
 import { realGains } from './gains.js';
 import { HAPPY_CAP } from './gain.js';
 import { JUMP_STACK } from './strategies.js';
-import { budgetOf, effectivePickBy, eventSwitchHeads, affordLine, autoWaitLine, unlockDays, unlockEnergyLeft } from './auto.js';
+import { budgetOf, effectivePickBy, affordLine, autoWaitLine, unlockDays, unlockEnergyLeft } from './auto.js';
 
 /*
  * The 30-day build projection is the heavy part of a model (thousands of
@@ -287,6 +287,12 @@ function withBestSpecial(id, base) {
     return without.gained > r.gained ? { ...without, specialHelps: false } : { ...r, specialHelps: true, specialGain: r.gained - without.gained };
 }
 
+/** The steady plan's cost a day (Auto's income adds it back while receipts cover under 3 days: it never depends on the budget). */
+export function steadyCostPerDay(args) {
+    const base = simInputs(args);
+    return simulateStrategy('steady', base).cost / base.days;
+}
+
 function steadyMaxItem() {
     return 367;
 }
@@ -368,7 +374,13 @@ export function drugNotBefore(skipped, now, cdMin = XANAX_CD_MIN) {
     return Math.max(...today.map((x) => x.stepAt)) + cdMin * 60 * 1000;
 }
 
-export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, autoSwitch = null, warOn = null, now }) {
+/**
+ * Round 6: the numbers come from the saved plan (`compare`: every plan's result, or on Torn's pages the small part;
+ * `rec`: its recommendation; `warn`: plans whose pick warns). `lite` (Torn's pages): only what those pages show is
+ * worked out (today's steps, the 48 h look-ahead, the strip, the gym page's next two days); no ladder, no 30-day
+ * projection. `saved`: where the saved plan stands (null: no plan yet).
+ */
+export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, rec: recIn = null, warn = null, lite = false, saved = null, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, warOn = null, now }) {
     if (!state) return { ready: false };
     // One player context per refresh: the comparison's, when the caller has it.
     const pc = pcIn || playerContext(state, statics, { unlockedKnown, learnedMult });
@@ -504,7 +516,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const energyPerDay = Math.round(((e.interval <= 600 ? 720 : 480) + 250 * Math.floor(1440 / 420) + e.maximum) / 10) * 10;
     // With Ignorance Is Bliss happy doesn't fall back to the maximum: the projection trains at today's happy.
     const projHappy = pc.perks.bliss ? Math.min(HAPPY_CAP, Math.max(state.happy.current, state.happy.maximum) + 300) : state.happy.maximum + 300;
-    const proj = projectionFor({ stats: pc.stats, shares, energyPerDay, happy: projHappy, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: 30, active: state.gymId, table: pc.table });
+    const proj = projectionFor({ stats: pc.stats, shares, energyPerDay, happy: projHappy, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: lite ? 2 : 30, active: state.gymId, table: pc.table });
     // The next ladder gym after the highest one unlocked; its progress comes from the gym page (percentage on the button).
     const ladderTop = Math.max(0, ...pc.unlocked.filter((id) => id <= 24));
     const progressE = gymProgress && Number(gymProgress.nextId) === ladderTop + 1 ? gymProgress.energy : null;
@@ -544,22 +556,21 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     // Auto without its Full key (or before the income is read) runs as "most stats in my budget".
     const pickBy = effectivePickBy(PICK_BY[plan.pickBy] ? plan.pickBy : 'most', auto);
     const goalKind = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
-    if (auto && auto.needsKey) heads.unshift({ tone: 'warn', text: 'Auto mode needs a Full key', sub: 'Settings › Full key · until then the plan uses your budget', go: 'settings' });
-    const sw = eventSwitchHeads(autoSwitch, now);
-    if (sw) heads.push({ ...sw, go: 'plan' });
+    if (auto && auto.needsKey) heads.unshift({ tone: 'warn', text: 'Auto mode needs a Full key', sub: 'Settings › Full key · until then a new plan uses your budget', go: 'settings' });
+    // No saved plan yet (a new install, or plans from before round 6): today's steps follow the plan picked (steady by
+    // default) until you create one. Nothing is worked out in the background.
+    if (!saved && !compare) heads.unshift({ tone: 'warn', text: 'Create your plan', sub: 'Plan › Create plan · until then the steps follow ' + ((STRATEGIES[plan.strategy] || STRATEGIES.steady).name || 'steady training').toLowerCase(), go: 'plan' });
+    if (saved && saved.progress && saved.progress.ended) heads.unshift({ tone: 'warn', text: 'Your plan has ended', sub: 'Plan › Create plan for the next one', go: 'plan' });
     if (compare) {
-        const r = recommend(compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy, goal: goalKind });
+        const r = recIn || recommend(compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy, goal: goalKind });
         rec = r;
         const mine = compare[plan.strategy];
-        // Auto switched for an event: the usual comparison has no event in it, so it doesn't argue with the switch.
-        const eventOn = autoSwitch && autoSwitch.active && autoSwitch.id === plan.strategy;
-        if (eventOn) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' for ' + autoSwitch.event.name });
-        else if (r.recommended === plan.strategy) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is still best' });
-        else if (mine) {
-            const w = pickWarning(compare[r.recommended], mine, { bliss: pc.perks.bliss, days: settings.horizonDays || 30 });
+        if (r.recommended === plan.strategy) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is your plan' });
+        else if (mine && r.recommended && compare[r.recommended]) {
+            const w = warn ? { warn: Boolean(warn[plan.strategy]) } : pickWarning(compare[r.recommended], mine, { bliss: pc.perks.bliss, days: settings.horizonDays || 30 });
             if (w.warn) heads.push({ tone: 'warn', text: (STRATEGIES[r.recommended] || {}).name + ' would gain more', sub: 'see Plan', go: 'plan' });
         }
-        ladder = energyLadder({ state, pc, shares, prices, compare, recommended: r.recommended, days: settings.horizonDays || 30, budget: budgetOf(settings), specialHave: state.specialRefills || 0, specialUse: specialLeft(plan, state) });
+        if (!lite && r.recommended && compare[r.recommended]) ladder = energyLadder({ state, pc, shares, prices, compare, recommended: r.recommended, days: settings.horizonDays || 30, budget: budgetOf(settings), specialHave: state.specialRefills || 0, specialUse: specialLeft(plan, state) });
     }
     // Spend per day, and how long the cash on hand lasts at the recommended plan's pace.
     const horizon = settings.horizonDays || 30;
@@ -568,7 +579,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const spend = recRow ? { perDay: recRow.cost / horizon, budgetPerDay: Number.isFinite(settings.budget) ? settings.budget / horizon : null, cash, lastsDays: cash !== null && recRow.cost > 0 ? cash / (recRow.cost / horizon) : null } : null;
     // Unlock goal: when the gym opens on each plan (energy through the gym), and what it costs in stats against the best plan.
     let unlock = null;
-    if (goalKind && compare) {
+    if (goalKind && compare && !lite) {
         const gym = gymById(plan.goal.gymId, pc.table);
         const left = unlockEnergyLeft(pc.unlocked, plan.goal.gymId, gymProgress, pc.perks.gymExpMult);
         if (gym && left !== null) {
@@ -621,7 +632,10 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         pickBy,
         keepEnergy: warKeep,
         noRefill: Boolean(ctx.noRefill),
-        auto: auto ? { ...auto, afford: affordLine(auto, recRow ? recRow.cost / horizon : 0), wait: autoWaitLine(auto), switch: autoSwitch } : null,
+        auto: auto ? { ...auto, afford: affordLine(auto, recRow ? recRow.cost / horizon : 0), wait: autoWaitLine(auto) } : null,
+        // The saved plan: its dates and where it stands (null: no plan yet), and the days its numbers cover.
+        saved,
+        planDays: horizon,
         unlock,
         // Your Xanax cooldown (median of the ones recorded, the range) and when the Torn day resets.
         xanaxCd: xcd,
