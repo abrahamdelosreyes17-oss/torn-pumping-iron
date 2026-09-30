@@ -126,7 +126,9 @@ function budgetControls(m, ctx) {
     if (pickBy === 'auto' && a && a.ready) {
         return [t('lab', 'with'), h('b', { class: 'white num', text: fmtMoney(Math.round(a.budgetPerDay)) + ' a day' }), h('span', { class: 'muted', text: a.source === 'floor' ? 'from your certain income (bank, dividends, rent)' : 'from your income (last ' + Math.round(a.days) + ' days' + (a.source === 'log' ? ', money log' : ', networth') + ')' + (a.floor && a.floor.perDay > 0 ? ' · ' + fmtMoney(Math.round(a.floor.perDay)) + ' of it certain' : '') }), h('span', { class: 'info', title: (a.source === 'log' ? 'Income = money in less money out a day in your money log (Full key), plus what the gym plan spends.' : 'Income = how fast your networth grew (Torn’s own history), plus what the gym plan spends; your money log has nothing readable yet.') + (a.networthPerDay !== null && a.source === 'log' ? ' Cross-check: your networth grew ' + fmtMoney(Math.round(a.networthPerDay)) + ' a day.' : '') + ' Auto spends at most that a day.', text: 'i' })];
     }
-    const box = [t('lab', 'with'), numberInput(s.budget || 0, 130, (v) => (v > 0 ? ctx.setSettings({ budget: v }) : ctx.rerender()), { money: true, label: 'Budget' }), h('span', { class: 'muted', text: 'budget' })];
+    // Round 6: a budget a day (the plan's length comes from Create plan).
+    const perDay = Math.round((s.budget || 0) / (s.horizonDays || 30));
+    const box = [t('lab', 'with'), numberInput(perDay, 120, (v) => (v > 0 ? ctx.setSettings({ budget: v * 30, horizonDays: 30 }) : ctx.rerender()), { money: true, label: 'Budget a day' }), h('span', { class: 'muted', text: 'a day' })];
     if (pickBy === 'auto' && a && a.wait) box.push(h('span', { class: 'tag warn', title: a.wait, text: a.needsKey ? 'Auto needs a Full key' : 'Reading your income…' }));
     return box;
 }
@@ -142,11 +144,9 @@ function controls(m, ctx) {
             : goal && goal.kind === 'unlockGym'
               ? h('b', { class: 'white', text: 'Unlock ' + ((gymById(goal.gymId, m.pc && m.pc.table) || {}).name || 'a gym') })
               : buildSelect(ctx);
+    void days;
     const bar1 = [
         planChooser(ctx),
-        t('lab', 'for'),
-        numberInput(days, 52, (v) => ctx.setSettings({ horizonDays: Math.max(3, Math.min(90, v || 30)) }), { label: 'Days' }),
-        h('span', { class: 'muted', text: 'days' }),
         ...budgetControls(m, ctx),
         h('span', { class: 'sep' }),
         t('lab', 'Train toward'),
@@ -155,6 +155,7 @@ function controls(m, ctx) {
             ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.setPlan({ goal: null }), text: 'Back to the build' })
             : h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.goalForm = !ctx.ui.goalForm; ctx.rerender(); }, text: '+ Stat numbers' }),
         !goal && m.nextGym && m.nextGym.gym ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.setPlan({ goal: { kind: 'unlockGym', gymId: m.nextGym.gym.id } }), text: '+ Unlock ' + m.nextGym.gym.name }) : null,
+        h('span', { class: 'muted', text: 'used by the next Create plan or Recalibrate' }),
     ];
     const bar2 = [];
     const sp = m.special || {};
@@ -225,7 +226,11 @@ function recommendedCard(m, ctx, rec, compare, days) {
             h('div', { class: 'figs' }, figs),
             h('div', { class: 'why' }, [
                 'Wins because: ' + reasons + (autoOn && a && a.afford ? ' ' + a.afford : spend) + ' ',
-                using === rec.recommended ? h('span', { class: 'c-good', text: 'You’re on it.' }) : h('a', { href: '#', onclick: (e) => { e.preventDefault(); ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Use it' }),
+                using === rec.recommended
+                    ? h('span', { class: 'c-good', text: 'You’re on it.' })
+                    : m.saved && !ctx.plan.strategyPicked
+                      ? h('span', { class: 'muted', text: 'Your saved plan follows ' + ((STRATEGIES[using] || {}).short || using).toLowerCase() + ' for these days and switches on its dates.' })
+                      : h('a', { href: '#', onclick: (e) => { e.preventDefault(); ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Back to the saved plan' }),
             ]),
         ]),
         ctx.plan.pickBy === 'auto' && a && a.wait ? h('div', { class: 'warnb', style: 'margin-top:10px' }, [h('b', { text: a.needsKey ? 'Auto mode needs a Full key' : 'Reading your income' }), h('p', { text: a.wait }), a.needsKey ? h('div', { class: 'acts' }, [h('button', { class: 'btn primary sm', type: 'button', onclick: () => ctx.go('settings'), text: 'Add it in Settings' })]) : null]) : null,
@@ -484,6 +489,114 @@ function blissCard(m, ctx, rec, compare, days) {
     return h('div', {}, [sectionHead('Ignorance Is Bliss', meta([bliss ? 'active' : 'not active']), null, 'h3'), h('div', { class: 'bliss num' }, lines)]);
 }
 
+/** The lengths Create plan offers (owner: 1 / 3 / 6 / 12 months). */
+const PLAN_LENGTHS = [1, 3, 6, 12];
+const monthsWord = (n) => n + (n === 1 ? ' month' : ' months');
+const dayWord = (t) => new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+
+function lengthChoice(ctx, fallback = 3) {
+    const cur = PLAN_LENGTHS.includes(ctx.ui.planMonths) ? ctx.ui.planMonths : fallback;
+    return h(
+        'div',
+        { class: 'seg', role: 'group', 'aria-label': 'Plan length' },
+        PLAN_LENGTHS.map((n) => h('button', { type: 'button', 'aria-pressed': String(n === cur), onclick: () => { ctx.ui.planMonths = n; ctx.ui.replaceAsk = false; ctx.rerender(); }, text: monthsWord(n) })),
+    );
+}
+
+/** A Create plan / Recalibrate click: the page shows it working, then the new plan (or why it couldn't). */
+function startPlan(ctx, months) {
+    ctx.ui.newPlan = false;
+    ctx.ui.replaceAsk = false;
+    return ctx.createPlan(months);
+}
+
+/**
+ * Your plan (round 6, the owner's pick: mockup A's card with C's months).
+ * Nothing re-plans by itself: Create plan (1, 3, 6 or 12 months, from
+ * scratch) and Recalibrate (any time: the days left from today, same end)
+ * are the only things that work a plan out.
+ */
+function planCard(m, ctx) {
+    const sv = m.saved;
+    const busy = m.planBusy;
+    const err = ctx.ui.planError ? h('p', { class: 'c-bad', style: 'margin:8px 0 0', text: ctx.ui.planError }) : null;
+    const months = PLAN_LENGTHS.includes(ctx.ui.planMonths) ? ctx.ui.planMonths : sv ? sv.months : 3;
+    if (!sv) {
+        return h('div', { class: 'lead plancard' }, [
+            sectionHead('No plan yet', meta(['worked out once from your stats, income, prices and gyms now, then saved · takes a few seconds'])),
+            h('div', { class: 'row', style: 'gap:10px;flex-wrap:wrap;margin-top:6px' }, [
+                lengthChoice(ctx, 3),
+                h('button', { class: 'btn primary', type: 'button', disabled: Boolean(busy), onclick: () => startPlan(ctx, months), text: busy ? 'Working out your plan…' : 'Create plan' }),
+            ]),
+            err,
+        ]);
+    }
+    const S = STRATEGIES[m.strategy] || STRATEGIES.steady;
+    const p = sv.progress || { day: 1, of: sv.days, ended: false };
+    const last = m.savedPlan && m.savedPlan.history && m.savedPlan.history.length ? m.savedPlan.history[m.savedPlan.history.length - 1] : null;
+    const incomeMove = last && last.from.budgetPerDay !== null && last.to.budgetPerDay !== null && Math.round(last.from.budgetPerDay) !== Math.round(last.to.budgetPerDay) ? ' on ' + fmtMoney(Math.round(last.to.budgetPerDay)) + ' a day (was ' + fmtMoney(Math.round(last.from.budgetPerDay)) + ')' : '';
+    const sub = [dayWord(sv.start) + ' → ' + dayWord(sv.end), p.ended ? 'ended' : 'day ' + p.day + ' of ' + p.of, 'made ' + dayWord(sv.createdAt), sv.recalibratedAt ? 'recalibrated ' + dayWord(sv.recalibratedAt) + incomeMove : null, ctx.plan.strategyPicked ? 'following ' + S.short.toLowerCase() + ', your pick' : null].filter(Boolean).join(' · ');
+    const kids = [
+        h('div', { class: 'pc-top' }, [
+            h('div', { class: 'pc-what' }, [
+                h('div', { class: 'pc-title', text: monthsWord(sv.months).replace(' months', '-month').replace(' month', '-month') + ' plan · ' + S.name }),
+                h('div', { class: 'pc-sub num', text: sub }),
+                h('div', { class: 'dayline', role: 'img', 'aria-label': 'Day ' + p.day + ' of ' + p.of }, [h('i', { style: 'width:' + Math.min(100, (100 * p.day) / Math.max(1, p.of)).toFixed(1) + '%' })]),
+            ]),
+            h('div', { class: 'acts' }, [
+                h('button', { class: 'btn primary', type: 'button', disabled: Boolean(busy) || p.ended, title: 'Re-reads your stats, income, prices and gyms now and re-plans the days left; the end date stays', onclick: () => { ctx.ui.newPlan = false; ctx.ui.replaceAsk = false; ctx.recalibratePlan(); }, text: busy && busy.recalibrate ? 'Recalibrating…' : 'Recalibrate' }),
+                h('button', { class: 'btn ghost', type: 'button', disabled: Boolean(busy), 'aria-expanded': String(Boolean(ctx.ui.newPlan)), onclick: () => { ctx.ui.newPlan = !ctx.ui.newPlan; ctx.ui.replaceAsk = false; ctx.rerender(); }, text: busy && !busy.recalibrate ? 'Working out…' : 'New plan…' }),
+            ]),
+        ]),
+    ];
+    if (ctx.ui.newPlan || p.ended) {
+        kids.push(
+            h('div', { class: 'newrow' }, [
+                t('lab', 'New plan for'),
+                lengthChoice(ctx, sv.months),
+                ctx.ui.replaceAsk
+                    ? h('span', { class: 'confirm' }, [
+                          h('b', { text: 'Replace your ' + monthsWord(sv.months).replace(' months', '-month').replace(' month', '-month') + ' plan?' }),
+                          h('span', { class: 'muted', text: ' A new ' + monthsWord(months) + ' plan starts today; the old one stays in its history. ' }),
+                          h('button', { class: 'btn sm primary', type: 'button', onclick: () => startPlan(ctx, months), text: 'Replace it' }),
+                          h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.replaceAsk = false; ctx.ui.newPlan = false; ctx.rerender(); }, text: 'Keep mine' }),
+                      ])
+                    : h('button', { class: 'btn sm primary', type: 'button', disabled: Boolean(busy), onclick: () => { ctx.ui.replaceAsk = true; ctx.rerender(); }, text: 'Create plan' }),
+                ctx.ui.replaceAsk ? null : h('span', { class: 'muted', text: 'replaces this plan (kept in its history)' }),
+            ]),
+        );
+    }
+    if (err) kids.push(err);
+    return h('div', { class: 'lead plancard' }, kids);
+}
+
+/** The plan's months (mockup C): total stats planned at each month's end, "you are here", the rough ones marked "~". */
+function monthsRow(m, ctx) {
+    const sp = m.savedPlan;
+    if (!sp || !Array.isArray(sp.monthly) || sp.monthly.length < 2) return null;
+    const now = m.now;
+    const total = (st) => Object.values(st || {}).reduce((a, v) => a + (Number(v) || 0), 0);
+    const cells = sp.monthly.map((mo, i) => {
+        const past = mo.to <= now;
+        const cur = now >= mo.from && now < mo.to;
+        const rough = i >= 3;
+        const name = new Date(mo.to - 1).toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' });
+        return h('div', { class: 'mo' + (past ? ' past' : '') + (cur ? ' now' : ''), title: dayWord(mo.from) + ' → ' + dayWord(mo.to) + ': +' + fmtShort(mo.gained) + ' for ' + fmtMoney(mo.cost) }, [h('span', { text: name }), h('b', { text: (rough ? '~' : '') + fmtShort(total(mo.stats)) }), cur ? h('em', { text: 'you are here' }) : null]);
+    });
+    const costs = sp.monthly.map((x) => x.cost).filter((x) => x > 0);
+    const y = sp.year;
+    const foot = [
+        costs.length ? 'About ' + fmtMoney(Math.min(...costs)) + (Math.max(...costs) > Math.min(...costs) * 1.05 ? '–' + fmtMoney(Math.max(...costs)) : '') + ' a month' : null,
+        y && y.band && y.path ? 'whole plan ~+' + fmtShort(y.path.gained) + ' (range +' + fmtShort(y.band.low) + ' to +' + fmtShort(y.band.high) + ': the model’s own error; later months are rougher)' : null,
+        y && y.unlocks && y.unlocks.length ? 'gyms: ' + y.unlocks.slice(0, 3).map((u) => ((gymById(u.gymId) || {}).name || 'gym ' + u.gymId) + ' ~day ' + u.day).join(', ') : null,
+    ].filter(Boolean);
+    return h('div', {}, [
+        sectionHead('Your ' + sp.monthly.length + ' months', meta(['total stats planned at each month’s end'])),
+        h('div', { class: 'months num', style: 'grid-template-columns:repeat(' + Math.min(12, sp.monthly.length) + ',minmax(0,1fr))' }, cells),
+        foot.length ? h('div', { class: 'note2 num', text: foot.join(' · ') }) : null,
+    ]);
+}
+
 export function renderPlan(m, ctx) {
     const compare = ctx.compare || {};
     const rec = m.recommendation;
@@ -492,12 +605,12 @@ export function renderPlan(m, ctx) {
     if (ctx.wantPrices) ctx.wantPrices([], CANDY_IDS);
     if (!rec || !rec.recommended || !compare[rec.recommended] || (m.saved && !m.saved.whole)) {
         // Round 6: plans are made on a click (Create plan / Recalibrate) and saved; nothing is worked out by itself.
-        const text = m.planBusy ? 'Working out your plan…' : m.saved ? 'Loading your saved plan…' : 'No plan yet: your steps follow ' + ((STRATEGIES[ctx.plan.strategy] || STRATEGIES.steady).name || '').toLowerCase() + ' until you create one.';
-        return { ctl: controls(m, ctx), main: [h('div', { class: 'lead' }, [h('p', { class: 'muted', style: 'margin:0', text }), ctx.ui.planError ? h('p', { class: 'c-bad', style: 'margin:6px 0 0', text: ctx.ui.planError }) : null])], pane: [] };
+        const loading = m.saved && !m.saved.whole && !m.planBusy ? h('p', { class: 'muted', style: 'margin:0', text: 'Loading your saved plan…' }) : null;
+        return { ctl: controls(m, ctx), main: [planCard(m, ctx), loading].filter(Boolean), pane: [] };
     }
     return {
         ctl: controls(m, ctx),
-        main: [recommendedCard(m, ctx, rec, compare, days), otherPlans(m, ctx, rec, compare, days), ladderCard(m, ctx)].filter(Boolean),
+        main: [planCard(m, ctx), monthsRow(m, ctx), recommendedCard(m, ctx, rec, compare, days), otherPlans(m, ctx, rec, compare, days), ladderCard(m, ctx)].filter(Boolean),
         pane: [chartCard(m, ctx, rec, compare, days), buildCard(m, ctx), blissCard(m, ctx, rec, compare, days)],
     };
 }

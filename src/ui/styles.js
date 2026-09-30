@@ -358,6 +358,22 @@ svg.ch .grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
 .bliss { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; font-size: 13px; color: var(--muted); }
 .bliss b { color: var(--text); }
 .note2 { color: var(--muted); font-size: 12px; margin-top: 8px; }
+/* Plan: your plan (round 6) */
+.plancard .pc-top { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+.plancard .pc-what { flex: 1 1 360px; min-width: 0; }
+.plancard .pc-title { font: 700 20px var(--display); color: var(--white); }
+.plancard .pc-sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
+.plancard .acts { display: flex; gap: 8px; }
+.dayline { height: 5px; background: var(--line); border-radius: 3px; margin-top: 8px; position: relative; overflow: hidden; }
+.dayline i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--chalk); border-radius: 3px; }
+.newrow { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.newrow .confirm { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; border: 1px solid var(--warn); border-radius: 6px; padding: 6px 10px; }
+.months { display: grid; gap: 4px; }
+.months .mo { background: var(--card); border: 1px solid var(--line); border-radius: 5px; padding: 6px 6px 5px; font-size: 11px; color: var(--muted); min-width: 0; }
+.months .mo b { display: block; color: var(--text); font-size: 13px; margin-top: 2px; }
+.months .mo em { display: block; font-style: normal; color: var(--chalk); font-size: 11px; margin-top: 2px; text-transform: uppercase; letter-spacing: .5px; }
+.months .mo.past { opacity: .55; }
+.months .mo.now { border-color: var(--chalk); }
 /* Breathing room and cards (owner, round 3): one level of cards; the page's primary block has a chalk edge. */
 .app { --row: 40px; --pad: 14px; --gap: 22px; --sec: 18px; }
 .top { padding: 0 24px; }

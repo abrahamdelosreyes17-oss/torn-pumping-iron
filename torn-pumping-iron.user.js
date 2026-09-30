@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Pumping Iron
 // @namespace    torn-pumping-iron
-// @version      1.2.3
+// @version      1.3.0
 // @description  Gym planner and fight scout for Torn: what to take, what to train, what to buy, who you can beat. Reads the API and the page you're on; never acts for you.
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
@@ -48,8 +48,8 @@
 (function () {
     'use strict';
 
-    const PI_BUILD_VERSION = '1.2.3';
-    const PI_BUILD_HASH = '253d838f6715';
+    const PI_BUILD_VERSION = '1.3.0';
+    const PI_BUILD_HASH = 'e9e331e4754b';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -229,6 +229,1327 @@
         return true;
     }
 
+    /* ===== src/platform/idb.js ===== */
+    /*
+     * A small key-value store in the page's own IndexedDB, for data only ONE page
+     * needs. Tampermonkey hands every stored GM value to the script before it
+     * starts, on every page it runs on - so the Torn Ledger's rows (which only
+     * Torn Bids reads, and which grow with every trade) slowed every Torn page
+     * they were never shown on. Here they cost Torn pages nothing.
+     *
+     * Every call rejects where IndexedDB is missing or refused (some private
+     * windows); the caller then keeps the GM store.
+     */
+
+    const IDB_NAME = 'pumpingIron';
+    const IDB_STORE = 'kv';
+
+    let idbOpening = null;
+
+    function idbOpen() {
+        if (!idbOpening) {
+            idbOpening = new Promise((resolve, reject) => {
+                if (typeof indexedDB === 'undefined' || !indexedDB) {
+                    reject(new Error('No IndexedDB.'));
+                    return;
+                }
+                const req = indexedDB.open(IDB_NAME, 1);
+                req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error || new Error('IndexedDB refused.'));
+                req.onblocked = () => reject(new Error('IndexedDB blocked.'));
+            });
+            // A failed open is tried again next time rather than remembered.
+            idbOpening.catch(() => {
+                idbOpening = null;
+            });
+        }
+        return idbOpening;
+    }
+
+    function idbRun(mode, fn) {
+        return idbOpen().then(
+            (db) =>
+                new Promise((resolve, reject) => {
+                    const tx = db.transaction(IDB_STORE, mode);
+                    const req = fn(tx.objectStore(IDB_STORE));
+                    tx.oncomplete = () => resolve(req ? req.result : undefined);
+                    tx.onerror = () => reject(tx.error || new Error('IndexedDB error.'));
+                    tx.onabort = () => reject(tx.error || new Error('IndexedDB aborted.'));
+                }),
+        );
+    }
+
+    /** @returns {Promise<any|null>} */
+    function idbGet(key) {
+        return idbRun('readonly', (s) => s.get(key)).then((v) => (v === undefined ? null : v));
+    }
+
+    function idbSet(key, value) {
+        return idbRun('readwrite', (s) => s.put(value, key));
+    }
+
+    /**
+     * Read, change and write one key in a single transaction: two tabs doing it
+     * at once are run one after the other by IndexedDB, so neither loses the
+     * other's change. Resolves to the value written.
+     */
+    function idbUpdate(key, fn) {
+        return idbOpen().then(
+            (db) =>
+                new Promise((resolve, reject) => {
+                    const tx = db.transaction(IDB_STORE, 'readwrite');
+                    const store = tx.objectStore(IDB_STORE);
+                    let next;
+                    const req = store.get(key);
+                    req.onsuccess = () => {
+                        next = fn(req.result === undefined ? null : req.result);
+                        if (next === null || next === undefined) store.delete(key);
+                        else store.put(next, key);
+                    };
+                    tx.oncomplete = () => resolve(next === undefined ? null : next);
+                    tx.onerror = () => reject(tx.error || new Error('IndexedDB error.'));
+                    tx.onabort = () => reject(tx.error || new Error('IndexedDB aborted.'));
+                }),
+        );
+    }
+
+    function idbDel(key) {
+        return idbRun('readwrite', (s) => s.delete(key));
+    }
+
+    /* ===== src/core/items.js ===== */
+    /*
+     * The items a gym plan uses, with their effects (Torn's own item text, from
+     * the items dump in docs/reference). Pure data.
+     */
+
+    const XANAX = 206;
+    const ECSTASY = 197;
+    const LSD = 199;
+    const EDVD = 366;
+    const FHC = 367;
+    const LOLLIPOP = 310;
+    const CHOC_KISSES = 210;
+    const SWEET_HEARTS = 209;
+    const BOX_CHOC = 35;
+    const BAG_BON_BONS = 37;
+    const BOX_BON_BONS = 38;
+    const MINTS = 39;
+    const BIG_BOX_CHOC = 36;
+    const CANDY_KISSES = 527;
+    const CHOC_EGG = 1312;
+    const TOOTSIE = 528;
+    const EYEBALLS = 634;
+    const TRUFFLES = 529;
+    const REINDEER = 556;
+    const PIXIE_STICKS = 151;
+    const JAWBREAKER = 586;
+    const SHERBET = 587;
+    const HUMBUGS = 1039;
+    const CUPCAKE = 1028;
+    /** The Game Console (type Special): "Converts 1, 3 or 5 energy into happiness" (the console jump). */
+    const GAME_CONSOLE = 104;
+    const MUNSTER = 530;
+    const RED_COW = 532;
+    const TAURINE = 533;
+    const BOOK_GHOGH = 757;
+    const BOOK_BLISS = 770;
+
+    /** A points refill costs this many points (research-gym.md: "30 pts/day, was 25"). */
+    const REFILL_POINTS = 30;
+
+    /** Pseudo item id for points in buy lists (not a Torn item). */
+    const POINTS = 'points';
+
+    /** [calibrate] Drug cooldowns, minutes (Xanax 6–8 h; Ecstasy ~3.3–4 h). The plan uses the live cooldown once a drug is taken. */
+    const XANAX_CD_MIN = 7 * 60;
+    const ECSTASY_CD_MIN = 4 * 60;
+    const LSD_CD_MIN = 7 * 60;
+
+    /** Booster cooldown cap, hours (faction perks raise it up to 48). */
+    const BOOSTER_CAP_H = 24;
+
+    /**
+     * kind: drug | booster (candy, EDVD, FHC, cans)
+     * energy: +E; happy: +happy; happyMult: × happy; boosterH: + booster cooldown; toMax: energy to max
+     */
+    const ITEMS = {
+        [XANAX]: { id: XANAX, name: 'Xanax', kind: 'drug', category: 'Drug', energy: 250, happy: 75, cdMin: XANAX_CD_MIN },
+        [ECSTASY]: { id: ECSTASY, name: 'Ecstasy', kind: 'drug', category: 'Drug', happyMult: 2, cdMin: ECSTASY_CD_MIN },
+        [LSD]: { id: LSD, name: 'LSD', kind: 'drug', category: 'Drug', energy: 50, happy: 350, cdMin: LSD_CD_MIN },
+        [EDVD]: { id: EDVD, name: 'Erotic DVD', short: 'EDVD', kind: 'booster', category: 'Booster', happy: 2500, boosterH: 6 },
+        [FHC]: { id: FHC, name: 'Feathery Hotel Coupon', short: 'FHC', kind: 'booster', category: 'Booster', toMax: true, happy: 500, boosterH: 6 },
+        // Every candy: "Increases happiness by N and booster cooldown by 30 minutes." (checked against the items dump, 2026-09-29).
+        [LOLLIPOP]: candy(LOLLIPOP, 'Lollipop', 25),
+        [CHOC_KISSES]: candy(CHOC_KISSES, 'Bag of Chocolate Kisses', 25, 'Chocolate Kisses'),
+        [SWEET_HEARTS]: candy(SWEET_HEARTS, 'Box of Sweet Hearts', 25, 'Sweet Hearts'),
+        [BOX_CHOC]: candy(BOX_CHOC, 'Box of Chocolate Bars', 25),
+        [BAG_BON_BONS]: candy(BAG_BON_BONS, 'Bag of Bon Bons', 25),
+        [BOX_BON_BONS]: candy(BOX_BON_BONS, 'Box of Bon Bons', 25),
+        [MINTS]: candy(MINTS, 'Box of Extra Strong Mints', 25, 'Extra Strong Mints'),
+        [BIG_BOX_CHOC]: candy(BIG_BOX_CHOC, 'Big Box of Chocolate Bars', 35),
+        [CANDY_KISSES]: candy(CANDY_KISSES, 'Bag of Candy Kisses', 50, 'Candy Kisses'),
+        [CHOC_EGG]: candy(CHOC_EGG, 'Chocolate Egg', 50),
+        [TOOTSIE]: candy(TOOTSIE, 'Bag of Tootsie Rolls', 75, 'Tootsie Rolls'),
+        [EYEBALLS]: candy(EYEBALLS, 'Bag of Bloody Eyeballs', 75, 'Bloody Eyeballs'),
+        [TRUFFLES]: candy(TRUFFLES, 'Bag of Chocolate Truffles', 100, 'Chocolate Truffles'),
+        [REINDEER]: candy(REINDEER, 'Bag of Reindeer Droppings', 100, 'Reindeer Droppings'),
+        [PIXIE_STICKS]: candy(PIXIE_STICKS, 'Pixie Sticks', 150),
+        [JAWBREAKER]: candy(JAWBREAKER, 'Jawbreaker', 150),
+        [SHERBET]: candy(SHERBET, 'Bag of Sherbet', 150, 'Sherbet'),
+        [HUMBUGS]: candy(HUMBUGS, 'Bag of Humbugs', 150, 'Humbugs'),
+        [CUPCAKE]: candy(CUPCAKE, 'Birthday Cupcake', 250),
+        [GAME_CONSOLE]: { id: GAME_CONSOLE, name: 'Game Console', kind: 'special', category: 'Special' },
+        [MUNSTER]: { id: MUNSTER, name: 'Can of Munster', kind: 'booster', category: 'Energy Drink', energy: 20, boosterH: 2 },
+        [RED_COW]: { id: RED_COW, name: 'Can of Red Cow', kind: 'booster', category: 'Energy Drink', energy: 25, boosterH: 2 },
+        [TAURINE]: { id: TAURINE, name: 'Can of Taurine Elite', kind: 'booster', category: 'Energy Drink', energy: 30, boosterH: 2 },
+    };
+
+    function candy(id, name, happy, short = null) {
+        return { id, name, ...(short ? { short } : {}), kind: 'booster', category: 'Candy', happy, boosterH: 0.5 };
+    }
+
+    /** Every candy, fewest happy first (the plan picks one of them: core/candy.js). */
+    const CANDY_IDS = Object.values(ITEMS)
+        .filter((it) => it.category === 'Candy')
+        .sort((a, b) => a.happy - b.happy || a.id - b.id)
+        .map((it) => it.id);
+
+    function isCandy(id) {
+        const it = ITEMS[id];
+        return Boolean(it && it.category === 'Candy');
+    }
+
+    /** Sample prices (docs/sims) used until live prices arrive, and in tests. */
+    const SAMPLE_PRICES = {
+        [XANAX]: 830000,
+        [ECSTASY]: 55000,
+        [EDVD]: 3700000,
+        [CANDY_KISSES]: 32000,
+        [FHC]: 12400000,
+        [POINTS]: 45000,
+        // The items dump's market value (2024); Torn's own market price replaces it once /torn/items answers.
+        [GAME_CONSOLE]: 170,
+    };
+
+    function itemName(id) {
+        if (id === POINTS) return 'Points';
+        const it = ITEMS[id];
+        return it ? it.short || it.name : 'Item ' + id;
+    }
+
+    /**
+     * The consumable cooldown cuts (Grocery 3★ −10%, Restaurant 10★ −25%, the book
+     * Self Control Is For Losers −50%: docs/research-events-perks.md §2) shorten
+     * the booster cooldown of candy, energy drinks and alcohol, not EDVD or FHC.
+     */
+    function isConsumable(id) {
+        const it = ITEMS[id];
+        return Boolean(it && (it.category === 'Candy' || it.category === 'Energy Drink'));
+    }
+
+    /** Booster cooldown one use adds, hours, after the consumable cuts (`cdMult`, e.g. 0.9 × 0.75). */
+    function boosterHours(itemId, cdMult = 1) {
+        const it = ITEMS[itemId];
+        if (!it || !(it.boosterH > 0)) return 0;
+        return it.boosterH * (isConsumable(itemId) ? Math.max(0.05, cdMult || 1) : 1);
+    }
+
+    /** Candy that fills the booster cap: how many of an item fit under `capH` from `cdH` already used. */
+    function boostersThatFit(itemId, capH = BOOSTER_CAP_H, cdH = 0, cdMult = 1) {
+        const each = boosterHours(itemId, cdMult);
+        if (!(each > 0)) return 0;
+        // An item can be used while the cooldown is below the cap, and the cooldown
+        // ticks down between uses, so the last one overshoots it: 5 EDVD or 49 candy
+        // on an empty 24 h cooldown (research-gym.md).
+        if (cdH >= capH) return 0;
+        return Math.floor((capH - cdH) / each + 1e-9) + 1;
+    }
+
+    /* ===== src/sources/route.js ===== */
+    /*
+     * Which page are we on? Pure string work, so it is testable.
+     *
+     * Every page the script marks is one the user opened; nothing here loads a
+     * page. The harness stands in for Torn's pages with `?page=<name>` on its own
+     * host (never on torn.com), the way the trading app's harness does.
+     */
+
+    const PAGE_GYM = 'gym';
+    const PAGE_ITEMS = 'items';
+    const PAGE_ITEM_MARKET = 'itemmarket';
+    const PAGE_BAZAAR = 'bazaar';
+    const PAGE_POINTS = 'points';
+    const PAGE_PROFILE = 'profile';
+    const PAGE_FACTION = 'faction';
+    const PAGE_ATTACK = 'attack';
+    const PAGE_OTHER = 'other';
+
+    /** The webpage the script draws over (GitHub Pages, gh-pages branch). */
+    const APP_PAGE_URL = 'https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html';
+
+    /** Torn Trading's Torn Bids page: we only note that Torn Trading runs there (read only). */
+    const TRADING_PAGE_URL = 'https://abrahamdelosreyes17-oss.github.io/torn-moneymaker-releases/traders.html';
+
+    function isTradingPageUrl(href) {
+        return String(href || '').split(/[?#]/)[0] === TRADING_PAGE_URL;
+    }
+
+    /** The harness boots the webpage on its own host with this marker. */
+    const APP_PAGE_PARAM = 'pi';
+    const APP_PAGE_VALUE = 'app';
+
+    function queryOf(href) {
+        try {
+            return new URL(href).searchParams;
+        } catch {
+            return new URLSearchParams();
+        }
+    }
+
+    function hostOf(href) {
+        try {
+            return new URL(href).hostname.toLowerCase();
+        } catch {
+            return '';
+        }
+    }
+
+    function isTornHost(href) {
+        return /(^|\.)torn\.com$/.test(hostOf(href));
+    }
+
+    /** A query value whatever its spelling (Torn's own links vary: XID, userId, userID). */
+    function param(href, name) {
+        const want = name.toLowerCase();
+        for (const [k, v] of queryOf(href)) if (k.toLowerCase() === want) return v;
+        // Some Torn pages keep their parameters in the hash (#/p=...&ID=5).
+        const hash = String(href || '').split('#')[1] || '';
+        for (const part of hash.replace(/^\/+/, '').split(/[&?]/)) {
+            const [k, v] = part.split('=');
+            if (k && k.toLowerCase() === want) return v || '';
+        }
+        return null;
+    }
+
+    function numParam(href, name) {
+        const v = param(href, name);
+        return v && /^\d+$/.test(v) ? v : null;
+    }
+
+    /**
+     * @param {string} href - normally location.href
+     * @returns {string} one of the PAGE_* constants
+     */
+    function detectPage(href) {
+        if (typeof href !== 'string' || !href) return PAGE_OTHER;
+        const url = href.toLowerCase();
+
+        // The harness: ?page=gym etc. on a host that is not Torn.
+        if (!isTornHost(href)) {
+            const p = (queryOf(href).get('page') || '').toLowerCase();
+            const known = [PAGE_GYM, PAGE_ITEMS, PAGE_ITEM_MARKET, PAGE_BAZAAR, PAGE_POINTS, PAGE_PROFILE, PAGE_FACTION, PAGE_ATTACK];
+            return known.includes(p) ? p : PAGE_OTHER;
+        }
+
+        if (url.includes('/gym.php')) return PAGE_GYM;
+        if (url.includes('/item.php')) return PAGE_ITEMS;
+        if (url.includes('sid=itemmarket') || url.includes('/imarket.php')) return PAGE_ITEM_MARKET;
+        if (url.includes('/bazaar.php')) return PAGE_BAZAAR;
+        if (url.includes('/pmarket.php')) return PAGE_POINTS;
+        if (url.includes('/profiles.php')) return PAGE_PROFILE;
+        if (url.includes('/factions.php')) return PAGE_FACTION;
+        if (/[?&]sid=attack(&|#|$)/.test(url) && (url.includes('loader.php') || url.includes('page.php'))) return PAGE_ATTACK;
+        return PAGE_OTHER;
+    }
+
+    /** The player a profile page shows (profiles.php?XID=), or null. */
+    function profileIdOf(href) {
+        return detectPage(href) === PAGE_PROFILE ? numParam(href, 'XID') : null;
+    }
+
+    /** The defender on the attack page (page.php?sid=attack&user2ID=, older loader.php links too), or null. */
+    function attackTargetOf(href) {
+        return detectPage(href) === PAGE_ATTACK ? numParam(href, 'user2ID') : null;
+    }
+
+    /** Whose bazaar this is (bazaar.php?userId=), or null for your own. */
+    function bazaarOwnerId(href) {
+        return detectPage(href) === PAGE_BAZAAR ? numParam(href, 'userId') : null;
+    }
+
+    /** The faction a faction page shows (factions.php?step=profile&ID=), or null (your own). */
+    function factionIdOf(href) {
+        return detectPage(href) === PAGE_FACTION ? numParam(href, 'ID') : null;
+    }
+
+    /** The item the Item Market page is showing (#/market/view=search&itemID=), or null. */
+    function itemMarketItemOf(href) {
+        return detectPage(href) === PAGE_ITEM_MARKET ? numParam(href, 'itemID') : null;
+    }
+
+    function isAppPageUrl(href) {
+        if (String(href || '').split(/[?#]/)[0] === APP_PAGE_URL) return true;
+        // The harness boots the webpage on its own page with the marker.
+        return queryOf(href).get(APP_PAGE_PARAM) === APP_PAGE_VALUE && !isTornHost(href);
+    }
+
+    /* ---------------------------------------------------------- Torn links */
+
+    /*
+     * Every action in the app is a link to the exact Torn page (owner rule 6).
+     * One click, one navigation: nothing is bought, used or trained.
+     */
+
+    const TORN = 'https://www.torn.com/';
+
+    function gymUrl() {
+        return TORN + 'gym.php';
+    }
+
+    function itemsUrl() {
+        return TORN + 'item.php';
+    }
+
+    /** Energy refills are bought on the Points page. */
+    function pointsUrl() {
+        return TORN + 'points.php';
+    }
+
+    function pointsMarketUrl() {
+        return TORN + 'pmarket.php';
+    }
+
+    function bazaarUrl(userId) {
+        return TORN + 'bazaar.php?userId=' + encodeURIComponent(String(userId)) + '#/';
+    }
+
+    function itemMarketUrl(itemId) {
+        return TORN + 'page.php?sid=ItemMarket#/market/view=search&itemID=' + encodeURIComponent(String(itemId));
+    }
+
+    /**
+     * City shops by the name /torn/items gives them (value.shops[].shop), as
+     * shops.php?step= pages (TornTools links the Pharmacy as step=pharmacy).
+     * Sally's Sweet Shop is step=candy [verify]; a shop not listed opens the city map.
+     */
+    const SHOP_STEPS = {
+        "Sally's Sweet Shop": 'candy',
+        Pharmacy: 'pharmacy',
+        "Bits 'n' Bobs": 'bitsnbobs',
+        'Super Store': 'super',
+        'Cyber Force': 'cyberforce',
+        'Jewelry Store': 'jewelry',
+        'Nikeh Sports': 'nikeh',
+        'TC Clothing': 'clothes',
+        Docks: 'docks',
+        'Post Office': 'postoffice',
+        'Pawn Shop': 'pawnshop',
+        'Recycling Center': 'recyclingcenter',
+        'Print Shop': 'printstore',
+    };
+
+    function shopUrl(shop) {
+        const step = SHOP_STEPS[shop];
+        return step ? TORN + 'shops.php?step=' + step : TORN + 'city.php';
+    }
+
+    function profileUrl(userId) {
+        return TORN + 'profiles.php?XID=' + encodeURIComponent(String(userId));
+    }
+
+    function attackUrl(userId) {
+        // Torn retired loader.php for attacks ("This endpoint is no longer available … page.php", 2026-09-29).
+        return TORN + 'page.php?sid=attack&user2ID=' + encodeURIComponent(String(userId));
+    }
+
+    function factionUrl(factionId) {
+        return TORN + 'factions.php?step=profile&ID=' + encodeURIComponent(String(factionId));
+    }
+
+    function apiKeyPageUrl() {
+        return TORN + 'preferences.php#tab=api';
+    }
+
+    /* ===== src/core/candy.js ===== */
+    /*
+     * Which candy a boost or jump uses, and how many. Pure.
+     *
+     * The owner: "we're defaulting to whatever Pumping Iron says we should take,
+     * it should just tell us what we should take/buy." So there is no default
+     * candy: every candy with a known price is weighed under the Plan's rule
+     * (most stats in the budget, best value for money, or max gains) and the
+     * winner is named everywhere (steps, Plan, Buy, Discord).
+     *
+     * Every candy costs the same booster cooldown (30 min, less with the
+     * consumable cuts), so a boost holds the same number of any of them; what
+     * differs is the happy each gives and its price.
+     */
+
+
+
+    /**
+     * The cheapest known price of each candy: the market (item market and
+     * bazaars, as the app loaded them) or an NPC shop the player ticked.
+     * @param {object} prices - {[id]: $ per unit} (market)
+     * @param {object} [npc] - {[id]: {price, shop}} NPC shop prices the player may use
+     * @returns {object} {[id]: {id, price, source:'market'|'npc', shop}}
+     */
+    function candyPrices(prices = {}, npc = {}) {
+        const out = {};
+        for (const id of CANDY_IDS) {
+            const m = Number(prices && prices[id]);
+            const n = npc && npc[id] && Number(npc[id].price);
+            if (n > 0 && !(m > 0 && m <= n)) out[id] = { id, price: n, source: 'npc', shop: npc[id].shop || null };
+            else if (m > 0) out[id] = { id, price: m, source: 'market', shop: null };
+        }
+        return out;
+    }
+
+    /**
+     * Candy worth weighing: a candy another beats on both happy and price is
+     * dropped (Lollipop vs Box of Chocolate Bars: the cheaper 25-happy one stays).
+     * @param {object} priced - candyPrices() output
+     * @returns {object[]} fewest happy first
+     */
+    function candyCandidates(priced) {
+        const list = Object.values(priced || {}).filter((c) => c && c.price > 0 && ITEMS[c.id]);
+        return list
+            .filter((c) => !list.some((o) => o !== c && ITEMS[o.id].happy >= ITEMS[c.id].happy && o.price <= c.price && (ITEMS[o.id].happy > ITEMS[c.id].happy || o.price < c.price || o.id < c.id)))
+            .sort((a, b) => ITEMS[a.id].happy - ITEMS[b.id].happy || a.price - b.price);
+    }
+
+    /** How many candy fit one boost: the booster cap from `cdH` already used, each 30 min × the cuts. */
+    function candyCount({ capH = BOOSTER_CAP_H, cdH = 0, cdMult = 1 } = {}) {
+        return boostersThatFit(CANDY_IDS[0], capH, cdH, cdMult);
+    }
+
+    /**
+     * The candy that gives the most stats under the Plan's rule.
+     *
+     * Without `evaluate`, each candy is scored by the happy it adds (a stand-in
+     * for stats: more happy, more stats) and the cost of `boosts` boosts. With
+     * `evaluate(id, count)` returning the whole plan's {gained, cost} (the
+     * engine passes a simulation), the scores are real stats and money, and
+     * `budget` is the plan's budget.
+     *
+     * @param {object} o
+     * @param {object} o.prices - {[id]: $} market unit prices
+     * @param {object} [o.npc] - {[id]: {price, shop}} NPC shop prices the player may use (ticked shops only)
+     * @param {number} [o.capH] - booster cooldown cap, hours (24; faction Voracity up to 48)
+     * @param {number} [o.cdH] - booster cooldown already used, hours
+     * @param {number} [o.cdCuts] - the consumable cooldown cuts as one multiplier (0.9 × 0.75 × 0.5 …)
+     * @param {number} [o.happyMult] - candy happy perks and events (Voracity +50%, a book ×2, World Diabetes Day ×3)
+     * @param {number} [o.budget] - money the candy may cost: over `boosts` boosts (proxy), or the whole plan (evaluate)
+     * @param {number} [o.boosts] - boosts the budget covers (Auto mode: boosts a day with a daily budget)
+     * @param {string} [o.pickBy] - 'most' (most stats in the budget) | 'value' (most stats per $) | 'max' (no budget)
+     * @param {object} [o.base] - {gained, cost} of the rest of the plan (proxy scores, for 'value')
+     * @param {function} [o.evaluate] - (id, count) => {gained, cost} of the whole plan with that candy
+     * @param {number} [o.count] - a fixed count per boost instead of filling the booster cap
+     * @param {number} [o.prefer] - the candy picked earlier today: kept while it gives the same happy and the
+     *   winner isn't at least CANDY_SWITCH_PCT cheaper for the whole boost (so the name doesn't flip on every price load)
+     * @returns {null|{id, name, count, happyEach, unit, source, shop, perBoost, gained, cost, fits, options:object[]}}
+     */
+    function bestCandy({ prices = {}, npc = {}, capH = BOOSTER_CAP_H, cdH = 0, cdCuts = 1, happyMult = 1, budget = Infinity, boosts = 1, pickBy = 'most', base = null, evaluate = null, count = null, prefer = null } = {}) {
+        const priced = candyPrices(prices, npc);
+        const cands = candyCandidates(priced);
+        // Today's pick stays in the running even when another +same-happy candy is a little cheaper (it's kept unless 10% cheaper).
+        if (prefer && priced[prefer] && !cands.some((c) => c.id === Number(prefer))) cands.push(priced[prefer]);
+        if (!cands.length) return null;
+        const n = count > 0 ? Math.floor(count) : candyCount({ capH, cdH, cdMult: cdCuts });
+        if (!(n > 0)) return null;
+        const limit = pickBy === 'max' ? Infinity : budget;
+        const options = cands.map((c) => {
+            const happyEach = ITEMS[c.id].happy * (happyMult || 1);
+            const perBoost = n * c.price;
+            let gained;
+            let cost;
+            if (evaluate) {
+                const r = evaluate(c.id, n) || {};
+                gained = Number(r.gained) || 0;
+                cost = Number(r.cost) || 0;
+            } else {
+                gained = (base ? Number(base.gained) || 0 : 0) + boosts * n * happyEach;
+                cost = (base ? Number(base.cost) || 0 : 0) + boosts * perBoost;
+            }
+            const own = evaluate ? cost : boosts * perBoost;
+            return { id: c.id, name: itemName(c.id), count: n, happyEach, unit: c.price, source: c.source, shop: c.shop, perBoost, gained, cost, fits: own <= limit };
+        });
+        const perM = (o) => (o.cost > 0 ? o.gained / o.cost : Infinity);
+        const pool = options.filter((o) => o.fits);
+        let best;
+        if (!pool.length) best = options.reduce((a, b) => (b.cost < a.cost ? b : a));
+        else if (pickBy === 'value') best = pool.reduce((a, b) => (perM(b) > perM(a) || (perM(b) === perM(a) && b.gained > a.gained) ? b : a));
+        else best = pool.reduce((a, b) => (b.gained > a.gained || (b.gained === a.gained && b.cost < a.cost) ? b : a));
+        // Owner (2026-09-29): the candy named flipped between reloads (every +25 candy is interchangeable). Today's pick stays
+        // unless the new one gives more happy or saves at least CANDY_SWITCH_PCT on the boost.
+        const kept = prefer ? options.find((o) => o.id === Number(prefer) && o.fits) : null;
+        if (kept && kept.id !== best.id && kept.happyEach === best.happyEach && best.perBoost > kept.perBoost * (1 - CANDY_SWITCH_PCT / 100)) best = kept;
+        return { ...best, options };
+    }
+
+    /** A candy picked earlier today is kept unless another saves this much on the boost (%). */
+    const CANDY_SWITCH_PCT = 10;
+
+    /** "Lollipop × 49" (the words steps, Plan and Buy use). */
+    function candyWords(c) {
+        if (!c || !c.id) return 'Candy';
+        return itemName(c.id) + (c.count ? ' × ' + c.count : '');
+    }
+
+    /** What an item adds, for pooling: candy by happy, energy drinks by energy. */
+    function poolValue(id) {
+        const it = ITEMS[id];
+        if (!it) return 0;
+        return it.category === 'Candy' ? it.happy || 0 : it.energy || 0;
+    }
+
+    /** Items that share a pool with `pickId`: every candy (same 30 min of booster cooldown), every energy drink (2 h). */
+    function poolOf(pickId) {
+        const it = ITEMS[pickId];
+        if (!it) return null;
+        return it.category === 'Candy' || it.category === 'Energy Drink' ? it.category : null;
+    }
+
+    /**
+     * Fill a boost's slots from what you hold first (owner, 2026-09-29: "it should exhaust my inventory first").
+     * Candy is a pool: each one takes the same booster cooldown, only its happy differs; energy drinks the same by
+     * energy. Held items with as much or more than the pick go in first (the most first), then the pick is bought
+     * for the rest. EDVD, FHC and everything else only count the same item held.
+     * @param {number} qty - slots in this boost
+     * @param {number} pickId - the plan's pick (what is bought)
+     * @param {object} held - {[id]: qty} still held (not changed here)
+     * @returns {{alloc:{id, qty, held}[], held:number, buy:number, value:number}} value: happy (candy) or energy (drinks) before perks
+     */
+    function fillFromPool(qty, pickId, held = {}) {
+        const n = Math.max(0, Math.floor(qty || 0));
+        const pool = poolOf(pickId);
+        const floor = poolValue(pickId);
+        const rows = Object.entries(held || {})
+            .map(([id, q]) => [Number(id), Math.max(0, Math.floor(Number(q) || 0))])
+            .filter(([id, q]) => q > 0 && ITEMS[id] && (pool ? poolOf(id) === pool && poolValue(id) >= floor : id === pickId))
+            .sort((a, b) => poolValue(b[0]) - poolValue(a[0]) || b[1] - a[1] || a[0] - b[0]);
+        const alloc = [];
+        let left = n;
+        for (const [id, q] of rows) {
+            if (left <= 0) break;
+            const take = Math.min(q, left);
+            alloc.push({ id, qty: take, held: take });
+            left -= take;
+        }
+        if (left > 0) {
+            const same = alloc.find((a) => a.id === pickId);
+            if (same) same.qty += left;
+            else alloc.push({ id: pickId, qty: left, held: 0 });
+        }
+        return { alloc, held: n - left, buy: left, value: alloc.reduce((a, x) => a + x.qty * poolValue(x.id), 0) };
+    }
+
+    /** Take a fill's held items out of `held` (the day plan and the simulator carry what's left to the next boost). */
+    function takeFromHeld(held, fill) {
+        for (const a of (fill && fill.alloc) || []) if (a.held > 0) held[a.id] = Math.max(0, (Number(held[a.id]) || 0) - a.held);
+    }
+
+    /**
+     * A boost's candy in words: "Lollipop × 49", or with what you hold, "Candy × 49: your 29 Chocolate Kisses +
+     * 20 Lollipop". `buy` says what is still bought ("buy 0" when the inventory covers it).
+     */
+    function fillWords(fill, pickId) {
+        if (!fill || !fill.alloc.length) return candyWords({ id: pickId });
+        const total = fill.held + fill.buy;
+        if (fill.alloc.length === 1) {
+            const a = fill.alloc[0];
+            return itemName(a.id) + ' × ' + total + (a.held ? ' (' + (a.held === a.qty ? 'all yours' : a.held + ' yours, buy ' + (a.qty - a.held)) + ')' : '');
+        }
+        const noun = isCandy(pickId) ? 'Candy' : 'Energy drinks';
+        const parts = fill.alloc.map((a) => (a.held === a.qty ? 'your ' + a.qty + ' ' + itemName(a.id) : a.qty + ' ' + itemName(a.id) + (a.held ? ' (' + a.held + ' yours)' : '')));
+        return noun + ' × ' + total + ': ' + parts.join(' + ');
+    }
+
+    /** "your 29 Chocolate Kisses + 20 Lollipop · buy 0" for the step's note (null when nothing is held). */
+    function heldWords(fill) {
+        if (!fill || !fill.held) return null;
+        const held = fill.alloc.filter((a) => a.held > 0).map((a) => a.held + ' ' + itemName(a.id));
+        return 'from your items: ' + held.join(' + ') + ' · buy ' + fill.buy;
+    }
+
+    /**
+     * The candy disclaimer (owner, 2026-09-29: the named candy changed between reloads): every candy with the same
+     * happy is interchangeable. "any +25 candy works the same (Lollipop, Bag of Bon Bons, Chocolate Kisses…)".
+     */
+    function tierWords(id) {
+        const it = ITEMS[id];
+        if (!it || it.category !== 'Candy') return '';
+        const same = CANDY_IDS.filter((c) => ITEMS[c].happy === it.happy);
+        if (same.length < 2) return '';
+        const names = [id, ...same.filter((c) => c !== id)].slice(0, 3).map(itemName);
+        return 'any +' + it.happy + ' candy works the same (' + names.join(', ') + (same.length > 3 ? '…' : '') + ')';
+    }
+
+    /* ===== src/core/gain.js ===== */
+    /*
+     * Gym gain: Vladar's formula V2 (rgiskard's C++ calculator, GreasyFork
+     * 392876), stepped train by train because happy and the stat both change
+     * with every train. Pure; see docs/ENGINE-SPEC.md §1 and research-gym.md.
+     */
+
+    const STATS = ['str', 'spd', 'def', 'dex'];
+
+    /** Torn's names for our short keys (API battlestats, gym modifiers). */
+    const STAT_API = { str: 'strength', spd: 'speed', def: 'defense', dex: 'dexterity' };
+
+    const STAT_LABEL = { str: 'STR', spd: 'SPD', def: 'DEF', dex: 'DEX' };
+
+    /** Per-stat constants A and B of the formula. */
+    const STAT_AB = {
+        str: [1600, 1700],
+        spd: [1600, 2000],
+        dex: [1800, 1500],
+        def: [2100, -600],
+    };
+
+    const HAPPY_CAP = 99999;
+
+    /**
+     * [calibrate] How a stat above 50M is damped. Disputed in the community
+     * (research-gym.md "Post-50M"): 'log10' (likely), 'ln', or 'power' (Gym
+     * Gains Calculator+'s 50M + 0.057406·(S−50M)^0.928996). Calibrate against
+     * the user's own trains (Progress › Gain model).
+     */
+    const POST_50M_MODE = 'log10';
+
+    /**
+     * The damping mode the engine uses now: POST_50M_MODE until the learner
+     * finds (and keeps) a better one from the player's own trains.
+     */
+    let dampingMode = POST_50M_MODE;
+
+    /** Use a learned damping mode ('log10' | 'ln' | 'power'); anything else resets it. */
+    function useDampingMode(mode) {
+        dampingMode = mode === 'ln' || mode === 'power' || mode === 'log10' ? mode : POST_50M_MODE;
+        return dampingMode;
+    }
+
+    function currentDampingMode() {
+        return dampingMode;
+    }
+
+    /**
+     * [calibrate] Happy lost per train, per energy. Torn's real loss is random in
+     * 0.4–0.6 × energy per train (research-gym.md); the mean is used.
+     */
+    const HAPPY_LOSS_PER_ENERGY = 0.5;
+
+    function round4(x) {
+        return Math.round(x * 1e4) / 1e4;
+    }
+
+    /** The stat the formula sees: itself up to 50M, damped above. */
+    function effectiveStat(S, mode = dampingMode) {
+        if (!(S > 5e7)) return Math.max(0, S || 0);
+        if (mode === 'power') return 5e7 + 0.057406 * Math.pow(S - 5e7, 0.928996);
+        const log = mode === 'ln' ? Math.log(S) : Math.log10(S);
+        return 5e7 + (S - 5e7) / (8.77635 * log);
+    }
+
+    /**
+     * Gain of ONE train.
+     * @param {string} stat - 'str'|'spd'|'def'|'dex'
+     * @param {number} S - the stat now
+     * @param {number} H - happy now (capped at 99,999)
+     * @param {number} dots - the gym's dots for this stat, as displayed (7.3)
+     * @param {number} E - energy per train of the gym (5, 10, 25, 50)
+     * @param {number} [perks] - product of every gym-gain multiplier (1.02 …)
+     */
+    function gainPerTrain(stat, S, H, dots, E, perks = 1, mode = dampingMode) {
+        const ab = STAT_AB[stat];
+        if (!ab || !(dots > 0) || !(E > 0)) return 0;
+        const t = happyTerms(H);
+        const [A, B] = ab;
+        const inner = effectiveStat(S, mode) * t.f + t.p + t.q * A + B;
+        return Math.max(0, (inner / 200000) * dots * E * perks);
+    }
+
+    /** Slots of happyTerms' cache: a simulated train asks for the happy now (twice) and the split's reference happy. */
+    const TERMS_SLOTS = 4;
+    const termsKey = new Array(TERMS_SLOTS).fill(NaN);
+    const termsVal = new Array(TERMS_SLOTS).fill(null);
+    let termsNext = 0;
+
+    /**
+     * The happy-only parts of the formula, for one happy: f (the stat's
+     * multiplier), p and q. The same numbers gainPerTrain always used; kept for
+     * the last few happy values, since the simulator asks for the same happy
+     * several times per train (the split's pick and the train itself), and the
+     * log and powers were most of the plan comparison's time.
+     */
+    function happyTerms(H) {
+        const h = Math.min(HAPPY_CAP, Math.max(0, H || 0));
+        for (let i = 0; i < TERMS_SLOTS; i++) if (termsKey[i] === h) return termsVal[i];
+        const v = { f: round4(1 + 0.07 * round4(Math.log(1 + h / 250))), p: 8 * Math.pow(h, 1.05), q: 1 - Math.pow(h / HAPPY_CAP, 2) };
+        termsKey[termsNext] = h;
+        termsVal[termsNext] = v;
+        termsNext = (termsNext + 1) % TERMS_SLOTS;
+        return v;
+    }
+
+    /**
+     * Train one stat, one train at a time, until the energy (or maxTrains) runs out.
+     * @returns {{gain:number, trains:number, energyUsed:number, statAfter:number, happyAfter:number}}
+     */
+    function trainSession({ stat, S, H, dots, energyPerTrain, energy, perks = 1, maxTrains = Infinity, mode = dampingMode }) {
+        let s = S;
+        let h = H;
+        let trains = 0;
+        const cap = Math.min(maxTrains, Math.floor(Math.max(0, energy) / energyPerTrain));
+        for (; trains < cap; trains++) {
+            s += gainPerTrain(stat, s, h, dots, energyPerTrain, perks, mode);
+            h = Math.max(0, h - HAPPY_LOSS_PER_ENERGY * energyPerTrain);
+        }
+        return { gain: s - S, trains, energyUsed: trains * energyPerTrain, statAfter: s, happyAfter: h };
+    }
+
+    /**
+     * Trains (and energy) to take a stat from S to at least `target`.
+     * Returns null when it would take more than `limit` trains.
+     */
+    function trainsToReach({ stat, S, target, H, dots, energyPerTrain, perks = 1, limit = 1e6, mode = dampingMode }) {
+        if (S >= target) return { trains: 0, energy: 0 };
+        let s = S;
+        let n = 0;
+        while (s < target) {
+            if (++n > limit) return null;
+            s += gainPerTrain(stat, s, H, dots, energyPerTrain, perks, mode);
+        }
+        return { trains: n, energy: n * energyPerTrain };
+    }
+
+    /** Sum of the four stats. */
+    function totalOf(stats) {
+        // A plain loop, same order and sum as a reduce: the split asks for it on every simulated train.
+        let a = 0;
+        if (!stats) return a;
+        for (let i = 0; i < STATS.length; i++) a += Number(stats[STATS[i]]) || 0;
+        return a;
+    }
+
+    /* ===== src/core/bars.js ===== */
+    /*
+     * Energy, happy, cooldowns, refill and Torn time. Pure: every function takes
+     * the time it is asked about. Torn time is UTC; a Torn day starts at 00:00
+     * UTC. See ENGINE-SPEC §3 and research-api-shapes.md §1 for the bar fields.
+     */
+
+
+
+    const MIN = 60 * 1000;
+    const HOUR = 60 * MIN;
+    const DAY = 24 * HOUR;
+    const QUARTER = 15 * MIN;
+
+    /** Natural regeneration: +5 energy per 10 min (donator/subscriber) or 15 min; +5 happy per 15 min. */
+    const ENERGY_PER_TICK = 5;
+    const HAPPY_PER_TICK = 5;
+
+    function tornDayStart(t) {
+        return Math.floor(t / DAY) * DAY;
+    }
+
+    function msToTornMidnight(t) {
+        return tornDayStart(t) + DAY - t;
+    }
+
+    /** The next :00/:15/:30/:45 Torn time strictly after t. */
+    function nextQuarterTick(t) {
+        return (Math.floor(t / QUARTER) + 1) * QUARTER;
+    }
+
+    /** "10:48" in Torn time (UTC). */
+    function tornClock(t) {
+        const d = new Date(t);
+        return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0');
+    }
+
+    /** A countdown the way the app shows it: "3:52" under an hour (m:ss), "2h 42m" above, "now" at 0. */
+    function countdown(ms) {
+        if (!(ms > 0)) return 'now';
+        const s = Math.ceil(ms / 1000);
+        if (s < 3600) return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+        const h = Math.floor(s / 3600);
+        const m = Math.floor((s % 3600) / 60);
+        return h + 'h ' + String(m).padStart(2, '0') + 'm';
+    }
+
+    function bar(b, fallbackMax, increment, intervalS) {
+        const o = b && typeof b === 'object' ? b : {};
+        return {
+            current: Number(o.current) || 0,
+            maximum: Number(o.maximum) || fallbackMax,
+            increment: Number(o.increment) || increment,
+            interval: Number(o.interval) || intervalS,
+            tickTime: Number.isFinite(Number(o.tick_time)) ? Number(o.tick_time) : intervalS,
+            fullTime: Number(o.full_time) || 0,
+        };
+    }
+
+    const API_STAT = { strength: 'str', speed: 'spd', defense: 'def', dexterity: 'dex' };
+
+    /**
+     * One call's answer (`/v2/user?selections=bars,cooldowns,refills,battlestats,gym`)
+     * as the state the engine reads. Missing parts stay null.
+     */
+    function normalizeState(api, at) {
+        const a = api && typeof api === 'object' ? api : {};
+        const bars = a.bars || {};
+        const cd = a.cooldowns || {};
+        let stats = null;
+        let statMods = null;
+        if (a.battlestats && typeof a.battlestats === 'object') {
+            stats = {};
+            statMods = {};
+            for (const [k, short] of Object.entries(API_STAT)) {
+                const v = a.battlestats[k];
+                stats[short] = Number(v && typeof v === 'object' ? v.value : v) || 0;
+                // Merits, faction and passive bonuses on that stat, in % (what counts in a fight).
+                statMods[short] = Number(v && typeof v === 'object' ? v.modifier : 0) || 0;
+            }
+        }
+        return {
+            at,
+            energy: bar(bars.energy, 150, ENERGY_PER_TICK, 600),
+            happy: bar(bars.happy, 5025, HAPPY_PER_TICK, 900),
+            life: bars.life ? bar(bars.life, 0, 0, 300) : null,
+            drugCd: Number(cd.drug) || 0,
+            boosterCd: Number(cd.booster) || 0,
+            medicalCd: Number(cd.medical) || 0,
+            refillUsed: a.refills ? Boolean(a.refills.energy) : null,
+            // Special refills on the account (free, not limited to one a day).
+            specialRefills: a.refills && a.refills.special_count !== undefined ? Number(a.refills.special_count) || 0 : null,
+            stats,
+            statMods,
+            gymId: a.gym && a.gym.id ? Number(a.gym.id) : null,
+            gymName: a.gym && a.gym.name ? String(a.gym.name) : null,
+        };
+    }
+
+    /** Is this a donator/subscriber's energy bar (5 per 10 min)? */
+    function fastEnergy(state) {
+        return state.energy.interval <= 600;
+    }
+
+    /** Ticks of a bar between the state's time and t. */
+    function ticksBy(b, stateAt, t) {
+        if (t <= stateAt) return 0;
+        const first = stateAt + b.tickTime * 1000;
+        if (t < first) return 0;
+        return 1 + Math.floor((t - first) / (b.interval * 1000));
+    }
+
+    /** Energy at time t, with natural regeneration (nothing regenerates above the maximum). */
+    function energyAt(state, t) {
+        const e = state.energy;
+        if (e.current >= e.maximum) return e.current;
+        return Math.min(e.maximum, e.current + e.increment * ticksBy(e, state.at, t));
+    }
+
+    /** When energy reaches `target` (≤ maximum) by natural regeneration; the state time if already there; null if never. */
+    function energyReachesAt(state, target) {
+        const e = state.energy;
+        if (e.current >= target) return state.at;
+        if (target > e.maximum) return null;
+        const ticks = Math.ceil((target - e.current) / e.increment);
+        return state.at + e.tickTime * 1000 + (ticks - 1) * e.interval * 1000;
+    }
+
+    /**
+     * Happy at time t. Below the maximum it regenerates +5 a tick. Above it,
+     * it resets to the maximum at the next quarter tick, unless Ignorance Is
+     * Bliss is active (then it keeps regenerating, up to 99,999).
+     */
+    function happyAt(state, t, { bliss = false } = {}) {
+        const h = state.happy;
+        const ticks = ticksBy(h, state.at, t);
+        if (bliss) return Math.min(HAPPY_CAP, h.current + h.increment * ticks);
+        if (h.current > h.maximum) return nextQuarterTick(state.at) <= t ? h.maximum : h.current;
+        return Math.min(h.maximum, h.current + h.increment * ticks);
+    }
+
+    function drugFreeAt(state) {
+        return state.at + state.drugCd * 1000;
+    }
+
+    function boosterFreeAt(state) {
+        return state.at + state.boosterCd * 1000;
+    }
+
+    /** Hours of booster cooldown left under the cap at time t (room for EDVD/candy). */
+    function boosterRoomH(state, t, capH = 24) {
+        const cdLeft = Math.max(0, state.boosterCd * 1000 - (t - state.at));
+        return Math.max(0, capH - cdLeft / HOUR);
+    }
+
+    /** Is today's refill still unused at time t? The API flag covers the day of the state; a new Torn day resets it. */
+    function refillAvailable(state, t) {
+        if (tornDayStart(t) > tornDayStart(state.at)) return true;
+        return state.refillUsed === false;
+    }
+
+    /**
+     * What changed between two states: the plan marks steps done from these,
+     * never from a click (ENGINE-SPEC §6).
+     * @returns {{drugTaken:boolean, refillUsed:boolean, boosterUsed:boolean, energySpent:number, trained:object}}
+     */
+    function diffStates(prev, next) {
+        const out = { drugTaken: false, refillUsed: false, boosterUsed: false, energySpent: 0, trained: {} };
+        if (!prev || !next) return out;
+        const elapsed = Math.max(0, (next.at - prev.at) / 1000);
+        // The drug cooldown only ever counts down; a jump up means a drug was taken.
+        if (next.drugCd > Math.max(0, prev.drugCd - elapsed) + 60) out.drugTaken = true;
+        if (next.boosterCd > Math.max(0, prev.boosterCd - elapsed) + 60) out.boosterUsed = true;
+        if (prev.refillUsed === false && next.refillUsed === true && tornDayStart(prev.at) === tornDayStart(next.at)) out.refillUsed = true;
+        if (prev.stats && next.stats) {
+            for (const k of Object.keys(next.stats)) {
+                const d = (next.stats[k] || 0) - (prev.stats[k] || 0);
+                if (d > 0) out.trained[k] = d;
+            }
+        }
+        const expected = energyAt(prev, next.at);
+        if (Object.keys(out.trained).length) out.energySpent = Math.max(0, expected - next.energy.current);
+        return out;
+    }
+
+    /* ===== src/core/market.js ===== */
+    /*
+     * What to buy and where: the need list from the plan, the cheapest fill
+     * across the Item Market, every bazaar (TornW3B) and the points market, and
+     * a verdict against our own 7-day history. Pure. ENGINE-SPEC §8.
+     */
+
+
+
+
+
+
+    const SOURCE_BAZAAR = 'bazaar';
+    const SOURCE_ITEM_MARKET = 'itemmarket';
+    const SOURCE_POINTS = 'points';
+    /** A city (NPC) shop: Sally's Sweet Shop and the like. */
+    const SOURCE_NPC = 'npc';
+
+    /**
+     * The slice of /v2/torn/{ids}/items the plan keeps: Torn's market price and
+     * the city shops that sell each item (only shops in Torn: abroad needs a flight).
+     * @param {object[]} items - the `items` array
+     * @returns {object} {[id]: {market:number|null, shops:[{shop, buy}]}}
+     */
+    function itemsInfoFrom(items) {
+        const out = {};
+        for (const it of Array.isArray(items) ? items : []) {
+            const id = Number(it && it.id);
+            if (!id) continue;
+            const v = it.value || {};
+            const shops = (Array.isArray(v.shops) ? v.shops : [])
+                .filter((s) => s && (s.country === undefined || s.country === 'Torn') && Number(s.buy_price) > 0)
+                .map((s) => ({ shop: String(s.shop), buy: Number(s.buy_price) }));
+            out[id] = { market: Number(v.market_price) > 0 ? Number(v.market_price) : null, shops };
+        }
+        return out;
+    }
+
+    /** Torn's own market price per item (a price to weigh a candy by until listings load). */
+    function marketPricesFrom(info) {
+        const out = {};
+        for (const [id, v] of Object.entries(info || {})) if (v && v.market > 0) out[id] = v.market;
+        return out;
+    }
+
+    /** The city shops that sell candy (Buy › Shops I can buy from lists these). */
+    function candyShopsFrom(info) {
+        const set = new Set();
+        for (const [id, v] of Object.entries(info || {})) if (isCandy(Number(id))) for (const s of (v && v.shops) || []) set.add(s.shop);
+        return [...set].sort();
+    }
+
+    /** Sally's Sweet Shop: counted by default (owner, 2026-09-29), the Buy tick switches it off. */
+    const SALLYS = "Sally's Sweet Shop";
+    const DEFAULT_SHOPS = [SALLYS];
+
+    /**
+     * Torn's Daily Items Allowance: 100 items a day from the city shops, all of them together, reset at 00:00 TCT
+     * (docs/research-sallys-xanax.md, 4 sources). Read from the personal stat `cityitemsbought`.
+     */
+    const CITY_DAILY_ALLOWANCE = 100;
+
+    /** The city shops the plan may buy from: Sally's unless switched off, plus any other shop ticked. */
+    function shopsAllowed(settings = {}) {
+        const off = new Set(Array.isArray(settings.npcShopsOff) ? settings.npcShopsOff : []);
+        const on = new Set([...DEFAULT_SHOPS, ...(Array.isArray(settings.npcShops) ? settings.npcShops : [])]);
+        return [...on].filter((x) => !off.has(x)).sort();
+    }
+
+    /** A shop's tick clicked: the settings patch ({npcShops, npcShopsOff}). */
+    function toggleShop(settings = {}, shop) {
+        const onNow = shopsAllowed(settings).includes(shop);
+        const on = new Set(Array.isArray(settings.npcShops) ? settings.npcShops : []);
+        const off = new Set(Array.isArray(settings.npcShopsOff) ? settings.npcShopsOff : []);
+        if (onNow) {
+            on.delete(shop);
+            off.add(shop);
+        } else {
+            off.delete(shop);
+            on.add(shop);
+        }
+        return { npcShops: [...on], npcShopsOff: [...off] };
+    }
+
+    /**
+     * Today's city-shop allowance left: 100 less what `cityitemsbought` rose since the Torn day began. Null
+     * until both reads are in (and for a read from an earlier Torn day).
+     * @param {object} cs - {day, start, now} stored by the feed
+     */
+    function allowanceLeft(cs, now) {
+        if (!cs || !(Number.isFinite(cs.start) && Number.isFinite(cs.now))) return null;
+        if (tornDayStart(now) !== cs.day) return CITY_DAILY_ALLOWANCE;
+        return Math.max(0, CITY_DAILY_ALLOWANCE - Math.max(0, cs.now - cs.start));
+    }
+
+    /**
+     * NPC prices the player may use: only shops they ticked (Torn's API can't
+     * tell who may buy there; the owner: Sally's is for newbies only).
+     * @returns {object} {[id]: {price, shop}} the cheapest ticked shop per item
+     */
+    function npcPricesFrom(info, allowed = []) {
+        const ok = new Set(Array.isArray(allowed) ? allowed : []);
+        const out = {};
+        if (!ok.size) return out;
+        for (const [id, v] of Object.entries(info || {})) {
+            for (const s of (v && v.shops) || []) {
+                if (!ok.has(s.shop)) continue;
+                if (!out[id] || s.buy < out[id].price) out[id] = { price: s.buy, shop: s.shop };
+            }
+        }
+        return out;
+    }
+
+    /**
+     * A shop "listing" for the Buy list: as many as needed at the shop's price, up to what's left of today's
+     * city-shop allowance (`left`; null = not read yet, 100 at most). None once the allowance is used up.
+     */
+    function npcListing(npc, qty, left = null) {
+        if (!npc || !(npc.price > 0)) return null;
+        const cap = left === null || left === undefined ? CITY_DAILY_ALLOWANCE : Math.max(0, Math.floor(left));
+        const n = Math.min(Math.max(1, Math.floor(qty || 1)), cap);
+        if (!(n > 0)) return null;
+        return { source: SOURCE_NPC, shop: npc.shop, sellerName: npc.shop, price: npc.price, qty: n };
+    }
+
+    /** Verdict thresholds vs the 7-day average of the lowest price. */
+    const BUY_NOW_MAX_PCT = 1;
+    const WAIT_OVER_PCT = 3;
+    const BULK_UNDER_PCT = 3;
+
+    /** Bazaar listings TornW3B hasn't re-checked in this long are dropped (Torn Trading's rule). */
+    const BAZAAR_MAX_AGE_MS = 2 * 60 * 1000;
+
+    /** Buy windows (Buy tab switch). */
+    const WINDOWS = { today: 1, three: 3, week: 7 };
+
+    /**
+     * @param {object} needed - {[itemId]: qty} for the window (plan.itemsNeeded over those days)
+     * @param {object} inventory - {[itemId]: qty held}
+     * @returns {{id, need:number, have:number, buy:number}[]} in a stable order (drugs, boosters, points)
+     */
+    function needList(needed, inventory = {}) {
+        const order = (id) => (id === POINTS ? 3 : ITEMS[id] && ITEMS[id].kind === 'drug' ? 1 : 2);
+        const rows = Object.entries(needed || {})
+            .map(([k, q]) => {
+                const id = k === POINTS ? POINTS : Number(k);
+                const have = Math.max(0, Number(inventory[id]) || 0);
+                return { id, name: itemName(id), need: q, have, buy: Math.max(0, q - have) };
+            })
+            .filter((r) => r.need > 0)
+            .sort((a, b) => order(a.id) - order(b.id) || String(a.id).localeCompare(String(b.id)));
+        // Candy and energy drinks are pools (owner: "it should exhaust my inventory first"): held ones the plan doesn't
+        // use yet cover a need for another with as much or less happy (energy), so nothing held is bought again.
+        const spare = {};
+        for (const [k, q] of Object.entries(inventory || {})) {
+            const id = Number(k);
+            if (!poolOf(id) || !(Number(q) > 0)) continue;
+            const used = rows.find((r) => r.id === id);
+            spare[id] = Math.max(0, Math.floor(Number(q)) - (used ? used.need : 0));
+        }
+        for (const r of rows) {
+            if (!(r.buy > 0) || !poolOf(r.id)) continue;
+            const f = fillFromPool(r.buy, r.id, Object.fromEntries(Object.entries(spare).filter(([id]) => Number(id) !== r.id)));
+            if (!f.held) continue;
+            takeFromHeld(spare, f);
+            r.fromPool = f.alloc.filter((a) => a.held > 0).map((a) => ({ id: a.id, name: itemName(a.id), qty: a.held }));
+            r.buy = f.buy;
+        }
+        return rows;
+    }
+
+    /** Where a row sends you: the exact bazaar, Item Market search or the points market. */
+    function linkFor(row, itemId) {
+        if (row.source === SOURCE_BAZAAR && row.sellerId) return bazaarUrl(row.sellerId);
+        if (row.source === SOURCE_POINTS) return pointsMarketUrl();
+        if (row.source === SOURCE_NPC) return shopUrl(row.shop);
+        return itemMarketUrl(itemId);
+    }
+
+    /**
+     * Take `qty` from the cheapest listings upward, whatever the source.
+     * Listings: {source, sellerId?, sellerName?, price, qty}. Ties keep the
+     * given order (callers list the Item Market first: no trip to a bazaar for
+     * the same price).
+     * @returns {{rows:object[], total:number, filled:number, short:number}}
+     */
+    function fillCheapest(listings, qty, itemId) {
+        const sorted = (listings || [])
+            .filter((l) => l && Number(l.price) > 0 && Number(l.qty) > 0)
+            .map((l, i) => ({ ...l, i }))
+            .sort((a, b) => a.price - b.price || a.i - b.i);
+        const rows = [];
+        let left = Math.max(0, qty);
+        let total = 0;
+        for (const l of sorted) {
+            if (left <= 0) break;
+            const take = Math.min(left, l.qty);
+            const row = { source: l.source, sellerId: l.sellerId || null, sellerName: l.sellerName || null, listingId: l.listingId || null, listed: l.qty, qty: take, price: l.price, subtotal: take * l.price, dataAt: l.dataAt || null, ...(l.shop ? { shop: l.shop } : {}) };
+            row.link = linkFor(row, itemId);
+            rows.push(row);
+            total += row.subtotal;
+            left -= take;
+        }
+        return { rows, total, filled: qty - left, short: left };
+    }
+
+    /**
+     * Buy now, fine, wait or stock up, from the cheapest price against the
+     * 7-day average of daily lows.
+     * @param {number} price - the cheapest price now
+     * @param {number|null} avg7
+     * @param {object} [o] - {slack: the plan can wait a day (enough in inventory for today)}
+     */
+    function priceVerdict(price, avg7, { slack = false } = {}) {
+        if (!(avg7 > 0) || !(price > 0)) return { kind: 'unknown', pct: null, text: 'No 7-day history yet' };
+        const pct = (100 * (price - avg7)) / avg7;
+        const vs = Math.abs(pct) < 0.05 ? 'at the 7-day average' : Math.abs(pct).toFixed(1) + '% ' + (pct < 0 ? 'under' : 'over') + ' the 7-day average';
+        if (pct <= -BULK_UNDER_PCT) return { kind: 'bulk', pct, text: 'Stock up · ' + vs };
+        if (pct <= BUY_NOW_MAX_PCT) return { kind: 'buy', pct, text: 'Buy now · ' + vs };
+        if (pct > WAIT_OVER_PCT && slack) return { kind: 'wait', pct, text: 'Wait · ' + vs };
+        return { kind: 'fine', pct, text: 'Fine · ' + vs };
+    }
+
+    /**
+     * Listings from each source in one shape.
+     * - Item Market (/v2/market/{id}/itemmarket): itemmarket.listings[{price, amount}]
+     * - TornW3B (/api/marketplace/{id}): listings[{player_id, player_name, price, quantity}]
+     * - Points market (/v2/market/pointsmarket): pointsmarket[{id, cost, quantity}] (cost per point)
+     */
+    function listingsFromItemMarket(api) {
+        const im = api && (api.itemmarket || api);
+        const list = im && Array.isArray(im.listings) ? im.listings : [];
+        return list.map((l) => ({ source: SOURCE_ITEM_MARKET, price: Number(l.price), qty: Number(l.amount ?? l.quantity) || 0 }));
+    }
+
+    /**
+     * TornW3B's bazaar listings. With `now`, only listings re-checked within
+     * BAZAAR_MAX_AGE_MS stay (Torn Trading's rule: an older one is often gone),
+     * and never a $1 listing (locked, one person's).
+     */
+    function listingsFromW3b(api, { now = null, maxAgeMs = BAZAAR_MAX_AGE_MS } = {}) {
+        const list = api && Array.isArray(api.listings) ? api.listings : [];
+        const rows = list.map((l) => ({ source: SOURCE_BAZAAR, sellerId: l.player_id ? String(l.player_id) : null, sellerName: l.player_name || null, price: Number(l.price), qty: Number(l.quantity) || 0, dataAt: toMs(l.last_checked) || toMs(l.content_updated) }));
+        if (now === null) return rows;
+        return rows.filter((r) => r.sellerId && r.price > 1 && r.dataAt && now - r.dataAt <= maxAgeMs);
+    }
+
+    /** Seconds or milliseconds → milliseconds (TornW3B sends seconds). */
+    function toMs(v) {
+        const n = Number(v);
+        if (!Number.isFinite(n) || n <= 0) return null;
+        return n < 1e12 ? n * 1000 : n;
+    }
+
+    /**
+     * The price a plan should count for an item: what `qty` units cost from the
+     * cheapest listings up, per unit. Stored price rows are objects
+     * ({at, listings, avg7}), sample prices plain numbers; anything else is null
+     * (never $0: a free item would win every comparison).
+     */
+    function unitPrice(row, qty = 10) {
+        if (typeof row === 'number') return row > 0 ? row : null;
+        if (!row || typeof row !== 'object') return null;
+        const ls = Array.isArray(row.listings) ? row.listings : [];
+        // Listings older than the row's unit price (the other site read later): the newer unit price.
+        if (row.u > 0 && row.listingsAt && (row.at || 0) > row.listingsAt) return row.u;
+        if (ls.length) {
+            const f = fillCheapest(ls, qty, null);
+            if (f.filled > 0) return f.total / f.filled;
+        }
+        // A small row (GM keeps no listings, round 6): the unit price worked out when they were read.
+        if (row.u > 0) return row.u;
+        return row.avg7 > 0 ? row.avg7 : null;
+    }
+
+    /**
+     * The small row GM keeps for an item (round 6): no listings, the unit price
+     * the plan uses (`u`, as livePrices works it out) and the cheapest (`low`).
+     */
+    function slimPriceRow(id, row) {
+        if (!row || typeof row !== 'object') return row;
+        const { listings, ...rest } = row;
+        const ls = Array.isArray(listings) ? listings : [];
+        const out = { ...rest };
+        const u = ls.length ? unitPrice({ listings: ls }, String(id) === String(POINTS) ? 300 : isCandy(Number(id)) ? 50 : 10) : row.u;
+        if (u > 0) out.u = u;
+        const low = ls.length ? Math.min(...ls.filter((l) => l && l.price > 0).map((l) => l.price)) : row.low;
+        if (low > 0 && Number.isFinite(low)) out.low = low;
+        return out;
+    }
+
+    /** The last answer per stored price object: prices are parsed once per change, so this sorts each item's listings once per price load, not on every priceFor. */
+    const liveMemo = new WeakMap();
+
+    /**
+     * {itemId: price row} → {itemId: $ per unit}, only the ones known (points: per point, 300 at a time; candy: a boost's 50).
+     * Read-only: the same object comes back for the same rows (copy before changing).
+     */
+    function livePrices(rows) {
+        if (rows && typeof rows === 'object') {
+            const hit = liveMemo.get(rows);
+            if (hit) return hit;
+        }
+        const out = computeLivePrices(rows);
+        if (rows && typeof rows === 'object') liveMemo.set(rows, out);
+        return out;
+    }
+
+    function computeLivePrices(rows) {
+        const out = {};
+        for (const [id, row] of Object.entries(rows || {})) {
+            const p = unitPrice(row, id === POINTS ? 300 : isCandy(Number(id)) ? 50 : 10);
+            if (p) out[id] = p;
+        }
+        return out;
+    }
+
+    function listingsFromPoints(api) {
+        const raw = api && api.pointsmarket;
+        const list = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? Object.entries(raw).map(([id, v]) => ({ id, ...v })) : [];
+        return list.map((l) => ({ source: SOURCE_POINTS, listingId: l.id ? String(l.id) : null, price: Number(l.cost ?? l.price), qty: Number(l.quantity) || 0 }));
+    }
+
+    /** A seller line: "Iron_Monk's bazaar", "Item Market", "Points market". */
+    function whereText(row) {
+        if (row.source === SOURCE_BAZAAR) return (row.sellerName ? row.sellerName + "'s" : 'A') + ' bazaar';
+        if (row.source === SOURCE_POINTS) return 'Points market';
+        if (row.source === SOURCE_NPC) return row.shop || 'City shop';
+        return 'Item Market';
+    }
+
     /* ===== src/platform/store.js ===== */
     /*
      * Typed settings and saved data over gm.js (prefix pumpingIron.v1.). Small
@@ -236,6 +1557,8 @@
      * for; big, one-page data (Torn Eye estimates, captured gear) goes to
      * IndexedDB so it doesn't slow every Torn page (the trading app's lesson).
      */
+
+
 
 
 
@@ -278,13 +1601,11 @@
         eyePredictions: 'eyePredictions',
         devUnlocked: 'devUnlocked',
         skipped: 'skippedSteps',
-        // Your real Xanax cooldowns (core/drugcd.js) and the candy picked today (kept steady: core/candy.js).
+        // Your real Xanax cooldowns (core/drugcd.js).
         xanaxCds: 'xanaxCds',
-        candyPick: 'candyPick',
-        // The plan comparison kept between pages (runtime.js), the event comparison, and which tab is working one out.
-        compareCache: 'compareCache',
-        eventCompareCache: 'eventCompareCache',
-        compareBusy: 'compareBusy',
+        // The saved plan's small part that Torn's pages and the bot follow (core/saved-plan.js; the whole plan is in
+        // IndexedDB: platform/plan-store.js).
+        planNow: 'planNow',
         // Your trains from Torn's log (Full key): the sessions no read of ours saw (core/gymlog.js).
         gymLog: 'gymLog',
     };
@@ -378,9 +1699,70 @@
         return v === null || v === undefined ? fallback : v;
     }
 
-    /** Prices, parsed once per change (read-only: copy before changing). */
+    /*
+     * Prices (round 6): GM keeps one small row per item (when it was read, the
+     * unit price the plan uses, the cheapest, the 7-day average); the listings
+     * themselves (60 per item) stay on the site that loaded them, in its
+     * IndexedDB, for its Buy list and market outlines.
+     */
+    const local = { rows: null, loading: null, ver: 0 };
+    const pricesMemo = { slim: null, ver: -1, value: null };
+
+    /** This site's own listings, read once from its IndexedDB (market pages and the webpage). */
+    function loadLocalPrices() {
+        if (local.loading) return local.loading;
+        local.loading = idbGet('prices')
+            .then((v) => {
+                local.rows = { ...(v || {}), ...(local.rows || {}) };
+                local.ver++;
+                return local.rows;
+            })
+            .catch(() => {
+                local.rows = local.rows || {};
+                return local.rows;
+            });
+        return local.loading;
+    }
+
+    /** Forget this site's listings (Settings › Your data › Prices). */
+    function clearLocalPrices() {
+        local.rows = {};
+        local.ver++;
+        idbSet('prices', {}).catch(() => {});
+    }
+
+    /** This site's listings (only what it loaded itself). */
+    function localPrices() {
+        return local.rows || {};
+    }
+
+    /** Keep newly loaded listings on this site (memory now, IndexedDB after). */
+    function setLocalPrices(rows) {
+        local.rows = { ...(local.rows || {}), ...rows };
+        local.ver++;
+        idbSet('prices', local.rows).catch(() => {});
+    }
+
+    /**
+     * Prices (read-only: copy before changing): GM's small rows, with this site's
+     * listings where it has the newest read.
+     */
     function getPrices() {
-        return gmGetShared(K.prices, {}) || {};
+        const slim = gmGetShared(K.prices, {}) || {};
+        if (!local.rows) return slim;
+        if (pricesMemo.slim === slim && pricesMemo.ver === local.ver) return pricesMemo.value;
+        const out = { ...slim };
+        for (const [id, row] of Object.entries(local.rows)) {
+            if (!row) continue;
+            // This site's read is the newest: all of it. The other site read later: its unit price, these listings (the
+            // Buy list and market outlines need them; they're reloaded here when due).
+            if (!slim[id] || (row.at || 0) >= (slim[id].at || 0)) out[id] = row;
+            else if (Array.isArray(row.listings) && row.listings.length) out[id] = { ...slim[id], listings: row.listings, listingsAt: row.at || 0 };
+        }
+        pricesMemo.slim = slim;
+        pricesMemo.ver = local.ver;
+        pricesMemo.value = out;
+        return out;
     }
 
     /** Listings kept per item: the cheapest, enough to fill a week's plan from many sellers. */
@@ -394,10 +1776,26 @@
         gmDel(name);
     }
 
+    /**
+     * Keys 1.2.3 kept and round 6 dropped (the comparison worked out on every page, Auto's event comparison, the turn to
+     * work one out, today's candy pick): removed once, so Tampermonkey stops handing them to every page.
+     */
+    const DROPPED_KEYS = ['compareCache', 'eventCompareCache', 'compareBusy', 'candyPick'];
+
+    function dropOldKeys() {
+        for (const k of DROPPED_KEYS) if (gmGet(k, null) !== null) gmDel(k);
+        // 1.2.3 kept every listing in GM (~140 KB): this site keeps them, GM gets the small rows.
+        const prices = gmGet(K.prices, null);
+        if (prices && Object.values(prices).some((r) => r && Array.isArray(r.listings))) {
+            setLocalPrices(Object.fromEntries(Object.entries(prices).filter(([, r]) => r && Array.isArray(r.listings))));
+            gmSet(K.prices, Object.fromEntries(Object.entries(prices).map(([id, r]) => [id, slimPriceRow(id, r)])));
+        }
+    }
+
     /** What "Your data" in Settings can clear, by group. */
     const DATA_GROUPS = {
         keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker, K.fullKey, K.fullKeyState, K.moneyLog],
-        plan: [K.plan, K.recheck, K.gymSession, K.compareCache, K.eventCompareCache, K.compareBusy],
+        plan: [K.plan, K.recheck, K.gymSession, K.planNow, 'savedPlanFull'],
         progress: [K.statsHistory, K.dayLog, K.dayTotals, K.planLine, K.receipts, K.gymLog],
         learning: ['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions],
         prices: [K.priceHistory, K.prices],
@@ -433,11 +1831,20 @@
      * @param {string} tabId
      * @param {object} store - {get(key, fallback), set(key, value), del(key)}
      * @param {function} [now]
+     * @param {object} [o]
+     * @param {number} [o.batchMs] - round 6: a burst's first slot is written at once, the rest together this long after
+     *   (every GM write reaches every open Torn tab; a watch-list sweep took two writes per request). 0: every slot.
      */
-    function tabWindow(name, tabId, store, now = () => Date.now()) {
+    function tabWindow(name, tabId, store, now = () => Date.now(), { batchMs = 0 } = {}) {
         const regKey = name + '.tabs';
         const ownKey = name + '.' + tabId;
         let own = [];
+        let lastWrite = -Infinity;
+        let pending = null;
+        const writeOwn = () => {
+            lastWrite = now();
+            store.set(ownKey, own.filter((x) => lastWrite - x < 60000));
+        };
 
         const registry = () => {
             const r = store.get(regKey, null);
@@ -445,6 +1852,13 @@
         };
 
         return {
+            /** Write a pending batch now (the page is going: its slots must reach the other tabs). */
+            flush() {
+                if (!pending) return;
+                clearTimeout(pending);
+                pending = null;
+                writeOwn();
+            },
             /** Every live tab's timestamps of the last minute, oldest first. */
             load() {
                 const t = now();
@@ -466,7 +1880,13 @@
                 const t = now();
                 own = own.filter((x) => t - x < 60000);
                 own.push(at);
-                store.set(ownKey, own);
+                if (!batchMs || t - lastWrite >= batchMs) writeOwn();
+                else if (!pending) {
+                    pending = setTimeout(() => {
+                        pending = null;
+                        writeOwn();
+                    }, batchMs - (t - lastWrite));
+                }
 
                 const reg = registry();
                 let changed = false;
@@ -502,11 +1922,17 @@
      * hidden gives up the role instead of keeping it.
      */
 
-    /** A leader that has not renewed in this long is presumed gone. */
-    const LEADER_STALE_MS = 10000;
+    /** A leader that has not renewed in this long is presumed gone (a page that closes hands over at once, on pagehide). */
+    const LEADER_STALE_MS = 30000;
 
-    /** How often the leader renews its claim. */
+    /** How often every tab checks the lead (and the leader polls when due). */
     const LEADER_HEARTBEAT_MS = 3000;
+
+    /**
+     * How often the leader writes its claim (round 6): every GM write goes to
+     * every open Torn tab, so the claim is renewed every 10 s, not every check.
+     */
+    const LEADER_RENEW_MS = 10000;
 
     /**
      * @param {object|null} record - { id, ts } as last stored
@@ -528,7 +1954,7 @@
 
         if (mine) {
             if (visible) {
-                return { lead: true, confirmed: true, write: { id: me, ts: now } };
+                return { lead: true, confirmed: true, write: now - record.ts >= LEADER_RENEW_MS ? { id: me, ts: now } : null };
             }
             // Hidden: step down so a visible tab can take over at once.
             return { lead: false, confirmed: false, write: { id: null, ts: 0 } };
@@ -567,8 +1993,11 @@
     /** Lanes, by the Torn API path a call reads. */
     const LANES = ['plan', 'war', 'eye', 'prices', 'other'];
 
-    /** A tab's focus counts this long after its last heartbeat (a closed or hidden tab drops out). */
-    const FOCUS_FRESH_MS = 15 * 1000;
+    /**
+     * A tab's focus counts this long after its last heartbeat. A tab that closes or is hidden drops out at once (its
+     * pagehide/visibility beat); this only covers a tab that died. 60 s (round 6): renewed every 20 s, not every few.
+     */
+    const FOCUS_FRESH_MS = 60 * 1000;
 
     /** Share of the minute a lane that isn't in front may use while another is (the rest is kept for the front one). */
     const BACK_LANE_SHARE = 0.3;
@@ -1201,338 +2630,6 @@
         }
     }
 
-    /* ===== src/core/gain.js ===== */
-    /*
-     * Gym gain: Vladar's formula V2 (rgiskard's C++ calculator, GreasyFork
-     * 392876), stepped train by train because happy and the stat both change
-     * with every train. Pure; see docs/ENGINE-SPEC.md §1 and research-gym.md.
-     */
-
-    const STATS = ['str', 'spd', 'def', 'dex'];
-
-    /** Torn's names for our short keys (API battlestats, gym modifiers). */
-    const STAT_API = { str: 'strength', spd: 'speed', def: 'defense', dex: 'dexterity' };
-
-    const STAT_LABEL = { str: 'STR', spd: 'SPD', def: 'DEF', dex: 'DEX' };
-
-    /** Per-stat constants A and B of the formula. */
-    const STAT_AB = {
-        str: [1600, 1700],
-        spd: [1600, 2000],
-        dex: [1800, 1500],
-        def: [2100, -600],
-    };
-
-    const HAPPY_CAP = 99999;
-
-    /**
-     * [calibrate] How a stat above 50M is damped. Disputed in the community
-     * (research-gym.md "Post-50M"): 'log10' (likely), 'ln', or 'power' (Gym
-     * Gains Calculator+'s 50M + 0.057406·(S−50M)^0.928996). Calibrate against
-     * the user's own trains (Progress › Gain model).
-     */
-    const POST_50M_MODE = 'log10';
-
-    /**
-     * The damping mode the engine uses now: POST_50M_MODE until the learner
-     * finds (and keeps) a better one from the player's own trains.
-     */
-    let dampingMode = POST_50M_MODE;
-
-    /** Use a learned damping mode ('log10' | 'ln' | 'power'); anything else resets it. */
-    function useDampingMode(mode) {
-        dampingMode = mode === 'ln' || mode === 'power' || mode === 'log10' ? mode : POST_50M_MODE;
-        return dampingMode;
-    }
-
-    function currentDampingMode() {
-        return dampingMode;
-    }
-
-    /**
-     * [calibrate] Happy lost per train, per energy. Torn's real loss is random in
-     * 0.4–0.6 × energy per train (research-gym.md); the mean is used.
-     */
-    const HAPPY_LOSS_PER_ENERGY = 0.5;
-
-    function round4(x) {
-        return Math.round(x * 1e4) / 1e4;
-    }
-
-    /** The stat the formula sees: itself up to 50M, damped above. */
-    function effectiveStat(S, mode = dampingMode) {
-        if (!(S > 5e7)) return Math.max(0, S || 0);
-        if (mode === 'power') return 5e7 + 0.057406 * Math.pow(S - 5e7, 0.928996);
-        const log = mode === 'ln' ? Math.log(S) : Math.log10(S);
-        return 5e7 + (S - 5e7) / (8.77635 * log);
-    }
-
-    /**
-     * Gain of ONE train.
-     * @param {string} stat - 'str'|'spd'|'def'|'dex'
-     * @param {number} S - the stat now
-     * @param {number} H - happy now (capped at 99,999)
-     * @param {number} dots - the gym's dots for this stat, as displayed (7.3)
-     * @param {number} E - energy per train of the gym (5, 10, 25, 50)
-     * @param {number} [perks] - product of every gym-gain multiplier (1.02 …)
-     */
-    function gainPerTrain(stat, S, H, dots, E, perks = 1, mode = dampingMode) {
-        const ab = STAT_AB[stat];
-        if (!ab || !(dots > 0) || !(E > 0)) return 0;
-        const t = happyTerms(H);
-        const [A, B] = ab;
-        const inner = effectiveStat(S, mode) * t.f + t.p + t.q * A + B;
-        return Math.max(0, (inner / 200000) * dots * E * perks);
-    }
-
-    /** Slots of happyTerms' cache: a simulated train asks for the happy now (twice) and the split's reference happy. */
-    const TERMS_SLOTS = 4;
-    const termsKey = new Array(TERMS_SLOTS).fill(NaN);
-    const termsVal = new Array(TERMS_SLOTS).fill(null);
-    let termsNext = 0;
-
-    /**
-     * The happy-only parts of the formula, for one happy: f (the stat's
-     * multiplier), p and q. The same numbers gainPerTrain always used; kept for
-     * the last few happy values, since the simulator asks for the same happy
-     * several times per train (the split's pick and the train itself), and the
-     * log and powers were most of the plan comparison's time.
-     */
-    function happyTerms(H) {
-        const h = Math.min(HAPPY_CAP, Math.max(0, H || 0));
-        for (let i = 0; i < TERMS_SLOTS; i++) if (termsKey[i] === h) return termsVal[i];
-        const v = { f: round4(1 + 0.07 * round4(Math.log(1 + h / 250))), p: 8 * Math.pow(h, 1.05), q: 1 - Math.pow(h / HAPPY_CAP, 2) };
-        termsKey[termsNext] = h;
-        termsVal[termsNext] = v;
-        termsNext = (termsNext + 1) % TERMS_SLOTS;
-        return v;
-    }
-
-    /**
-     * Train one stat, one train at a time, until the energy (or maxTrains) runs out.
-     * @returns {{gain:number, trains:number, energyUsed:number, statAfter:number, happyAfter:number}}
-     */
-    function trainSession({ stat, S, H, dots, energyPerTrain, energy, perks = 1, maxTrains = Infinity, mode = dampingMode }) {
-        let s = S;
-        let h = H;
-        let trains = 0;
-        const cap = Math.min(maxTrains, Math.floor(Math.max(0, energy) / energyPerTrain));
-        for (; trains < cap; trains++) {
-            s += gainPerTrain(stat, s, h, dots, energyPerTrain, perks, mode);
-            h = Math.max(0, h - HAPPY_LOSS_PER_ENERGY * energyPerTrain);
-        }
-        return { gain: s - S, trains, energyUsed: trains * energyPerTrain, statAfter: s, happyAfter: h };
-    }
-
-    /**
-     * Trains (and energy) to take a stat from S to at least `target`.
-     * Returns null when it would take more than `limit` trains.
-     */
-    function trainsToReach({ stat, S, target, H, dots, energyPerTrain, perks = 1, limit = 1e6, mode = dampingMode }) {
-        if (S >= target) return { trains: 0, energy: 0 };
-        let s = S;
-        let n = 0;
-        while (s < target) {
-            if (++n > limit) return null;
-            s += gainPerTrain(stat, s, H, dots, energyPerTrain, perks, mode);
-        }
-        return { trains: n, energy: n * energyPerTrain };
-    }
-
-    /** Sum of the four stats. */
-    function totalOf(stats) {
-        // A plain loop, same order and sum as a reduce: the split asks for it on every simulated train.
-        let a = 0;
-        if (!stats) return a;
-        for (let i = 0; i < STATS.length; i++) a += Number(stats[STATS[i]]) || 0;
-        return a;
-    }
-
-    /* ===== src/core/bars.js ===== */
-    /*
-     * Energy, happy, cooldowns, refill and Torn time. Pure: every function takes
-     * the time it is asked about. Torn time is UTC; a Torn day starts at 00:00
-     * UTC. See ENGINE-SPEC §3 and research-api-shapes.md §1 for the bar fields.
-     */
-
-
-
-    const MIN = 60 * 1000;
-    const HOUR = 60 * MIN;
-    const DAY = 24 * HOUR;
-    const QUARTER = 15 * MIN;
-
-    /** Natural regeneration: +5 energy per 10 min (donator/subscriber) or 15 min; +5 happy per 15 min. */
-    const ENERGY_PER_TICK = 5;
-    const HAPPY_PER_TICK = 5;
-
-    function tornDayStart(t) {
-        return Math.floor(t / DAY) * DAY;
-    }
-
-    function msToTornMidnight(t) {
-        return tornDayStart(t) + DAY - t;
-    }
-
-    /** The next :00/:15/:30/:45 Torn time strictly after t. */
-    function nextQuarterTick(t) {
-        return (Math.floor(t / QUARTER) + 1) * QUARTER;
-    }
-
-    /** "10:48" in Torn time (UTC). */
-    function tornClock(t) {
-        const d = new Date(t);
-        return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0');
-    }
-
-    /** A countdown the way the app shows it: "3:52" under an hour (m:ss), "2h 42m" above, "now" at 0. */
-    function countdown(ms) {
-        if (!(ms > 0)) return 'now';
-        const s = Math.ceil(ms / 1000);
-        if (s < 3600) return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
-        const h = Math.floor(s / 3600);
-        const m = Math.floor((s % 3600) / 60);
-        return h + 'h ' + String(m).padStart(2, '0') + 'm';
-    }
-
-    function bar(b, fallbackMax, increment, intervalS) {
-        const o = b && typeof b === 'object' ? b : {};
-        return {
-            current: Number(o.current) || 0,
-            maximum: Number(o.maximum) || fallbackMax,
-            increment: Number(o.increment) || increment,
-            interval: Number(o.interval) || intervalS,
-            tickTime: Number.isFinite(Number(o.tick_time)) ? Number(o.tick_time) : intervalS,
-            fullTime: Number(o.full_time) || 0,
-        };
-    }
-
-    const API_STAT = { strength: 'str', speed: 'spd', defense: 'def', dexterity: 'dex' };
-
-    /**
-     * One call's answer (`/v2/user?selections=bars,cooldowns,refills,battlestats,gym`)
-     * as the state the engine reads. Missing parts stay null.
-     */
-    function normalizeState(api, at) {
-        const a = api && typeof api === 'object' ? api : {};
-        const bars = a.bars || {};
-        const cd = a.cooldowns || {};
-        let stats = null;
-        let statMods = null;
-        if (a.battlestats && typeof a.battlestats === 'object') {
-            stats = {};
-            statMods = {};
-            for (const [k, short] of Object.entries(API_STAT)) {
-                const v = a.battlestats[k];
-                stats[short] = Number(v && typeof v === 'object' ? v.value : v) || 0;
-                // Merits, faction and passive bonuses on that stat, in % (what counts in a fight).
-                statMods[short] = Number(v && typeof v === 'object' ? v.modifier : 0) || 0;
-            }
-        }
-        return {
-            at,
-            energy: bar(bars.energy, 150, ENERGY_PER_TICK, 600),
-            happy: bar(bars.happy, 5025, HAPPY_PER_TICK, 900),
-            life: bars.life ? bar(bars.life, 0, 0, 300) : null,
-            drugCd: Number(cd.drug) || 0,
-            boosterCd: Number(cd.booster) || 0,
-            medicalCd: Number(cd.medical) || 0,
-            refillUsed: a.refills ? Boolean(a.refills.energy) : null,
-            // Special refills on the account (free, not limited to one a day).
-            specialRefills: a.refills && a.refills.special_count !== undefined ? Number(a.refills.special_count) || 0 : null,
-            stats,
-            statMods,
-            gymId: a.gym && a.gym.id ? Number(a.gym.id) : null,
-            gymName: a.gym && a.gym.name ? String(a.gym.name) : null,
-        };
-    }
-
-    /** Is this a donator/subscriber's energy bar (5 per 10 min)? */
-    function fastEnergy(state) {
-        return state.energy.interval <= 600;
-    }
-
-    /** Ticks of a bar between the state's time and t. */
-    function ticksBy(b, stateAt, t) {
-        if (t <= stateAt) return 0;
-        const first = stateAt + b.tickTime * 1000;
-        if (t < first) return 0;
-        return 1 + Math.floor((t - first) / (b.interval * 1000));
-    }
-
-    /** Energy at time t, with natural regeneration (nothing regenerates above the maximum). */
-    function energyAt(state, t) {
-        const e = state.energy;
-        if (e.current >= e.maximum) return e.current;
-        return Math.min(e.maximum, e.current + e.increment * ticksBy(e, state.at, t));
-    }
-
-    /** When energy reaches `target` (≤ maximum) by natural regeneration; the state time if already there; null if never. */
-    function energyReachesAt(state, target) {
-        const e = state.energy;
-        if (e.current >= target) return state.at;
-        if (target > e.maximum) return null;
-        const ticks = Math.ceil((target - e.current) / e.increment);
-        return state.at + e.tickTime * 1000 + (ticks - 1) * e.interval * 1000;
-    }
-
-    /**
-     * Happy at time t. Below the maximum it regenerates +5 a tick. Above it,
-     * it resets to the maximum at the next quarter tick, unless Ignorance Is
-     * Bliss is active (then it keeps regenerating, up to 99,999).
-     */
-    function happyAt(state, t, { bliss = false } = {}) {
-        const h = state.happy;
-        const ticks = ticksBy(h, state.at, t);
-        if (bliss) return Math.min(HAPPY_CAP, h.current + h.increment * ticks);
-        if (h.current > h.maximum) return nextQuarterTick(state.at) <= t ? h.maximum : h.current;
-        return Math.min(h.maximum, h.current + h.increment * ticks);
-    }
-
-    function drugFreeAt(state) {
-        return state.at + state.drugCd * 1000;
-    }
-
-    function boosterFreeAt(state) {
-        return state.at + state.boosterCd * 1000;
-    }
-
-    /** Hours of booster cooldown left under the cap at time t (room for EDVD/candy). */
-    function boosterRoomH(state, t, capH = 24) {
-        const cdLeft = Math.max(0, state.boosterCd * 1000 - (t - state.at));
-        return Math.max(0, capH - cdLeft / HOUR);
-    }
-
-    /** Is today's refill still unused at time t? The API flag covers the day of the state; a new Torn day resets it. */
-    function refillAvailable(state, t) {
-        if (tornDayStart(t) > tornDayStart(state.at)) return true;
-        return state.refillUsed === false;
-    }
-
-    /**
-     * What changed between two states: the plan marks steps done from these,
-     * never from a click (ENGINE-SPEC §6).
-     * @returns {{drugTaken:boolean, refillUsed:boolean, boosterUsed:boolean, energySpent:number, trained:object}}
-     */
-    function diffStates(prev, next) {
-        const out = { drugTaken: false, refillUsed: false, boosterUsed: false, energySpent: 0, trained: {} };
-        if (!prev || !next) return out;
-        const elapsed = Math.max(0, (next.at - prev.at) / 1000);
-        // The drug cooldown only ever counts down; a jump up means a drug was taken.
-        if (next.drugCd > Math.max(0, prev.drugCd - elapsed) + 60) out.drugTaken = true;
-        if (next.boosterCd > Math.max(0, prev.boosterCd - elapsed) + 60) out.boosterUsed = true;
-        if (prev.refillUsed === false && next.refillUsed === true && tornDayStart(prev.at) === tornDayStart(next.at)) out.refillUsed = true;
-        if (prev.stats && next.stats) {
-            for (const k of Object.keys(next.stats)) {
-                const d = (next.stats[k] || 0) - (prev.stats[k] || 0);
-                if (d > 0) out.trained[k] = d;
-            }
-        }
-        const expected = energyAt(prev, next.at);
-        if (Object.keys(out.trained).length) out.energySpent = Math.max(0, expected - next.energy.current);
-        return out;
-    }
-
     /* ===== src/core/gyms.js ===== */
     /*
      * Gyms: the table, specialist rules and which gym is best for each stat.
@@ -1597,8 +2694,21 @@
     /** [calibrate] Sports Science Lab: at most this many Xanax + Ecstasy taken, ever (research-gym.md "uncertain vs 50+50"). */
     const SSL_DRUG_LIMIT = 150;
 
-    /** [calibrate] Specialist gyms open once George's is unlocked (unconfirmed; the stat rule is the hard part). */
-    const SPECIALIST_NEEDS_GYM = GEORGES;
+    /**
+     * The ladder gym after which each specialist can be joined (its stat rule
+     * still applies; research-gym-unlock.md, wiki 2023): the pair gyms after
+     * Cha Cha's, Sports Science Lab after Last Round, the single-stat ones after
+     * George's.
+     */
+    const SPECIALIST_OPENS_AFTER = { 25: 20, 26: 20, 27: 24, 28: 24, 29: 24, 30: 24, 31: 22 };
+
+    /** Gyms open once the ladder reaches `top`: every ladder gym up to it, and the specialists it opens. */
+    function gymsOpenAt(top) {
+        const out = [];
+        for (let i = 1; i <= Math.min(top, GEORGES); i++) out.push(i);
+        for (const [id, after] of Object.entries(SPECIALIST_OPENS_AFTER)) if (top >= after) out.push(Number(id));
+        return out.sort((a, b) => a - b);
+    }
 
     /**
      * Energy (gym experience) to unlock the NEXT ladder gym, from gym 1 → 2 up to
@@ -2213,370 +3323,6 @@
         return { days: out, reachedDay, statsAfter: s, catchUp };
     }
 
-    /* ===== src/core/items.js ===== */
-    /*
-     * The items a gym plan uses, with their effects (Torn's own item text, from
-     * the items dump in docs/reference). Pure data.
-     */
-
-    const XANAX = 206;
-    const ECSTASY = 197;
-    const LSD = 199;
-    const EDVD = 366;
-    const FHC = 367;
-    const LOLLIPOP = 310;
-    const CHOC_KISSES = 210;
-    const SWEET_HEARTS = 209;
-    const BOX_CHOC = 35;
-    const BAG_BON_BONS = 37;
-    const BOX_BON_BONS = 38;
-    const MINTS = 39;
-    const BIG_BOX_CHOC = 36;
-    const CANDY_KISSES = 527;
-    const CHOC_EGG = 1312;
-    const TOOTSIE = 528;
-    const EYEBALLS = 634;
-    const TRUFFLES = 529;
-    const REINDEER = 556;
-    const PIXIE_STICKS = 151;
-    const JAWBREAKER = 586;
-    const SHERBET = 587;
-    const HUMBUGS = 1039;
-    const CUPCAKE = 1028;
-    /** The Game Console (type Special): "Converts 1, 3 or 5 energy into happiness" (the console jump). */
-    const GAME_CONSOLE = 104;
-    const MUNSTER = 530;
-    const RED_COW = 532;
-    const TAURINE = 533;
-    const BOOK_GHOGH = 757;
-    const BOOK_BLISS = 770;
-
-    /** A points refill costs this many points (research-gym.md: "30 pts/day, was 25"). */
-    const REFILL_POINTS = 30;
-
-    /** Pseudo item id for points in buy lists (not a Torn item). */
-    const POINTS = 'points';
-
-    /** [calibrate] Drug cooldowns, minutes (Xanax 6–8 h; Ecstasy ~3.3–4 h). The plan uses the live cooldown once a drug is taken. */
-    const XANAX_CD_MIN = 7 * 60;
-    const ECSTASY_CD_MIN = 4 * 60;
-    const LSD_CD_MIN = 7 * 60;
-
-    /** Booster cooldown cap, hours (faction perks raise it up to 48). */
-    const BOOSTER_CAP_H = 24;
-
-    /**
-     * kind: drug | booster (candy, EDVD, FHC, cans)
-     * energy: +E; happy: +happy; happyMult: × happy; boosterH: + booster cooldown; toMax: energy to max
-     */
-    const ITEMS = {
-        [XANAX]: { id: XANAX, name: 'Xanax', kind: 'drug', category: 'Drug', energy: 250, happy: 75, cdMin: XANAX_CD_MIN },
-        [ECSTASY]: { id: ECSTASY, name: 'Ecstasy', kind: 'drug', category: 'Drug', happyMult: 2, cdMin: ECSTASY_CD_MIN },
-        [LSD]: { id: LSD, name: 'LSD', kind: 'drug', category: 'Drug', energy: 50, happy: 350, cdMin: LSD_CD_MIN },
-        [EDVD]: { id: EDVD, name: 'Erotic DVD', short: 'EDVD', kind: 'booster', category: 'Booster', happy: 2500, boosterH: 6 },
-        [FHC]: { id: FHC, name: 'Feathery Hotel Coupon', short: 'FHC', kind: 'booster', category: 'Booster', toMax: true, happy: 500, boosterH: 6 },
-        // Every candy: "Increases happiness by N and booster cooldown by 30 minutes." (checked against the items dump, 2026-09-29).
-        [LOLLIPOP]: candy(LOLLIPOP, 'Lollipop', 25),
-        [CHOC_KISSES]: candy(CHOC_KISSES, 'Bag of Chocolate Kisses', 25, 'Chocolate Kisses'),
-        [SWEET_HEARTS]: candy(SWEET_HEARTS, 'Box of Sweet Hearts', 25, 'Sweet Hearts'),
-        [BOX_CHOC]: candy(BOX_CHOC, 'Box of Chocolate Bars', 25),
-        [BAG_BON_BONS]: candy(BAG_BON_BONS, 'Bag of Bon Bons', 25),
-        [BOX_BON_BONS]: candy(BOX_BON_BONS, 'Box of Bon Bons', 25),
-        [MINTS]: candy(MINTS, 'Box of Extra Strong Mints', 25, 'Extra Strong Mints'),
-        [BIG_BOX_CHOC]: candy(BIG_BOX_CHOC, 'Big Box of Chocolate Bars', 35),
-        [CANDY_KISSES]: candy(CANDY_KISSES, 'Bag of Candy Kisses', 50, 'Candy Kisses'),
-        [CHOC_EGG]: candy(CHOC_EGG, 'Chocolate Egg', 50),
-        [TOOTSIE]: candy(TOOTSIE, 'Bag of Tootsie Rolls', 75, 'Tootsie Rolls'),
-        [EYEBALLS]: candy(EYEBALLS, 'Bag of Bloody Eyeballs', 75, 'Bloody Eyeballs'),
-        [TRUFFLES]: candy(TRUFFLES, 'Bag of Chocolate Truffles', 100, 'Chocolate Truffles'),
-        [REINDEER]: candy(REINDEER, 'Bag of Reindeer Droppings', 100, 'Reindeer Droppings'),
-        [PIXIE_STICKS]: candy(PIXIE_STICKS, 'Pixie Sticks', 150),
-        [JAWBREAKER]: candy(JAWBREAKER, 'Jawbreaker', 150),
-        [SHERBET]: candy(SHERBET, 'Bag of Sherbet', 150, 'Sherbet'),
-        [HUMBUGS]: candy(HUMBUGS, 'Bag of Humbugs', 150, 'Humbugs'),
-        [CUPCAKE]: candy(CUPCAKE, 'Birthday Cupcake', 250),
-        [GAME_CONSOLE]: { id: GAME_CONSOLE, name: 'Game Console', kind: 'special', category: 'Special' },
-        [MUNSTER]: { id: MUNSTER, name: 'Can of Munster', kind: 'booster', category: 'Energy Drink', energy: 20, boosterH: 2 },
-        [RED_COW]: { id: RED_COW, name: 'Can of Red Cow', kind: 'booster', category: 'Energy Drink', energy: 25, boosterH: 2 },
-        [TAURINE]: { id: TAURINE, name: 'Can of Taurine Elite', kind: 'booster', category: 'Energy Drink', energy: 30, boosterH: 2 },
-    };
-
-    function candy(id, name, happy, short = null) {
-        return { id, name, ...(short ? { short } : {}), kind: 'booster', category: 'Candy', happy, boosterH: 0.5 };
-    }
-
-    /** Every candy, fewest happy first (the plan picks one of them: core/candy.js). */
-    const CANDY_IDS = Object.values(ITEMS)
-        .filter((it) => it.category === 'Candy')
-        .sort((a, b) => a.happy - b.happy || a.id - b.id)
-        .map((it) => it.id);
-
-    function isCandy(id) {
-        const it = ITEMS[id];
-        return Boolean(it && it.category === 'Candy');
-    }
-
-    /** Sample prices (docs/sims) used until live prices arrive, and in tests. */
-    const SAMPLE_PRICES = {
-        [XANAX]: 830000,
-        [ECSTASY]: 55000,
-        [EDVD]: 3700000,
-        [CANDY_KISSES]: 32000,
-        [FHC]: 12400000,
-        [POINTS]: 45000,
-        // The items dump's market value (2024); Torn's own market price replaces it once /torn/items answers.
-        [GAME_CONSOLE]: 170,
-    };
-
-    function itemName(id) {
-        if (id === POINTS) return 'Points';
-        const it = ITEMS[id];
-        return it ? it.short || it.name : 'Item ' + id;
-    }
-
-    /**
-     * The consumable cooldown cuts (Grocery 3★ −10%, Restaurant 10★ −25%, the book
-     * Self Control Is For Losers −50%: docs/research-events-perks.md §2) shorten
-     * the booster cooldown of candy, energy drinks and alcohol, not EDVD or FHC.
-     */
-    function isConsumable(id) {
-        const it = ITEMS[id];
-        return Boolean(it && (it.category === 'Candy' || it.category === 'Energy Drink'));
-    }
-
-    /** Booster cooldown one use adds, hours, after the consumable cuts (`cdMult`, e.g. 0.9 × 0.75). */
-    function boosterHours(itemId, cdMult = 1) {
-        const it = ITEMS[itemId];
-        if (!it || !(it.boosterH > 0)) return 0;
-        return it.boosterH * (isConsumable(itemId) ? Math.max(0.05, cdMult || 1) : 1);
-    }
-
-    /** Candy that fills the booster cap: how many of an item fit under `capH` from `cdH` already used. */
-    function boostersThatFit(itemId, capH = BOOSTER_CAP_H, cdH = 0, cdMult = 1) {
-        const each = boosterHours(itemId, cdMult);
-        if (!(each > 0)) return 0;
-        // An item can be used while the cooldown is below the cap, and the cooldown
-        // ticks down between uses, so the last one overshoots it: 5 EDVD or 49 candy
-        // on an empty 24 h cooldown (research-gym.md).
-        if (cdH >= capH) return 0;
-        return Math.floor((capH - cdH) / each + 1e-9) + 1;
-    }
-
-    /* ===== src/core/candy.js ===== */
-    /*
-     * Which candy a boost or jump uses, and how many. Pure.
-     *
-     * The owner: "we're defaulting to whatever Pumping Iron says we should take,
-     * it should just tell us what we should take/buy." So there is no default
-     * candy: every candy with a known price is weighed under the Plan's rule
-     * (most stats in the budget, best value for money, or max gains) and the
-     * winner is named everywhere (steps, Plan, Buy, Discord).
-     *
-     * Every candy costs the same booster cooldown (30 min, less with the
-     * consumable cuts), so a boost holds the same number of any of them; what
-     * differs is the happy each gives and its price.
-     */
-
-
-
-    /**
-     * The cheapest known price of each candy: the market (item market and
-     * bazaars, as the app loaded them) or an NPC shop the player ticked.
-     * @param {object} prices - {[id]: $ per unit} (market)
-     * @param {object} [npc] - {[id]: {price, shop}} NPC shop prices the player may use
-     * @returns {object} {[id]: {id, price, source:'market'|'npc', shop}}
-     */
-    function candyPrices(prices = {}, npc = {}) {
-        const out = {};
-        for (const id of CANDY_IDS) {
-            const m = Number(prices && prices[id]);
-            const n = npc && npc[id] && Number(npc[id].price);
-            if (n > 0 && !(m > 0 && m <= n)) out[id] = { id, price: n, source: 'npc', shop: npc[id].shop || null };
-            else if (m > 0) out[id] = { id, price: m, source: 'market', shop: null };
-        }
-        return out;
-    }
-
-    /**
-     * Candy worth weighing: a candy another beats on both happy and price is
-     * dropped (Lollipop vs Box of Chocolate Bars: the cheaper 25-happy one stays).
-     * @param {object} priced - candyPrices() output
-     * @returns {object[]} fewest happy first
-     */
-    function candyCandidates(priced) {
-        const list = Object.values(priced || {}).filter((c) => c && c.price > 0 && ITEMS[c.id]);
-        return list
-            .filter((c) => !list.some((o) => o !== c && ITEMS[o.id].happy >= ITEMS[c.id].happy && o.price <= c.price && (ITEMS[o.id].happy > ITEMS[c.id].happy || o.price < c.price || o.id < c.id)))
-            .sort((a, b) => ITEMS[a.id].happy - ITEMS[b.id].happy || a.price - b.price);
-    }
-
-    /** How many candy fit one boost: the booster cap from `cdH` already used, each 30 min × the cuts. */
-    function candyCount({ capH = BOOSTER_CAP_H, cdH = 0, cdMult = 1 } = {}) {
-        return boostersThatFit(CANDY_IDS[0], capH, cdH, cdMult);
-    }
-
-    /**
-     * The candy that gives the most stats under the Plan's rule.
-     *
-     * Without `evaluate`, each candy is scored by the happy it adds (a stand-in
-     * for stats: more happy, more stats) and the cost of `boosts` boosts. With
-     * `evaluate(id, count)` returning the whole plan's {gained, cost} (the
-     * engine passes a simulation), the scores are real stats and money, and
-     * `budget` is the plan's budget.
-     *
-     * @param {object} o
-     * @param {object} o.prices - {[id]: $} market unit prices
-     * @param {object} [o.npc] - {[id]: {price, shop}} NPC shop prices the player may use (ticked shops only)
-     * @param {number} [o.capH] - booster cooldown cap, hours (24; faction Voracity up to 48)
-     * @param {number} [o.cdH] - booster cooldown already used, hours
-     * @param {number} [o.cdCuts] - the consumable cooldown cuts as one multiplier (0.9 × 0.75 × 0.5 …)
-     * @param {number} [o.happyMult] - candy happy perks and events (Voracity +50%, a book ×2, World Diabetes Day ×3)
-     * @param {number} [o.budget] - money the candy may cost: over `boosts` boosts (proxy), or the whole plan (evaluate)
-     * @param {number} [o.boosts] - boosts the budget covers (Auto mode: boosts a day with a daily budget)
-     * @param {string} [o.pickBy] - 'most' (most stats in the budget) | 'value' (most stats per $) | 'max' (no budget)
-     * @param {object} [o.base] - {gained, cost} of the rest of the plan (proxy scores, for 'value')
-     * @param {function} [o.evaluate] - (id, count) => {gained, cost} of the whole plan with that candy
-     * @param {number} [o.count] - a fixed count per boost instead of filling the booster cap
-     * @param {number} [o.prefer] - the candy picked earlier today: kept while it gives the same happy and the
-     *   winner isn't at least CANDY_SWITCH_PCT cheaper for the whole boost (so the name doesn't flip on every price load)
-     * @returns {null|{id, name, count, happyEach, unit, source, shop, perBoost, gained, cost, fits, options:object[]}}
-     */
-    function bestCandy({ prices = {}, npc = {}, capH = BOOSTER_CAP_H, cdH = 0, cdCuts = 1, happyMult = 1, budget = Infinity, boosts = 1, pickBy = 'most', base = null, evaluate = null, count = null, prefer = null } = {}) {
-        const priced = candyPrices(prices, npc);
-        const cands = candyCandidates(priced);
-        // Today's pick stays in the running even when another +same-happy candy is a little cheaper (it's kept unless 10% cheaper).
-        if (prefer && priced[prefer] && !cands.some((c) => c.id === Number(prefer))) cands.push(priced[prefer]);
-        if (!cands.length) return null;
-        const n = count > 0 ? Math.floor(count) : candyCount({ capH, cdH, cdMult: cdCuts });
-        if (!(n > 0)) return null;
-        const limit = pickBy === 'max' ? Infinity : budget;
-        const options = cands.map((c) => {
-            const happyEach = ITEMS[c.id].happy * (happyMult || 1);
-            const perBoost = n * c.price;
-            let gained;
-            let cost;
-            if (evaluate) {
-                const r = evaluate(c.id, n) || {};
-                gained = Number(r.gained) || 0;
-                cost = Number(r.cost) || 0;
-            } else {
-                gained = (base ? Number(base.gained) || 0 : 0) + boosts * n * happyEach;
-                cost = (base ? Number(base.cost) || 0 : 0) + boosts * perBoost;
-            }
-            const own = evaluate ? cost : boosts * perBoost;
-            return { id: c.id, name: itemName(c.id), count: n, happyEach, unit: c.price, source: c.source, shop: c.shop, perBoost, gained, cost, fits: own <= limit };
-        });
-        const perM = (o) => (o.cost > 0 ? o.gained / o.cost : Infinity);
-        const pool = options.filter((o) => o.fits);
-        let best;
-        if (!pool.length) best = options.reduce((a, b) => (b.cost < a.cost ? b : a));
-        else if (pickBy === 'value') best = pool.reduce((a, b) => (perM(b) > perM(a) || (perM(b) === perM(a) && b.gained > a.gained) ? b : a));
-        else best = pool.reduce((a, b) => (b.gained > a.gained || (b.gained === a.gained && b.cost < a.cost) ? b : a));
-        // Owner (2026-09-29): the candy named flipped between reloads (every +25 candy is interchangeable). Today's pick stays
-        // unless the new one gives more happy or saves at least CANDY_SWITCH_PCT on the boost.
-        const kept = prefer ? options.find((o) => o.id === Number(prefer) && o.fits) : null;
-        if (kept && kept.id !== best.id && kept.happyEach === best.happyEach && best.perBoost > kept.perBoost * (1 - CANDY_SWITCH_PCT / 100)) best = kept;
-        return { ...best, options };
-    }
-
-    /** A candy picked earlier today is kept unless another saves this much on the boost (%). */
-    const CANDY_SWITCH_PCT = 10;
-
-    /** "Lollipop × 49" (the words steps, Plan and Buy use). */
-    function candyWords(c) {
-        if (!c || !c.id) return 'Candy';
-        return itemName(c.id) + (c.count ? ' × ' + c.count : '');
-    }
-
-    /** What an item adds, for pooling: candy by happy, energy drinks by energy. */
-    function poolValue(id) {
-        const it = ITEMS[id];
-        if (!it) return 0;
-        return it.category === 'Candy' ? it.happy || 0 : it.energy || 0;
-    }
-
-    /** Items that share a pool with `pickId`: every candy (same 30 min of booster cooldown), every energy drink (2 h). */
-    function poolOf(pickId) {
-        const it = ITEMS[pickId];
-        if (!it) return null;
-        return it.category === 'Candy' || it.category === 'Energy Drink' ? it.category : null;
-    }
-
-    /**
-     * Fill a boost's slots from what you hold first (owner, 2026-09-29: "it should exhaust my inventory first").
-     * Candy is a pool: each one takes the same booster cooldown, only its happy differs; energy drinks the same by
-     * energy. Held items with as much or more than the pick go in first (the most first), then the pick is bought
-     * for the rest. EDVD, FHC and everything else only count the same item held.
-     * @param {number} qty - slots in this boost
-     * @param {number} pickId - the plan's pick (what is bought)
-     * @param {object} held - {[id]: qty} still held (not changed here)
-     * @returns {{alloc:{id, qty, held}[], held:number, buy:number, value:number}} value: happy (candy) or energy (drinks) before perks
-     */
-    function fillFromPool(qty, pickId, held = {}) {
-        const n = Math.max(0, Math.floor(qty || 0));
-        const pool = poolOf(pickId);
-        const floor = poolValue(pickId);
-        const rows = Object.entries(held || {})
-            .map(([id, q]) => [Number(id), Math.max(0, Math.floor(Number(q) || 0))])
-            .filter(([id, q]) => q > 0 && ITEMS[id] && (pool ? poolOf(id) === pool && poolValue(id) >= floor : id === pickId))
-            .sort((a, b) => poolValue(b[0]) - poolValue(a[0]) || b[1] - a[1] || a[0] - b[0]);
-        const alloc = [];
-        let left = n;
-        for (const [id, q] of rows) {
-            if (left <= 0) break;
-            const take = Math.min(q, left);
-            alloc.push({ id, qty: take, held: take });
-            left -= take;
-        }
-        if (left > 0) {
-            const same = alloc.find((a) => a.id === pickId);
-            if (same) same.qty += left;
-            else alloc.push({ id: pickId, qty: left, held: 0 });
-        }
-        return { alloc, held: n - left, buy: left, value: alloc.reduce((a, x) => a + x.qty * poolValue(x.id), 0) };
-    }
-
-    /** Take a fill's held items out of `held` (the day plan and the simulator carry what's left to the next boost). */
-    function takeFromHeld(held, fill) {
-        for (const a of (fill && fill.alloc) || []) if (a.held > 0) held[a.id] = Math.max(0, (Number(held[a.id]) || 0) - a.held);
-    }
-
-    /**
-     * A boost's candy in words: "Lollipop × 49", or with what you hold, "Candy × 49: your 29 Chocolate Kisses +
-     * 20 Lollipop". `buy` says what is still bought ("buy 0" when the inventory covers it).
-     */
-    function fillWords(fill, pickId) {
-        if (!fill || !fill.alloc.length) return candyWords({ id: pickId });
-        const total = fill.held + fill.buy;
-        if (fill.alloc.length === 1) {
-            const a = fill.alloc[0];
-            return itemName(a.id) + ' × ' + total + (a.held ? ' (' + (a.held === a.qty ? 'all yours' : a.held + ' yours, buy ' + (a.qty - a.held)) + ')' : '');
-        }
-        const noun = isCandy(pickId) ? 'Candy' : 'Energy drinks';
-        const parts = fill.alloc.map((a) => (a.held === a.qty ? 'your ' + a.qty + ' ' + itemName(a.id) : a.qty + ' ' + itemName(a.id) + (a.held ? ' (' + a.held + ' yours)' : '')));
-        return noun + ' × ' + total + ': ' + parts.join(' + ');
-    }
-
-    /** "your 29 Chocolate Kisses + 20 Lollipop · buy 0" for the step's note (null when nothing is held). */
-    function heldWords(fill) {
-        if (!fill || !fill.held) return null;
-        const held = fill.alloc.filter((a) => a.held > 0).map((a) => a.held + ' ' + itemName(a.id));
-        return 'from your items: ' + held.join(' + ') + ' · buy ' + fill.buy;
-    }
-
-    /**
-     * The candy disclaimer (owner, 2026-09-29: the named candy changed between reloads): every candy with the same
-     * happy is interchangeable. "any +25 candy works the same (Lollipop, Bag of Bon Bons, Chocolate Kisses…)".
-     */
-    function tierWords(id) {
-        const it = ITEMS[id];
-        if (!it || it.category !== 'Candy') return '';
-        const same = CANDY_IDS.filter((c) => ITEMS[c].happy === it.happy);
-        if (same.length < 2) return '';
-        const names = [id, ...same.filter((c) => c !== id)].slice(0, 3).map(itemName);
-        return 'any +' + it.happy + ' candy works the same (' + names.join(', ') + (same.length > 3 ? '…' : '') + ')';
-    }
-
     /* ===== src/core/strategies.js ===== */
     /*
      * The training strategies as event simulators over N days, in 5-minute
@@ -2717,6 +3463,11 @@
      * @param {number} [o.boosterCdMin] - booster cooldown already running at the start, minutes (the live one)
      * @param {object} [o.held] - {[itemId]: qty} boosters in the inventory: used first and free (candy and energy
      *   drinks as a pool, the most happy or energy first; EDVD and FHC as themselves). `used.held` counts them.
+     * @param {object[]} [o.events] - round 6 (year plans): [{from, to (minutes from the start), candyMult, canMult,
+     *   freeEnergy, freeHappy}]: candy and cans count the event's × while it runs; free energy/happy land at its start
+     * @param {object} [o.unlock] - round 6: gyms opening as energy is trained: {left: energy to the next gym,
+     *   next: () => ({gyms, left}|null)}: when the energy trained reaches `left`, the gyms switch to `next()`'s
+     *   (per stat {dots, energy}) and `left` becomes the next step; `unlocked` counts them (with the day)
      * @returns {{id, gained:number, perStat:object, cost:number, energyTrained:number, daily:number[], used:object}}
      * Refills (points or special) set energy to the maximum, never above it: anything over is wasted (O2, owner).
      */
@@ -2775,6 +3526,16 @@
         const eb = id === 'steadyMax' ? { id: FHC, perDay: Infinity } : id === 'steadyBoost' && o.energyBooster && ITEMS[o.energyBooster.id] ? o.energyBooster : null;
         const ebItem = eb ? ITEMS[eb.id] : null;
         const canMult = o.canMult || 1;
+        // Events (year plans): the multipliers in force now, and free energy/happy handed out once at their start.
+        const evs = Array.isArray(o.events) ? o.events.filter((e) => e && e.to > 0 && e.from < days * 1440) : [];
+        let evCandy = 1;
+        let evCan = 1;
+        const evGiven = new Set();
+        // Gyms opening as energy is trained (year plans).
+        const unlocked = [];
+        let unlockLeft = o.unlock && o.unlock.left > 0 ? o.unlock.left : Infinity;
+        // This run's own (the specialists it has joined): plans compared side by side don't share it.
+        const unlockMemo = {};
         let ebDay = -1;
         let ebToday = 0;
         const isConsole = id === 'consoleJump' || id === 'consoleJumpToy';
@@ -2800,8 +3561,25 @@
                 E -= g.energy;
                 H = Math.max(0, H - HAPPY_LOSS_PER_ENERGY * g.energy * lossMult);
                 trainedE += g.energy;
+                unlockLeft -= g.energy;
+                if (unlockLeft <= 0) openGym();
             }
         };
+        // The next gym opened: train there from now on (its fee is the caller's; `unlocked` says when).
+        function openGym() {
+            const n = o.unlock.next(S, trainedE, unlockMemo);
+            if (!n) {
+                unlockLeft = Infinity;
+                return;
+            }
+            unlocked.push({ at: trainedE, gymId: n.gymId, cost: n.cost || 0, joined: n.joined || [] });
+            cost += n.cost || 0;
+            if (n.gyms) {
+                o = { ...o, gyms: n.gyms };
+                if (cands) cands.splice(0, cands.length, ...STATS.filter((k) => o.gyms[k] && o.gyms[k].dots > 0).map((k) => ({ k, dots: o.gyms[k].dots, energy: o.gyms[k].energy })));
+            }
+            unlockLeft += n.left > 0 ? n.left : Infinity;
+        }
         const buy = (item, n = 1) => {
             used[item] = (used[item] || 0) + n;
             cost += price(item) * n;
@@ -2820,7 +3598,7 @@
             return f;
         };
         // A candy boost of `n`: the happy it adds (held candy may give more than the pick).
-        const eatCandy = (n) => useBoosters(candyId, n).value * (o.candyMult || 1);
+        const eatCandy = (n) => useBoosters(candyId, n).value * (o.candyMult || 1) * evCandy;
         // Special refills: in a boosted session as many as keep happy above the maximum (it resets there anyway);
         // otherwise a day's share. Each train costs happy, so dumping them all at the maximum drains it for days.
         const specialPerDay = Math.ceil(Math.max(0, Math.floor(o.special || 0)) / days);
@@ -2896,7 +3674,7 @@
                 if (ebItem.toMax) {
                     E = Math.max(E, maxE);
                     H += ebItem.happy || 0;
-                } else E += Math.round(f.value * canMult);
+                } else E += Math.round(f.value * canMult * evCan);
                 addBooster(eb.id, 1, t);
                 ebToday++;
                 train();
@@ -2926,6 +3704,21 @@
         for (let t = 0; t < days * 1440; t += STEP_MIN) {
             const day = Math.floor(t / 1440);
             if (t % 1440 === 0 && t) daily.push(Math.round(totalOf(S) - start));
+            if (evs.length) {
+                evCandy = 1;
+                evCan = 1;
+                for (let i = 0; i < evs.length; i++) {
+                    const ev = evs[i];
+                    if (t < ev.from || t >= ev.to) continue;
+                    evCandy *= ev.candyMult || 1;
+                    evCan *= ev.canMult || 1;
+                    if (!evGiven.has(i) && (ev.freeEnergy || ev.freeHappy)) {
+                        evGiven.add(i);
+                        E += ev.freeEnergy || 0;
+                        H = Math.min(HAPPY_CAP, H + (ev.freeHappy || 0));
+                    }
+                }
+            }
             if (t % regenEvery === 0 && E < maxE) E = Math.min(maxE, E + 5);
             if (t % 15 === 0) {
                 if (bliss) H = Math.min(HAPPY_CAP, H + 5);
@@ -3043,7 +3836,9 @@
         daily.push(Math.round(totalOf(S) - start));
         const perStat = {};
         for (const k of STATS) perStat[k] = Math.round(S[k] - o.stats[k]);
-        return { id, gained: Math.round(totalOf(S) - start), perStat, cost: Math.round(cost), energyTrained: trainedE, daily, used };
+        const out = { id, gained: Math.round(totalOf(S) - start), perStat, cost: Math.round(cost), energyTrained: trainedE, daily, used };
+        if (unlocked.length) out.unlocked = unlocked;
+        return out;
     }
 
     /** Which strategies can run at all for this player (items, cooldown caps, a book). */
@@ -3962,7 +4757,7 @@
 
 
     /** Samples kept (the learner wants many; each is ~150 bytes). */
-    const CALIBRATION_KEEP = 200;
+    const CALIBRATION_KEEP = 500;
 
     /**
      * @param {object} prev - normalizeState() before
@@ -4231,8 +5026,11 @@
             id: 'anniversary',
             match: /^torn anniversary/i,
             name: 'Torn Anniversary',
-            effect: 'The R in the TORN logo gives +500 happy (once per 15 min, 10 times).',
-            advice: 'One click fits a jump window: +500 happy.',
+            // Round 6 (research-year-events.md): the T gives energy too (+50 each, 10 uses).
+            freeEnergy: 500,
+            freeHappy: 500,
+            effect: 'The R in the TORN logo gives +500 happy and the T +50 energy (each once per 15 min, 10 times).',
+            advice: 'One R click fits a jump window: +500 happy; the ten T clicks are 500 free energy.',
         },
         {
             id: 'ead',
@@ -4300,10 +5098,77 @@
 
     /**
      * Should the plan keep the booster cooldown free now: an event that uses it
-     * starts within a day, and this plan uses what the event boosts.
+     * starts within one booster cap (24 h; 48 h with faction Voracity), and this
+     * plan uses what the event boosts.
      */
-    function holdBoosterFor(events, now, strategy = null) {
-        return (events || []).find((e) => e.usesBooster && !e.active && e.start - now <= EVENT_BOOSTER_HOLD_MS && (!strategy || (EVENT_PLANS[e.id] || []).includes(strategy))) || null;
+    function holdBoosterFor(events, now, strategy = null, capH = 24) {
+        const hold = Math.max(EVENT_BOOSTER_HOLD_MS, (Number(capH) || 24) * HOUR);
+        return (events || []).find((e) => e.usesBooster && !e.active && e.start - now <= hold && (!strategy || (EVENT_PLANS[e.id] || []).includes(strategy))) || null;
+    }
+
+    /** Easter Sunday (UTC midnight) of a year (the Gregorian computus). */
+    function easterSunday(year) {
+        const a = year % 19;
+        const b = Math.floor(year / 100);
+        const c = year % 100;
+        const d = Math.floor(b / 4);
+        const e = b % 4;
+        const f = Math.floor((b + 8) / 25);
+        const g = Math.floor((b - f + 1) / 3);
+        const h = (19 * a + b - d - g + 15) % 30;
+        const i = Math.floor(c / 4);
+        const k = c % 4;
+        const l = (32 + 2 * e + 2 * i - h - k) % 7;
+        const m = Math.floor((a + 11 * h + 22 * l) / 451);
+        const month = Math.floor((h + l - 7 * m + 114) / 31);
+        const day = ((h + l - 7 * m + 114) % 31) + 1;
+        return Date.UTC(year, month - 1, day);
+    }
+
+    /**
+     * Next year's dates (research-year-events.md §1a): fixed days, and Easter
+     * Sunday −3 to +3. Marked `expected` until the API lists them.
+     */
+    function ruleEvents(year) {
+        const day = (m, d) => Math.floor(Date.UTC(year, m - 1, d) / 1000);
+        const easter = Math.floor(easterSunday(year) / 1000);
+        return [
+            { title: 'CaffeineCon ' + year, start: day(10, 15), end: day(10, 15) + 86399, expected: true },
+            { title: 'World Diabetes Day', start: day(11, 14), end: day(11, 14) + 86399, expected: true },
+            { title: 'Torn Anniversary', start: day(11, 15), end: day(11, 15) + 86399, fixed_start_time: true, expected: true },
+            { title: 'Easter Egg Hunt', start: easter - 3 * 86400, end: easter + 4 * 86400 - 1, expected: true },
+        ];
+    }
+
+    /**
+     * Every training event between two times (a year plan): this year's from
+     * `/torn/calendar` (a fixed event already past comes back with `start` in
+     * next year and `end` in this one: read as this year's), the rest from the
+     * date rules. Soonest first, with the player's window.
+     */
+    function eventsBetween(calendar, from, to, { startTime = null } = {}) {
+        const slot = slotMinutes(startTime);
+        const api = (calendar && Array.isArray(calendar.events) ? calendar.events : []).map((ev) => (ev && Number(ev.start) > Number(ev.end) ? { ...ev, start: Number(ev.start) - 365 * 86400 } : ev));
+        const out = [];
+        const seen = new Set();
+        const add = (ev) => {
+            const title = String((ev && ev.title) || '');
+            const def = TRAINING_EVENTS.find((d) => d.match.test(title));
+            if (!def) return;
+            const w = eventWindow(ev, slot);
+            if (!w || w.end <= from || w.start >= to) return;
+            const key = def.id + ':' + new Date(w.start + 2 * DAY).getUTCFullYear();
+            if (seen.has(key)) return;
+            seen.add(key);
+            const { match, ...rest } = def;
+            void match;
+            out.push({ ...rest, title, start: w.start, end: w.end, exact: w.exact, expected: Boolean(ev.expected) });
+        };
+        for (const ev of api) add(ev);
+        const y0 = new Date(from).getUTCFullYear();
+        const y1 = new Date(to).getUTCFullYear();
+        for (let y = y0; y <= y1; y++) for (const ev of ruleEvents(y)) add(ev);
+        return out.sort((a, b) => a.start - b.start);
     }
 
     /** While an event runs: × on can energy and candy happy (on top of perks). */
@@ -4322,506 +5187,6 @@
         if (!e) return null;
         const when = e.active ? 'now' : e.inMs < HOUR ? 'within the hour' : e.inMs < DAY ? 'in ' + Math.round(e.inMs / HOUR) + ' h' : 'in ' + Math.round(e.inMs / DAY) + ' days';
         return { text: e.name + ' ' + when + (e.exact ? '' : ' (about)'), sub: e.effect + ' ' + e.advice, at: e.start, active: e.active, id: e.id, until: e.end };
-    }
-
-    /* ===== src/sources/route.js ===== */
-    /*
-     * Which page are we on? Pure string work, so it is testable.
-     *
-     * Every page the script marks is one the user opened; nothing here loads a
-     * page. The harness stands in for Torn's pages with `?page=<name>` on its own
-     * host (never on torn.com), the way the trading app's harness does.
-     */
-
-    const PAGE_GYM = 'gym';
-    const PAGE_ITEMS = 'items';
-    const PAGE_ITEM_MARKET = 'itemmarket';
-    const PAGE_BAZAAR = 'bazaar';
-    const PAGE_POINTS = 'points';
-    const PAGE_PROFILE = 'profile';
-    const PAGE_FACTION = 'faction';
-    const PAGE_ATTACK = 'attack';
-    const PAGE_OTHER = 'other';
-
-    /** The webpage the script draws over (GitHub Pages, gh-pages branch). */
-    const APP_PAGE_URL = 'https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html';
-
-    /** Torn Trading's Torn Bids page: we only note that Torn Trading runs there (read only). */
-    const TRADING_PAGE_URL = 'https://abrahamdelosreyes17-oss.github.io/torn-moneymaker-releases/traders.html';
-
-    function isTradingPageUrl(href) {
-        return String(href || '').split(/[?#]/)[0] === TRADING_PAGE_URL;
-    }
-
-    /** The harness boots the webpage on its own host with this marker. */
-    const APP_PAGE_PARAM = 'pi';
-    const APP_PAGE_VALUE = 'app';
-
-    function queryOf(href) {
-        try {
-            return new URL(href).searchParams;
-        } catch {
-            return new URLSearchParams();
-        }
-    }
-
-    function hostOf(href) {
-        try {
-            return new URL(href).hostname.toLowerCase();
-        } catch {
-            return '';
-        }
-    }
-
-    function isTornHost(href) {
-        return /(^|\.)torn\.com$/.test(hostOf(href));
-    }
-
-    /** A query value whatever its spelling (Torn's own links vary: XID, userId, userID). */
-    function param(href, name) {
-        const want = name.toLowerCase();
-        for (const [k, v] of queryOf(href)) if (k.toLowerCase() === want) return v;
-        // Some Torn pages keep their parameters in the hash (#/p=...&ID=5).
-        const hash = String(href || '').split('#')[1] || '';
-        for (const part of hash.replace(/^\/+/, '').split(/[&?]/)) {
-            const [k, v] = part.split('=');
-            if (k && k.toLowerCase() === want) return v || '';
-        }
-        return null;
-    }
-
-    function numParam(href, name) {
-        const v = param(href, name);
-        return v && /^\d+$/.test(v) ? v : null;
-    }
-
-    /**
-     * @param {string} href - normally location.href
-     * @returns {string} one of the PAGE_* constants
-     */
-    function detectPage(href) {
-        if (typeof href !== 'string' || !href) return PAGE_OTHER;
-        const url = href.toLowerCase();
-
-        // The harness: ?page=gym etc. on a host that is not Torn.
-        if (!isTornHost(href)) {
-            const p = (queryOf(href).get('page') || '').toLowerCase();
-            const known = [PAGE_GYM, PAGE_ITEMS, PAGE_ITEM_MARKET, PAGE_BAZAAR, PAGE_POINTS, PAGE_PROFILE, PAGE_FACTION, PAGE_ATTACK];
-            return known.includes(p) ? p : PAGE_OTHER;
-        }
-
-        if (url.includes('/gym.php')) return PAGE_GYM;
-        if (url.includes('/item.php')) return PAGE_ITEMS;
-        if (url.includes('sid=itemmarket') || url.includes('/imarket.php')) return PAGE_ITEM_MARKET;
-        if (url.includes('/bazaar.php')) return PAGE_BAZAAR;
-        if (url.includes('/pmarket.php')) return PAGE_POINTS;
-        if (url.includes('/profiles.php')) return PAGE_PROFILE;
-        if (url.includes('/factions.php')) return PAGE_FACTION;
-        if (/[?&]sid=attack(&|#|$)/.test(url) && (url.includes('loader.php') || url.includes('page.php'))) return PAGE_ATTACK;
-        return PAGE_OTHER;
-    }
-
-    /** The player a profile page shows (profiles.php?XID=), or null. */
-    function profileIdOf(href) {
-        return detectPage(href) === PAGE_PROFILE ? numParam(href, 'XID') : null;
-    }
-
-    /** The defender on the attack page (page.php?sid=attack&user2ID=, older loader.php links too), or null. */
-    function attackTargetOf(href) {
-        return detectPage(href) === PAGE_ATTACK ? numParam(href, 'user2ID') : null;
-    }
-
-    /** Whose bazaar this is (bazaar.php?userId=), or null for your own. */
-    function bazaarOwnerId(href) {
-        return detectPage(href) === PAGE_BAZAAR ? numParam(href, 'userId') : null;
-    }
-
-    /** The faction a faction page shows (factions.php?step=profile&ID=), or null (your own). */
-    function factionIdOf(href) {
-        return detectPage(href) === PAGE_FACTION ? numParam(href, 'ID') : null;
-    }
-
-    /** The item the Item Market page is showing (#/market/view=search&itemID=), or null. */
-    function itemMarketItemOf(href) {
-        return detectPage(href) === PAGE_ITEM_MARKET ? numParam(href, 'itemID') : null;
-    }
-
-    function isAppPageUrl(href) {
-        if (String(href || '').split(/[?#]/)[0] === APP_PAGE_URL) return true;
-        // The harness boots the webpage on its own page with the marker.
-        return queryOf(href).get(APP_PAGE_PARAM) === APP_PAGE_VALUE && !isTornHost(href);
-    }
-
-    /* ---------------------------------------------------------- Torn links */
-
-    /*
-     * Every action in the app is a link to the exact Torn page (owner rule 6).
-     * One click, one navigation: nothing is bought, used or trained.
-     */
-
-    const TORN = 'https://www.torn.com/';
-
-    function gymUrl() {
-        return TORN + 'gym.php';
-    }
-
-    function itemsUrl() {
-        return TORN + 'item.php';
-    }
-
-    /** Energy refills are bought on the Points page. */
-    function pointsUrl() {
-        return TORN + 'points.php';
-    }
-
-    function pointsMarketUrl() {
-        return TORN + 'pmarket.php';
-    }
-
-    function bazaarUrl(userId) {
-        return TORN + 'bazaar.php?userId=' + encodeURIComponent(String(userId)) + '#/';
-    }
-
-    function itemMarketUrl(itemId) {
-        return TORN + 'page.php?sid=ItemMarket#/market/view=search&itemID=' + encodeURIComponent(String(itemId));
-    }
-
-    /**
-     * City shops by the name /torn/items gives them (value.shops[].shop), as
-     * shops.php?step= pages (TornTools links the Pharmacy as step=pharmacy).
-     * Sally's Sweet Shop is step=candy [verify]; a shop not listed opens the city map.
-     */
-    const SHOP_STEPS = {
-        "Sally's Sweet Shop": 'candy',
-        Pharmacy: 'pharmacy',
-        "Bits 'n' Bobs": 'bitsnbobs',
-        'Super Store': 'super',
-        'Cyber Force': 'cyberforce',
-        'Jewelry Store': 'jewelry',
-        'Nikeh Sports': 'nikeh',
-        'TC Clothing': 'clothes',
-        Docks: 'docks',
-        'Post Office': 'postoffice',
-        'Pawn Shop': 'pawnshop',
-        'Recycling Center': 'recyclingcenter',
-        'Print Shop': 'printstore',
-    };
-
-    function shopUrl(shop) {
-        const step = SHOP_STEPS[shop];
-        return step ? TORN + 'shops.php?step=' + step : TORN + 'city.php';
-    }
-
-    function profileUrl(userId) {
-        return TORN + 'profiles.php?XID=' + encodeURIComponent(String(userId));
-    }
-
-    function attackUrl(userId) {
-        // Torn retired loader.php for attacks ("This endpoint is no longer available … page.php", 2026-09-29).
-        return TORN + 'page.php?sid=attack&user2ID=' + encodeURIComponent(String(userId));
-    }
-
-    function factionUrl(factionId) {
-        return TORN + 'factions.php?step=profile&ID=' + encodeURIComponent(String(factionId));
-    }
-
-    function apiKeyPageUrl() {
-        return TORN + 'preferences.php#tab=api';
-    }
-
-    /* ===== src/core/market.js ===== */
-    /*
-     * What to buy and where: the need list from the plan, the cheapest fill
-     * across the Item Market, every bazaar (TornW3B) and the points market, and
-     * a verdict against our own 7-day history. Pure. ENGINE-SPEC §8.
-     */
-
-
-
-
-
-
-    const SOURCE_BAZAAR = 'bazaar';
-    const SOURCE_ITEM_MARKET = 'itemmarket';
-    const SOURCE_POINTS = 'points';
-    /** A city (NPC) shop: Sally's Sweet Shop and the like. */
-    const SOURCE_NPC = 'npc';
-
-    /**
-     * The slice of /v2/torn/{ids}/items the plan keeps: Torn's market price and
-     * the city shops that sell each item (only shops in Torn: abroad needs a flight).
-     * @param {object[]} items - the `items` array
-     * @returns {object} {[id]: {market:number|null, shops:[{shop, buy}]}}
-     */
-    function itemsInfoFrom(items) {
-        const out = {};
-        for (const it of Array.isArray(items) ? items : []) {
-            const id = Number(it && it.id);
-            if (!id) continue;
-            const v = it.value || {};
-            const shops = (Array.isArray(v.shops) ? v.shops : [])
-                .filter((s) => s && (s.country === undefined || s.country === 'Torn') && Number(s.buy_price) > 0)
-                .map((s) => ({ shop: String(s.shop), buy: Number(s.buy_price) }));
-            out[id] = { market: Number(v.market_price) > 0 ? Number(v.market_price) : null, shops };
-        }
-        return out;
-    }
-
-    /** Torn's own market price per item (a price to weigh a candy by until listings load). */
-    function marketPricesFrom(info) {
-        const out = {};
-        for (const [id, v] of Object.entries(info || {})) if (v && v.market > 0) out[id] = v.market;
-        return out;
-    }
-
-    /** The city shops that sell candy (Buy › Shops I can buy from lists these). */
-    function candyShopsFrom(info) {
-        const set = new Set();
-        for (const [id, v] of Object.entries(info || {})) if (isCandy(Number(id))) for (const s of (v && v.shops) || []) set.add(s.shop);
-        return [...set].sort();
-    }
-
-    /** Sally's Sweet Shop: counted by default (owner, 2026-09-29), the Buy tick switches it off. */
-    const SALLYS = "Sally's Sweet Shop";
-    const DEFAULT_SHOPS = [SALLYS];
-
-    /**
-     * Torn's Daily Items Allowance: 100 items a day from the city shops, all of them together, reset at 00:00 TCT
-     * (docs/research-sallys-xanax.md, 4 sources). Read from the personal stat `cityitemsbought`.
-     */
-    const CITY_DAILY_ALLOWANCE = 100;
-
-    /** The city shops the plan may buy from: Sally's unless switched off, plus any other shop ticked. */
-    function shopsAllowed(settings = {}) {
-        const off = new Set(Array.isArray(settings.npcShopsOff) ? settings.npcShopsOff : []);
-        const on = new Set([...DEFAULT_SHOPS, ...(Array.isArray(settings.npcShops) ? settings.npcShops : [])]);
-        return [...on].filter((x) => !off.has(x)).sort();
-    }
-
-    /** A shop's tick clicked: the settings patch ({npcShops, npcShopsOff}). */
-    function toggleShop(settings = {}, shop) {
-        const onNow = shopsAllowed(settings).includes(shop);
-        const on = new Set(Array.isArray(settings.npcShops) ? settings.npcShops : []);
-        const off = new Set(Array.isArray(settings.npcShopsOff) ? settings.npcShopsOff : []);
-        if (onNow) {
-            on.delete(shop);
-            off.add(shop);
-        } else {
-            off.delete(shop);
-            on.add(shop);
-        }
-        return { npcShops: [...on], npcShopsOff: [...off] };
-    }
-
-    /**
-     * Today's city-shop allowance left: 100 less what `cityitemsbought` rose since the Torn day began. Null
-     * until both reads are in (and for a read from an earlier Torn day).
-     * @param {object} cs - {day, start, now} stored by the feed
-     */
-    function allowanceLeft(cs, now) {
-        if (!cs || !(Number.isFinite(cs.start) && Number.isFinite(cs.now))) return null;
-        if (tornDayStart(now) !== cs.day) return CITY_DAILY_ALLOWANCE;
-        return Math.max(0, CITY_DAILY_ALLOWANCE - Math.max(0, cs.now - cs.start));
-    }
-
-    /**
-     * NPC prices the player may use: only shops they ticked (Torn's API can't
-     * tell who may buy there; the owner: Sally's is for newbies only).
-     * @returns {object} {[id]: {price, shop}} the cheapest ticked shop per item
-     */
-    function npcPricesFrom(info, allowed = []) {
-        const ok = new Set(Array.isArray(allowed) ? allowed : []);
-        const out = {};
-        if (!ok.size) return out;
-        for (const [id, v] of Object.entries(info || {})) {
-            for (const s of (v && v.shops) || []) {
-                if (!ok.has(s.shop)) continue;
-                if (!out[id] || s.buy < out[id].price) out[id] = { price: s.buy, shop: s.shop };
-            }
-        }
-        return out;
-    }
-
-    /**
-     * A shop "listing" for the Buy list: as many as needed at the shop's price, up to what's left of today's
-     * city-shop allowance (`left`; null = not read yet, 100 at most). None once the allowance is used up.
-     */
-    function npcListing(npc, qty, left = null) {
-        if (!npc || !(npc.price > 0)) return null;
-        const cap = left === null || left === undefined ? CITY_DAILY_ALLOWANCE : Math.max(0, Math.floor(left));
-        const n = Math.min(Math.max(1, Math.floor(qty || 1)), cap);
-        if (!(n > 0)) return null;
-        return { source: SOURCE_NPC, shop: npc.shop, sellerName: npc.shop, price: npc.price, qty: n };
-    }
-
-    /** Verdict thresholds vs the 7-day average of the lowest price. */
-    const BUY_NOW_MAX_PCT = 1;
-    const WAIT_OVER_PCT = 3;
-    const BULK_UNDER_PCT = 3;
-
-    /** Bazaar listings TornW3B hasn't re-checked in this long are dropped (Torn Trading's rule). */
-    const BAZAAR_MAX_AGE_MS = 2 * 60 * 1000;
-
-    /** Buy windows (Buy tab switch). */
-    const WINDOWS = { today: 1, three: 3, week: 7 };
-
-    /**
-     * @param {object} needed - {[itemId]: qty} for the window (plan.itemsNeeded over those days)
-     * @param {object} inventory - {[itemId]: qty held}
-     * @returns {{id, need:number, have:number, buy:number}[]} in a stable order (drugs, boosters, points)
-     */
-    function needList(needed, inventory = {}) {
-        const order = (id) => (id === POINTS ? 3 : ITEMS[id] && ITEMS[id].kind === 'drug' ? 1 : 2);
-        const rows = Object.entries(needed || {})
-            .map(([k, q]) => {
-                const id = k === POINTS ? POINTS : Number(k);
-                const have = Math.max(0, Number(inventory[id]) || 0);
-                return { id, name: itemName(id), need: q, have, buy: Math.max(0, q - have) };
-            })
-            .filter((r) => r.need > 0)
-            .sort((a, b) => order(a.id) - order(b.id) || String(a.id).localeCompare(String(b.id)));
-        // Candy and energy drinks are pools (owner: "it should exhaust my inventory first"): held ones the plan doesn't
-        // use yet cover a need for another with as much or less happy (energy), so nothing held is bought again.
-        const spare = {};
-        for (const [k, q] of Object.entries(inventory || {})) {
-            const id = Number(k);
-            if (!poolOf(id) || !(Number(q) > 0)) continue;
-            const used = rows.find((r) => r.id === id);
-            spare[id] = Math.max(0, Math.floor(Number(q)) - (used ? used.need : 0));
-        }
-        for (const r of rows) {
-            if (!(r.buy > 0) || !poolOf(r.id)) continue;
-            const f = fillFromPool(r.buy, r.id, Object.fromEntries(Object.entries(spare).filter(([id]) => Number(id) !== r.id)));
-            if (!f.held) continue;
-            takeFromHeld(spare, f);
-            r.fromPool = f.alloc.filter((a) => a.held > 0).map((a) => ({ id: a.id, name: itemName(a.id), qty: a.held }));
-            r.buy = f.buy;
-        }
-        return rows;
-    }
-
-    /** Where a row sends you: the exact bazaar, Item Market search or the points market. */
-    function linkFor(row, itemId) {
-        if (row.source === SOURCE_BAZAAR && row.sellerId) return bazaarUrl(row.sellerId);
-        if (row.source === SOURCE_POINTS) return pointsMarketUrl();
-        if (row.source === SOURCE_NPC) return shopUrl(row.shop);
-        return itemMarketUrl(itemId);
-    }
-
-    /**
-     * Take `qty` from the cheapest listings upward, whatever the source.
-     * Listings: {source, sellerId?, sellerName?, price, qty}. Ties keep the
-     * given order (callers list the Item Market first: no trip to a bazaar for
-     * the same price).
-     * @returns {{rows:object[], total:number, filled:number, short:number}}
-     */
-    function fillCheapest(listings, qty, itemId) {
-        const sorted = (listings || [])
-            .filter((l) => l && Number(l.price) > 0 && Number(l.qty) > 0)
-            .map((l, i) => ({ ...l, i }))
-            .sort((a, b) => a.price - b.price || a.i - b.i);
-        const rows = [];
-        let left = Math.max(0, qty);
-        let total = 0;
-        for (const l of sorted) {
-            if (left <= 0) break;
-            const take = Math.min(left, l.qty);
-            const row = { source: l.source, sellerId: l.sellerId || null, sellerName: l.sellerName || null, listingId: l.listingId || null, listed: l.qty, qty: take, price: l.price, subtotal: take * l.price, dataAt: l.dataAt || null, ...(l.shop ? { shop: l.shop } : {}) };
-            row.link = linkFor(row, itemId);
-            rows.push(row);
-            total += row.subtotal;
-            left -= take;
-        }
-        return { rows, total, filled: qty - left, short: left };
-    }
-
-    /**
-     * Buy now, fine, wait or stock up, from the cheapest price against the
-     * 7-day average of daily lows.
-     * @param {number} price - the cheapest price now
-     * @param {number|null} avg7
-     * @param {object} [o] - {slack: the plan can wait a day (enough in inventory for today)}
-     */
-    function priceVerdict(price, avg7, { slack = false } = {}) {
-        if (!(avg7 > 0) || !(price > 0)) return { kind: 'unknown', pct: null, text: 'No 7-day history yet' };
-        const pct = (100 * (price - avg7)) / avg7;
-        const vs = Math.abs(pct) < 0.05 ? 'at the 7-day average' : Math.abs(pct).toFixed(1) + '% ' + (pct < 0 ? 'under' : 'over') + ' the 7-day average';
-        if (pct <= -BULK_UNDER_PCT) return { kind: 'bulk', pct, text: 'Stock up · ' + vs };
-        if (pct <= BUY_NOW_MAX_PCT) return { kind: 'buy', pct, text: 'Buy now · ' + vs };
-        if (pct > WAIT_OVER_PCT && slack) return { kind: 'wait', pct, text: 'Wait · ' + vs };
-        return { kind: 'fine', pct, text: 'Fine · ' + vs };
-    }
-
-    /**
-     * Listings from each source in one shape.
-     * - Item Market (/v2/market/{id}/itemmarket): itemmarket.listings[{price, amount}]
-     * - TornW3B (/api/marketplace/{id}): listings[{player_id, player_name, price, quantity}]
-     * - Points market (/v2/market/pointsmarket): pointsmarket[{id, cost, quantity}] (cost per point)
-     */
-    function listingsFromItemMarket(api) {
-        const im = api && (api.itemmarket || api);
-        const list = im && Array.isArray(im.listings) ? im.listings : [];
-        return list.map((l) => ({ source: SOURCE_ITEM_MARKET, price: Number(l.price), qty: Number(l.amount ?? l.quantity) || 0 }));
-    }
-
-    /**
-     * TornW3B's bazaar listings. With `now`, only listings re-checked within
-     * BAZAAR_MAX_AGE_MS stay (Torn Trading's rule: an older one is often gone),
-     * and never a $1 listing (locked, one person's).
-     */
-    function listingsFromW3b(api, { now = null, maxAgeMs = BAZAAR_MAX_AGE_MS } = {}) {
-        const list = api && Array.isArray(api.listings) ? api.listings : [];
-        const rows = list.map((l) => ({ source: SOURCE_BAZAAR, sellerId: l.player_id ? String(l.player_id) : null, sellerName: l.player_name || null, price: Number(l.price), qty: Number(l.quantity) || 0, dataAt: toMs(l.last_checked) || toMs(l.content_updated) }));
-        if (now === null) return rows;
-        return rows.filter((r) => r.sellerId && r.price > 1 && r.dataAt && now - r.dataAt <= maxAgeMs);
-    }
-
-    /** Seconds or milliseconds → milliseconds (TornW3B sends seconds). */
-    function toMs(v) {
-        const n = Number(v);
-        if (!Number.isFinite(n) || n <= 0) return null;
-        return n < 1e12 ? n * 1000 : n;
-    }
-
-    /**
-     * The price a plan should count for an item: what `qty` units cost from the
-     * cheapest listings up, per unit. Stored price rows are objects
-     * ({at, listings, avg7}), sample prices plain numbers; anything else is null
-     * (never $0: a free item would win every comparison).
-     */
-    function unitPrice(row, qty = 10) {
-        if (typeof row === 'number') return row > 0 ? row : null;
-        if (!row || typeof row !== 'object') return null;
-        const ls = Array.isArray(row.listings) ? row.listings : [];
-        if (ls.length) {
-            const f = fillCheapest(ls, qty, null);
-            if (f.filled > 0) return f.total / f.filled;
-        }
-        return row.avg7 > 0 ? row.avg7 : null;
-    }
-
-    /** {itemId: price row} → {itemId: $ per unit}, only the ones known (points: per point, 300 at a time; candy: a boost's 50). */
-    function livePrices(rows) {
-        const out = {};
-        for (const [id, row] of Object.entries(rows || {})) {
-            const p = unitPrice(row, id === POINTS ? 300 : isCandy(Number(id)) ? 50 : 10);
-            if (p) out[id] = p;
-        }
-        return out;
-    }
-
-    function listingsFromPoints(api) {
-        const raw = api && api.pointsmarket;
-        const list = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? Object.entries(raw).map(([id, v]) => ({ id, ...v })) : [];
-        return list.map((l) => ({ source: SOURCE_POINTS, listingId: l.id ? String(l.id) : null, price: Number(l.cost ?? l.price), qty: Number(l.quantity) || 0 }));
-    }
-
-    /** A seller line: "Iron_Monk's bazaar", "Item Market", "Points market". */
-    function whereText(row) {
-        if (row.source === SOURCE_BAZAAR) return (row.sellerName ? row.sellerName + "'s" : 'A') + ' bazaar';
-        if (row.source === SOURCE_POINTS) return 'Points market';
-        if (row.source === SOURCE_NPC) return row.shop || 'City shop';
-        return 'Item Market';
     }
 
     /* ===== src/api/torn.js ===== */
@@ -4921,6 +5286,45 @@
             throw error;
         }
     }
+
+    /**
+     * The income that is certain (round 6, R6.4): the city bank investment
+     * (/user/money, Limited), your stocks' benefits (/user/stocks, Limited, with
+     * /torn/stocks for what each pays), and properties you rent out
+     * (/user/properties?filters=ownedByUser). Four calls; a part that fails is
+     * left out (null), the rest still count.
+     */
+    async function fetchPassiveIncome(client) {
+        let failed = 0;
+        const part = async (fn) => {
+            try {
+                return await fn();
+            } catch (error) {
+                // Paused, rate-limited, offline or a dead key: the whole read waits and is asked again (5 minutes).
+                if (error && (error.takingTurns || error.paused || KEY_DEAD_CODES_API.has(error.code) || !(error instanceof TornApiError))) throw error;
+                failed++;
+                return null;
+            }
+        };
+        const money = await part(async () => ((await client.get('v2/user/money')) || {}).money || null);
+        const cb = money && money.city_bank;
+        const userStocks = await part(async () => ((await client.get('v2/user/stocks')) || {}).stocks || []);
+        const tornStocks = userStocks && userStocks.length ? await part(async () => ((await client.get('v2/torn/stocks')) || {}).stocks || []) : [];
+        const properties = await part(async () => ((await client.get('v2/user/properties', { filters: 'ownedByUser', limit: 100 })) || {}).properties || []);
+        // Every part refused: not "nothing certain", a failed read.
+        if (failed >= 3) throw new Error('The income reads all failed.');
+        const slimStocks = (tornStocks || []).filter((s) => (userStocks || []).some((u) => Number(u.id) === Number(s.id))).map((s) => ({ id: s.id, name: s.name, acronym: s.acronym, bonus: s.bonus }));
+        return {
+            cityBank: cb ? { amount: cb.amount, profit: cb.profit, duration: cb.duration, until: cb.until, rate: cb.interest_rate } : null,
+            userStocks: (userStocks || []).map((u) => ({ id: u.id, shares: u.shares, bonus: u.bonus })),
+            tornStocks: slimStocks,
+            // Only what the rent needs (the full answer carries every modification and staff).
+            properties: (properties || []).filter((p) => p && p.status === 'rented').map((p) => ({ status: p.status, owner: p.owner ? { id: p.owner.id } : null, property: p.property ? { name: p.property.name } : null, cost_per_day: p.cost_per_day, rental_period_remaining: p.rental_period_remaining })),
+        };
+    }
+
+    /** Torn's codes for a key that no longer works (the caller stops on these). */
+    const KEY_DEAD_CODES_API = new Set([2, 13, 18]);
 
     /** Points held, or null (see fetchMoney). */
     async function fetchPoints(client) {
@@ -5556,17 +5960,26 @@
      * @param {number} [o.spentPerDay] - what the gym plan spends a day (added back to the log's net)
      * @returns {{on:boolean, ready:boolean, needsKey:boolean, waiting:boolean, perDay:number|null, budgetPerDay:number|null, budget:number|null, source:'log'|'networth'|null, networthPerDay:number|null}}
      */
-    function autoState({ plan, settings, hasFullKey, income, log = null, spentPerDay = 0 }) {
+    function autoState({ plan, settings, hasFullKey, income, log = null, spentPerDay = 0, floor = null }) {
         const on = Boolean(plan && plan.pickBy === 'auto');
         const horizon = (settings && settings.horizonDays) || 30;
+        const certain = floor && floor.perDay > 0 ? floor.perDay : 0;
         if (!on) return { on, ready: false, needsKey: false, waiting: false, perDay: null, budgetPerDay: null, budget: null };
-        if (!hasFullKey) return { on, ready: false, needsKey: true, waiting: false, perDay: null, budgetPerDay: null, budget: null };
+        // Round 6 (R6.4): the income that is certain (bank, dividends, rent: Limited key) lets Auto plan without the Full key.
+        if (!hasFullKey) {
+            if (!certain) return { on, ready: false, needsKey: true, waiting: false, perDay: null, budgetPerDay: null, budget: null };
+            return { on, ready: true, needsKey: false, waiting: false, perDay: certain, budgetPerDay: certain, budget: certain * horizon, days: null, source: 'floor', networthPerDay: null, floor };
+        }
         const nw = income && Number.isFinite(income.perDay) ? income.perDay : null;
-        const fromLog = log && log.lines && log.lines.some((l) => l.dir === 'in') ? log.inPerDay - log.outPerDay + Math.max(0, spentPerDay || 0) : null;
-        const perDay = fromLog !== null ? fromLog : nw;
+        // The log's other income leaves out the bank and dividend lines (the floor counts those): certain + the rest.
+        const fromLog = log && log.lines && log.lines.some((l) => l.dir === 'in') ? certain + Math.max(0, log.inPerDay - log.outPerDay + Math.max(0, spentPerDay || 0)) : null;
+        // Networth growth already holds the certain part: whichever is higher, never both.
+        const measured = fromLog !== null ? fromLog : nw !== null ? Math.max(certain, nw) : null;
+        const perDay = measured !== null ? measured : certain || null;
         if (perDay === null) return { on, ready: false, needsKey: false, waiting: true, perDay: null, budgetPerDay: null, budget: null, source: null, networthPerDay: null };
         const budgetPerDay = Math.max(0, perDay);
-        return { on, ready: true, needsKey: false, waiting: false, perDay, budgetPerDay, budget: budgetPerDay * horizon, days: fromLog !== null ? log.days : income.days, source: fromLog !== null ? 'log' : 'networth', networthPerDay: nw };
+        const source = fromLog !== null ? 'log' : nw !== null ? (certain > nw ? 'floor' : 'networth') : 'floor';
+        return { on, ready: true, needsKey: false, waiting: false, perDay, budgetPerDay, budget: budgetPerDay * horizon, days: fromLog !== null ? log.days : income ? income.days : null, source, networthPerDay: nw, floor };
     }
 
     /**
@@ -5597,7 +6010,15 @@
         const inText = fmtMoney(Math.round(auto.perDay));
         if (!(auto.perDay > 0)) return 'Your networth hasn’t grown over the last ' + Math.round(auto.days) + ' days, so Auto picks a plan that costs nothing.';
         if (!(planPerDay > 0)) return 'About ' + inText + ' a day comes in; this plan costs nothing.';
-        return 'You can afford this with your income: about ' + inText + ' a day comes in, this plan costs ' + fmtMoney(Math.round(planPerDay)) + ' a day.';
+        return 'You can afford this with your income: about ' + inText + ' a day comes in' + certainWords(auto) + ', this plan costs ' + fmtMoney(Math.round(planPerDay)) + ' a day.';
+    }
+
+    /** " (about $2.2M a day of it is certain: bank $1.9M, dividends $0.3M)" when the floor counts. */
+    function certainWords(auto) {
+        const f = auto && auto.floor;
+        if (!f || !(f.perDay > 0)) return '';
+        const parts = [['bank', f.bank], ['dividends', f.dividends], ['rent', f.rent]].filter(([, v]) => v > 0).map(([k, v]) => k + ' ' + fmtMoney(Math.round(v)));
+        return ' (' + (auto.source === 'floor' ? 'all of it certain' : 'about ' + fmtMoney(Math.round(f.perDay)) + ' a day of it certain') + ': ' + parts.join(', ') + ')';
     }
 
     /** How long before an event a plan must start to have its stack ready (jumps stack Xanax). */
@@ -5693,7 +6114,7 @@
      * @param {number} [windowDays] - how far back the log was read
      * @returns {{days:number, inPerDay:number, outPerDay:number, lines:{title:string, perDay:number, n:number, dir:'in'|'out'}[]}|null}
      */
-    function incomeBreakdown(log, now, windowDays = null) {
+    function incomeBreakdown(log, now, windowDays = null, floor = null) {
         const rows = (log || []).filter((e) => e && e.money > 0 && Number.isFinite(e.at));
         if (!rows.length) return null;
         // Spread over the whole span that was read (one sale 2 days ago in a 30-day read is 1/30 a day, not 1/2).
@@ -5701,6 +6122,11 @@
         const days = Math.max(1, windowDays || 0, (now - oldest) / DAY);
         const by = new Map();
         for (const e of rows) {
+            // Bank investment and dividend lines are the certain income (core/income-floor.js), counted there, not here
+            // (a maturity line carries the principal too: never income). Only the kinds the floor counted are left out.
+            if (/matur/i.test(e.title)) continue;
+            if (floor && floor.bank > 0 && /(invest|city bank|bank interest)/i.test(e.title)) continue;
+            if (floor && floor.dividends > 0 && /dividend/i.test(e.title)) continue;
             const dir = IN_WORDS.test(e.title) ? 'in' : OUT_WORDS.test(e.title) ? 'out' : null;
             if (!dir) continue;
             const k = dir + '|' + e.title;
@@ -6014,7 +6440,7 @@
 
     /** The price to count for an item: live (10 units from the cheapest up) or the sample. */
     function priceFor(id, prices) {
-        const live = livePrices(prices || {});
+        const live = prices ? livePrices(prices) : {};
         return live[id] || SAMPLE_PRICES[id] || LADDER_SAMPLE_PRICES[id] || null;
     }
 
@@ -6366,6 +6792,8 @@
         const perks = parsePerks(statics.perks || {});
         // What the learner found in your own trains (an unknown perk): on top of the perks Torn lists.
         if (extra.learnedMult) for (const k of STATS) perks.mult[k] *= Number(extra.learnedMult[k]) > 0 ? Number(extra.learnedMult[k]) : 1;
+        // Happy lost per energy as your own gym log measured it (R6.6), on top of the perks'.
+        if (Number(extra.learnedHappyLoss) > 0) perks.happyLossMult = (perks.happyLossMult || 1) * Number(extra.learnedHappyLoss);
         const unlocked = unlockedGyms(state && state.gymId, extra.unlockedKnown || null);
         const stats = (state && state.stats) || { str: 0, spd: 0, def: 0, dex: 0 };
         const best = {};
@@ -6418,7 +6846,7 @@
     }
 
     /** The simulation inputs every strategy shares. */
-    function simInputs({ state, pc, shares, settings, prices, special = 0, statics = {} }) {
+    function simInputs({ state, pc, shares, settings, prices, special = 0, statics = {}, events = null, unlock = null }) {
         const gyms = {};
         for (const k of STATS) if (pc.best[k]) gyms[k] = { dots: pc.best[k].dots[k], energy: pc.best[k].energy };
         const ic = itemContext(statics, settings);
@@ -6456,6 +6884,9 @@
             xanaxCdMin: xanaxCdOf(statics.xanaxCds).min,
             // Today's candy pick, kept unless another is clearly cheaper.
             candyPrefer: statics.candyPick && statics.candyPick.day === tornDayStart(state.at) ? statics.candyPick.id : null,
+            // Year plans (core/year.js): events on their dates, gyms opening as energy is trained.
+            ...(events ? { events } : {}),
+            ...(unlock ? { unlock } : {}),
         };
     }
 
@@ -6515,8 +6946,8 @@
     }
 
     /** The comparison, yielding after each plan (see compareStrategies / compareStrategiesAsync). */
-    function* compareSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most' }) {
-        const base = simInputs({ state, pc, shares, settings, prices, special, statics });
+    function* compareSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', events = null, unlock = null }) {
+        const base = simInputs({ state, pc, shares, settings, prices, special, statics, events, unlock });
         const results = {};
         const budget = budgetOf(settings);
         for (const id of feasibleStrategies({ bliss: pc.perks.bliss, boosterCapH: base.boosterCapH, toyShop5: base.toyShop5, adultNovelties10: base.adultNovelties10 })) {
@@ -6575,6 +7006,12 @@
         if (!(base.special > 0)) return r;
         const without = simulateStrategy(id, { ...base, special: 0 });
         return without.gained > r.gained ? { ...without, specialHelps: false } : { ...r, specialHelps: true, specialGain: r.gained - without.gained };
+    }
+
+    /** The steady plan's cost a day (Auto's income adds it back while receipts cover under 3 days: it never depends on the budget). */
+    function steadyCostPerDay(args) {
+        const base = simInputs(args);
+        return simulateStrategy('steady', base).cost / base.days;
     }
 
     function steadyMaxItem() {
@@ -6658,7 +7095,13 @@
         return Math.max(...today.map((x) => x.stepAt)) + cdMin * 60 * 1000;
     }
 
-    function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, autoSwitch = null, warOn = null, now }) {
+    /**
+     * Round 6: the numbers come from the saved plan (`compare`: every plan's result, or on Torn's pages the small part;
+     * `rec`: its recommendation; `warn`: plans whose pick warns). `lite` (Torn's pages): only what those pages show is
+     * worked out (today's steps, the 48 h look-ahead, the strip, the gym page's next two days); no ladder, no 30-day
+     * projection. `saved`: where the saved plan stands (null: no plan yet).
+     */
+    function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, rec: recIn = null, warn = null, lite = false, saved = null, onPath = false, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, warOn = null, now }) {
         if (!state) return { ready: false };
         // One player context per refresh: the comparison's, when the caller has it.
         const pc = pcIn || playerContext(state, statics, { unlockedKnown, learnedMult });
@@ -6718,7 +7161,7 @@
         if (ic.jobHappy) ctx.jobHappy = ic.jobHappy;
         // Torn events that change training: a heads-up, and no boosters in the day before one that needs the booster cooldown.
         const events = statics.calendar ? upcomingEvents(statics.calendar.calendar, now, { startTime: statics.calendar.startTime }) : [];
-        const hold = holdBoosterFor(events, now, plan.strategy);
+        const hold = holdBoosterFor(events, now, plan.strategy, boosterCapOf(pc, settings));
         if (hold) {
             ctx.holdBooster = hold.id;
             ctx.holdUntil = hold.start;
@@ -6794,7 +7237,7 @@
         const energyPerDay = Math.round(((e.interval <= 600 ? 720 : 480) + 250 * Math.floor(1440 / 420) + e.maximum) / 10) * 10;
         // With Ignorance Is Bliss happy doesn't fall back to the maximum: the projection trains at today's happy.
         const projHappy = pc.perks.bliss ? Math.min(HAPPY_CAP, Math.max(state.happy.current, state.happy.maximum) + 300) : state.happy.maximum + 300;
-        const proj = projectionFor({ stats: pc.stats, shares, energyPerDay, happy: projHappy, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: 30, active: state.gymId, table: pc.table });
+        const proj = projectionFor({ stats: pc.stats, shares, energyPerDay, happy: projHappy, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: lite ? 2 : 30, active: state.gymId, table: pc.table });
         // The next ladder gym after the highest one unlocked; its progress comes from the gym page (percentage on the button).
         const ladderTop = Math.max(0, ...pc.unlocked.filter((id) => id <= 24));
         const progressE = gymProgress && Number(gymProgress.nextId) === ladderTop + 1 ? gymProgress.energy : null;
@@ -6834,22 +7277,23 @@
         // Auto without its Full key (or before the income is read) runs as "most stats in my budget".
         const pickBy = effectivePickBy(PICK_BY[plan.pickBy] ? plan.pickBy : 'most', auto);
         const goalKind = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
-        if (auto && auto.needsKey) heads.unshift({ tone: 'warn', text: 'Auto mode needs a Full key', sub: 'Settings › Full key · until then the plan uses your budget', go: 'settings' });
-        const sw = eventSwitchHeads(autoSwitch, now);
-        if (sw) heads.push({ ...sw, go: 'plan' });
+        if (auto && auto.needsKey) heads.unshift({ tone: 'warn', text: 'Auto mode needs a Full key', sub: 'Settings › Full key · until then a new plan uses your budget', go: 'settings' });
+        // No saved plan yet (a new install, or plans from before round 6): today's steps follow the plan picked (steady by
+        // default) until you create one. Nothing is worked out in the background.
+        if (!saved && !compare) heads.unshift({ tone: 'warn', text: 'Create your plan', sub: 'Plan › Create plan · until then the steps follow ' + ((STRATEGIES[plan.strategy] || STRATEGIES.steady).name || 'steady training').toLowerCase(), go: 'plan' });
+        if (saved && saved.progress && saved.progress.ended) heads.unshift({ tone: 'warn', text: 'Your plan has ended', sub: 'Plan › Create plan for the next one', go: 'plan' });
         if (compare) {
-            const r = recommend(compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy, goal: goalKind });
+            const r = recIn || recommend(compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy, goal: goalKind });
             rec = r;
             const mine = compare[plan.strategy];
-            // Auto switched for an event: the usual comparison has no event in it, so it doesn't argue with the switch.
-            const eventOn = autoSwitch && autoSwitch.active && autoSwitch.id === plan.strategy;
-            if (eventOn) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' for ' + autoSwitch.event.name });
-            else if (r.recommended === plan.strategy) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is still best' });
-            else if (mine) {
-                const w = pickWarning(compare[r.recommended], mine, { bliss: pc.perks.bliss, days: settings.horizonDays || 30 });
+            // Following the saved path (its plan for this stretch): that is the plan, not a pick to warn about.
+            if (onPath) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is your plan', sub: 'your saved plan for these days' });
+            else if (r.recommended === plan.strategy) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is your plan' });
+            else if (mine && r.recommended && compare[r.recommended]) {
+                const w = warn ? { warn: Boolean(warn[plan.strategy]) } : pickWarning(compare[r.recommended], mine, { bliss: pc.perks.bliss, days: settings.horizonDays || 30 });
                 if (w.warn) heads.push({ tone: 'warn', text: (STRATEGIES[r.recommended] || {}).name + ' would gain more', sub: 'see Plan', go: 'plan' });
             }
-            ladder = energyLadder({ state, pc, shares, prices, compare, recommended: r.recommended, days: settings.horizonDays || 30, budget: budgetOf(settings), specialHave: state.specialRefills || 0, specialUse: specialLeft(plan, state) });
+            if (!lite && r.recommended && compare[r.recommended]) ladder = energyLadder({ state, pc, shares, prices, compare, recommended: r.recommended, days: settings.horizonDays || 30, budget: budgetOf(settings), specialHave: state.specialRefills || 0, specialUse: specialLeft(plan, state) });
         }
         // Spend per day, and how long the cash on hand lasts at the recommended plan's pace.
         const horizon = settings.horizonDays || 30;
@@ -6858,7 +7302,7 @@
         const spend = recRow ? { perDay: recRow.cost / horizon, budgetPerDay: Number.isFinite(settings.budget) ? settings.budget / horizon : null, cash, lastsDays: cash !== null && recRow.cost > 0 ? cash / (recRow.cost / horizon) : null } : null;
         // Unlock goal: when the gym opens on each plan (energy through the gym), and what it costs in stats against the best plan.
         let unlock = null;
-        if (goalKind && compare) {
+        if (goalKind && compare && !lite) {
             const gym = gymById(plan.goal.gymId, pc.table);
             const left = unlockEnergyLeft(pc.unlocked, plan.goal.gymId, gymProgress, pc.perks.gymExpMult);
             if (gym && left !== null) {
@@ -6911,7 +7355,10 @@
             pickBy,
             keepEnergy: warKeep,
             noRefill: Boolean(ctx.noRefill),
-            auto: auto ? { ...auto, afford: affordLine(auto, recRow ? recRow.cost / horizon : 0), wait: autoWaitLine(auto), switch: autoSwitch } : null,
+            auto: auto ? { ...auto, afford: affordLine(auto, recRow ? recRow.cost / horizon : 0), wait: autoWaitLine(auto) } : null,
+            // The saved plan: its dates and where it stands (null: no plan yet), and the days its numbers cover.
+            saved,
+            planDays: horizon,
             unlock,
             // Your Xanax cooldown (median of the ones recorded, the range) and when the Torn day resets.
             xanaxCd: xcd,
@@ -7099,7 +7546,7 @@
         const h = readPriceHistory(priceHistory).items[id] || {};
         const low = h[Math.floor(now / DAY_MS)] > 0 ? h[Math.floor(now / DAY_MS)] : null;
         const row = prices[id];
-        const fresh = row && typeof row === 'object' && tornDayStart(row.at || 0) === tornDayStart(now) ? unitPrice({ listings: row.listings }, id === POINTS ? REFILL_POINTS : 1) : null;
+        const fresh = row && typeof row === 'object' && tornDayStart(row.at || 0) === tornDayStart(now) ? (Array.isArray(row.listings) && row.listings.length ? unitPrice({ listings: row.listings }, id === POINTS ? REFILL_POINTS : 1) : row.low || null) : null;
         const p = [low, fresh].filter((v) => v > 0);
         return p.length ? Math.min(...p) : null;
     }
@@ -7477,6 +7924,8 @@
         factionWars: 15 * 60 * 1000,
         // Today's city-shop allowance (Sally's Sweet Shop): `cityitemsbought` now, and once a day at the day's start.
         cityShop: 10 * 60 * 1000,
+        // The income that is certain (bank investment, dividends, rent: 4 calls), for Create plan and Recalibrate.
+        passive: 6 * 60 * 60 * 1000,
     };
 
     /** The personal stat that counts items bought from city shops (docs/research-sallys-xanax.md). */
@@ -7555,8 +8004,9 @@
                 const prev = last && last.api ? normalizeState(last.api, last.at) : null;
                 if (prev) {
                     const diff = diffStates(prev, next);
-                    const log = logFromDiff(this.store.get(this.keys.log, []), diff, { at, nextStep: this.nextStep(), catchUp: at - last.at > CATCH_UP_GAP_MS && Number(this.store.get(TRADING_SEEN_KEY, 0)) > last.at });
-                    this.store.set(this.keys.log, log);
+                    const before = this.store.get(this.keys.log, []);
+                    const log = logFromDiff(before, diff, { at, nextStep: this.nextStep(), catchUp: at - last.at > CATCH_UP_GAP_MS && Number(this.store.get(TRADING_SEEN_KEY, 0)) > last.at });
+                    if (JSON.stringify(log) !== JSON.stringify(before)) this.store.set(this.keys.log, log);
                     // The gain model checks itself against your own trains.
                     const st = this.store.get(this.keys.static, {}) || {};
                     const sample = calibrationSample(prev, next, diff, { table: st.gyms && st.gyms.length ? mergeLiveGyms(st.gyms) : GYMS, perks: parsePerks(st.perks || {}).mult });
@@ -7599,7 +8049,10 @@
             const special = h[day] && h[day].special !== undefined ? h[day].special : state.specialRefills;
             // The stats as the day's first read saw them (today's real gain, when yesterday wasn't read).
             const open = h[day] ? h[day].open : { ...state.stats };
-            h[day] = { ...state.stats, total: totalOf(state.stats), ...(special !== null && special !== undefined ? { special } : {}), ...(open ? { open } : {}) };
+            const row = { ...state.stats, total: totalOf(state.stats), ...(special !== null && special !== undefined ? { special } : {}), ...(open ? { open } : {}) };
+            // Written only when the day's row changes (round 6: every GM write reaches every open Torn tab).
+            if (JSON.stringify(h[day]) === JSON.stringify(row)) return;
+            h[day] = row;
             const days = Object.keys(h).map(Number).sort((a, b) => a - b);
             while (days.length > 120) delete h[days.shift()];
             this.store.set(this.keys.history, h);
@@ -7619,6 +8072,9 @@
         /** Receipts: a new inventory read names the uses since the last one. */
         recordInventory(st) {
             if (!st || !st.inventory || !(st.inventoryAt > 0)) return;
+            // Once per inventory read (this ran on every 3 s check and parsed the receipts each time).
+            if (this.inventorySeen === st.inventoryAt) return;
+            this.inventorySeen = st.inventoryAt;
             const before = this.store.get(this.keys.receipts, null);
             if (before && before.inv && before.inv.at >= st.inventoryAt) return;
             this.store.set(this.keys.receipts, applyInventory(before, st.inventory, st.inventoryAt, { priceOf: this.priceOf(st.inventoryAt) }));
@@ -7656,7 +8112,9 @@
                 [
                     'inventory',
                     async () => {
-                        const inv = await fetchInventory(this.client);
+                        // Only the items the plan knows (round 6: GM is handed to every Torn page; a full inventory is hundreds of rows).
+                        const all = await fetchInventory(this.client);
+                        const inv = Object.fromEntries(Object.entries(all || {}).filter(([id]) => ITEMS[id]));
                         // Points held (for the refill) come from /user/money; a failure there keeps the inventory.
                         try {
                             const money = await fetchMoney(this.client);
@@ -7684,6 +8142,7 @@
                 ['job', () => fetchJob(this.client)],
                 ['jobPoints', () => fetchJobPoints(this.client)],
                 ['items', () => fetchItemsInfo(this.client, ITEMS_INFO_IDS)],
+                ['passive', () => fetchPassiveIncome(this.client)],
                 [
                     'factionWars',
                     async () => {
@@ -7732,6 +8191,919 @@
             }
             return this.store.get(this.keys.static, {}) || st;
         }
+    }
+
+    /* ===== src/core/income-floor.js ===== */
+    /*
+     * The income that is certain (round 6, R6.4; docs/research-passive-income.md):
+     * the city bank investment's profit, money dividends from stocks, and rent
+     * from properties you rent out. Pure. It is the floor under Auto's income:
+     * a bad month (losses, a 30-day window that missed the bank payout) can't
+     * push the plan's money below what is certain to come in, and Auto can plan
+     * on the Limited key alone.
+     */
+
+
+
+    /** Bank investment and dividend lines in the money log: counted by the floor, not again as "other" income [verify]. */
+    const FLOOR_LOG_WORDS = /(matur|invest|dividend|city bank|bank interest)/i;
+
+    /** The first dollar amount in a dividend's description ("$50,000,000" → 50000000); null for item dividends. */
+    function dividendMoney(description) {
+        const m = String(description || '').match(/^\s*\$\s?([\d,]+)/);
+        return m ? Number(m[1].replace(/,/g, '')) : null;
+    }
+
+    /**
+     * @param {object} o
+     * @param {object|null} o.cityBank - /user/money city_bank {amount, profit, duration (days), until (s)}
+     * @param {object[]} o.userStocks - /user/stocks [{id, shares, bonus: {increment, frequency}}]
+     * @param {object[]} o.tornStocks - /torn/stocks [{id, name, acronym, bonus: {passive, frequency, description}}]
+     * @param {object[]} o.properties - /user/properties?filters=ownedByUser (rented ones carry cost_per_day)
+     * @param {number|null} o.meId - your player id (only your own properties' rent)
+     * @param {number} o.now
+     * @returns {{perDay:number, bank:number, dividends:number, rent:number, lines:{what:string, perDay:number, until?:number}[]}}
+     */
+    function incomeFloor({ cityBank = null, userStocks = [], tornStocks = [], properties = [], meId = null, now }) {
+        const lines = [];
+        let bank = 0;
+        // The investment's own numbers: profit over its term, merits and bank perks included. Once it has ended it pays
+        // nothing more until it's renewed.
+        if (cityBank && cityBank.profit > 0 && cityBank.duration > 0 && !(cityBank.until && cityBank.until * 1000 < now)) {
+            bank = cityBank.profit / cityBank.duration;
+            lines.push({ what: 'City bank', perDay: bank, until: cityBank.until ? cityBank.until * 1000 : null });
+        }
+        let dividends = 0;
+        const info = new Map((tornStocks || []).map((s) => [Number(s.id), s]));
+        for (const us of userStocks || []) {
+            const b = us && us.bonus;
+            const s = info.get(Number(us && us.id));
+            if (!b || !s || !s.bonus || !(b.increment > 0)) continue;
+            // Money dividends only (item ones pay items, not cash): the amount × blocks held ÷ days between payouts.
+            const amount = dividendMoney(s.bonus.description);
+            const freq = Number(b.frequency) || Number(s.bonus.frequency) || 0;
+            if (!(amount > 0) || !(freq > 0)) continue;
+            const perDay = (amount * b.increment) / freq;
+            dividends += perDay;
+            lines.push({ what: (s.acronym || s.name || 'Stock ' + us.id) + ' dividend', perDay });
+        }
+        let rent = 0;
+        for (const p of properties || []) {
+            if (!p || p.status !== 'rented' || !(p.cost_per_day > 0) || !(p.rental_period_remaining > 0)) continue;
+            if (meId && p.owner && Number(p.owner.id) !== Number(meId)) continue;
+            rent += p.cost_per_day;
+            lines.push({ what: 'Rent · ' + ((p.property && p.property.name) || 'property'), perDay: p.cost_per_day, until: now + p.rental_period_remaining * DAY });
+        }
+        return { perDay: bank + dividends + rent, bank, dividends, rent, lines: lines.sort((a, b) => b.perDay - a.perDay) };
+    }
+
+    /* ===== src/core/year.js ===== */
+    /*
+     * The long plan (round 6, R6.5; docs/research-year-events.md §5,
+     * research-gym-unlock.md): 3, 6 or 12 months simulated day by day with the
+     * same 5-minute simulator, in segments. At each segment's start the plans
+     * are compared again from the stats projected for that day and the best one
+     * is followed (stats grow, so the best plan changes):
+     *   - a segment every 30 days;
+     *   - an event gets its own segment, from 2 days before it (a jump stacks in
+     *     ~29 h) to its end, with its multiplier (World Diabetes Day's candy ×3,
+     *     CaffeineCon's cans ×2, the Anniversary's free energy and happy);
+     *   - gyms open as energy is trained (the ladder's gym experience, its fee
+     *     paid), specialists after their ladder gym (Balboas and Frontline after
+     *     Cha Cha's, Sports Science Lab after Last Round, the rest after George's)
+     *     and only while their stat rule holds.
+     * A year compounds model error, so it also gives a band: the same path with
+     * the gain model 5% lower and 10% more happy lost per train, and the other
+     * way round. The monthly steps are what you follow; the year is a range.
+     * Pure (compareStrategies is pure).
+     */
+
+
+
+
+
+
+
+
+    /** Plans are compared again this often (simulated days). */
+    const REPICK_DAYS = 30;
+
+    /** An event segment starts this long before the event (a jump's stack: 4 Xanax ~29 h, and the booster hold). */
+    const EVENT_LEAD_MS = 2 * DAY;
+
+    /** The band: the gain model this much off, and happy lost per train this much off (research: ±10% happy loss moved a year −8%…+39%). */
+    const BAND_GAIN = 0.05;
+    const BAND_HAPPY_LOSS = 0.1;
+
+    /** Segment boundaries: every REPICK_DAYS, and each event's lead-in and end (ms, from start to end). */
+    function segmentsOf(start, end, events = []) {
+        if (!(end > start)) return [];
+        const cuts = new Set([start, end]);
+        for (let t = start + REPICK_DAYS * DAY; t < end; t += REPICK_DAYS * DAY) cuts.add(t);
+        for (const e of events) {
+            const a = Math.max(start, Math.floor((e.start - EVENT_LEAD_MS) / DAY) * DAY);
+            const b = Math.min(end, Math.ceil(e.end / DAY) * DAY);
+            if (b > start && a < end) {
+                cuts.add(a);
+                cuts.add(b);
+            }
+        }
+        const list = [...cuts].sort((x, y) => x - y);
+        const segs = [];
+        for (let i = 0; i < list.length - 1; i++) {
+            const seg = { from: list[i], to: list[i + 1] };
+            seg.event = events.some((e) => e.start < seg.to && e.end > seg.from && seg.from >= Math.floor((e.start - EVENT_LEAD_MS) / DAY) * DAY - 1);
+            segs.push(seg);
+        }
+        // A plain sliver under 3 days joins the stretch before it (the first one, the stretch after): a plan re-picked
+        // over a day or two can't even finish a jump's stack.
+        const out = [];
+        for (const seg of segs) {
+            const prev = out[out.length - 1];
+            if (!seg.event && seg.to - seg.from < 3 * DAY && prev) prev.to = seg.to;
+            else out.push({ ...seg });
+        }
+        if (out.length > 1 && !out[0].event && out[0].to - out[0].from < 3 * DAY) {
+            out[1].from = out[0].from;
+            out.shift();
+        }
+        return out.map((x) => ({ ...x, days: Math.round((x.to - x.from) / DAY) })).filter((x) => x.days > 0);
+    }
+
+    /** The events inside a span, in the simulator's minutes from its start. */
+    function segEvents(events, seg) {
+        return events
+            .filter((e) => e.start < seg.to && e.end > seg.from)
+            .map((e) => ({ from: Math.max(0, Math.round((e.start - seg.from) / 60000)), to: Math.round((e.end - seg.from) / 60000), candyMult: e.candyMult || 1, canMult: e.canMult || 1, freeEnergy: e.freeEnergy || 0, freeHappy: e.freeHappy || 0, id: e.id }));
+    }
+
+    /** Gyms open with the ladder at `top`: its gyms, the specialists it opens (not Sports Science Lab: its ≤ 150 Xanax + Ecstasy rule fails for any plan that takes Xanax), and specialists you already joined. */
+    function openAt(top, known = []) {
+        return [...new Set([...gymsOpenAt(top).filter((id) => id !== SSL), ...known])].sort((a, b) => a - b);
+    }
+
+    /** Each stat's gym (per stat {dots, energy}) with these gyms open and these stats (specialists only while their rule holds). */
+    function gymsFor(stats, open, { table, active, drugsTaken }) {
+        const best = {};
+        const gyms = {};
+        for (const k of STATS) {
+            best[k] = bestGymFor(k, stats, open, { table, drugsTaken, active });
+            if (best[k]) gyms[k] = { dots: best[k].dots[k], energy: best[k].energy };
+        }
+        return { best, gyms };
+    }
+
+    /** Specialist memberships a gym choice needs that aren't paid yet: [{id, cost}]. */
+    function newMemberships(best, paid, table) {
+        const out = [];
+        for (const g of Object.values(best || {})) if (g && g.id > GEORGES && !paid.has(g.id) && !out.some((x) => x.id === g.id)) out.push({ id: g.id, cost: (gymById(g.id, table) || {}).cost || 0 });
+        return out;
+    }
+
+    /**
+     * The ladder still to climb (gym experience = energy trained, any gym): a
+     * helper the simulator asks when a step's energy is reached. `memo` is one
+     * run's own (the specialists that run has joined), so plans compared side by
+     * side don't share it. The ladder gym's fee and a specialist's membership are
+     * paid when they're first used.
+     */
+    function unlockHook({ top, progress, gymExpMult, table, active, drugsTaken, known, paid = new Set() }) {
+        if (!(top >= 1 && top < GEORGES)) return null;
+        const steps = [];
+        let acc = -Math.max(0, progress || 0);
+        for (let id = top; id < GEORGES; id++) {
+            const e = unlockEnergyAfter(id, gymExpMult);
+            if (e === null) break;
+            acc += e;
+            steps.push({ gymId: id + 1, at: acc });
+        }
+        if (!steps.length) return null;
+        return {
+            left: Math.max(1, steps[0].at),
+            next(S, trained, memo = {}) {
+                let i = -1;
+                for (let j = 0; j < steps.length; j++) if (steps[j].at <= trained) i = j;
+                if (i < 0) return null;
+                const gymTop = steps[i].gymId;
+                const open = openAt(gymTop, known || []);
+                const g = gymById(gymTop, table);
+                const { best, gyms } = gymsFor(S, open, { table, active, drugsTaken });
+                memo.paid = memo.paid || new Set(paid);
+                const joined = newMemberships(best, memo.paid, table);
+                for (const x of joined) memo.paid.add(x.id);
+                return { gymId: gymTop, cost: (g ? g.cost : 0) + joined.reduce((a, x) => a + x.cost, 0), joined: joined.map((x) => x.id), gyms, left: i + 1 < steps.length ? steps[i + 1].at - steps[i].at : Infinity };
+            },
+        };
+    }
+
+    /** What's left of today's one-off resources after a stretch (held boosters, special refills), for the next one. */
+    function carryOver(args, r) {
+        const usedHeld = (r.used && r.used.held) || {};
+        const inv = { ...((args.statics && args.statics.inventory) || {}) };
+        for (const [id, n] of Object.entries(usedHeld)) inv[id] = Math.max(0, (Number(inv[id]) || 0) - n);
+        // used.special counts every special refill (the daily one too); dailySpecial the daily ones among them.
+        const specialUsed = (r.used && r.used.special) || 0;
+        const extraUsed = Math.max(0, specialUsed - ((r.used && r.used.dailySpecial) || 0));
+        const held = Math.max(0, (Number(args.state.specialRefills) || 0) - specialUsed);
+        return {
+            ...args,
+            statics: { ...(args.statics || {}), inventory: inv },
+            // The live booster cooldown is today's only; later stretches start with it spent.
+            state: { ...args.state, specialRefills: args.state.specialRefills === null || args.state.specialRefills === undefined ? args.state.specialRefills : held, boosterCd: 0 },
+            special: Math.max(0, (args.special || 0) - extraUsed),
+        };
+    }
+
+    /**
+     * The projection, in slices (a generator: one comparison per step; the caller
+     * pauses between them, like compareStrategiesAsync).
+     * @param {object} o
+     * @param {function} o.compare - (args) → a generator like model.js compareSteps (yields between plans, returns the comparison)
+     * @param {function} o.inputs - model.js simInputs (the band re-runs each stretch's plan with the same inputs)
+     * @param {object} o.args - compareStrategies' arguments now ({state, pc, shares, settings, prices, special, statics, pickBy})
+     * @param {number} o.start - the plan's first day (ms)
+     * @param {number} o.end
+     * @param {number} o.budgetPerDay - Infinity: none
+     * @param {object[]} [o.events] - eventsBetween() for the span
+     * @param {object} [o.progress] - {top: highest ladder gym open, energy: gym experience toward the next}
+     * @param {string|null} [o.goal] - recommend's goal ('unlock')
+     * @returns {Generator} whose value is {segments, result, band, unlocks, events}
+     */
+    function* yearSteps({ compare, inputs = null, args, start, end, budgetPerDay = Infinity, events = [], progress = null, goal = null }) {
+        const pc0 = args.pc;
+        const table = pc0.table;
+        const gymExpMult = (pc0.perks && pc0.perks.gymExpMult) || 1;
+        const active = args.state.gymId;
+        let stats = { ...pc0.stats };
+        const knownSpecialists = (pc0.unlocked || []).filter((id) => id > GEORGES);
+        // Memberships held already: the specialists you've joined (Torn's gym page lists them as unlocked).
+        const paid = new Set(knownSpecialists);
+        const top0 = Math.max(1, ...(pc0.unlocked || []).filter((id) => id <= GEORGES));
+        let top = top0;
+        const toNext0 = progress && Number(progress.top) === top0 ? Number(progress.energy) || 0 : 0;
+        let toNext = toNext0;
+        const segs = segmentsOf(start, end, events);
+        const out = [];
+        const daily = [];
+        const perStat = { str: 0, spd: 0, def: 0, dex: 0 };
+        const used = {};
+        const unlocks = [];
+        let cost = 0;
+        let energy = 0;
+        let cur = args;
+        const startTotal = totalOf(stats);
+        for (const seg of segs) {
+            yield seg;
+            const open = openAt(top, knownSpecialists);
+            const { best } = gymsFor(stats, open, { table, active, drugsTaken: null });
+            // A specialist first used now: its membership is paid now.
+            let fees = 0;
+            for (const x of newMemberships(best, paid, table)) {
+                fees += x.cost;
+                paid.add(x.id);
+            }
+            const pc = { ...pc0, stats: { ...stats }, unlocked: open, best };
+            const state = { ...cur.state, stats: { ...stats } };
+            const unlock = unlockHook({ top, progress: toNext, gymExpMult, table, active, known: knownSpecialists, paid });
+            const segArgs = { ...cur, state, pc, settings: { ...cur.settings, horizonDays: seg.days, budget: Number.isFinite(budgetPerDay) ? Math.max(0, budgetPerDay * seg.days - fees) : Infinity }, events: segEvents(events, seg), unlock };
+            const cmp = yield* compare(segArgs);
+            const rec = recommend(cmp, { budget: budgetOf(segArgs.settings), bliss: pc.perks.bliss, pickBy: cur.pickBy || 'most', goal });
+            const r = cmp[rec.recommended];
+            if (!r) break;
+            const base = totalOf(stats) - startTotal;
+            for (const v of r.daily) daily.push(Math.round(base + v));
+            for (const k of STATS) {
+                stats[k] += r.perStat[k] || 0;
+                perStat[k] += r.perStat[k] || 0;
+            }
+            for (const [id, n] of Object.entries(r.used || {})) if (typeof n === 'number') used[id] = (used[id] || 0) + n;
+            cost += r.cost + fees;
+            energy += r.energyTrained || 0;
+            // The ladder: what this segment's energy opened (the simulator switched gyms when it did).
+            for (const u of r.unlocked || []) unlocks.push({ gymId: u.gymId, day: Math.round((seg.from - start) / DAY) + Math.floor((u.at / Math.max(1, r.energyTrained || 1)) * seg.days), cost: u.cost });
+            for (const u of r.unlocked || []) for (const id of u.joined || []) paid.add(id);
+            ({ top, toNext } = climb(top, toNext, r.energyTrained || 0, gymExpMult));
+            out.push({ from: seg.from, to: seg.to, days: seg.days, event: seg.event ? segEvents(events, seg).map((e) => e.id) : null, strategy: rec.recommended, gained: r.gained, cost: r.cost + fees, energy: r.energyTrained || 0, statsEnd: { ...stats }, candy: r.candy || null, refill: r.refill, booster: r.booster || null, alternatives: rec.alternatives.slice(0, 3).map((a) => ({ id: a.id, deltaStatsPct: a.deltaStatsPct })) });
+            cur = carryOver(cur, r);
+        }
+        const result = { id: 'year', gained: Math.round(totalOf(stats) - startTotal), perStat: Object.fromEntries(STATS.map((k) => [k, Math.round(perStat[k])])), cost: Math.round(cost), energyTrained: energy, daily, used, unlocks };
+        yield 'band';
+        const band = inputs ? yearBand(out, args, { inputs, events, gymExpMult, knownSpecialists, table, active, top0, toNext0 }) : null;
+        return { segments: out, result, band, unlocks, events };
+    }
+
+    /** Gym experience: the ladder gym reached after training `energy` more, and the progress toward the next. */
+    function climb(top, toNext, energy, gymExpMult = 1) {
+        let t = top;
+        let left = (toNext || 0) + energy;
+        while (t < GEORGES) {
+            const need = unlockEnergyAfter(t, gymExpMult);
+            if (need === null || left < need) break;
+            left -= need;
+            t++;
+        }
+        return { top: t, toNext: t < GEORGES ? left : 0 };
+    }
+
+    /**
+     * The same path (the plan, candy, booster and refill picked for each stretch,
+     * with the simulator's own inputs) with the model a little off each way: low
+     * and high totals. `centre` is the same re-run unchanged (it should match the path).
+     */
+    function yearBand(segments, args, { inputs, events, gymExpMult, knownSpecialists, table, active, top0, toNext0 }) {
+        const run = (gainMult, lossMult) => {
+            let stats = { ...args.pc.stats };
+            let top = top0;
+            let toNext = toNext0;
+            let cur = args;
+            const paid = new Set(knownSpecialists);
+            const t0 = totalOf(stats);
+            for (const s of segments) {
+                const open = openAt(top, knownSpecialists);
+                const { best } = gymsFor(stats, open, { table, active, drugsTaken: null });
+                for (const x of newMemberships(best, paid, table)) paid.add(x.id);
+                const pc = { ...args.pc, stats: { ...stats }, unlocked: open, best };
+                const base = inputs({ ...cur, state: { ...cur.state, stats: { ...stats } }, pc, settings: { ...cur.settings, horizonDays: s.days } });
+                const o = {
+                    ...base,
+                    perks: Object.fromEntries(STATS.map((k) => [k, ((base.perks && base.perks[k]) || 1) * gainMult])),
+                    happyLossMult: (base.happyLossMult || 1) * lossMult,
+                    ...(s.candy ? { candyId: s.candy.id, candyCount: s.candy.count } : {}),
+                    ...(s.booster ? { energyBooster: { id: s.booster.id, perDay: s.booster.perDay } } : {}),
+                    ...(s.refill === false ? { noRefill: true } : {}),
+                    special: 0,
+                    events: segEvents(events, s),
+                    unlock: unlockHook({ top, progress: toNext, gymExpMult, table, active, known: knownSpecialists, paid }),
+                };
+                const r = simulateStrategy(s.strategy, o);
+                stats = { ...stats };
+                for (const k of STATS) stats[k] += r.perStat[k] || 0;
+                for (const u of r.unlocked || []) for (const id of u.joined || []) paid.add(id);
+                ({ top, toNext } = climb(top, toNext, r.energyTrained || 0, gymExpMult));
+                cur = carryOver(cur, r);
+            }
+            return Math.round(totalOf(stats) - t0);
+        };
+        return { low: run(1 - BAND_GAIN, 1 + BAND_HAPPY_LOSS), centre: run(1, 1), high: run(1 + BAND_GAIN, 1 - BAND_HAPPY_LOSS) };
+    }
+
+    /* ===== src/core/saved-plan.js ===== */
+    /*
+     * Saved plans (round 6, owner 2026-09-30: "no more automatic"). Pure.
+     *
+     * A plan is made on a click and saved with the numbers it was made from:
+     *   - Create plan: 1, 3, 6 or 12 months from today, worked out from scratch
+     *     from your stats, income, prices and gyms now;
+     *   - Recalibrate (only on a click): re-reads everything as it is now and
+     *     re-plans the time left, keeping the end date (2 months into a year,
+     *     still 10 months left).
+     * Nothing re-plans by itself. Everything else (today's steps and their
+     * timing, the booster cooldown, links, gym marks, Buy, Progress, the Discord
+     * pings) follows the saved plan with the same logic as before.
+     *
+     * Two parts:
+     *   - the saved plan (webpage, IndexedDB): every plan's results with their
+     *     day-by-day lines, the recommendation, the what-ifs, what it saw
+     *     (`snapshot`), a line per month and the history of recalibrations;
+     *   - `planNow` (GM, a few KB): what Torn's pages and the bot need to follow
+     *     it (per plan: candy, refill, special refills, items used, gains, cost).
+     */
+
+
+
+
+    /** The lengths Create plan offers, in months (owner: 1 / 3 / 6 / 12). */
+    const PLAN_MONTHS = [1, 3, 6, 12];
+
+    /** The saved plan's shape version: an older one is read as "no plan yet". */
+    const SAVED_PLAN_V = 1;
+
+    /** Recalibrations kept in a plan's history. */
+    const HISTORY_KEEP = 24;
+
+    /** The same UTC date `months` later (the 31st becomes the month's last day). */
+    function addMonths(t, months) {
+        const d = new Date(t);
+        const y = d.getUTCFullYear();
+        const m = d.getUTCMonth() + months;
+        const last = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+        return Date.UTC(y, m, Math.min(d.getUTCDate(), last), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds());
+    }
+
+    /** A new plan's span: from today's Torn day to the same day `months` later. */
+    function planWindow(months, now) {
+        const n = PLAN_MONTHS.includes(Number(months)) ? Number(months) : 1;
+        const start = tornDayStart(now);
+        const end = addMonths(start, n);
+        return { months: n, start, end, days: Math.round((end - start) / DAY) };
+    }
+
+    /** Torn days left in a plan from today (today counts; at least 1). */
+    function daysLeft(saved, now) {
+        if (!saved || !Number.isFinite(saved.end)) return 0;
+        return Math.max(1, Math.round((saved.end - tornDayStart(now)) / DAY));
+    }
+
+    /** Where a plan stands: day N of M, and whether it has ended. */
+    function planProgress(saved, now) {
+        if (!saved) return null;
+        const of = Math.round((saved.end - saved.start) / DAY);
+        const day = Math.min(of, Math.max(1, Math.floor((tornDayStart(now) - saved.start) / DAY) + 1));
+        return { day, of, left: daysLeft(saved, now), ended: tornDayStart(now) >= saved.end };
+    }
+
+    /** What Torn's pages need of one plan's result to follow it (no day-by-day line). */
+    function slimResult(r) {
+        if (!r) return null;
+        const out = { id: r.id, gained: r.gained, cost: r.cost, used: r.used || {}, perStat: r.perStat || {} };
+        for (const k of ['candy', 'refill', 'refillGain', 'refillCost', 'specialHelps', 'specialGain', 'booster', 'blocked']) if (r[k] !== undefined) out[k] = r[k];
+        return out;
+    }
+
+    /**
+     * The plan's months: the stats it plans at each month's end (per stat), what
+     * the month gains and costs, and what it uses (items, points). From the
+     * result's day-by-day line; items and cost spread evenly over the days.
+     * @param {object} r - a strategy result ({daily, perStat, cost, used, gained})
+     * @param {object} o - {start, days, stats: the stats it starts from}
+     */
+    function monthlyOf(r, { start, days, stats }) {
+        if (!r || !Array.isArray(r.daily) || !days) return [];
+        const out = [];
+        const perDayCost = r.cost / days;
+        const gainedAt = (d) => (d <= 0 ? 0 : r.daily[Math.min(r.daily.length, d) - 1] || 0);
+        const total = r.gained || 0;
+        const statTotal = STATS.reduce((a, k) => a + ((r.perStat && r.perStat[k]) || 0), 0);
+        let from = start;
+        let d0 = 0;
+        for (let i = 1; d0 < days; i++) {
+            const to = Math.min(addMonths(start, i), start + days * DAY);
+            const d1 = Math.min(days, Math.round((to - start) / DAY));
+            const gained = gainedAt(d1) - gainedAt(d0);
+            const share = total > 0 ? gainedAt(d1) / total : d1 / days;
+            const planned = {};
+            for (const k of STATS) planned[k] = Math.round((stats[k] || 0) + (statTotal > 0 ? ((r.perStat[k] || 0) / statTotal) * total * share : 0));
+            const used = {};
+            for (const [id, n] of Object.entries(r.used || {})) if (n > 0) used[id] = Math.round(((n * (d1 - d0)) / days) * 10) / 10;
+            out.push({ month: i, from, to, days: d1 - d0, gained: Math.round(gained), cost: Math.round(perDayCost * (d1 - d0)), stats: planned, used });
+            from = to;
+            d0 = d1;
+        }
+        return out;
+    }
+
+    /**
+     * What a plan was made from (kept with it: "it remembers what it saw").
+     * @param {object} o - {state, pc, statics, settings, plan, prices (id → unit price), income, budgetPerDay, held}
+     */
+    function snapshotOf({ state, pc, statics = {}, plan = {}, prices = {}, income = null, budgetPerDay = null, held = {}, now }) {
+        return {
+            at: now,
+            stats: { ...pc.stats },
+            gymId: state.gymId,
+            unlocked: [...(pc.unlocked || [])],
+            perks: { mult: { ...pc.perks.mult }, bliss: Boolean(pc.perks.bliss), happyLossMult: pc.perks.happyLossMult || 1, boosterCapExtraH: pc.perks.boosterCapExtraH || 0 },
+            happyMax: state.happy.maximum,
+            energyMax: state.energy.maximum,
+            income: income ? { perDay: income.perDay, source: income.source || null, days: income.days || null, certain: income.certain || null } : null,
+            budgetPerDay: Number.isFinite(budgetPerDay) ? budgetPerDay : null,
+            prices: { ...prices },
+            held: { ...held },
+            cash: statics.inventory && Number.isFinite(statics.inventory.cash) ? statics.inventory.cash : null,
+            build: plan.build || null,
+            goal: plan.goal || null,
+            pickBy: plan.pickBy || 'most',
+        };
+    }
+
+    /**
+     * A saved plan from a finished comparison.
+     * @param {object} o
+     * @param {object} o.compare - compareStrategies() over the plan's days
+     * @param {object} o.rec - recommend() of it
+     * @param {object} o.snapshot - snapshotOf()
+     * @param {number} o.start - the plan's first Torn day
+     * @param {number} o.end - the day after its last
+     * @param {number} o.months
+     * @param {number} o.days - days the comparison covers (the whole plan, or what's left of it)
+     * @param {number} o.budget - the budget the comparison ran with (Infinity: none)
+     * @param {object|null} [o.whatIf] - the Bliss what-if
+     * @param {object[]} [o.jobWhatIf] - company what-ifs
+     * @param {object|null} [o.prev] - the plan this one recalibrates (its start, end, history are kept)
+     * @param {object|null} [o.year] - core/year.js yearSteps' value: the path followed (a plan per segment, re-picked
+     *   every 30 days and for each event), gyms opening, the events, the band
+     */
+    function makeSavedPlan({ compare, rec, snapshot, start, end, months, days, budget, whatIf = null, jobWhatIf = [], prev = null, year = null, now }) {
+        const from = prev ? tornDayStart(now) : start;
+        const best = compare && rec && rec.recommended ? compare[rec.recommended] : null;
+        const history = prev ? (prev.history || []).slice(-(HISTORY_KEEP - 1)) : [];
+        if (prev) {
+            const was = prev.compare && prev.rec ? prev.compare[prev.rec.recommended] : null;
+            history.push({
+                at: now,
+                // What changed since the plan was made or last recalibrated.
+                from: { at: prev.snapshot && prev.snapshot.at, stats: prev.snapshot && prev.snapshot.stats, incomePerDay: prev.snapshot && prev.snapshot.income ? prev.snapshot.income.perDay : null, budgetPerDay: prev.snapshot ? prev.snapshot.budgetPerDay : null, strategy: prev.rec ? prev.rec.recommended : null, gained: was ? was.gained : null, cost: was ? was.cost : null, days: prev.days },
+                to: { stats: snapshot.stats, incomePerDay: snapshot.income ? snapshot.income.perDay : null, budgetPerDay: snapshot.budgetPerDay, strategy: rec ? rec.recommended : null, gained: best ? best.gained : null, cost: best ? best.cost : null, days },
+            });
+        }
+        return {
+            v: SAVED_PLAN_V,
+            rev: now,
+            createdAt: prev ? prev.createdAt : now,
+            recalibratedAt: prev ? now : null,
+            start: prev ? prev.start : start,
+            end: prev ? prev.end : end,
+            months: prev ? prev.months : months,
+            // The comparison covers these days, from `from` (a recalibration: from today).
+            from,
+            days,
+            budget: Number.isFinite(budget) ? budget : null,
+            snapshot,
+            compare,
+            rec,
+            whatIf,
+            jobWhatIf: jobWhatIf || [],
+            // The months of the path you follow (the year's path when there is one).
+            monthly: year && year.result ? monthlyOf(year.result, { start: from, days, stats: snapshot.stats }) : best ? monthlyOf(best, { start: from, days, stats: snapshot.stats }) : [],
+            year: year ? { path: year.result, segments: year.segments, band: year.band, unlocks: year.unlocks, events: (year.events || []).map((e) => ({ id: e.id, name: e.name, start: e.start, end: e.end, expected: Boolean(e.expected) })) } : null,
+            history,
+        };
+    }
+
+    /** The plan to follow on a day: its segment of the path (null without one). */
+    function scheduleAt(schedule, now) {
+        if (!Array.isArray(schedule) || !schedule.length) return null;
+        return schedule.find((s) => now >= s.from && now < s.to) || (now < schedule[0].from ? schedule[0] : schedule[schedule.length - 1]);
+    }
+
+    /**
+     * The small part Torn's pages and the bot follow (GM): every plan's slim
+     * result, so picking another plan on the webpage needs nothing new here.
+     * @param {object} saved - makeSavedPlan()
+     * @param {object} [warn] - {strategyId: true} plans whose pick warns against the recommended one
+     */
+    function planNowOf(saved, warn = {}) {
+        if (!saved) return null;
+        const slim = {};
+        for (const [id, r] of Object.entries(saved.compare || {})) if (r) slim[id] = slimResult(r);
+        return {
+            v: SAVED_PLAN_V,
+            rev: saved.rev,
+            createdAt: saved.createdAt,
+            recalibratedAt: saved.recalibratedAt,
+            start: saved.start,
+            end: saved.end,
+            months: saved.months,
+            from: saved.from,
+            days: saved.days,
+            budget: saved.budget,
+            recommended: saved.rec ? saved.rec.recommended : null,
+            pickBy: saved.rec ? saved.rec.pickBy : null,
+            warn,
+            slim,
+            // Which plan the path follows when (a switch on its date is following the saved plan, not re-planning).
+            schedule: saved.year ? saved.year.segments.map((s) => ({ from: s.from, to: s.to, strategy: s.strategy, candy: s.candy || null })) : null,
+        };
+    }
+
+    /** A stored planNow this build can follow (else: no plan yet). */
+    function usablePlanNow(p) {
+        return p && p.v === SAVED_PLAN_V && p.slim && Number.isFinite(p.end) && p.recommended ? p : null;
+    }
+
+    /* ===== src/platform/plan-store.js ===== */
+    /*
+     * Where the saved plan lives (round 6): the whole plan (every plan's
+     * day-by-day line, the what-ifs, what it saw, its months and history) in the
+     * webpage's IndexedDB, so Tampermonkey never hands it to a Torn page. Torn's
+     * pages follow the small part in GM (`planNow`, core/saved-plan.js).
+     * Where IndexedDB is missing or refused, the whole plan goes to GM instead.
+     */
+
+
+
+
+    const IDB_KEY = 'savedPlan';
+    const SAVED_PLAN_GM_FALLBACK = 'savedPlanFull';
+
+    /** @returns {Promise<object|null>} */
+    async function loadSavedPlan() {
+        const gm = gmGet(SAVED_PLAN_GM_FALLBACK, null);
+        try {
+            const v = await idbGet(IDB_KEY);
+            // The newer of the two (a save that fell back to GM after an IndexedDB one).
+            if (v && !(gm && gm.rev > v.rev)) return v;
+        } catch {
+            // No IndexedDB here: the GM copy below.
+        }
+        return gm;
+    }
+
+    /** @returns {Promise<'idb'|'gm'>} where it went */
+    async function saveSavedPlan(plan) {
+        try {
+            await idbSet(IDB_KEY, plan);
+            gmDel(SAVED_PLAN_GM_FALLBACK);
+            return 'idb';
+        } catch {
+            gmSet(SAVED_PLAN_GM_FALLBACK, plan);
+            // An older copy there would be read first next time.
+            try {
+                await idbDel(IDB_KEY);
+            } catch {
+                // No IndexedDB at all.
+            }
+            return 'gm';
+        }
+    }
+
+    async function forgetSavedPlan() {
+        gmDel(SAVED_PLAN_GM_FALLBACK);
+        try {
+            await idbDel(IDB_KEY);
+        } catch {
+            // Nothing stored there.
+        }
+    }
+
+    /* ===== src/platform/archive.js ===== */
+    /*
+     * Keeping Tampermonkey's store small (round 6, R6.2). Tampermonkey hands
+     * every GM value to every Torn page before the script starts and copies it
+     * on every read, so the growing histories made every Torn page slower
+     * (Torn Bids' lesson: its ledger lives in IndexedDB).
+     *
+     * IndexedDB belongs to one site: what torn.com stores there, the webpage
+     * (github.io) never sees. So:
+     *   - histories the leader tab records (it can be a Torn page) keep only
+     *     their recent part in GM; the webpage moves the older part into its own
+     *     IndexedDB (`drainArchives`) and reads the two together (`archived`);
+     *   - data only the webpage uses lives in the webpage's IndexedDB
+     *     (`pageGet` / `pageSet`), with a copy in memory for synchronous reads.
+     * Without IndexedDB (some private windows) everything stays in GM, as before.
+     */
+
+
+
+
+
+    /** A map of day starts (ms or day numbers) inside a value: which days are old, and the value without them. */
+    function daysSpec({ get, put, keepDays, dayOf = (k) => Number(k), cap = Infinity }) {
+        return {
+            kind: 'days',
+            // The days older than keepDays (by the value's own day keys), as {key: row}.
+            old(v, now) {
+                const m = get(v);
+                if (!m) return {};
+                const cut = dayOf.cutoff(now, keepDays);
+                return Object.fromEntries(Object.entries(m).filter(([k]) => dayOf(k) < cut));
+            },
+            trim(v, archivedKeys) {
+                const m = get(v);
+                if (!m) return v;
+                return put(v, Object.fromEntries(Object.entries(m).filter(([k]) => !archivedKeys.has(k))));
+            },
+            absorb(arch, rows) {
+                const next = { ...(arch || {}), ...rows };
+                const keys = Object.keys(next).sort((a, b) => dayOf(a) - dayOf(b));
+                while (keys.length > cap) delete next[keys.shift()];
+                return next;
+            },
+            keysOf: (rows) => Object.keys(rows),
+            merge(arch, v) {
+                if (!arch || !Object.keys(arch).length) return v;
+                const m = get(v) || {};
+                return put(v || null, { ...arch, ...m });
+            },
+        };
+    }
+
+    /** A list of entries (newest last) inside a value: all but the newest `keep` are old. */
+    function listSpec({ get, put, keep, cap, id }) {
+        return {
+            kind: 'list',
+            old(v) {
+                const l = get(v) || [];
+                return l.length > keep ? l.slice(0, l.length - keep) : [];
+            },
+            trim(v, archivedKeys) {
+                const l = get(v);
+                if (!l) return v;
+                return put(v, l.filter((x) => !archivedKeys.has(id(x))));
+            },
+            absorb(arch, rows) {
+                const seen = new Set((arch || []).map(id));
+                return [...(arch || []), ...rows.filter((x) => !seen.has(id(x)))].slice(-cap);
+            },
+            keysOf: (rows) => rows.map(id),
+            merge(arch, v) {
+                if (!arch || !arch.length) return v;
+                const l = get(v) || [];
+                const seen = new Set(l.map(id));
+                return put(v || null, [...arch.filter((x) => !seen.has(id(x))), ...l].slice(-cap));
+            },
+        };
+    }
+
+    /** Day-start keys in ms (statsHistory, dayTotals, receipts). */
+    const msDay = (k) => Number(k);
+    msDay.cutoff = (now, keep) => Math.floor(now / DAY) * DAY - (keep - 1) * DAY;
+    /** Day-number keys (priceHistory). */
+    const numDay = (k) => Number(k);
+    numDay.cutoff = (now, keep) => Math.floor(now / DAY) - (keep - 1);
+
+    /** Price history keeps its days per item: flattened to "item|day" keys here. */
+    function priceDaysGet(v) {
+        if (!v || !v.items) return null;
+        const out = {};
+        for (const [id, rec] of Object.entries(v.items)) for (const [d, p] of Object.entries(rec || {})) out[id + '|' + d] = p;
+        return out;
+    }
+    function priceDaysPut(v, flat) {
+        const items = {};
+        for (const [k, p] of Object.entries(flat)) {
+            const [id, d] = k.split('|');
+            (items[id] = items[id] || {})[d] = p;
+        }
+        return { v: 1, ...(v || {}), items };
+    }
+    const priceDay = (k) => Number(String(k).split('|')[1]);
+    priceDay.cutoff = numDay.cutoff;
+
+    /**
+     * The histories split between GM (recent) and the webpage's IndexedDB (older):
+     * GM keeps what Torn's pages and the leader use (the build's 7-day sparkline,
+     * today's receipts, the week of prices behind the 7-day average).
+     */
+    const ARCHIVES = {
+        statsHistory: daysSpec({ get: (v) => v, put: (_v, m) => m, keepDays: 8, dayOf: msDay, cap: 400 }),
+        dayTotals: daysSpec({ get: (v) => v, put: (_v, m) => m, keepDays: 2, dayOf: msDay, cap: 400 }),
+        receipts: daysSpec({ get: (v) => v && v.days, put: (v, m) => ({ v: 1, pend: {}, inv: null, ...(v || {}), days: m }), keepDays: 3, dayOf: msDay, cap: 400 }),
+        priceHistory: daysSpec({ get: priceDaysGet, put: priceDaysPut, keepDays: 8, dayOf: priceDay, cap: 20000 }),
+        calibration: listSpec({
+            get: (v) => v && v.samples,
+            put: (v, l) => {
+                const p = l.reduce((a, s) => a + s.predicted, 0);
+                const a = l.reduce((x, s) => x + s.actual, 0);
+                return { ...(v || {}), samples: l, n: l.length, errPct: p > 0 ? (100 * (a - p)) / p : 0 };
+            },
+            keep: 20,
+            cap: 500,
+            id: (s) => s.at + ':' + s.stat,
+        }),
+        eyePredictions: listSpec({ get: (v) => v, put: (_v, l) => l, keep: 30, cap: 300, id: (p) => p.def + ':' + p.at }),
+    };
+
+    /** Data only the webpage uses: its IndexedDB, never GM (moved out of GM once). */
+    const PAGE_KEYS = ['moneyLog', 'gymLog', 'fightLog', 'learnLog', 'planLine', 'eyeTargets', 'eyeFlights', 'eyeWatchState'];
+
+    const mem = { loaded: false, loading: null, arch: {}, page: {}, idb: false };
+
+    /** One IndexedDB entry per key (round 6 review: one shared entry let two webpage tabs overwrite each other). */
+    const archKey = (k) => 'arch.' + k;
+    const pageKey = (k) => 'page.' + k;
+
+    /** The webpage's copy is in memory (after `loadArchives`). */
+    function archivesReady() {
+        return mem.loaded;
+    }
+
+    /** Read every key's copy from IndexedDB into memory (at start, and before each drain: another tab may have added). */
+    async function readAll() {
+        for (const k of Object.keys(ARCHIVES)) mem.arch[k] = (await idbGet(archKey(k))) || undefined;
+        for (const k of PAGE_KEYS) {
+            const v = await idbGet(pageKey(k));
+            if (v !== null && v !== undefined) mem.page[k] = v;
+        }
+    }
+
+    /**
+     * The webpage, at start: read its IndexedDB into memory, and move what 1.2.3
+     * kept in GM (webpage-only data) over once. Without IndexedDB, GM stays in use.
+     */
+    function loadArchives() {
+        if (mem.loading) return mem.loading;
+        mem.loading = (async () => {
+            try {
+                await readAll();
+                mem.idb = true;
+            } catch {
+                mem.idb = false;
+            }
+            if (mem.idb) {
+                for (const k of PAGE_KEYS) {
+                    const v = gmGet(k, null);
+                    if (v === null || v === undefined) continue;
+                    try {
+                        // A newer copy another tab saved wins; otherwise GM's moves over.
+                        mem.page[k] = await idbUpdate(pageKey(k), (old) => (old === null ? v : old));
+                        gmDel(k);
+                    } catch {
+                        // Left in GM: tried again next start.
+                    }
+                }
+            }
+            mem.loaded = true;
+            return mem;
+        })();
+        return mem.loading;
+    }
+
+    /** A history, whole: the webpage's older part with GM's recent part (elsewhere: GM's part). */
+    function archived(key, fallback = null) {
+        const v = gmGet(key, null);
+        const spec = ARCHIVES[key];
+        if (!spec || !mem.loaded) return v === null ? fallback : v;
+        const out = spec.merge(mem.arch[key], v);
+        return out === null || out === undefined ? fallback : out;
+    }
+
+    /** Webpage-only data: from the webpage's IndexedDB copy (GM until that's loaded or when there is no IndexedDB). */
+    function pageGet(key, fallback = null) {
+        if (mem.loaded && mem.idb) {
+            const v = mem.page[key];
+            return v === undefined || v === null ? fallback : v;
+        }
+        return gmGet(key, fallback);
+    }
+
+    function pageSet(key, value) {
+        // The webpage before its copy has loaded: wait for it (a write now would go to GM and be dropped at the next start).
+        if (mem.loading && !mem.loaded) {
+            mem.loading.then(() => pageSet(key, value)).catch(() => {});
+            return;
+        }
+        if (mem.loaded && mem.idb) {
+            if (value === null || value === undefined) delete mem.page[key];
+            else mem.page[key] = value;
+            idbUpdate(pageKey(key), () => (value === undefined ? null : value)).catch(() => {});
+            return;
+        }
+        if (value === null || value === undefined) gmDel(key);
+        else gmSet(key, value);
+    }
+
+    /** One tab at a time drains (Web Locks where the browser has them; else this tab goes ahead). */
+    function withDrainLock(fn) {
+        const locks = typeof navigator !== 'undefined' && navigator.locks;
+        if (!locks || typeof locks.request !== 'function') return fn();
+        return locks.request('pumpingIron.drain', { ifAvailable: true }, (lock) => (lock ? fn() : 0));
+    }
+
+    /**
+     * The webpage moves the older part of each history out of GM into its
+     * IndexedDB. Each key is merged inside one transaction (another tab's rows
+     * stay), and GM is trimmed only of what is now safe there (a newer entry the
+     * leader wrote meanwhile stays).
+     */
+    async function drainArchives(now = Date.now()) {
+        await loadArchives();
+        if (!mem.idb) return 0;
+        return withDrainLock(async () => {
+            let moved = 0;
+            try {
+                await readAll();
+            } catch {
+                return 0;
+            }
+            for (const [key, spec] of Object.entries(ARCHIVES)) {
+                const rows = spec.old(gmGet(key, null), now);
+                const keys = spec.keysOf(rows);
+                if (!keys.length) continue;
+                try {
+                    mem.arch[key] = await idbUpdate(archKey(key), (old) => spec.absorb(old || undefined, rows));
+                } catch {
+                    return moved;
+                }
+                // Synchronous from here: read the newest GM value, drop only what is now safe in IndexedDB.
+                const done = new Set(keys);
+                const cur = gmGet(key, null);
+                if (cur !== null) gmSet(key, spec.trim(cur, done));
+                moved += keys.length;
+            }
+            return moved;
+        });
+    }
+
+    /** Forget the webpage's copy of some keys (Settings › Your data). */
+    function clearArchived(keys) {
+        for (const k of keys) {
+            delete mem.arch[k];
+            delete mem.page[k];
+            if (mem.idb) {
+                idbUpdate(archKey(k), () => null).catch(() => {});
+                idbUpdate(pageKey(k), () => null).catch(() => {});
+            }
+        }
+    }
+
+    /** For tests: start again as a fresh page. */
+    function resetArchivesForTest() {
+        mem.loaded = false;
+        mem.loading = null;
+        mem.arch = {};
+        mem.page = {};
+        mem.idb = false;
     }
 
     /* ===== src/turns.js ===== */
@@ -7910,6 +9282,28 @@
         return s - r.S;
     }
 
+    /**
+     * Round 6 (R6.6, docs/research-learner-retrain.md P3): a per-stat keep test.
+     * The pooled rule dilutes a 1% error on one stat with the others' sessions:
+     * at 200 sessions it kept a real +1% only 6% of the time. Per stat, on the
+     * newest sessions of that stat, the log of actual ÷ predicted must lean the
+     * learned way by z ≥ 3 (94% kept at 200 sessions, noise kept under 5%).
+     */
+    const LEARN_STAT_Z = 3;
+    const LEARN_STAT_MIN_TEST = 8;
+    const LEARN_STAT_MIN_CHANGE = 0.003;
+
+    /** z of the newest sessions' residuals against the model in use, signed toward the learned multiplier. */
+    function learnStatZ(test, stat, base, learnedMult, baseMode) {
+        const rows = test.filter((r) => r.stat === stat);
+        if (rows.length < LEARN_STAT_MIN_TEST) return { z: 0, n: rows.length };
+        const res = rows.map((r) => Math.log(r.actual / learnPredict(r, base.mode, base.mult[stat] || 1, baseMode)));
+        const mean = res.reduce((a, x) => a + x, 0) / res.length;
+        const sd = Math.max(0.002, Math.sqrt(res.reduce((a, x) => a + (x - mean) * (x - mean), 0) / Math.max(1, res.length - 1)));
+        const dir = Math.sign(Math.log(learnedMult / (base.mult[stat] || 1)));
+        return { z: (dir * mean) / (sd / Math.sqrt(res.length)), n: rows.length };
+    }
+
     /** Mean absolute error in % of the actual gain. */
     function learnMape(rows, model, baseMode) {
         if (!rows.length) return null;
@@ -7958,6 +9352,20 @@
 
         if (!allInputs && rows.length) reasons.push('Some sessions lack the stat, happy and gym, so only the multipliers were learned.');
         let accepted = false;
+        // The per-stat test (same mode as in use): a stat whose newest sessions clearly lean the learned way is kept.
+        const perStat = {};
+        const statModel = { mode: base.mode, mult: { ...base.mult } };
+        if (test.length) {
+            const sameMode = best.mode === base.mode ? best.mult : null;
+            if (sameMode) {
+                for (const stat of STATS) {
+                    const change = Math.abs((sameMode[stat] || 1) / (base.mult[stat] || 1) - 1);
+                    const t = learnStatZ(test, stat, base, sameMode[stat] || 1, base.mode);
+                    perStat[stat] = { z: Math.round(t.z * 100) / 100, n: t.n, keep: t.z >= LEARN_STAT_Z && change >= LEARN_STAT_MIN_CHANGE };
+                    if (perStat[stat].keep) statModel.mult[stat] = sameMode[stat];
+                }
+            }
+        }
         if (train.length < LEARN_MIN) {
             reasons.push(`Only ${train.length} sessions to learn from; ${LEARN_MIN} are needed.`);
         } else if (!test.length) {
@@ -7965,14 +9373,68 @@
         } else {
             const gain = heldOut.current - heldOut.learned;
             const words = `On the newest ${test.length} sessions the formula was off by ${heldOut.current.toFixed(2)}%, the learned model by ${heldOut.learned.toFixed(2)}%.`;
+            const kept = STATS.filter((k) => perStat[k] && perStat[k].keep);
+            const statErr = kept.length ? learnMape(test, statModel, base.mode) : null;
             if (gain >= LEARN_MARGIN_PCT) {
                 accepted = true;
                 reasons.push(`${words} Kept: better by ${gain.toFixed(2)} points.`);
+            } else if (kept.length && statErr !== null && statErr <= heldOut.current) {
+                // The per-stat test: only the stats that clearly lean, and only if the newest sessions don't get worse.
+                accepted = true;
+                model.mode = statModel.mode;
+                model.mult = statModel.mult;
+                heldOut.learned = statErr;
+                reasons.push(`${words} Kept for ${kept.map((k) => STAT_LABEL[k]).join(', ')}: their newest sessions lean that way clearly (z ≥ ${LEARN_STAT_Z}).`);
             } else {
-                reasons.push(`${words} Not kept: the gain (${gain.toFixed(2)} points) is under the ${LEARN_MARGIN_PCT} needed.`);
+                reasons.push(`${words} Not kept: the gain (${gain.toFixed(2)} points) is under the ${LEARN_MARGIN_PCT} needed, and no stat leans clearly on its own.`);
             }
         }
-        return { accepted, model, current: base, heldOut, sessions: rows.length, learnSessions: train.length, testSessions: test.length, reasons, candidates, at: Number.isFinite(now) ? now : null };
+        return { accepted, model, current: base, heldOut, perStat, sessions: rows.length, learnSessions: train.length, testSessions: test.length, reasons, candidates, at: Number.isFinite(now) ? now : null };
+    }
+
+    // ---------------------------------------------------------------- happy loss (R6.6, P1)
+
+    /** Happy lost per energy the formula assumes (0.5), and what the learned factor must clear. */
+    const HAPPY_LOSS_MIN_TRAINS = 150;
+    const HAPPY_LOSS_Z = 3;
+    const HAPPY_LOSS_MIN_CHANGE = 0.02;
+    /** Per-click spread of happy_used ÷ energy_used (research: 0.058). */
+    const HAPPY_LOSS_SD = 0.058;
+
+    /**
+     * Happy lost per energy, from Torn's gym log (Full key: every click's
+     * `happy_used` and `energy_used`), as a factor on 0.5 × your perks'.
+     * Clicks where happy hit 0 (happy_used under 80% of the expected) are left
+     * out. Kept only with ≥ 150 trains, a change ≥ 2%, the newest 30% of clicks
+     * leaning the same way by z ≥ 3, and closer on them than the constant.
+     * @param {object[]} lines - core/gymlog.js lines ({at, trains, energy, happy})
+     * @param {object} o - {now, lossMult: your perks' happy-loss multiplier, current: the factor in use (1)}
+     * @returns {{accepted, factor, current, trains, heldOut:{current, learned}|null, reasons:string[]}}
+     */
+    function learnHappyLoss(lines, { now, lossMult = 1, current = 1 } = {}) {
+        const expected = HAPPY_LOSS_PER_ENERGY * (lossMult || 1);
+        const rows = (lines || [])
+            .filter((l) => l && l.energy > 0 && Number.isFinite(l.happy) && l.happy >= 0.8 * expected * l.energy && (!now || now - l.at <= 30 * 86400e3))
+            .sort((a, b) => a.at - b.at);
+        const trains = rows.reduce((a, l) => a + (l.trains || 0), 0);
+        const k = Math.floor(rows.length * LEARN_SPLIT);
+        const train = rows.slice(0, k);
+        const test = rows.slice(k);
+        const ratio = (list) => list.reduce((a, l) => a + l.happy, 0) / Math.max(1, list.reduce((a, l) => a + l.energy, 0));
+        const reasons = [];
+        const base = Number(current) > 0 ? Number(current) : 1;
+        if (trains < HAPPY_LOSS_MIN_TRAINS || !train.length || !test.length) {
+            reasons.push(`Happy lost per energy: ${trains} trains in your gym log so far; ${HAPPY_LOSS_MIN_TRAINS} are needed.`);
+            return { accepted: false, factor: base, current: base, trains, heldOut: null, reasons };
+        }
+        const factor = ratio(train) / expected;
+        const testTrains = test.reduce((a, l) => a + (l.trains || 0), 0);
+        const z = ((ratio(test) - expected * base) / (HAPPY_LOSS_SD / Math.sqrt(Math.max(1, testTrains)))) * Math.sign(factor - base);
+        const err = (f) => test.reduce((a, l) => a + Math.abs(l.happy - expected * f * l.energy), 0) / test.length;
+        const heldOut = { current: err(base), learned: err(factor) };
+        const accepted = Math.abs(factor / base - 1) >= HAPPY_LOSS_MIN_CHANGE && z >= HAPPY_LOSS_Z && heldOut.learned < heldOut.current;
+        reasons.push(`Happy lost per energy: ${(expected * factor).toFixed(3)} learned vs ${(expected * base).toFixed(3)} in use (${trains} trains). ${accepted ? 'Kept.' : 'Not kept: needs a 2% change your newest clicks clearly back (z ' + z.toFixed(1) + ' of ' + HAPPY_LOSS_Z + ').'}`);
+        return { accepted, factor: accepted ? factor : base, learned: factor, current: base, trains, heldOut, reasons };
     }
 
     /**
@@ -8254,18 +9716,21 @@
      * Run both learners. `current` is the gym model in use (so a new one must
      * beat it on the newest sessions to replace it).
      */
-    function runLearning({ samples = [], fights = [], now, current = null }) {
+    function runLearning({ samples = [], fights = [], now, current = null, gymLog = [], lossMult = 1, happyCurrent = 1 }) {
         const gym = learnGym(samples, { now, current: current || undefined });
         const fight = learnFights(fights, { now });
-        return { at: now, gym, fights: fight };
+        // R6.6: happy lost per energy, from Torn's gym log (every click's happy_used and energy_used).
+        const happy = learnHappyLoss(gymLog, { now, lossMult, current: happyCurrent });
+        return { at: now, gym, fights: fight, happy };
     }
 
     /** What the engine uses from a learning run: per-stat multipliers, the damping mode, the fight model. */
     function learnedModel(learned) {
-        if (!learned) return { mult: { str: 1, spd: 1, def: 1, dex: 1 }, mode: null, fight: null };
+        if (!learned) return { mult: { str: 1, spd: 1, def: 1, dex: 1 }, mode: null, fight: null, happyLoss: 1 };
         // The model in use: the learned one when kept, else the one it was checked against (itself possibly learned earlier).
         const g = applyGymModel(learned.gym || null);
-        return { mult: g.mult, mode: learned.gym ? g.mode : null, fight: learned.fights && learned.fights.accepted ? learned.fights.model : null };
+        const happyLoss = learned.happy && learned.happy.factor > 0 ? learned.happy.factor : 1;
+        return { mult: g.mult, mode: learned.gym ? g.mode : null, fight: learned.fights && learned.fights.accepted ? learned.fights.model : null, happyLoss };
     }
 
     /**
@@ -8354,15 +9819,21 @@
 
 
 
+
+
+
+
     const pi = {
         tabId: makeTabId(),
         client: null,
         feed: null,
         model: null,
-        compare: null,
-        whatIf: null,
-        compareKey: '',
-        compareWanted: '',
+        // 'app' (the webpage) or 'torn' (Torn's pages): main.js says which.
+        where: 'app',
+        // The whole saved plan (webpage), and a Create plan / Recalibrate being worked out.
+        saved: null,
+        savedLoading: null,
+        planBusy: null,
         listeners: [],
     };
 
@@ -8381,11 +9852,14 @@
      */
     const TORN_PER_MINUTE = TORN_PER_MINUTE_ALONE;
 
+    /** A burst of Torn calls writes its request window once every 2 s, not once a call (round 6; there is room: 85 of Torn's 100). */
+    const WINDOW_BATCH_MS = 2000;
+
     /** Where each tab's focus heartbeat is kept ({tabId: {focus, war, at}}), and each side's shared minute. */
     const FOCUS_KEY = 'apiFocus';
     const laneWindows = {};
     function laneWindow(side) {
-        if (!laneWindows[side]) laneWindows[side] = tabWindow('apiLane_' + side, pi.tabId, storeApi);
+        if (!laneWindows[side]) laneWindows[side] = tabWindow('apiLane_' + side, pi.tabId, storeApi, undefined, { batchMs: WINDOW_BATCH_MS });
         return laneWindows[side];
     }
 
@@ -8412,13 +9886,27 @@
         for (const [id, b] of Object.entries(all)) if (!b || !(now - (b.at || 0) < FOCUS_FRESH_MS * 4)) delete all[id];
         if (mine && (mine.focus || mine.war)) all[pi.tabId] = { focus: mine.focus || null, war: Boolean(mine.war), at: now };
         else delete all[pi.tabId];
-        if (JSON.stringify(had || null) !== JSON.stringify(all[pi.tabId] || null) || (all[pi.tabId] && now - ((had && had.at) || 0) > FOCUS_FRESH_MS / 3)) set(FOCUS_KEY, all);
+        // Written when what this tab shows changes, or to renew it (the time alone is not a change).
+        const same = (x, y) => (x ? x.focus + ':' + x.war : '') === (y ? y.focus + ':' + y.war : '');
+        if (!same(had, all[pi.tabId]) || (all[pi.tabId] && now - ((had && had.at) || 0) > FOCUS_FRESH_MS / 3)) set(FOCUS_KEY, all);
+    }
+
+    /** This tab's request window (one for every Torn client here: two on the same key hid each other's slots). */
+    function apiWindow() {
+        if (!pi.apiWindow) pi.apiWindow = tabWindow('apiWindow', pi.tabId, storeApi, undefined, { batchMs: WINDOW_BATCH_MS });
+        return pi.apiWindow;
+    }
+
+    /** Write every batched request window now (the page is going). */
+    function flushWindows() {
+        if (pi.apiWindow) pi.apiWindow.flush();
+        for (const w of Object.values(laneWindows)) w.flush();
     }
 
     /** The one Torn client every part of this tab uses: 85/min across tabs, visible only, nothing while paused; what's open goes first. */
     function tornClient() {
         if (pi.client) return pi.client;
-        const win = tabWindow('apiWindow', pi.tabId, storeApi);
+        const win = apiWindow();
         pi.client = new TornApiClient({
             maxPerMinute: TORN_PER_MINUTE,
             // A key Torn refused (2, 13, 18) is not used again, by any part of any tab, until a new one is saved.
@@ -8441,7 +9929,7 @@
      */
     function fullKeyClient() {
         if (pi.fullClient) return pi.fullClient;
-        const win = tabWindow('apiWindow', pi.tabId, storeApi);
+        const win = apiWindow();
         pi.fullClient = new TornApiClient({
             maxPerMinute: TORN_PER_MINUTE,
             getKey: () => ((get(K.fullKeyState, {}) || {}).dead ? '' : getKey(K.fullKey)),
@@ -8464,26 +9952,27 @@
     }
 
     /**
-     * Auto mode for this refresh: income from the networth history (plus what
-     * the plan spent meanwhile), the budget it affords, and whether a coming
-     * event wins enough to switch the plan for it.
+     * Income (Auto, "Plan from my income"): from the money log (Full key) or the
+     * networth history, plus what the gym plan spent meanwhile. Read when a plan
+     * is made or recalibrated, and on the webpage to show it.
+     * @param {function} steadyPerDay - the steady plan's cost a day, while receipts cover under 3 days (it doesn't depend on the budget)
      */
-    function autoFor(plan, settings, statics) {
+    function autoFor(plan, settings, statics, steadyPerDay) {
         // What the gym really cost over the same days (receipts), added back: it left your networth and shows in the log's "out".
         // Never the plan's own projected cost, which would feed the budget back into itself.
         const now = Date.now();
-        const rc = get(K.receipts, null);
+        const rc = archived(K.receipts, null);
         const today = tornDayStart(now);
         // 30 Torn days, today included.
-        const sum = rc ? summarizeReceipts(rc, today - 29 * 86400e3, today, { prices: getPrices(), priceHistory: get(K.priceHistory, null) }) : null;
-        // Until receipts cover a few days (everyone upgrading starts with none), the steady plan's cost stands in: it
-        // doesn't depend on the budget, so the budget never feeds itself.
-        const steady = pi.compare && pi.compare.steady ? pi.compare.steady.cost / (settings.horizonDays || 30) : 0;
-        const spentPerDay = sum && sum.days >= INCOME_MIN_DAYS ? sum.cost / sum.days : steady;
+        const sum = rc ? summarizeReceipts(rc, today - 29 * 86400e3, today, { prices: getPrices(), priceHistory: archived(K.priceHistory, null) }) : null;
+        const spentPerDay = sum && sum.days >= INCOME_MIN_DAYS ? sum.cost / sum.days : plan.pickBy === 'auto' && hasFullKey() ? steadyPerDay() : 0;
         const income = incomeFrom(statics.income || [], { spentPerDay });
-        const ml = get(K.moneyLog, null);
-        const breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now(), ml.days || null) : null;
-        const auto = autoState({ plan, settings, hasFullKey: hasFullKey(), income, log: breakdown, spentPerDay });
+        const ml = pageGet(K.moneyLog, null);
+        // The income that is certain (bank, dividends, rent), read with the main key: the floor under the rest.
+        const pv = statics.passive || null;
+        const floor = pv ? incomeFloor({ ...pv, meId: statics.keyInfo && statics.keyInfo.userId, now }) : null;
+        const breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now(), ml.days || null, floor) : null;
+        const auto = autoState({ plan, settings, hasFullKey: hasFullKey(), income, log: breakdown, spentPerDay, floor });
         auto.breakdown = breakdown;
         auto.income = income;
         return auto;
@@ -8500,242 +9989,203 @@
         return w.enemies.find((e) => (!e.start || e.start - nowS <= 86400) && (!e.end || e.end > nowS)) || null;
     }
 
-    /** The comparison over a coming event's days, with and without its multiplier (cached per event and inputs). */
-    function eventComparisonFor(event, state, pc, shares, settings, budgetPerDay, statics = {}) {
-        const days = Math.max(1, Math.round((event.end - event.start) / (24 * 3600e3)));
-        const key = [event.id, event.start, pi.compareKey, days, Math.round(budgetPerDay || 0)].join('|');
-        if (pi.eventCompare && pi.eventCompare.key === key) return pi.eventCompare;
-        // Kept between pages like the plan comparison (another page or tab worked it out).
-        const kept = getShared(K.eventCompareCache, null);
-        if (kept && kept.v === BUILD && kept.key === key) {
-            pi.eventCompare = kept;
-            return kept;
-        }
-        // Two more full comparisons: never inside a redraw, and only in a tab you can see. The last answer stands until the new one is ready.
-        // Not from a comparison still being worked out (it would run twice, once for the old inputs).
-        if (pi.eventWanted !== key && isVisible() && (!pi.compareWanted || pi.compareWanted === pi.compareKey)) {
-            pi.eventWanted = key;
-            setTimeout(async () => {
-                if (pi.eventWanted !== key) return;
-                await runEventComparison(key, event, state, pc, shares, settings, budgetPerDay, statics, days);
-                if (pi.eventWanted === key) refresh();
-            }, COMPARE_CLICK_DELAY_MS * 2);
-        }
-        return pi.eventCompare || { eventCompare: null, normalCompare: null };
-    }
-
-    async function runEventComparison(key, event, state, pc, shares, settings, budgetPerDay, statics, days) {
-        const es = { ...settings, horizonDays: days, budget: Number.isFinite(budgetPerDay) ? budgetPerDay * days : Infinity };
-        const prices = getPrices();
-        const special = 0;
-        const boosted = { ...pc, perks: { ...pc.perks, candyMult: (pc.perks.candyMult || 1) * (event.candyMult || 1), canMult: (pc.perks.canMult || 1) * (event.canMult || 1) } };
-        // Same inputs as the plan's own comparison (shops, console held, job), with the event's multiplier on one side.
-        const eventCompare = await compareStrategiesAsync({ state, pc: boosted, shares, settings: es, prices, special, statics, pickBy: 'most' });
-        const normalCompare = await compareStrategiesAsync({ state, pc, shares, settings: es, prices, special, statics, pickBy: 'most' });
-        if (pi.eventWanted === key) {
-            pi.eventCompare = { v: BUILD, key, eventCompare, normalCompare };
-            set(K.eventCompareCache, pi.eventCompare);
-        }
-        return pi.eventCompare;
-    }
-
-    /** After a click, the plan runs wait this long (the page paints first); after new prices only, this long (batched). */
-    const COMPARE_CLICK_DELAY_MS = 80;
-    const COMPARE_PRICE_DELAY_MS = 5000;
-
-    /** This build's version: a comparison kept by another version is never used (its results may have another shape). */
+    /** This build's version (Diagnostics; a saved plan's shape is versioned in core/saved-plan.js). */
     const BUILD = (typeof PI_BUILD_VERSION !== 'undefined' ? PI_BUILD_VERSION : 'dev') + '+' + (typeof PI_BUILD_HASH !== 'undefined' ? PI_BUILD_HASH : 'dev');
 
-    /**
-     * A tab working out the comparison holds the turn this long, renewed after
-     * every plan it runs; other tabs take its result instead of running their
-     * own. Short, so a page left mid-run (a click to another Torn page) holds
-     * the others back for seconds, not half a minute; and the page lets go of it
-     * as it goes (pagehide).
-     */
-    const COMPARE_BUSY_MS = 5000;
-
-    /** Thrown inside a run that newer inputs made pointless: it stops at its next slice. */
-    const SUPERSEDED = { superseded: true };
-
-    /** Let go of the turn to work out the comparison, if this tab holds it. */
-    function releaseCompareTurn() {
-        const busy = get(K.compareBusy, null);
-        if (busy && busy.tab === pi.tabId) del(K.compareBusy);
-    }
-
-    /** The comparison kept between pages (K.compareCache), if this build wrote it. */
-    function storedCompare() {
-        const c = getShared(K.compareCache, null);
-        return c && c.v === BUILD && c.key && c.compare ? c : null;
-    }
-
-    /** Use a kept comparison. `exact`: it is for the inputs now, so nothing is waiting. */
-    function adoptCompare(c, exact) {
-        pi.compare = c.compare;
-        pi.whatIf = c.whatIf || null;
-        pi.jobWhatIf = c.jobWhatIf || [];
-        pi.compareKey = c.key;
-        pi.compareKeyNoPrice = c.keyNoPrice;
-        if (exact) {
-            pi.compareWanted = c.key;
-            pi.compareScheduled = '';
-        }
+    /** The part of the saved plan Torn's pages and the bot follow (GM, a few KB), if there is one. */
+    function planNowStored() {
+        return usablePlanNow(getShared(K.planNow, null));
     }
 
     /**
-     * Re-run the strategy comparison at most once per Torn hour or when inputs
-     * change, in one tab, and keep it between pages: Torn loads a new page on
-     * nearly every click, and each one used to work the whole comparison out
-     * again in one go (owner's friend, 2026-09-30: "masyadong laggy"; ~1 s a
-     * page on a slow machine). A page opens on the kept one; when the inputs
-     * moved, the last one shows while the new one is worked out in slices.
+     * The whole saved plan (webpage): read from IndexedDB once, and again when
+     * another tab saves a new one (planNow's `rev` moves).
      */
-    function comparisonFor(state, statics, plan, settings) {
-        const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult });
-        const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
-        const prices = getPrices();
-        // Every input that moves the answer: all four stats (in ~2% steps), prices (2 significant digits), perks, gyms.
-        const statsSig = Object.values(pc.stats).map((v) => Math.round(Math.log1p(v) * 50)).join(',');
-        const priceSig = Object.entries(livePrices(prices)).map(([id, p]) => id + ':' + Number(p.toPrecision(2))).join(',');
-        const special = specialLeft(plan, state);
-        const perkSig = JSON.stringify([learnedNow().mode, pc.perks.mult, pc.perks.happyLossMult, pc.perks.canMult, pc.perks.candyMult, pc.perks.consoleMult, pc.perks.edvdMult, pc.perks.boosterCapExtraH]);
-        // Items and job: the candy rule (Plan dropdown), shops ticked, Torn's item data, a console held, the job, specials held.
-        const pickBy = plan.pickBy || 'most';
-        const keysFor = (candyPick) => {
-            const itemSig = JSON.stringify([pickBy, shopsAllowed(settings), statics.itemsAt || 0, Number((statics.inventory || {})[104]) > 0, statics.job || null, statics.jobPoints || null, state.specialRefills || 0, Math.round((state.boosterCd || 0) / 3600), heldBoosters(statics.inventory), candyPick || null, xanaxCdOf(statics.xanaxCds).min]);
-            const keyNoPrice = [BUILD, Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, pc.unlocked.join(','), special, itemSig].join('|');
-            return { keyNoPrice, key: keyNoPrice + '|' + priceSig };
-        };
-        const { keyNoPrice, key } = keysFor(statics.candyPick);
-        if (key === pi.compareKey) {
-            // Back to the inputs of the comparison shown (a click undone): whatever was scheduled for the others is dropped.
-            if (pi.compareWanted !== key) {
-                pi.compareWanted = key;
-                pi.compareScheduled = '';
-                clearTimeout(pi.compareTimer);
-            }
-            return { compare: pi.compare, pc };
+    function savedFor(pn) {
+        if (!pn) return null;
+        if (pi.saved && pi.saved.rev === pn.rev) return pi.saved;
+        if (pi.savedLoading !== pn.rev) {
+            pi.savedLoading = pn.rev;
+            loadSavedPlan()
+                .then((p) => {
+                    if (p && p.rev === pn.rev) {
+                        pi.saved = p;
+                        refresh();
+                    } else pi.savedLoading = null;
+                })
+                .catch(() => {
+                    pi.savedLoading = null;
+                });
         }
-        const stored = storedCompare();
-        // Worked out already, on another page or in another tab.
-        if (stored && stored.key === key) {
-            adoptCompare(stored, true);
-            return { compare: pi.compare, pc };
-        }
-        // A new page: the last one shows while the new one is worked out.
-        if (!pi.compare && stored) adoptCompare(stored, false);
-        pi.compareWanted = key;
-        const whatIfs = (compare) => {
+        return null;
+    }
+
+    /**
+     * Create plan (1, 3, 6 or 12 months) or Recalibrate, on a click only: every
+     * plan is worked out over the plan's days from what's true now (stats,
+     * income, prices, gyms), the best one is recommended, and the whole thing is
+     * saved with what it saw. Recalibrate keeps the plan's start and end and
+     * re-plans only the days left. Worked out in slices (the page stays free).
+     * @param {object} o - {months: 1|3|6|12} or {recalibrate: true}
+     * @returns {Promise<object>} the saved plan
+     */
+    async function createPlan({ months = 1, recalibrate = false, pause = pauseForPage } = {}) {
+        if (pi.planBusy) return pi.planBusy.promise;
+        const run = (async () => {
+            const now = Date.now();
+            const s = get(K.userState, null);
+            const state = s && s.api ? normalizeState(s.api, s.at) : null;
+            if (!state) throw new Error('Waiting for the first read of your stats.');
+            const prev = recalibrate ? await loadSavedPlan() : null;
+            if (recalibrate && !(prev && prev.v === SAVED_PLAN_V)) throw new Error('No plan to recalibrate yet: create one first.');
+            if (recalibrate && planProgress(prev, now).ended) throw new Error('Your plan has ended: create a new one.');
+            const plan = getPlan();
+            const settings = getSettings();
+            // The candy the plan named stays unless another is clearly cheaper now (candy.js's 10% rule).
+            const keptCandy = prev && prev.compare && prev.compare[plan.strategy] && prev.compare[plan.strategy].candy;
+            const statics = { ...(getShared(K.userStatic, {}) || {}), xanaxCds: get(K.xanaxCds, []) || [], candyPick: keptCandy ? { day: tornDayStart(state.at), id: keptCandy.id } : null };
+            const win = recalibrate ? { start: prev.start, end: prev.end, months: prev.months, days: daysLeft(prev, now) } : planWindow(months, now);
+            const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult, learnedHappyLoss: learnedNow().happyLoss });
+            const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
+            const prices = getPrices();
+            const special = specialLeft(plan, state);
+            // Money a day: Auto from your income (Full key), "Max gains" none, else the budget you set, per day.
+            const auto = autoFor(plan, settings, statics, () => steadyCostPerDay({ state, pc, shares, settings: { ...settings, horizonDays: 30 }, prices, special, statics }));
+            const perDay = plan.pickBy === 'max' ? Infinity : auto.ready ? auto.budgetPerDay : budgetOf(settings) / (settings.horizonDays || 30);
+            const runSettings = { ...settings, horizonDays: win.days, budget: Number.isFinite(perDay) ? perDay * win.days : Infinity };
+            const pickBy = effectivePickBy(PICK_BY[plan.pickBy] ? plan.pickBy : 'most', auto);
+            const args = { state, pc, shares, settings: runSettings, prices, special, statics, pickBy };
+            // R6.5: the events on their dates and the gyms opening as energy is trained, in every plan's run.
+            const from = recalibrate ? tornDayStart(now) : win.start;
+            const cal = statics.calendar || null;
+            const events = eventsBetween(cal && cal.calendar, from, win.end, { startTime: cal && cal.startTime });
+            const gp = get(K.gymProgress, null);
+            const top = Math.max(1, ...pc.unlocked.filter((id) => id <= 24));
+            const progress = gp && Number(gp.nextId) === top + 1 ? { top, energy: Number(gp.energy) || 0 } : null;
+            const hook = unlockHook({ top, progress: progress ? progress.energy : 0, gymExpMult: pc.perks.gymExpMult || 1, table: pc.table, active: state.gymId, known: pc.unlocked.filter((id) => id > 24), paid: new Set(pc.unlocked.filter((id) => id > 24)) });
+            const compare = await compareStrategiesAsync({ ...args, events: segEvents(events, { from, to: win.end }), unlock: hook }, { pause });
+            await pause();
+            const goal = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
+            const budget = budgetOf(runSettings);
+            const rec = recommend(compare, { budget, bliss: pc.perks.bliss, pickBy, goal });
             // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
-            const whatIf = pc.perks.bliss ? null : blissWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy });
-            // Company what-ifs: hired where a jump variant would beat the recommended plan.
-            const rec = recommend(compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy });
-            return { whatIf, jobWhatIf: companyWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy, compare, recommended: rec.recommended }) };
-        };
-        const finish = (compare, { whatIf, jobWhatIf }) => {
-            let keys = { key, keyNoPrice };
-            // Today's candy stays named unless another is clearly cheaper (owner: it flipped on every price load). Keeping
-            // it is one of the comparison's own inputs: the key it's kept under says so, so it doesn't run a second time.
-            const mine = compare && compare[plan.strategy] && compare[plan.strategy].candy;
-            const kept = get(K.candyPick, null);
-            const day = tornDayStart(Date.now());
-            if (mine && !(kept && kept.day === day && kept.id === mine.id)) {
-                const pick = { day, id: mine.id };
-                set(K.candyPick, pick);
-                keys = keysFor(pick);
-            }
-            const c = { v: BUILD, key: keys.key, keyNoPrice: keys.keyNoPrice, at: Date.now(), tab: pi.tabId, compare, whatIf, jobWhatIf };
-            set(K.compareCache, c);
-            adoptCompare(c, true);
-            releaseCompareTurn();
-        };
-        const args = { state, pc, shares, settings, prices, special, statics, pickBy };
-        if (!pi.compare) {
-            // Nothing kept yet (the first page after an install or an update): once, in one go.
-            const compare = compareStrategies(args);
-            finish(compare, whatIfs(compare));
-        } else if (pi.compareScheduled !== key && isVisible()) {
-            // A click (build, budget, days, a shop tick) redraws at once and the plan runs follow once the page has
-            // painted. New prices alone (they arrive in batches while Buy loads) are gathered: one run 5 s later.
-            const priceOnly = pi.compareKeyNoPrice === keyNoPrice;
-            pi.compareScheduled = key;
-            clearTimeout(pi.compareTimer);
-            pi.compareTimer = setTimeout(async () => {
-                if (pi.compareWanted !== key) return;
-                // Another tab may have it by now, or be working it out: take its result at the next redraw.
-                const again = storedCompare();
-                if (again && again.key === key) {
-                    adoptCompare(again, true);
-                    refresh();
-                    return;
-                }
-                const busy = get(K.compareBusy, null);
-                if (busy && busy.key === key && busy.tab !== pi.tabId && Date.now() - (busy.at || 0) < COMPARE_BUSY_MS) {
-                    pi.compareScheduled = '';
-                    return;
-                }
-                set(K.compareBusy, { key, tab: pi.tabId, at: Date.now() });
-                // One plan at a time, with the page free in between: the turn is renewed each time, and a newer change
-                // stops the run at its next slice.
-                const pause = async () => {
-                    await pauseForPage();
-                    if (pi.compareWanted !== key) throw SUPERSEDED;
-                    set(K.compareBusy, { key, tab: pi.tabId, at: Date.now() });
-                };
-                try {
-                    const compare = await compareStrategiesAsync(args, { pause });
-                    await pause();
-                    const w = whatIfs(compare);
-                    if (pi.compareWanted !== key) throw SUPERSEDED;
-                    finish(compare, w);
-                    refresh();
-                } catch (error) {
-                    releaseCompareTurn();
-                    // Stopped for newer inputs: they have their own run. Failed: kept as failed until the inputs change (not
-                    // retried every redraw), the last comparison showing; the error goes to Diagnostics.
-                    if (error !== SUPERSEDED) set(K.lastError, { at: Date.now(), where: 'plan comparison', message: String((error && error.message) || error) });
-                }
-            }, priceOnly ? COMPARE_PRICE_DELAY_MS : COMPARE_CLICK_DELAY_MS);
+            const whatIf = pc.perks.bliss ? null : blissWhatIf(args);
+            await pause();
+            const jobWhatIf = companyWhatIf({ ...args, compare, recommended: rec.recommended });
+            // The path: the best plan again every 30 days and for each event, from the stats projected for that day.
+            const goalYear = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
+            const year = await runSteps(yearSteps({ compare: compareSteps, inputs: simInputs, args, start: from, end: win.end, budgetPerDay: perDay, events, progress, goal: goalYear }), pause);
+            const snapshot = snapshotOf({ state, pc, statics, plan, prices: livePrices(prices), income: auto.ready ? { perDay: auto.perDay, source: auto.source, days: auto.days, certain: auto.floor ? { perDay: auto.floor.perDay, bank: auto.floor.bank, dividends: auto.floor.dividends, rent: auto.floor.rent } : null } : null, budgetPerDay: Number.isFinite(perDay) ? perDay : null, held: heldBoosters(statics.inventory), now });
+            const saved = makeSavedPlan({ compare, rec, snapshot, start: win.start, end: win.end, months: win.months, days: win.days, budget, whatIf, jobWhatIf, prev, year, now });
+            const best = compare[rec.recommended];
+            const warn = {};
+            for (const [id, r] of Object.entries(compare)) if (r && best && id !== rec.recommended) warn[id] = pickWarning(best, r, { bliss: pc.perks.bliss, days: win.days }).warn;
+            await saveSavedPlan(saved);
+            pi.saved = saved;
+            set(K.planNow, planNowOf(saved, warn));
+            // The plan followed: the path (today's segment); a plan you picked yourself stays through a recalibration.
+            const cur = getPlan();
+            const keep = recalibrate && cur.strategyPicked && compare[cur.strategy];
+            const strategy = keep ? cur.strategy : year.segments.length ? year.segments[0].strategy : rec.recommended;
+            setPlan({ ...cur, strategy, strategyPicked: Boolean(keep), createdAt: now });
+            recordPlanLine(saved, keep ? strategy : 'path', now);
+            return saved;
+        })();
+        pi.planBusy = { recalibrate, months, at: Date.now(), promise: run };
+        refresh();
+        try {
+            return await run;
+        } finally {
+            pi.planBusy = null;
+            refresh();
         }
-        return { compare: pi.compare, pc };
+    }
+
+    /** Recalibrate (a click): the plan's end stays, the days left are re-planned from what's true now. */
+    function recalibratePlan(o = {}) {
+        return createPlan({ ...o, recalibrate: true });
+    }
+
+    /**
+     * Picking another of the saved plans yourself (the Plan page): followed the
+     * whole length, nothing worked out again; Progress's line follows the pick.
+     */
+    function followStrategy(id) {
+        const saved = pi.saved;
+        const cur = getPlan();
+        setPlan({ ...cur, strategy: id, strategyPicked: true, createdAt: Date.now() });
+        if (saved && saved.compare && saved.compare[id]) recordPlanLine(saved, id, Date.now());
+        refresh();
+    }
+
+    /** Back to the saved path (the recommended plan for each stretch, switching on its dates). */
+    function followPath() {
+        const saved = pi.saved;
+        const cur = getPlan();
+        const seg = scheduleAt(saved && saved.year ? saved.year.segments : null, Date.now());
+        setPlan({ ...cur, strategy: seg ? seg.strategy : cur.strategy, strategyPicked: false, createdAt: Date.now() });
+        if (saved) recordPlanLine(saved, saved.year ? 'path' : cur.strategy, Date.now());
+        refresh();
     }
 
     /** A break for the page between two pieces of work. */
     const pauseForPage = () => new Promise((r) => setTimeout(r, 0));
+
+    /** Run a generator of work to its end, with a break for the page after each step. */
+    async function runSteps(gen, pause) {
+        let r = gen.next();
+        while (!r.done) {
+            await pause();
+            r = gen.next();
+        }
+        return r.value;
+    }
+
+    /**
+     * Where this tab runs: 'app' (the webpage: the whole saved plan, Plan,
+     * Progress, Buy) or 'torn' (Torn's pages: today's steps from the saved plan,
+     * re-timed from live timers; nothing else is worked out there).
+     */
+    function setWhere(where) {
+        pi.where = where;
+    }
 
     /** The model every surface renders from. */
     function currentModel(now = Date.now()) {
         const s = get(K.userState, null);
         const state = s && s.api ? normalizeState(s.api, s.at) : null;
         if (!state) return { ready: false, hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)) };
-        // Your Xanax cooldowns and today's candy pick ride along with the stored data (the plan and the comparison read them).
-        const statics = { ...(getShared(K.userStatic, {}) || {}), xanaxCds: get(K.xanaxCds, []) || [], candyPick: get(K.candyPick, null) };
-        let plan = getPlan();
-        const auto = autoFor(plan, getSettings(), statics);
-        // Auto: the plans run inside what your income affords; without its Full key it's "most stats in my budget".
-        const settings = effectiveSettings(getSettings(), auto);
-        const { compare, pc } = comparisonFor(state, statics, plan, settings);
-        let autoSwitch = null;
-        if (auto.ready && compare) {
-            const goal = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
-            let strategy = recommend(compare, { budget: settings.budget, bliss: pc.perks.bliss, pickBy: 'auto', goal }).recommended;
-            // A coming event that multiplies what a plan uses: switch for it when it wins clearly (stacking skips natural energy).
-            const events = statics.calendar ? upcomingEvents(statics.calendar.calendar, now, { startTime: statics.calendar.startTime }) : [];
-            const ev = eventToPlan(events, now);
-            if (ev) {
-                const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
-                const ec = eventComparisonFor(ev, state, pc, shares, settings, auto.budgetPerDay, statics);
-                autoSwitch = eventSwitch({ event: ev, eventCompare: ec.eventCompare, normalCompare: ec.normalCompare, budgetPerDay: auto.budgetPerDay, now });
-                if (autoSwitch && autoSwitch.active) strategy = autoSwitch.id;
-            }
-            // The plan follows Auto's pick (saved, so the day plan, Discord and Progress all see the same plan): written by the
-            // leader tab only, and only from an up-to-date comparison, so tabs never take turns rewriting it.
-            const lead = get(K.leader, null);
-            const fresh = !pi.compareWanted || pi.compareWanted === pi.compareKey;
-            if (strategy && strategy !== plan.strategy && fresh && lead && lead.id === pi.tabId) plan = setPlan({ ...plan, strategy, strategyPicked: false, createdAt: now });
+        // Your Xanax cooldowns ride along with the stored data (the day plan reads them).
+        const statics = { ...(getShared(K.userStatic, {}) || {}), xanaxCds: get(K.xanaxCds, []) || [] };
+        const plan = getPlan();
+        const settings = getSettings();
+        const app = pi.where === 'app';
+        const pn = planNowStored();
+        const saved = app ? savedFor(pn) : null;
+        const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult, learnedHappyLoss: learnedNow().happyLoss });
+        // The saved plan's numbers: every plan's whole result on the webpage, the small part on Torn's pages.
+        let compare = null;
+        let rec = null;
+        let planSettings = settings;
+        // The saved path: today's segment's plan, unless you picked one yourself (a switch on its date is the plan).
+        const seg = pn && !plan.strategyPicked ? scheduleAt(pn.schedule, now) : null;
+        const followed = seg && seg.strategy ? { ...plan, strategy: seg.strategy } : plan;
+        if (pn) {
+            compare = saved ? saved.compare : pn.slim;
+            if (seg && seg.candy && compare[seg.strategy]) compare = { ...compare, [seg.strategy]: { ...compare[seg.strategy], candy: seg.candy } };
+            rec = saved ? saved.rec : { recommended: pn.recommended, pickBy: pn.pickBy, alternatives: [], reasons: [] };
+            planSettings = { ...settings, horizonDays: pn.days, budget: pn.budget === null ? Infinity : pn.budget };
         }
-        return buildModel({ state, statics, plan, settings, auto, autoSwitch, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, whatIf: pi.whatIf || null, jobWhatIf: pi.jobWhatIf || null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+        // Income (Plan's "Plan from my income"): read on the webpage only, where a plan is made.
+        const auto = app ? autoFor(plan, settings, statics, () => (pn && pn.slim.steady ? pn.slim.steady.cost / pn.days : 0)) : null;
+        const planInfo = pn ? { start: pn.start, end: pn.end, months: pn.months, days: pn.days, from: pn.from, createdAt: pn.createdAt, recalibratedAt: pn.recalibratedAt, progress: planProgress(pn, now), whole: Boolean(saved) } : null;
+        const m = buildModel({ state, statics, plan: followed, onPath: Boolean(seg && seg.strategy), settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: (app ? archived(K.statsHistory, {}) : get(K.statsHistory, {})) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+        if (m.ready) {
+            m.strategy = followed.strategy;
+            m.planBusy = pi.planBusy ? { recalibrate: pi.planBusy.recalibrate, months: pi.planBusy.months, at: pi.planBusy.at } : null;
+            m.savedPlan = saved;
+        }
+        return m;
     }
 
     /**
@@ -8764,22 +10214,16 @@
     }
 
     /**
-     * The plan's line for Progress: the 30-day projection as it stood when this
-     * plan (strategy, build, start) was set. Written once per plan by the leader.
+     * The plan's line for Progress: the projection of the plan followed, from
+     * the day it was made or recalibrated (or picked).
      */
-    function recordPlanLine(m) {
-        if (!m || !m.ready || !m.compare) return;
-        // Not while a new comparison is still coming (a click just changed the build).
-        if (pi.compareWanted && pi.compareWanted !== pi.compareKey) return;
+    function recordPlanLine(saved, strategy, now) {
+        // 'path': the saved path (a plan per segment); else one plan over the whole length.
+        const r = strategy === 'path' ? saved && saved.year && saved.year.path : saved && saved.compare ? saved.compare[strategy] : null;
+        if (!r || !Array.isArray(r.daily)) return;
         const plan = getPlan();
-        const r = m.compare[plan.strategy];
-        if (!r) return;
-        const key = [plan.createdAt || 0, plan.strategy, plan.build].join('|');
-        const cur = get(K.planLine, null);
-        if (cur && cur.key === key) return;
-        const lead = get(K.leader, null);
-        if (!lead || lead.id !== pi.tabId) return;
-        set(K.planLine, { key, start: tornDayStart(m.now), total: m.total, perStat: { ...m.pc.stats }, daily: r.daily, perStatGain: r.perStat, cost: r.cost, days: r.daily.length });
+        const stats = saved.snapshot.stats;
+        pageSet(K.planLine, { key: [plan.createdAt || 0, strategy, plan.build].join('|'), start: saved.from || tornDayStart(now), total: Object.values(stats).reduce((a, v) => a + v, 0), perStat: { ...stats }, daily: r.daily, perStatGain: r.perStat, cost: r.cost, days: r.daily.length });
     }
 
     /**
@@ -8801,24 +10245,49 @@
      * sessions better (docs/research-learning.md). Cheap: a few ms.
      */
     function maybeLearn(now = Date.now(), force = false) {
-        const lead = get(K.leader, null);
-        if (!force && (!lead || lead.id !== pi.tabId)) return null;
-        const cal = get('calibration', null) || {};
-        const samples = cal.samples || [];
-        const fights = joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []);
+        // On the webpage only (round 6: learning is a developer thing, and its data lives in the webpage's IndexedDB), once
+        // that copy has loaded (before, it would learn from GM's few recent samples and wait 6 hours).
+        if (!force && (pi.where !== 'app' || !archivesReady())) return null;
+        // The 6-hour check first: reading and joining the samples and fights costs more than the check (every 5 s refresh).
         const prev = get(K.learned, null);
+        if (!force && prev && now - Math.max(prev.at || 0, prev.checkedAt || 0) < LEARN_EVERY_MS) return prev;
+        const cal = archived('calibration', null) || {};
+        const samples = cal.samples || [];
+        const fights = joinFights(pageGet(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], archived(K.eyePredictions, []) || []);
         // New trains or fights since the last run (counts stop growing at the cap; the newest time doesn't).
-        const sig = [samples.length, samples.length ? samples[samples.length - 1].at || 0 : 0, fights.length, fights.length ? fights[fights.length - 1].at : 0].join(':');
-        if (!force && prev && (now - prev.at < LEARN_EVERY_MS || prev.sig === sig)) return prev;
-        set(K.fightLog, fights);
+        const logNewest = ((pageGet(K.gymLog, null) || {}).newest) || 0;
+        const sig = [samples.length, samples.length ? samples[samples.length - 1].at || 0 : 0, fights.length, fights.length ? fights[fights.length - 1].at : 0, logNewest].join(':');
+        if (!force && prev && prev.sig === sig) {
+            // Nothing new: checked again in 6 hours, not on every refresh (`at` stays when it last learned).
+            set(K.learned, { ...prev, checkedAt: now });
+            return prev;
+        }
+        pageSet(K.fightLog, fights);
         // The model in use (kept earlier, or kept over and over since) is the one a new one must beat.
         const current = prev && prev.gym ? applyGymModel(prev.gym) : null;
-        const res = { ...runLearning({ samples, fights, now, current }), sig };
+        const statics = getShared(K.userStatic, {}) || {};
+        const lossMult = parsePerks(statics.perks || {}).happyLossMult || 1;
+        const gymLog = (pageGet(K.gymLog, null) || {}).lines || [];
+        const res = { ...runLearning({ samples, fights, now, current, gymLog, lossMult, happyCurrent: prev && prev.happy && prev.happy.factor > 0 ? prev.happy.factor : 1 }), sig };
         set(K.learned, res);
-        const log = get(K.learnLog, []) || [];
+        const log = pageGet(K.learnLog, []) || [];
         log.push({ at: now, gym: { accepted: res.gym.accepted, heldOut: res.gym.heldOut, mode: res.gym.model.mode, mult: res.gym.model.mult, sessions: res.gym.sessions, candidates: res.gym.candidates }, fights: { accepted: res.fights.accepted, model: res.fights.model, fights: res.fights.fights, heldOut: res.fights.heldOut } });
-        set(K.learnLog, log.slice(-30));
+        pageSet(K.learnLog, log.slice(-30));
         return res;
+    }
+
+    /** On Torn's pages a model with nothing new is kept this long (a new read or another tab's change redraws at once). */
+    const TORN_MODEL_MAX_AGE_MS = 30000;
+
+    /**
+     * Is a Torn page's model due again without anything new (round 6: rebuilding today's plan every 5 s was most of what
+     * a Torn page cost)? When it's 30 s old, when a step's time has come, or at Torn midnight.
+     */
+    function modelDue(m, at, now) {
+        if (!m || !m.ready || !at) return true;
+        if (now - at >= TORN_MODEL_MAX_AGE_MS) return true;
+        if (tornDayStart(now) !== tornDayStart(at)) return true;
+        return (m.steps || []).some((x) => x.at > at && x.at <= now);
     }
 
     function refresh() {
@@ -8832,8 +10301,8 @@
         try {
             maybeLearn();
             pi.model = currentModel();
+            pi.modelAt = Date.now();
             recordDayTotals(pi.model);
-            recordPlanLine(pi.model);
         } catch (error) {
             set(K.lastError, { at: Date.now(), where: 'model', message: String((error && error.message) || error) });
             return;
@@ -8878,8 +10347,7 @@
         window.addEventListener('pagehide', () => {
             const rec = get(K.leader, null);
             if (rec && rec.id === pi.tabId) set(K.leader, { id: null, ts: 0 });
-            // A comparison this page was working out: another page takes the turn at once.
-            releaseCompareTurn();
+            flushWindows();
         });
         const tick = () => pi.feed.tick().catch(() => {});
         tick();
@@ -8898,6 +10366,8 @@
         gmOnChange(K.userState, refresh);
         gmOnChange(K.userStatic, refresh);
         gmOnChange(K.plan, refresh);
+        gmOnChange(K.planNow, refresh);
+        gmOnChange(K.skipped, refresh);
         gmOnChange(K.settings, refresh);
         gmOnChange(K.stateError, refresh);
         gmOnChange(K.apiKeyDead, refresh);
@@ -8908,11 +10378,25 @@
             pi.focusOf = null;
             beatFocus();
         });
-        // Countdowns tick by themselves every second; the model itself is worked out again every 5 s, in a tab you can see.
+        // Countdowns tick by themselves every second; the model is worked out again every 5 s in a tab you can see (on
+        // Torn's pages only when it's due: see modelDue).
         setInterval(() => {
-            if (isVisible()) refresh();
+            if (isVisible() && (pi.where === 'app' || modelDue(pi.model, pi.modelAt, Date.now()))) refresh();
         }, 5000);
-        refresh();
+        // Taking turns with Torn Trading: the page follows a pause (or its end) at once, not at the next due model.
+        let pausedWas = null;
+        onPauseChange((p) => {
+            if (pausedWas !== null && p !== pausedWas) refresh();
+            pausedWas = p;
+        });
+        // The first model once Torn's page has settled (idle), not inside the page's own start-up.
+        whenIdle(refresh);
+    }
+
+    /** Run when the page is idle (at most ~1.5 s later). */
+    function whenIdle(fn) {
+        if (typeof requestIdleCallback === 'function') requestIdleCallback(() => fn(), { timeout: 1500 });
+        else setTimeout(fn, 200);
     }
 
     /* ===== src/api/worker.js ===== */
@@ -9071,6 +10555,12 @@
 
 
 
+    /** Set by the runtime: a Discord skip redraws this tab's model. */
+    let onSkippedChange = null;
+    function onSkipped(fn) {
+        onSkippedChange = fn;
+    }
+
     const SYNC_MIN_MS = 60 * 1000;
 
     /** Sync at least this often while a tab is visible (a plan not synced for 12 h is "out of date" on the Worker). */
@@ -9139,7 +10629,10 @@
             ids.push(a.id);
             if (a.kind === 'skip' && a.step && a.step.kind !== 'test') skipped.push({ at: now, stepAt: Number(a.step.at) * 1000, kind: a.step.kind, label: a.step.label || null });
         }
+        const before = JSON.stringify(get(K.skipped, []) || []);
         set(K.skipped, skipped);
+        // A step skipped in Discord: this tab's model follows at once (a local write fires no change event here).
+        if (JSON.stringify(skipped) !== before && typeof onSkippedChange === 'function') onSkippedChange();
         return ids;
     }
 
@@ -9847,6 +11340,22 @@
     .bliss { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; font-size: 13px; color: var(--muted); }
     .bliss b { color: var(--text); }
     .note2 { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    /* Plan: your plan (round 6) */
+    .plancard .pc-top { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+    .plancard .pc-what { flex: 1 1 360px; min-width: 0; }
+    .plancard .pc-title { font: 700 20px var(--display); color: var(--white); }
+    .plancard .pc-sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
+    .plancard .acts { display: flex; gap: 8px; }
+    .dayline { height: 5px; background: var(--line); border-radius: 3px; margin-top: 8px; position: relative; overflow: hidden; }
+    .dayline i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--chalk); border-radius: 3px; }
+    .newrow { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .newrow .confirm { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; border: 1px solid var(--warn); border-radius: 6px; padding: 6px 10px; }
+    .months { display: grid; gap: 4px; }
+    .months .mo { background: var(--card); border: 1px solid var(--line); border-radius: 5px; padding: 6px 6px 5px; font-size: 11px; color: var(--muted); min-width: 0; }
+    .months .mo b { display: block; color: var(--text); font-size: 13px; margin-top: 2px; }
+    .months .mo em { display: block; font-style: normal; color: var(--chalk); font-size: 11px; margin-top: 2px; text-transform: uppercase; letter-spacing: .5px; }
+    .months .mo.past { opacity: .55; }
+    .months .mo.now { border-color: var(--chalk); }
     /* Breathing room and cards (owner, round 3): one level of cards; the page's primary block has a chalk edge. */
     .app { --row: 40px; --pad: 14px; --gap: 22px; --sec: 18px; }
     .top { padding: 0 24px; }
@@ -10473,8 +11982,10 @@
                     warn: cur.stopAt !== undefined ? 'Stop at ' + n + ' trains. More puts you under the rule for ' + cur.stopReason + ' and you lose it.' : null,
                 };
             } else if (cur && !here) {
-                // The current part is in another gym: every box here waits.
-                perStat[k] = { kind: 'grey', text: k === cur.stat ? 'Next · ' + STAT_LABEL[k] + ' × ' + cur.left + ' at ' + cur.gymName : greyWord(k, mine, open, locked) };
+                // The current part is in another gym: the strip says so in one line; Torn's boxes are left as they are
+                // (owner, round 6: greying them read as "the gym is disabled").
+                // A part already done here still says so.
+                perStat[k] = { kind: 'away', text: mine.length && !open.length ? greyWord(k, mine, open, locked) : '' };
             } else {
                 const text = greyWord(k, mine, open, locked);
                 perStat[k] = { kind: open.length ? 'next' : mine.length ? 'done' : text === 'Not trained here' ? 'none' : text.startsWith('Next') ? 'next' : 'skip', text };
@@ -10484,7 +11995,7 @@
         if (cur && !here) {
             const label = 'Next: ' + cur.gymName + ' · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
             out.nextGym = { id: cur.gymId, label, group: gymGroupWord(cur.gymId) };
-            out.switchHint = 'Switch to ' + cur.gymName + ' (' + gymGroupWord(cur.gymId) + ') · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
+            out.switchHint = 'This session trains at ' + cur.gymName + ': open it · then ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
         }
         // In the right gym: its button is outlined too, so where to train is never a guess.
         if (cur && here) out.hereGym = { id: cur.gymId, label: 'Train here · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left };
@@ -10855,7 +12366,7 @@
         const plan = ctx.plan;
         const strat = STRATEGIES[plan.strategy] || STRATEGIES.steady;
         const r = ctx.compare && ctx.compare[plan.strategy];
-        const days = ctx.settings.horizonDays || 30;
+        const days = m.planDays || ctx.settings.horizonDays || 30;
         const perDay = r ? Math.round(((r.used && r.used[XANAX]) || 0) / days) : null;
         const sub = r ? (perDay ? perDay + ' Xanax' : 'no Xanax') + ((r.used && r.used[POINTS]) ? ' + refill' : '') + ' a day · +' + fmtShort(r.gained) + ' in ' + days + ' days' : strat.what;
         return h('div', {}, [
@@ -10985,14 +12496,9 @@
         return s ? KIND_TAG[s.kind] || 'Steady' : '';
     }
 
-    /**
-     * Picking a plan yourself. In Auto the plan follows your income, so a pick
-     * of your own switches the Plan dropdown to a manual rule (Most stats in my
-     * budget) instead of being undone at the next refresh.
-     */
+    /** Picking another of the saved plans yourself: followed at once, nothing is worked out again (round 6). */
     function pickPlan(ctx, id) {
-        const manual = ctx.plan.pickBy === 'auto' ? { pickBy: 'most', pickByPicked: true } : {};
-        ctx.setPlan({ strategy: id, strategyPicked: true, ...manual });
+        ctx.setPlan({ strategy: id, strategyPicked: true });
     }
 
     /** The Plan dropdown: stands out, chalk-edged. */
@@ -11058,9 +12564,11 @@
         const a = m.auto;
         if (pickBy === 'max') return [h('span', { class: 'muted', text: '· no budget' })];
         if (pickBy === 'auto' && a && a.ready) {
-            return [t('lab', 'with'), h('b', { class: 'white num', text: fmtMoney(Math.round(a.budgetPerDay)) + ' a day' }), h('span', { class: 'muted', text: 'from your income (last ' + Math.round(a.days) + ' days' + (a.source === 'log' ? ', money log' : ', networth') + ')' }), h('span', { class: 'info', title: (a.source === 'log' ? 'Income = money in less money out a day in your money log (Full key), plus what the gym plan spends.' : 'Income = how fast your networth grew (Torn’s own history), plus what the gym plan spends; your money log has nothing readable yet.') + (a.networthPerDay !== null && a.source === 'log' ? ' Cross-check: your networth grew ' + fmtMoney(Math.round(a.networthPerDay)) + ' a day.' : '') + ' Auto spends at most that a day.', text: 'i' })];
+            return [t('lab', 'with'), h('b', { class: 'white num', text: fmtMoney(Math.round(a.budgetPerDay)) + ' a day' }), h('span', { class: 'muted', text: a.source === 'floor' ? 'from your certain income (bank, dividends, rent)' : 'from your income (last ' + Math.round(a.days) + ' days' + (a.source === 'log' ? ', money log' : ', networth') + ')' + (a.floor && a.floor.perDay > 0 ? ' · ' + fmtMoney(Math.round(a.floor.perDay)) + ' of it certain' : '') }), h('span', { class: 'info', title: (a.source === 'log' ? 'Income = money in less money out a day in your money log (Full key), plus what the gym plan spends.' : 'Income = how fast your networth grew (Torn’s own history), plus what the gym plan spends; your money log has nothing readable yet.') + (a.networthPerDay !== null && a.source === 'log' ? ' Cross-check: your networth grew ' + fmtMoney(Math.round(a.networthPerDay)) + ' a day.' : '') + ' Auto spends at most that a day.', text: 'i' })];
         }
-        const box = [t('lab', 'with'), numberInput(s.budget || 0, 130, (v) => (v > 0 ? ctx.setSettings({ budget: v }) : ctx.rerender()), { money: true, label: 'Budget' }), h('span', { class: 'muted', text: 'budget' })];
+        // Round 6: a budget a day (the plan's length comes from Create plan).
+        const perDay = Math.round((s.budget || 0) / (s.horizonDays || 30));
+        const box = [t('lab', 'with'), numberInput(perDay, 120, (v) => (v > 0 ? ctx.setSettings({ budget: v * 30, horizonDays: 30 }) : ctx.rerender()), { money: true, label: 'Budget a day' }), h('span', { class: 'muted', text: 'a day' })];
         if (pickBy === 'auto' && a && a.wait) box.push(h('span', { class: 'tag warn', title: a.wait, text: a.needsKey ? 'Auto needs a Full key' : 'Reading your income…' }));
         return box;
     }
@@ -11076,11 +12584,9 @@
                 : goal && goal.kind === 'unlockGym'
                   ? h('b', { class: 'white', text: 'Unlock ' + ((gymById(goal.gymId, m.pc && m.pc.table) || {}).name || 'a gym') })
                   : buildSelect(ctx);
+        void days;
         const bar1 = [
             planChooser(ctx),
-            t('lab', 'for'),
-            numberInput(days, 52, (v) => ctx.setSettings({ horizonDays: Math.max(3, Math.min(90, v || 30)) }), { label: 'Days' }),
-            h('span', { class: 'muted', text: 'days' }),
             ...budgetControls(m, ctx),
             h('span', { class: 'sep' }),
             t('lab', 'Train toward'),
@@ -11089,6 +12595,7 @@
                 ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.setPlan({ goal: null }), text: 'Back to the build' })
                 : h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.goalForm = !ctx.ui.goalForm; ctx.rerender(); }, text: '+ Stat numbers' }),
             !goal && m.nextGym && m.nextGym.gym ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.setPlan({ goal: { kind: 'unlockGym', gymId: m.nextGym.gym.id } }), text: '+ Unlock ' + m.nextGym.gym.name }) : null,
+            h('span', { class: 'muted', text: 'used by the next Create plan or Recalibrate' }),
         ];
         const bar2 = [];
         const sp = m.special || {};
@@ -11148,16 +12655,22 @@
         const reasons = rec.reasons.length ? rec.reasons.join(' ') : 'It gains the most stats inside your budget.';
         const spend = m.spend && m.spend.lastsDays !== null && m.spend.cash !== null ? ' Your ' + fmtMoney(m.spend.cash) + ' on hand lasts about ' + Math.round(m.spend.lastsDays) + ' days at ' + fmtMoney(m.spend.perDay) + ' a day.' : '';
         const a = m.auto;
-        const autoOn = Boolean(a && a.ready && ctx.plan.pickBy === 'auto');
-        const money = autoOn ? 'Auto · ' + fmtMoney(Math.round(a.budgetPerDay)) + ' a day from your income' : pickBy === 'max' || !(ctx.settings.budget > 0) ? 'no budget' : fmtMoney(ctx.settings.budget);
+        // What the saved plan was made with (round 6: its budget and income are the ones it saw, until you recalibrate).
+        const snap = m.savedPlan ? m.savedPlan.snapshot : null;
+        const autoOn = Boolean(snap && snap.income && rec.pickBy === 'auto');
+        const money = autoOn ? fmtMoney(Math.round(snap.budgetPerDay)) + ' a day from your income' : snap && snap.budgetPerDay !== null ? fmtMoney(Math.round(snap.budgetPerDay)) + ' a day' : 'no budget';
         const kids = [
             sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + money + ' · ' + days + ' days'])),
             h('div', { class: 'prime num' }, [
                 h('div', {}, [h('span', { class: 'pill-tag chalk', text: kindOf(rec.recommended) }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: planWhat(rec.recommended, best) }), best && best.candy && tierWords(best.candy.id) ? h('div', { class: 'd muted', style: 'margin-top:2px;font-size:12px', text: 'Candy: ' + tierWords(best.candy.id) + '; what you hold goes first' }) : null]),
                 h('div', { class: 'figs' }, figs),
                 h('div', { class: 'why' }, [
-                    'Wins because: ' + reasons + (autoOn && a.afford ? ' ' + a.afford : spend) + ' ',
-                    autoOn ? h('span', { class: 'c-good', text: 'Auto keeps you on it.' }) : using === rec.recommended ? h('span', { class: 'c-good', text: 'You’re on it.' }) : h('a', { href: '#', onclick: (e) => { e.preventDefault(); ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Use it' }),
+                    'Wins because: ' + reasons + (autoOn && a && a.afford ? ' ' + a.afford : spend) + ' ',
+                    using === rec.recommended
+                        ? h('span', { class: 'c-good', text: 'You’re on it.' })
+                        : m.saved && !ctx.plan.strategyPicked
+                          ? h('span', { class: 'muted', text: 'Your saved plan follows ' + ((STRATEGIES[using] || {}).short || using).toLowerCase() + ' for these days and switches on its dates.' })
+                          : h('a', { href: '#', onclick: (e) => { e.preventDefault(); ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Back to the saved plan' }),
                 ]),
             ]),
             ctx.plan.pickBy === 'auto' && a && a.wait ? h('div', { class: 'warnb', style: 'margin-top:10px' }, [h('b', { text: a.needsKey ? 'Auto mode needs a Full key' : 'Reading your income' }), h('p', { text: a.wait }), a.needsKey ? h('div', { class: 'acts' }, [h('button', { class: 'btn primary sm', type: 'button', onclick: () => ctx.go('settings'), text: 'Add it in Settings' })]) : null]) : null,
@@ -11173,7 +12686,7 @@
             kids.push(
                 h('div', { class: 'warnb num', style: 'margin-top:12px' }, [
                     h('b', { text: w.title }),
-                    h('p', { text: w.text + ' ' + w.reasons.join(' ') + (ctx.plan.pickBy === 'auto' ? ' Using it yourself turns Auto off (Plan: Most stats in my budget).' : '') }),
+                    h('p', { text: w.text + ' ' + w.reasons.join(' ') + '' }),
                     h('div', { class: 'acts' }, [
                         h('button', { class: 'btn primary', type: 'button', onclick: () => { ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Keep ' + S.short.toLowerCase() }),
                         h('button', { class: 'btn', type: 'button', onclick: () => { ctx.ui.planPick = null; pickPlan(ctx, pick); }, text: 'Use it anyway' }),
@@ -11416,16 +12929,128 @@
         return h('div', {}, [sectionHead('Ignorance Is Bliss', meta([bliss ? 'active' : 'not active']), null, 'h3'), h('div', { class: 'bliss num' }, lines)]);
     }
 
+    /** The lengths Create plan offers (owner: 1 / 3 / 6 / 12 months). */
+    const PLAN_LENGTHS = [1, 3, 6, 12];
+    const monthsWord = (n) => n + (n === 1 ? ' month' : ' months');
+    const dayWord = (t) => new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+
+    function lengthChoice(ctx, fallback = 3) {
+        const cur = PLAN_LENGTHS.includes(ctx.ui.planMonths) ? ctx.ui.planMonths : fallback;
+        return h(
+            'div',
+            { class: 'seg', role: 'group', 'aria-label': 'Plan length' },
+            PLAN_LENGTHS.map((n) => h('button', { type: 'button', 'aria-pressed': String(n === cur), onclick: () => { ctx.ui.planMonths = n; ctx.ui.replaceAsk = false; ctx.rerender(); }, text: monthsWord(n) })),
+        );
+    }
+
+    /** A Create plan / Recalibrate click: the page shows it working, then the new plan (or why it couldn't). */
+    function startPlan(ctx, months) {
+        ctx.ui.newPlan = false;
+        ctx.ui.replaceAsk = false;
+        return ctx.createPlan(months);
+    }
+
+    /**
+     * Your plan (round 6, the owner's pick: mockup A's card with C's months).
+     * Nothing re-plans by itself: Create plan (1, 3, 6 or 12 months, from
+     * scratch) and Recalibrate (any time: the days left from today, same end)
+     * are the only things that work a plan out.
+     */
+    function planCard(m, ctx) {
+        const sv = m.saved;
+        const busy = m.planBusy;
+        const err = ctx.ui.planError ? h('p', { class: 'c-bad', style: 'margin:8px 0 0', text: ctx.ui.planError }) : null;
+        const months = PLAN_LENGTHS.includes(ctx.ui.planMonths) ? ctx.ui.planMonths : sv ? sv.months : 3;
+        if (!sv) {
+            return h('div', { class: 'lead plancard' }, [
+                sectionHead('No plan yet', meta(['worked out once from your stats, income, prices and gyms now, then saved · takes a few seconds'])),
+                h('div', { class: 'row', style: 'gap:10px;flex-wrap:wrap;margin-top:6px' }, [
+                    lengthChoice(ctx, 3),
+                    h('button', { class: 'btn primary', type: 'button', disabled: Boolean(busy), onclick: () => startPlan(ctx, months), text: busy ? 'Working out your plan…' : 'Create plan' }),
+                ]),
+                err,
+            ]);
+        }
+        const S = STRATEGIES[m.strategy] || STRATEGIES.steady;
+        const p = sv.progress || { day: 1, of: sv.days, ended: false };
+        const last = m.savedPlan && m.savedPlan.history && m.savedPlan.history.length ? m.savedPlan.history[m.savedPlan.history.length - 1] : null;
+        const incomeMove = last && last.from.budgetPerDay !== null && last.to.budgetPerDay !== null && Math.round(last.from.budgetPerDay) !== Math.round(last.to.budgetPerDay) ? ' on ' + fmtMoney(Math.round(last.to.budgetPerDay)) + ' a day (was ' + fmtMoney(Math.round(last.from.budgetPerDay)) + ')' : '';
+        const sub = [dayWord(sv.start) + ' → ' + dayWord(sv.end), p.ended ? 'ended' : 'day ' + p.day + ' of ' + p.of, 'made ' + dayWord(sv.createdAt), sv.recalibratedAt ? 'recalibrated ' + dayWord(sv.recalibratedAt) + incomeMove : null, ctx.plan.strategyPicked ? 'following ' + S.short.toLowerCase() + ', your pick' : null].filter(Boolean).join(' · ');
+        const kids = [
+            h('div', { class: 'pc-top' }, [
+                h('div', { class: 'pc-what' }, [
+                    h('div', { class: 'pc-title', text: monthsWord(sv.months).replace(' months', '-month').replace(' month', '-month') + ' plan · ' + S.name }),
+                    h('div', { class: 'pc-sub num', text: sub }),
+                    h('div', { class: 'dayline', role: 'img', 'aria-label': 'Day ' + p.day + ' of ' + p.of }, [h('i', { style: 'width:' + Math.min(100, (100 * p.day) / Math.max(1, p.of)).toFixed(1) + '%' })]),
+                ]),
+                h('div', { class: 'acts' }, [
+                    h('button', { class: 'btn primary', type: 'button', disabled: Boolean(busy) || p.ended, title: 'Re-reads your stats, income, prices and gyms now and re-plans the days left; the end date stays', onclick: () => { ctx.ui.newPlan = false; ctx.ui.replaceAsk = false; ctx.recalibratePlan(); }, text: busy && busy.recalibrate ? 'Recalibrating…' : 'Recalibrate' }),
+                    h('button', { class: 'btn ghost', type: 'button', disabled: Boolean(busy), 'aria-expanded': String(Boolean(ctx.ui.newPlan)), onclick: () => { ctx.ui.newPlan = !ctx.ui.newPlan; ctx.ui.replaceAsk = false; ctx.rerender(); }, text: busy && !busy.recalibrate ? 'Working out…' : 'New plan…' }),
+                ]),
+            ]),
+        ];
+        if (ctx.ui.newPlan || p.ended) {
+            kids.push(
+                h('div', { class: 'newrow' }, [
+                    t('lab', 'New plan for'),
+                    lengthChoice(ctx, sv.months),
+                    ctx.ui.replaceAsk
+                        ? h('span', { class: 'confirm' }, [
+                              h('b', { text: 'Replace your ' + monthsWord(sv.months).replace(' months', '-month').replace(' month', '-month') + ' plan?' }),
+                              h('span', { class: 'muted', text: ' A new ' + monthsWord(months) + ' plan starts today; the old one stays in its history. ' }),
+                              h('button', { class: 'btn sm primary', type: 'button', onclick: () => startPlan(ctx, months), text: 'Replace it' }),
+                              h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.replaceAsk = false; ctx.ui.newPlan = false; ctx.rerender(); }, text: 'Keep mine' }),
+                          ])
+                        : h('button', { class: 'btn sm primary', type: 'button', disabled: Boolean(busy), onclick: () => { ctx.ui.replaceAsk = true; ctx.rerender(); }, text: 'Create plan' }),
+                    ctx.ui.replaceAsk ? null : h('span', { class: 'muted', text: 'replaces this plan (kept in its history)' }),
+                ]),
+            );
+        }
+        if (err) kids.push(err);
+        return h('div', { class: 'lead plancard' }, kids);
+    }
+
+    /** The plan's months (mockup C): total stats planned at each month's end, "you are here", the rough ones marked "~". */
+    function monthsRow(m, ctx) {
+        const sp = m.savedPlan;
+        if (!sp || !Array.isArray(sp.monthly) || sp.monthly.length < 2) return null;
+        const now = m.now;
+        const total = (st) => Object.values(st || {}).reduce((a, v) => a + (Number(v) || 0), 0);
+        const cells = sp.monthly.map((mo, i) => {
+            const past = mo.to <= now;
+            const cur = now >= mo.from && now < mo.to;
+            const rough = i >= 3;
+            const name = new Date(mo.to - 1).toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' });
+            return h('div', { class: 'mo' + (past ? ' past' : '') + (cur ? ' now' : ''), title: dayWord(mo.from) + ' → ' + dayWord(mo.to) + ': +' + fmtShort(mo.gained) + ' for ' + fmtMoney(mo.cost) }, [h('span', { text: name }), h('b', { text: (rough ? '~' : '') + fmtShort(total(mo.stats)) }), cur ? h('em', { text: 'you are here' }) : null]);
+        });
+        const costs = sp.monthly.map((x) => x.cost).filter((x) => x > 0);
+        const y = sp.year;
+        const foot = [
+            costs.length ? 'About ' + fmtMoney(Math.min(...costs)) + (Math.max(...costs) > Math.min(...costs) * 1.05 ? '–' + fmtMoney(Math.max(...costs)) : '') + ' a month' : null,
+            y && y.band && y.path ? 'whole plan ~+' + fmtShort(y.path.gained) + ' (range +' + fmtShort(y.band.low) + ' to +' + fmtShort(y.band.high) + ': the model’s own error; later months are rougher)' : null,
+            y && y.unlocks && y.unlocks.length ? 'gyms: ' + y.unlocks.slice(0, 3).map((u) => ((gymById(u.gymId) || {}).name || 'gym ' + u.gymId) + ' ~day ' + u.day).join(', ') : null,
+        ].filter(Boolean);
+        return h('div', {}, [
+            sectionHead('Your ' + sp.monthly.length + ' months', meta(['total stats planned at each month’s end'])),
+            h('div', { class: 'months num', style: 'grid-template-columns:repeat(' + Math.min(12, sp.monthly.length) + ',minmax(0,1fr))' }, cells),
+            foot.length ? h('div', { class: 'note2 num', text: foot.join(' · ') }) : null,
+        ]);
+    }
+
     function renderPlan(m, ctx) {
         const compare = ctx.compare || {};
         const rec = m.recommendation;
-        const days = ctx.settings.horizonDays || 30;
+        const days = m.planDays || ctx.settings.horizonDays || 30;
         // Every candy a plan might pick is priced (a few listings, every 30 min), so the candy choice follows prices.
         if (ctx.wantPrices) ctx.wantPrices([], CANDY_IDS);
-        if (!rec || !rec.recommended || !compare[rec.recommended]) return { ctl: controls(m, ctx), main: [h('div', { class: 'lead' }, [h('p', { class: 'muted', style: 'margin:0', text: 'Working out the plans…' })])], pane: [] };
+        if (!rec || !rec.recommended || !compare[rec.recommended] || (m.saved && !m.saved.whole)) {
+            // Round 6: plans are made on a click (Create plan / Recalibrate) and saved; nothing is worked out by itself.
+            const loading = m.saved && !m.saved.whole && !m.planBusy ? h('p', { class: 'muted', style: 'margin:0', text: 'Loading your saved plan…' }) : null;
+            return { ctl: controls(m, ctx), main: [planCard(m, ctx), loading].filter(Boolean), pane: [] };
+        }
         return {
             ctl: controls(m, ctx),
-            main: [recommendedCard(m, ctx, rec, compare, days), otherPlans(m, ctx, rec, compare, days), ladderCard(m, ctx)].filter(Boolean),
+            main: [planCard(m, ctx), monthsRow(m, ctx), recommendedCard(m, ctx, rec, compare, days), otherPlans(m, ctx, rec, compare, days), ladderCard(m, ctx)].filter(Boolean),
             pane: [chartCard(m, ctx, rec, compare, days), buildCard(m, ctx), blissCard(m, ctx, rec, compare, days)],
         };
     }
@@ -11900,7 +13525,7 @@
         const now = m.now;
         const win = s.buyWindow || 'three';
         const inv = ctx.statics.inventory || {};
-        const needs = needList(needsForWindow(m, ctx.compare, ctx.plan, win, s.horizonDays), inv);
+        const needs = needList(needsForWindow(m, ctx.compare, { ...ctx.plan, strategy: m.strategy || ctx.plan.strategy }, win, m.planDays || s.horizonDays), inv);
         const planTypes = [...new Set(needs.map((n) => typeOf(n.id)))];
         const show = shownTypes(s, planTypes);
         const toBuy = needs.filter((n) => n.buy > 0 && show.has(typeOf(n.id)));
@@ -12401,7 +14026,7 @@
     }
 
     function budgetFacts(m, ctx, s) {
-        const days = ctx.settings.horizonDays || 30;
+        const days = m.planDays || ctx.settings.horizonDays || 30;
         // Auto mode: the budget is what your income affords over the horizon.
         const auto = m.auto && m.auto.ready && ctx.plan && ctx.plan.pickBy === 'auto' ? m.auto : null;
         const budget = auto ? auto.budget : ctx.settings.budget || 0;
@@ -12447,7 +14072,7 @@
     function milestones(m, ctx) {
         const r = ctx.compare && ctx.compare[ctx.plan.strategy];
         if (!r) return null;
-        const days = ctx.settings.horizonDays || 30;
+        const days = m.planDays || ctx.settings.horizonDays || 30;
         const out = [];
         const main = STATS.filter((k) => r.perStat && r.perStat[k] > 0).sort((a, b) => r.perStat[b] - r.perStat[a])[0];
         const when = (target, cur, daily) => {
@@ -15440,70 +17065,6 @@
         return { ctl: [bar1, bar2], main, pane, upd };
     }
 
-    /* ===== src/platform/idb.js ===== */
-    /*
-     * A small key-value store in the page's own IndexedDB, for data only ONE page
-     * needs. Tampermonkey hands every stored GM value to the script before it
-     * starts, on every page it runs on - so the Torn Ledger's rows (which only
-     * Torn Bids reads, and which grow with every trade) slowed every Torn page
-     * they were never shown on. Here they cost Torn pages nothing.
-     *
-     * Every call rejects where IndexedDB is missing or refused (some private
-     * windows); the caller then keeps the GM store.
-     */
-
-    const IDB_NAME = 'pumpingIron';
-    const IDB_STORE = 'kv';
-
-    let idbOpening = null;
-
-    function idbOpen() {
-        if (!idbOpening) {
-            idbOpening = new Promise((resolve, reject) => {
-                if (typeof indexedDB === 'undefined' || !indexedDB) {
-                    reject(new Error('No IndexedDB.'));
-                    return;
-                }
-                const req = indexedDB.open(IDB_NAME, 1);
-                req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
-                req.onsuccess = () => resolve(req.result);
-                req.onerror = () => reject(req.error || new Error('IndexedDB refused.'));
-                req.onblocked = () => reject(new Error('IndexedDB blocked.'));
-            });
-            // A failed open is tried again next time rather than remembered.
-            idbOpening.catch(() => {
-                idbOpening = null;
-            });
-        }
-        return idbOpening;
-    }
-
-    function idbRun(mode, fn) {
-        return idbOpen().then(
-            (db) =>
-                new Promise((resolve, reject) => {
-                    const tx = db.transaction(IDB_STORE, mode);
-                    const req = fn(tx.objectStore(IDB_STORE));
-                    tx.oncomplete = () => resolve(req ? req.result : undefined);
-                    tx.onerror = () => reject(tx.error || new Error('IndexedDB error.'));
-                    tx.onabort = () => reject(tx.error || new Error('IndexedDB aborted.'));
-                }),
-        );
-    }
-
-    /** @returns {Promise<any|null>} */
-    function idbGet(key) {
-        return idbRun('readonly', (s) => s.get(key)).then((v) => (v === undefined ? null : v));
-    }
-
-    function idbSet(key, value) {
-        return idbRun('readwrite', (s) => s.put(value, key));
-    }
-
-    function idbDel(key) {
-        return idbRun('readwrite', (s) => s.delete(key));
-    }
-
     /* ===== src/core/eye/gear.js ===== */
     /*
      * Gear (ENGINE-SPEC §11): the defender's items from the attack page's
@@ -15596,6 +17157,7 @@
      * tab, inside each service's own budget; answers are cached (FFScouter 5
      * min in memory and 1 h stored, as its guidance asks).
      */
+
 
 
 
@@ -15713,7 +17275,10 @@
         set('eyeGearCount', 0);
         await idbSet('eye', eye.cache).catch(() => {});
         set('myAttacks', null);
-        for (const k of [TARGETS_KEY, WATCH_KEY, WATCH_STATE_KEY, FLIGHTS_KEY, 'eyeWarAuto']) set(k, null);
+        pageSet(TARGETS_KEY, null);
+        for (const k of [WATCH_KEY, 'eyeWarAuto']) set(k, null);
+        pageSet(WATCH_STATE_KEY, null);
+        pageSet(FLIGHTS_KEY, null);
         notify();
     }
 
@@ -15803,7 +17368,12 @@
         const withProfile = new Set(want.filter((x) => String(x).endsWith(':p')).map((x) => Number(String(x).split(':')[0])));
         const c = await cache();
         const now = Date.now();
-        const rec = (id) => (c.players[id] = c.players[id] || {});
+        let changed = false;
+        // Every write goes through here: the sweep saves only when one happened.
+        const rec = (id) => {
+            changed = true;
+            return (c.players[id] = c.players[id] || {});
+        };
         clients();
         // FFScouter, batched, for anything not fresh.
         if (getKey(K.ffsKey)) {
@@ -15864,10 +17434,16 @@
                 }
             }
         }
-        for (const id of ids) rec(id).seen = Date.now();
-        saveSoon();
-        await myAttacks();
-        await myEquipment();
+        // Saved only when something changed (round 6: the whole cache was written on every sweep); `seen` (which players to
+        // keep) moves at most hourly.
+        for (const id of ids) if (!c.players[id] || !(now - (c.players[id].seen || 0) < 3600e3)) rec(id).seen = Date.now();
+        if (changed) saveSoon();
+        // Your own attacks and gear: read on the webpage's Torn Eye tab only (owner, round 6: Torn's pages ask about the
+        // player you view or attack, nothing else).
+        if (pi.where === 'app') {
+            await myAttacks();
+            await myEquipment();
+        }
         notify();
     }
 
@@ -15900,7 +17476,9 @@
         let fGear = null;
         if (est) {
             // The fight Monte Carlo runs again only when something it reads changed (a war page redraws every 10 s).
-            const key = JSON.stringify([est.bss, est.stats, life, myLife, meStats, gearRec ? gearRec.seenAt : 0, statics.equipmentAt || 0]);
+            // Your stats in ~1% steps (round 6): every train moved them, and every chip's Monte Carlo ran again (~50 ms for 100).
+            const meKey = Object.values(meStats).map((v) => Math.round(Math.log1p(v) * 100));
+            const key = JSON.stringify([est.bss, est.stats, life, myLife, meKey, gearRec ? gearRec.seenAt : 0, statics.equipmentAt || 0]);
             const memo = eye.fc.get(id);
             if (memo && memo.key === key) {
                 f = memo.f;
@@ -16022,7 +17600,7 @@
      * @param {object} input - {minLevel, maxLevel, inactiveOnly, factionless}
      * @param {object} [deps] - {client, judge, store, sleep, now} (tests)
      */
-    async function importTargets(input = {}, { client = null, judge = null, store = (v) => set(TARGETS_KEY, v), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() } = {}) {
+    async function importTargets(input = {}, { client = null, judge = null, store = (v) => pageSet(TARGETS_KEY, v), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() } = {}) {
         const ffs = client || sharedFfsClient();
         if (!judge && !(pi.model && pi.model.ready)) throw new Error('Waiting for your stats from Torn.');
         const params = targetParams(input);
@@ -16073,12 +17651,12 @@
 
     /** When each flight was first seen, kept across reloads (GM storage, so every tab agrees). */
     function flightsSeen() {
-        return get(FLIGHTS_KEY, {}) || {};
+        return pageGet(FLIGHTS_KEY, {}) || {};
     }
 
     function rememberFlights(members, now = Date.now()) {
         const { seen, changed } = trackFlights(flightsSeen(), members, now);
-        if (changed) set(FLIGHTS_KEY, seen);
+        if (changed) pageSet(FLIGHTS_KEY, seen);
         return seen;
     }
 
@@ -16089,7 +17667,7 @@
     }
 
     function watchStates() {
-        const s = get(WATCH_STATE_KEY, null) || {};
+        const s = pageGet(WATCH_STATE_KEY, null) || {};
         return { at: s.at || 0, players: s.players || {} };
     }
 
@@ -16143,14 +17721,16 @@
         const w = getWatch();
         if (!w.list.length) return false;
         const now = Date.now();
-        const st = get(WATCH_STATE_KEY, null) || {};
-        if (st.lockAt && now - st.lockAt < 20000 && st.lockTab !== pi.tabId) return false;
+        const st = pageGet(WATCH_STATE_KEY, null) || {};
+        // The lock is shared (GM, tiny): two webpage tabs on Watched don't both read everyone.
+        const lock = get('eyeWatchLock', null) || {};
+        if (lock.at && now - lock.at < 20000 && lock.tab !== pi.tabId) return false;
         const flights = flightsSeen();
         const fromList = new Map((members || []).map((m) => [Number(m.id), m]));
         const players = { ...(st.players || {}) };
         const due = w.list.filter((x) => fromList.has(Number(x.id)) || dueForRead(players[x.id], now, flights[x.id] ? flights[x.id].at : null));
         if (!due.length) return false;
-        set(WATCH_STATE_KEY, { ...st, lockAt: now, lockTab: pi.tabId });
+        set('eyeWatchLock', { at: now, tab: pi.tabId });
         watchRun.busy = true;
         const read = [];
         try {
@@ -16195,7 +17775,7 @@
         }
         const ids = new Set(getWatch().list.map((x) => String(x.id)));
         for (const k of Object.keys(players)) if (!ids.has(k)) delete players[k];
-        set(WATCH_STATE_KEY, { at: Date.now(), players });
+        pageSet(WATCH_STATE_KEY, { at: Date.now(), players });
         rememberFlights(read);
         // Life and level for the fight model (this page's own cache).
         const c = await cache();
@@ -16215,6 +17795,7 @@
      * saved (it must be a Full key); read at most every 6 hours by the leader
      * tab, never while Torn Trading runs.
      */
+
 
 
 
@@ -16243,9 +17824,9 @@
                 return { ok: false, text: 'Saved, but this is a ' + (info.type || 'lower') + ' key. Auto mode needs a Full key.' };
             }
             set(K.fullKeyState, { ok: true, at: Date.now(), type: info.type || 'Full Access' });
-            del(K.moneyLog);
+            pageSet(K.moneyLog, null);
             // Another key may be another account: its gym log starts fresh.
-            del(K.gymLog);
+            pageSet(K.gymLog, null);
             refreshMoneyLog({ force: true }).catch(() => {});
             return { ok: true, text: getPlan().pickBy === 'auto' ? 'Saved · Full key. Auto mode is on.' : 'Saved · Full key. Pick Auto (from your income) on Plan to use it.' };
         } catch (error) {
@@ -16258,40 +17839,43 @@
     function forgetFullKey() {
         setKey(K.fullKey, '');
         del(K.fullKeyState);
-        del(K.moneyLog);
-        del(K.gymLog);
+        pageSet(K.moneyLog, null);
+        pageSet(K.gymLog, null);
         pi.fullClient = null;
     }
 
     /**
-     * Your trains from Torn's log (Full key), at most every 15 minutes, in the
-     * leader tab (visible), never while Torn Trading runs: what's new since the
+     * Your trains from Torn's log (Full key), at most every 15 minutes, on the
+     * webpage (visible), never while Torn Trading runs: what's new since the
      * newest line kept, a week back the first time. Trains on your phone, or
      * with the laptop closed, show in Progress' "Last trains".
      */
     async function refreshGymLog({ force = false, now = Date.now() } = {}) {
         const st = get(K.fullKeyState, {}) || {};
         if (!getKey(K.fullKey) || !st.ok || st.dead || isPaused()) return null;
-        const kept = get(K.gymLog, null);
+        const kept = pageGet(K.gymLog, null);
         // A gap left by a long time away (more than a read's 300 lines) is filled a read a minute until it's done.
         const gap = kept && kept.gap ? kept.gap : null;
         if (!force && kept && !gap && now - (kept.at || 0) < GYM_LOG_EVERY_MS) return null;
         if (!force && kept && gap && now - (kept.at || 0) < 50e3) return null;
         // Asked before a slow answer came back: one read at a time.
-        set(K.gymLog, { ...(kept || { lines: [], newest: null }), at: now });
+        pageSet(K.gymLog, { ...(kept || { lines: [], newest: null }), at: now });
         const range = gap || { from: gymLogFrom(kept, now), to: null };
         const rows = await fetchGymLog(fullKeyClient(), range);
         // What's still missing: from where this read started back to the oldest line it reached.
         const left = rows.complete || !(rows.oldest > range.from) ? null : { from: range.from, to: rows.oldest };
-        const next = mergeGymLog(get(K.gymLog, null), parseGymLog(rows), now, left);
-        set(K.gymLog, next);
+        const next = mergeGymLog(pageGet(K.gymLog, null), parseGymLog(rows), now, left);
+        pageSet(K.gymLog, next);
         return next;
     }
 
-    /** The leader tab's gym-log clock (main.js calls it every minute). */
+    /**
+     * The gym-log clock (main.js calls it every minute), on the webpage only
+     * (round 6): only the webpage shows it, and it keeps it in its own IndexedDB.
+     * Torn's log goes back far enough that a day away is filled in when it opens.
+     */
     function gymLogTick() {
-        const lead = get(K.leader, null);
-        if (!lead || lead.id !== pi.tabId || typeof document === 'undefined' || document.visibilityState === 'hidden') return;
+        if (pi.where !== 'app' || typeof document === 'undefined' || document.visibilityState === 'hidden') return;
         refreshGymLog().catch((error) => set(K.lastError, { at: Date.now(), where: 'gym log', code: error && error.code, message: String((error && error.message) || error) }));
     }
 
@@ -16302,7 +17886,7 @@
     async function refreshMoneyLog({ force = false, now = Date.now() } = {}) {
         const st = get(K.fullKeyState, {}) || {};
         if (!getKey(K.fullKey) || !st.ok || st.dead || isPaused()) return null;
-        const prev = get(K.moneyLog, null);
+        const prev = pageGet(K.moneyLog, null);
         if (!force && prev && now - prev.at < MONEY_LOG_EVERY_MS) return prev;
         const cats = (await fetchLogCategories(tornClient())).filter((c) => MONEY_LOG_CATEGORY.test(String(c.title || ''))).slice(0, MONEY_LOG_MAX_CATS);
         const log = await fetchMoneyLog(fullKeyClient(), { from: Math.floor(now / 1000) - MONEY_LOG_DAYS * 86400, categories: cats });
@@ -16311,7 +17895,7 @@
         const since = log.coveredFrom || now - MONEY_LOG_DAYS * 86400e3;
         const kept = log.filter((e) => e.at >= since);
         const row = { at: now, days: Math.max(1, (now - since) / 86400e3), cats: cats.map((c) => c.title), log: kept.slice(0, 1500).map((e) => ({ at: e.at, title: e.title, money: e.money })) };
-        set(K.moneyLog, row);
+        pageSet(K.moneyLog, row);
         return row;
     }
 
@@ -16378,10 +17962,12 @@
 
 
 
+
+
     /** What Settings shows about the Full key (never the key itself). */
     function fullKeyView() {
         const st = get(K.fullKeyState, null) || {};
-        const ml = get(K.moneyLog, null);
+        const ml = pageGet(K.moneyLog, null);
         return { has: Boolean(getKey(K.fullKey)), ok: Boolean(st.ok && !st.dead), error: st.error || null, logAt: ml ? ml.at : null, logLines: ml && ml.log ? ml.log.length : 0 };
     }
 
@@ -16419,16 +18005,28 @@
     async function loadPrices(ids, slim = []) {
         // Nothing from Torn or TornW3B while Torn Trading runs (the two take turns).
         if (!getKey(K.apiKey) || isPaused() || get(K.apiKeyDead, false)) return;
-        const prices = { ...(getPrices()) };
+        // This site's own listings decide what is due (the other site's reads left only small rows in GM).
+        const first = !page.localPrices;
+        await loadLocalPrices();
+        page.localPrices = true;
+        const prices = { ...localPrices() };
         const skip = new Set();
         const now = Date.now();
         const full = new Set(ids.map(String));
         const slimSet = new Set(slim.map(String).filter((id) => !full.has(id)));
         const fresh = (id) => (slimSet.has(id) ? PRICE_SLIM_FRESH_MS : PRICE_FRESH_MS);
         const due = [...new Set([...full, ...slimSet])].filter((id) => !page.loading.has(id) && !(prices[id] && now - (prices[id].at || 0) < fresh(id)));
-        if (!due.length) return;
+        if (!due.length) {
+            // This site's listings just came from its IndexedDB: the Buy list and market outlines can show them now.
+            if (first) {
+                refresh();
+                if (page.app) page.app.render(true);
+            }
+            return;
+        }
         for (const id of due) page.loading.add(id);
         let hist = readPriceHistory(get(K.priceHistory, null));
+        const loaded = {};
         for (const id of due) {
             // Paused mid-load: keep what's stored, ask again once Torn Trading stops.
             if (isPaused()) {
@@ -16467,6 +18065,7 @@
                 const retryAt = Date.now() - PRICE_FRESH_MS + 30000;
                 if (old && Array.isArray(old.listings) && old.listings.length) {
                     prices[id] = { ...old, error: row.error, at: retryAt };
+                    loaded[id] = prices[id];
                     page.loading.delete(id);
                     continue;
                 }
@@ -16480,11 +18079,17 @@
             row.avg7 = avg.days >= 2 ? avg.avg : null;
             row.lows7 = dailyLows(hist, id, Date.now(), 7);
             prices[id] = row;
+            loaded[id] = row;
             page.loading.delete(id);
         }
         set(K.priceHistory, hist);
-        const merged = { ...(getPrices()), ...Object.fromEntries(due.filter((id) => prices[id] && !skip.has(id)).map((id) => [id, prices[id]])) };
-        set(K.prices, merged);
+        // The listings stay on this site; GM gets one small row per item (every Torn page is handed GM).
+        const got = Object.fromEntries(Object.entries(loaded).filter(([id]) => !skip.has(id)));
+        setLocalPrices(got);
+        const small = { ...(get(K.prices, {}) || {}) };
+        for (const [id, row] of Object.entries(small)) if (row && row.listings) small[id] = slimPriceRow(id, row);
+        for (const [id, row] of Object.entries(got)) small[id] = slimPriceRow(id, row);
+        set(K.prices, small);
         refresh();
         if (page.app) page.app.render(true);
     }
@@ -16547,10 +18152,10 @@
             lastError: err ? new Date(err.at).toISOString().slice(11, 16) + ' ' + err.message : null,
             unknownPerks: parsePerks(statics.perks || {}).unknown.length,
             version: PI_BUILD_VERSION,
-            historyDays: Object.keys(get(K.statsHistory, {}) || {}).length,
-            priceItems: Object.keys((readPriceHistory(get(K.priceHistory, null)) || {}).items || {}).length,
+            historyDays: Object.keys(archived(K.statsHistory, {}) || {}).length,
+            priceItems: Object.keys((readPriceHistory(archived(K.priceHistory, null)) || {}).items || {}).length,
             eyeLine: 'targets, estimates and gear for ' + page.eye.gear + ' player' + (page.eye.gear === 1 ? '' : 's'),
-            learnLine: (((get('calibration', null) || {}).samples) || []).length + ' sessions · ' + (get(K.fightLog, []) || []).length + ' fights · what it learned',
+            learnLine: (((archived('calibration', null) || {}).samples) || []).length + ' sessions · ' + (pageGet(K.fightLog, []) || []).length + ' fights · what it learned',
         };
     }
 
@@ -16652,7 +18257,7 @@
 
     /** Stored targets, judged again now: only players you still beat show (your stats or colours may have changed). */
     function eyeRows() {
-        const stored = get(TARGETS_KEY, null);
+        const stored = pageGet(TARGETS_KEY, null);
         if (!stored || !Array.isArray(stored.list)) return [];
         const rows = stored.list.map((x) => {
             const v = eyeView(x.playerId, { level: x.level, name: x.name });
@@ -16688,9 +18293,21 @@
         setEyeForSync({ war: fid && warRows.length ? { factionId: fid, members: warRows } : null, watch: watchRows });
     }
 
+    /** A Create plan or Recalibrate click: the page shows it working, then the new plan (or why it couldn't). */
+    function runPlan(fn) {
+        page.app.ui.planError = null;
+        page.app.render(true);
+        return fn()
+            .catch((e) => {
+                page.app.ui.planError = String((e && e.message) || e);
+            })
+            .finally(() => page.app.render(true));
+    }
+
     function getCtx() {
         const settings = getSettings();
-        const plan = getPlan();
+        // The plan followed today: the saved path's for this stretch (its switches happen on their dates) or your pick.
+        const plan = { ...getPlan(), ...(pi.model && pi.model.ready && pi.model.strategy ? { strategy: pi.model.strategy } : {}) };
         const statics = get(K.userStatic, {}) || {};
         const prices = getPrices();
         const ffsState = get(K.ffsState, null);
@@ -16703,31 +18320,39 @@
             statics,
             prices,
             compare: pi.model && pi.model.compare,
-            history: get(K.statsHistory, {}) || {},
-            dayTotals: get(K.dayTotals, {}) || {},
+            history: archived(K.statsHistory, {}) || {},
+            dayTotals: archived(K.dayTotals, {}) || {},
             gymProgress: get(K.gymProgress, null),
-            calibration: get('calibration', null),
-            gymLog: get(K.gymLog, null),
-            planProjection: get(K.planLine, null),
-            receipts: get(K.receipts, null),
-            priceHistory: get(K.priceHistory, null),
+            calibration: archived('calibration', null),
+            gymLog: pageGet(K.gymLog, null),
+            planProjection: pageGet(K.planLine, null),
+            receipts: archived(K.receipts, null),
+            priceHistory: archived(K.priceHistory, null),
             flags: { hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)), hasFfs: Boolean(getKey(K.ffsKey)), ffsDead: Boolean(ffsState && ffsState.registered === false), hasTs: Boolean(getKey(K.tsKey)) },
             keyProblem: keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: statics.keyInfo || null }),
             planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
             fullKey: fullKeyView(),
-            sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (get(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), (get(K.planLine, null) || {}).key || ''].join('|'),
+            sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (pageGet(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), (pageGet(K.planLine, null) || {}).key || ''].join('|'),
             setSettings: (p) => {
                 setSettings(p);
                 refresh();
                 page.app.render(true);
             },
             setPlan: (p) => {
-                const cur = getPlan();
-                const restart = (p.strategy !== undefined && p.strategy !== cur.strategy) || (p.build !== undefined && p.build !== cur.build) || !cur.createdAt;
-                setPlan({ ...cur, ...p, createdAt: restart ? Date.now() : cur.createdAt });
+                const { strategy, strategyPicked, ...rest } = p;
+                // Another of the saved plans: followed at once, nothing worked out again (Progress's line follows it). The
+                // recommended one means the saved path (it switches plans on its dates).
+                const rec = pi.saved && pi.saved.rec ? pi.saved.rec.recommended : null;
+                if (strategy !== undefined && strategy === rec) followPath();
+                else if (strategy !== undefined && (strategy !== ((pi.model && pi.model.strategy) || getPlan().strategy) || !getPlan().strategyPicked)) followStrategy(strategy);
+                // Build, goal, the Plan rule, special refills: kept for the next Create plan or Recalibrate (a click).
+                if (Object.keys(rest).length) setPlan({ ...getPlan(), ...rest });
                 refresh();
                 page.app.render(true);
             },
+            // Create plan (1, 3, 6 or 12 months) and Recalibrate: the only things that work a plan out (round 6).
+            createPlan: (months) => runPlan(() => createPlan({ months })),
+            recalibratePlan: () => runPlan(() => recalibratePlan()),
             wantPrices: (ids, slim = []) => {
                 if (isVisible()) setTimeout(() => loadPrices(ids, slim).catch(() => {}), 0);
             },
@@ -16762,6 +18387,14 @@
                     return;
                 }
                 if (g === 'eye') clearEye();
+                if (g === 'plan') {
+                    pi.saved = null;
+                    forgetSavedPlan().catch(() => {});
+                }
+                // The webpage's own copy (older history, webpage-only data) goes with GM's.
+                clearArchived(DATA_GROUPS[g] || []);
+                if (g === 'eye') clearArchived([TARGETS_KEY]);
+                if (g === 'prices') clearLocalPrices();
                 clearGroup(g);
                 refresh();
                 page.app.render(true);
@@ -16779,23 +18412,23 @@
                 setupUrl: WORKER_SETUP_URL,
             },
             dev: {
-                data: () => ({ samples: ((get('calibration', null) || {}).samples) || [], gymLog: ((get(K.gymLog, null) || {}).lines) || [], fights: joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []), learned: get(K.learned, null), version: PI_BUILD_VERSION }),
+                data: () => ({ samples: ((archived('calibration', null) || {}).samples) || [], gymLog: ((pageGet(K.gymLog, null) || {}).lines) || [], fights: joinFights(pageGet(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], archived(K.eyePredictions, []) || []), learned: get(K.learned, null), version: PI_BUILD_VERSION }),
                 unlocked: () => Boolean(get(K.devUnlocked, false)),
                 setUnlocked: (v) => (v ? set(K.devUnlocked, true) : del(K.devUnlocked)),
-                log: () => get(K.learnLog, []) || [],
+                log: () => pageGet(K.learnLog, []) || [],
                 sizes: () => Object.fromEntries(['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions, K.prices, K.priceHistory, K.statsHistory].map((k) => [k, JSON.stringify(get(k, null) || '').length])),
             },
             eye: {
                 rows: eyeRows,
-                stored: () => get(TARGETS_KEY, null),
+                stored: () => pageGet(TARGETS_KEY, null),
                 load: (params) => loadTargets(params).catch(() => {}),
                 loading: () => page.eye.loading,
                 error: () => page.eye.error,
                 sources: () => ({ fights: ((get('myAttacks', null) || {}).list || []).length, ffsFree: page.ffs ? page.ffs.stats().remaining : 60, gear: page.eye.gear }),
                 view: (id, extra, o) => eyeView(id, extra, o),
                 attacks: () => (get('myAttacks', null) || {}).list || [],
-                updatedAt: () => (get(TARGETS_KEY, null) || {}).at || null,
-                params: () => (get(TARGETS_KEY, null) || {}).params || null,
+                updatedAt: () => (pageGet(TARGETS_KEY, null) || {}).at || null,
+                params: () => (pageGet(TARGETS_KEY, null) || {}).params || null,
                 war: {
                     state: () => {
                         const fid = warFid();
@@ -16847,23 +18480,48 @@
             page.app.render(true);
         });
         gearCount().then((n) => (page.eye.gear = n));
-        const stored = get(TARGETS_KEY, null);
-        if (stored && Array.isArray(stored.list)) setTimeout(() => wantPlayers(stored.list.map((x) => x.playerId)), 500);
         page.app.mount();
+        // Torn Eye works only while its tab is open (owner, round 6): the targets' estimates are asked for when it opens.
+        let eyeOpen = false;
+        const eyeTab = () => {
+            const open = page.app.tab === 'eye';
+            if (open && !eyeOpen) {
+                const stored = pageGet(TARGETS_KEY, null);
+                if (stored && Array.isArray(stored.list)) setTimeout(() => wantPlayers(stored.list.map((x) => x.playerId)), 500);
+            }
+            eyeOpen = open;
+        };
+        window.addEventListener('hashchange', eyeTab);
+        loadArchives().then(eyeTab).catch(() => {});
         onModel(() => page.app.render());
+        // The webpage keeps the older history and its own data in its IndexedDB (GM stays small for Torn's pages).
+        loadArchives()
+            .then(() => {
+                refresh();
+                page.app.render(true);
+                return drainArchives();
+            })
+            .catch(() => {});
+        setInterval(() => {
+            if (isVisible()) drainArchives().catch(() => {});
+        }, 10 * 60 * 1000);
+        loadLocalPrices().then(() => page.app.render(true)).catch(() => {});
         for (const k of [K.prices, K.settings, K.plan, K.userStatic, K.stateError, K.apiKeyDead]) gmOnChange(k, () => page.app.render());
         // The watch list is changed from Torn's pages too (☆ on a profile or the attack page) and read there.
-        for (const k of ['eyeWatch', 'eyeWatchState']) gmOnChange(k, () => page.app.tab === 'eye' && page.app.render(true));
+        gmOnChange('eyeWatch', () => page.app.tab === 'eye' && page.app.render(true));
         onPauseChange(() => page.app.render(true));
         // War mode: a faction picked by id stays until "Back to our war"; otherwise your faction's war, found by itself.
         war.manual = getSettings().warFaction || null;
         const auto = get('eyeWarAuto', null);
         if (auto && Array.isArray(auto.enemies) && auto.myFaction === myFactionId()) war.enemies = auto.enemies;
         setInterval(() => {
+            // Nothing of Torn Eye's runs unless its tab is open (owner, round 6: it only runs on the Torn Eye tab).
+            eyeTab();
+            if (page.app.tab !== 'eye') return;
             pollOwnWars().catch(() => {});
             pollWarTab().catch(() => {});
             // The Watched view reads its players every 60 s while it shows (the war list just read costs nothing).
-            if (page.app.tab === 'eye' && page.app.ui.eyeMode === 'watched') pollWatch({ members: war.members }).catch(() => {});
+            if (page.app.ui.eyeMode === 'watched') pollWatch({ members: war.members }).catch(() => {});
             syncEye();
         }, 2000);
         // A Log in with Discord that was under way when the page reloaded: keep waiting for it.
@@ -17037,10 +18695,23 @@
             window.addEventListener('resize', () => this.place());
             // Torn's page settles after load (sidebar, React): fit again then.
             setTimeout(() => this.place(), 1500);
-            this.setCollapsed(Boolean(this.loadCollapsed()), false);
+            // Hidden until placed: where it goes is measured after Torn's first paint, never inside the page's boot.
+            this.wrap.style.visibility = 'hidden';
+            this.setCollapsed(Boolean(this.loadCollapsed()), false, true);
         }
 
-        setCollapsed(on, save) {
+        /** Place it after the page's next paint (measuring Torn's layout inside the boot task forced a layout: 80–136 ms at 4× CPU). */
+        placeSoon() {
+            if (this.placeTimer) return;
+            const later = (fn) => (typeof requestAnimationFrame === 'function' ? requestAnimationFrame(() => setTimeout(fn, 0)) : setTimeout(fn, 0));
+            this.placeTimer = true;
+            later(() => {
+                this.placeTimer = null;
+                this.place();
+            });
+        }
+
+        setCollapsed(on, save, soon = false) {
             this.collapsed = Boolean(on);
             this.wrap.classList.toggle('collapsed', this.collapsed);
             this.colBtn.textContent = this.collapsed ? '+' : '–';
@@ -17048,7 +18719,8 @@
             this.colBtn.title = (this.collapsed ? 'Expand' : 'Collapse') + ' (Alt+`)';
             this.head.setAttribute('aria-expanded', String(!this.collapsed));
             if (save) this.saveCollapsed(this.collapsed);
-            this.place();
+            if (soon) this.placeSoon();
+            else this.place();
         }
 
         spotList() {
@@ -17060,6 +18732,7 @@
             if (!this.wrap) return;
             this.wrap.style.display = this.off ? 'none' : 'flex';
             if (this.off) return;
+            this.wrap.style.visibility = '';
             const list = this.spotList();
             const stored = this.loadPos();
             const pos = stored && stored.side ? stored : null;
@@ -17140,7 +18813,7 @@
             ]);
             if (wasOff || !this.placed) {
                 this.placed = true;
-                this.place();
+                this.placeSoon();
             }
         }
 
@@ -17296,7 +18969,6 @@
     .pi-warn { display: flex; align-items: center; gap: 10px; padding: 7px 10px; margin: 6px 0; background: #2a1f10; border-left: 3px solid #e8a33d; border-radius: 0 5px 5px 0; font-size: 12px; color: #ffd79a; }
     .pi-warn b { color: #ffe3b3; }
     .pi-outlined { box-shadow: inset 0 0 0 2px #efebe2 !important; position: relative; }
-    .pi-dim { opacity: .45; }
     .pi-strip .pi-part { color: #939aa1; white-space: nowrap; }
     .pi-strip .pi-part.pi-cur { color: #fff; font-weight: bold; }
     .pi-strip .pi-part.pi-done { color: #9bdc8a; }
@@ -17392,9 +19064,8 @@
                 });
                 const panel = p.warn ? h('div', { class: 'pi-mark pi-warn' }, [h('span', {}, [h('b', { text: p.warn.split('. ')[0] + '.' }), ' ' + p.warn.split('. ').slice(1).join('. ')]), fill]) : h('div', { class: 'pi-mark pi-panel' }, [h('b', { text: p.text }), h('span', { text: p.sub }), fill]);
                 box.content.insertBefore(panel, box.content.firstChild);
-            } else {
-                // Waiting on another gym's part: the whole box greys out.
-                if (p.kind === 'grey') box.li.classList.add('pi-dim');
+            } else if (p.text) {
+                // Never dims Torn's boxes (round 6): a grey line only.
                 box.content.insertBefore(h('div', { class: 'pi-mark pi-grey', text: p.text }), box.content.firstChild);
             }
         }
@@ -17506,7 +19177,7 @@
 
 
 
-    const tp = { overlay: null, model: null, observer: null, drawing: false, lastGymPlan: null };
+    const tp = { overlay: null, model: null, observer: null, gymSig: '', lastGymPlan: null };
 
     /** Torn's page (its sidebar and content column) as {left, right}; a centred 976 px guess if it can't be measured. */
     function pageRect() {
@@ -17601,13 +19272,19 @@
         if (sum.unlocked.length) {
             const prev = get(K.unlocked, null);
             const next = [...new Set(sum.unlocked)].sort((a, b) => a - b);
-            if (JSON.stringify(prev) !== JSON.stringify(next)) set(K.unlocked, next);
+            if (JSON.stringify(prev) !== JSON.stringify(next)) {
+                set(K.unlocked, next);
+                pi.modelAt = 0;
+            }
         }
         if (sum.inProgress && sum.inProgress.percent !== null) {
             const need = unlockEnergyAfter(sum.inProgress.id - 1, m && m.pc ? m.pc.perks.gymExpMult : 1) || 0;
             const gp = { nextId: sum.inProgress.id, energy: Math.round((need * sum.inProgress.percent) / 100), at: Date.now() };
             const prev = get(K.gymProgress, null);
-            if (!prev || prev.nextId !== gp.nextId || prev.energy !== gp.energy) set(K.gymProgress, gp);
+            if (!prev || prev.nextId !== gp.nextId || prev.energy !== gp.energy) {
+                set(K.gymProgress, gp);
+                pi.modelAt = 0;
+            }
         }
         if (!m || !m.ready || !getSettings().gymMarks) {
             clearMarks(root);
@@ -17624,12 +19301,18 @@
         if (JSON.stringify(session) !== JSON.stringify(prev)) set(K.gymSession, session);
         const plan = planGymPage(m, { selectedId: sum.selectedId || m.state.gymId, boxes, reading }, session, now);
         tp.lastGymPlan = plan;
-        tp.drawing = true;
-        try {
-            drawGymMarks(root, plan, boxes, (stat) => readStatBoxes(gymRoot()).find((b) => b.stat === stat), buttons);
-        } finally {
-            tp.drawing = false;
-        }
+        drawGymMarks(root, plan, boxes, (stat) => readStatBoxes(gymRoot()).find((b) => b.stat === stat), buttons);
+        // Our own drawing is not Torn changing the page: those records are dropped, and what Torn shows now is remembered.
+        if (tp.observer) tp.observer.takeRecords();
+        tp.gymSig = gymPageSig(root);
+    }
+
+    /** What Torn's gym page shows that the marks depend on: the stat boxes, the gym selected, the energy bar. */
+    function gymPageSig(root) {
+        const boxes = readStatBoxes(root).map((b) => b.stat + ':' + b.value + ':' + (b.locked ? 1 : 0)).join(',');
+        const sel = gymListSummary(readGymButtons(root)).selectedId;
+        // Our marks' count too: Torn re-rendering a box (a message, same value) wipes its panel without changing a value.
+        return [boxes, sel, JSON.stringify(readEnergyBar()), gymLoading(root) ? 1 : 0, root.querySelectorAll('.pi-mark').length].join('|');
     }
 
     function watchGym() {
@@ -17640,12 +19323,21 @@
         if (tp.observer) tp.observer.disconnect();
         tp.observedRoot = root;
         let timer = null;
+        // Redraw only when Torn's own values change (a train, another gym, the energy bar, our marks wiped by a re-render),
+        // never on any mutation: other scripts (TornTools) and Torn's timers change the page all the time, and two
+        // scripts redrawing on each other's changes could loop.
         tp.observer = new MutationObserver((muts) => {
-            if (tp.drawing || isPaused()) return;
+            if (isPaused()) return;
             // Our own marks changing is not Torn re-rendering.
             if (muts.every((mu) => [...mu.addedNodes, ...mu.removedNodes].every((n) => n.nodeType === 1 && n.classList && n.classList.contains('pi-mark')))) return;
             clearTimeout(timer);
-            timer = setTimeout(() => drawGym(tp.model), 150);
+            timer = setTimeout(() => {
+                const r = gymRoot();
+                if (r && gymPageSig(r) === tp.gymSig) return;
+                drawGym(tp.model);
+                // The panel's pill follows the walk-through at once (a train, another gym), not at the next model.
+                if (tp.showView) tp.showView(tp.model);
+            }, 150);
         });
         tp.observer.observe(root, { childList: true, subtree: true });
     }
@@ -17669,7 +19361,7 @@
         const s = getSettings();
         const statics = get(K.userStatic, {}) || {};
         const prices = getPrices();
-        const needs = needList(needsForWindow(m, m.compare, getPlan(), s.buyWindow || 'three', s.horizonDays), statics.inventory || {});
+        const needs = needList(needsForWindow(m, m.compare, { ...getPlan(), strategy: m.strategy || getPlan().strategy }, s.buyWindow || 'three', m.planDays || s.horizonDays), statics.inventory || {});
         // The same list as the Buy tab: its type ticks, and a city shop you ticked joins the listings.
         const show = shownTypes(s, [...new Set(needs.map((n) => typeOf(n.id)))]);
         const ic = itemContext(statics, s, m.now);
@@ -17694,7 +19386,7 @@
         if (!m || !m.ready || !getSettings().marketMarks) return;
         // On a market page, the Buy list's prices are refreshed (at most every 5 minutes) so the outline is current.
         const s = getSettings();
-        const want = needList(needsForWindow(m, m.compare, getPlan(), s.buyWindow || 'three', s.horizonDays), (get(K.userStatic, {}) || {}).inventory || {}).filter((n) => n.buy > 0).map((n) => n.id);
+        const want = needList(needsForWindow(m, m.compare, { ...getPlan(), strategy: m.strategy || getPlan().strategy }, s.buyWindow || 'three', m.planDays || s.horizonDays), (get(K.userStatic, {}) || {}).inventory || {}).filter((n) => n.buy > 0).map((n) => n.id);
         if (want.length) loadPrices(want).catch(() => {});
         const fills = chosenFills(m);
         const label = (r) => 'Take ' + fmtInt(r.qty) + ' · $' + fmtInt(r.subtotal);
@@ -17762,6 +19454,14 @@
         });
         let lastSig = '';
         let lastView = '';
+        tp.showView = (m) => {
+            const view = overlayView(m, detectPage(location.href));
+            const vs = JSON.stringify(view);
+            if (vs !== lastView) {
+                lastView = vs;
+                tp.overlay.update(view);
+            }
+        };
         onModel((m) => {
             tp.model = m;
             if (!isVisible()) return;
@@ -17779,7 +19479,9 @@
                 return;
             }
             const p = detectPage(location.href);
-            const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), Object.values(getPrices()).map((x) => x.at).join(), pageRowsCount(p)].join('|');
+            // The saved plan (made, recalibrated or another picked on the webpage) redraws the marks too.
+            const planSig = m && m.ready && m.saved ? m.saved.createdAt + ':' + (m.saved.recalibratedAt || 0) : '';
+            const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), JSON.stringify(getPlan()), planSig, Object.values(getPrices()).map((x) => x.at).join(), pageRowsCount(p)].join('|');
             if (sig !== lastSig) {
                 lastSig = sig;
                 if (p === PAGE_GYM) {
@@ -17788,12 +19490,7 @@
                 } else if (p === PAGE_ITEMS) drawItems(m);
                 else if (p === PAGE_BAZAAR || p === PAGE_ITEM_MARKET || p === PAGE_POINTS) drawMarket(m, p);
             }
-            const view = overlayView(m, p);
-            const vs = JSON.stringify(view);
-            if (vs !== lastView) {
-                lastView = vs;
-                tp.overlay.update(view);
-            }
+            tp.showView(m);
         });
         setInterval(() => tp.overlay.tick(), 1000);
         // Torn's pages change the hash without a load (Item Market search, items tabs).
@@ -18076,18 +19773,26 @@
     /** One floating card for the page, shown next to the chip under the pointer. */
     function bindCard(doc, getView) {
         let card = null;
+        let shownFor = null;
         const hide = () => {
             if (card) card.remove();
             card = null;
+            shownFor = null;
         };
         // Hover, keyboard focus or a tap shows the card; Escape or leaving hides it.
         const show = (e) => {
             const chip = e.target && e.target.closest ? e.target.closest('.pi-chip[data-pi-player]') : null;
-            if (!chip) return hide();
+            if (!chip) {
+                if (card) hide();
+                return;
+            }
+            // Moving within the same chip (its dot, its words) keeps the card: it was rebuilt on every move (round 6).
+            if (card && shownFor === chip && e.type === 'mouseover') return;
             const v = getView(Number(chip.getAttribute('data-pi-player')));
             if (!v) return;
             hide();
             card = cardEl(v);
+            shownFor = chip;
             doc.body.appendChild(card);
             const r = chip.getBoundingClientRect();
             const x = Math.min(window.innerWidth - 340, Math.max(8, r.left));
@@ -18114,7 +19819,8 @@
             h('span', {}, [h('b', { text: String(sum.attackable) }), ' attackable now' + (sum.early ? ' (' + sum.early + ' out early)' : '')]),
             sum.nextOutS !== null ? h('span', {}, [h('b', { text: mmss(sum.nextOutS) }), ' until the next one is out']) : null,
             h('span', {}, [h('b', { text: String(sum.traveling) }), ' traveling']),
-            h('span', { class: 'pi-muted' }, ['updated ' + (updatedAgoS ?? 0) + 's ago · every 10 s while this tab is open', fromFfs ? ' · stats: ' : '', fromFfs ? h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }) : null]),
+            // Torn's pages read nothing for the war (owner, round 6): what this page shows; the live read is on the Torn Eye tab.
+            h('span', { class: 'pi-muted' }, [updatedAgoS === null || updatedAgoS === undefined ? 'from this page · live war mode on Pumping Iron’s Torn Eye tab' : 'updated ' + updatedAgoS + 's ago · every 10 s while this tab is open', fromFfs ? ' · stats: ' : '', fromFfs ? h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }) : null]),
         ]);
     }
 
@@ -18192,10 +19898,6 @@
 
 
 
-
-    /** War mode asks for the enemy faction this often, and only from a visible tab. */
-    const WAR_POLL_MS = 10000;
-
     const ep = { extras: new Map(), war: { factionId: null, members: null, prev: null, at: 0, polling: false }, attack: { gearVisible: false, gearSaved: false }, drawing: false };
 
     function view(id) {
@@ -18272,30 +19974,6 @@
         for (const r of rows) {
             for (const c of r.cell.querySelectorAll('.pi-chip')) c.remove();
             r.cell.appendChild(chipEl(view(r.id), { mini: true, id: r.id }));
-        }
-    }
-
-    async function pollWar() {
-        const fid = enemyFactionId();
-        if (!fid || ep.war.polling || !isVisible()) return;
-        if (ep.war.factionId === fid && Date.now() - ep.war.at < WAR_POLL_MS) return;
-        ep.war.polling = true;
-        try {
-            const members = await fetchFactionMembers(tornClient(), fid);
-            ep.war.prev = ep.war.factionId === fid ? ep.war.members : null;
-            ep.war.members = members;
-            ep.war.factionId = fid;
-            ep.war.at = Date.now();
-            for (const m of members) ep.extras.set(Number(m.id), { level: m.level, name: m.name });
-            // When each flight was first seen, shared with the webpage: landings survive a reload.
-            rememberFlights(members);
-            wantPlayers(members.map((m) => Number(m.id)));
-            drawWar();
-            pollWatch({ members }).catch(() => {});
-        } catch {
-            ep.war.at = Date.now();
-        } finally {
-            ep.war.polling = false;
         }
     }
 
@@ -18425,17 +20103,14 @@
             const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
             installAttackHook(pageWin, onAttackData);
         }
+        // Owner (round 6): on Torn's pages Torn Eye asks only about the player you're viewing (their profile) or
+        // attacking. Faction and war lists, mini-profiles and the watch list show what is already known; the list sweeps,
+        // war mode's reads and the watch list run on the webpage's Torn Eye tab, only while it is open.
         const ask = () => {
             if (!getSettings().eyeChips || !isVisible() || isPaused()) return;
             const pg = detectPage(location.href);
             if (pg === PAGE_PROFILE) wantPlayers([Number(profileIdOf(location.href))], { profiles: true });
             if (pg === PAGE_ATTACK) wantPlayers([Number(attackTargetOf(location.href))], { profiles: true });
-            if (pg === PAGE_FACTION) {
-                wantPlayers(readFactionRows().map((r) => r.id));
-                if (document.getElementById('faction_war_list_id')) pollWar();
-            }
-            const mini = miniProfileId();
-            if (mini) wantPlayers([mini], { profiles: true });
         };
         onEye(() => drawAll());
         let lastSig = '';
@@ -18448,15 +20123,19 @@
                 drawAll();
             }
         });
-        // War mode: every 10 s while visible. The watch list: read every 60 s while a Torn tab is visible (each player when due).
-        setInterval(() => {
-            if (!isPaused() && detectPage(location.href) === PAGE_FACTION && document.getElementById('faction_war_list_id')) pollWar();
-            if (!isPaused() && isVisible() && getSettings().eyeChips && getWatch().list.length) pollWatch().catch(() => {});
-        }, 2000);
         onPauseChange(() => {
             lastSig = '';
             drawAll();
         });
+        // Faction and war lists render after the page: a cheap look each second (row ids only) draws their chips then.
+        let rowsSig = '';
+        setInterval(() => {
+            if (!isVisible() || isPaused() || !getSettings().eyeChips || detectPage(location.href) !== PAGE_FACTION) return;
+            const sig = readFactionRows().map((r) => r.id).join(',') + '|' + readWarRows().map((r) => r.id + ':' + r.status).join(',');
+            if (sig === rowsSig) return;
+            rowsSig = sig;
+            drawAll();
+        }, 1000);
         // The mini-profile popup is added to the body on the first hover, then re-drawn for each player.
         let watchedRoot = null;
         const onMini = () => {
@@ -18471,7 +20150,6 @@
             if (id && (!shown || shown.getAttribute('data-pi-player') !== String(id)) && !(ep.miniAt && ep.miniId === id && Date.now() - ep.miniAt < 500)) {
                 ep.miniId = id;
                 ep.miniAt = Date.now();
-                wantPlayers([id], { profiles: true });
                 ep.drawing = true;
                 try {
                     drawMini();
@@ -18525,6 +20203,10 @@
         }
         watchTrading();
         menus();
+        // Round 6: what 1.2.3 kept for the comparison it ran on every page goes (Tampermonkey hands every key to every page).
+        dropOldKeys();
+        // The webpage holds the whole saved plan; Torn's pages only follow it.
+        setWhere(where === 'app' ? 'app' : 'torn');
         if (where === 'app') bootAppPage();
         else {
             bootTornPage();
@@ -18533,11 +20215,15 @@
         startFeed();
         // The plan's next steps go to your Discord Worker when they change (if you set one up).
         onModel((m) => maybeSyncPlan(m));
-        // Trains Torn logged that no read saw (your phone, the laptop closed): the leader reads them every 15 minutes (Full key).
-        setTimeout(gymLogTick, 20000);
-        setInterval(gymLogTick, 60000);
+        // A step skipped in Discord: the model follows at once (Torn pages rebuild only when due otherwise).
+        onSkipped(() => refresh());
+        // Trains Torn logged that no read saw (your phone, the laptop closed): the webpage reads them every 15 minutes (Full key).
+        if (where === 'app') {
+            setTimeout(gymLogTick, 20000);
+            setInterval(gymLogTick, 60000);
+        }
         // Off torn.com (the harness), expose the model for checks. On torn.com the sandbox keeps it private anyway.
-        if (/^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed };
+        if (/^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed, createPlan, recalibratePlan, followStrategy };
     }
 
     boot();

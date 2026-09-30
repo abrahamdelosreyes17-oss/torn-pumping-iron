@@ -91,7 +91,9 @@ async function openApp(query) {
         r.abort();
     });
     await page.route(/fonts\.(googleapis|gstatic)\.com/, (r) => r.abort());
-    await page.goto('http://127.0.0.1:8782/test/harness-live.html?pi=app&key=1&at=2026-09-29T10:48:00Z&wait=100000&plan=1&follow=steady' + (query || ''));
+    // &noplan=1: start with no saved plan (Create plan is clicked by the check itself).
+    const base = 'http://127.0.0.1:8782/test/harness-live.html?pi=app&key=1&at=2026-09-29T10:48:00Z&wait=100000' + (/noplan=1/.test(query || '') ? '' : '&plan=1&follow=steady');
+    await page.goto(base + (query || ''));
     await page.waitForFunction(() => {
         const sr = document.getElementById('pi-app') && document.getElementById('pi-app').shadowRoot;
         return sr && sr.querySelector('.strip');
@@ -119,7 +121,7 @@ async function checkTab(page, tab, errors, want) {
 
 const TABS = {
     home: ['Auto mode needs a Full key · Add it in Settings', 'Today', 'Take Xanax #1, then train', 'Refill · 30 points', 'Buy today', 'Heads-up', 'Pick your build type', "You vs Baldr's, STR high", 'Next 7 days', 'This week'],
-    plan: ['Auto (from your income)', 'Auto mode needs a Full key', 'Recommended', 'Steady training', 'Per $1M', 'Other plans', 'Why it isn’t the pick', 'Where your energy comes from', 'Natural energy', 'Build', 'High stat', "Hank's", 'pick yours', 'Ignorance Is Bliss', 'what-if'],
+    plan: ['Auto (from your income)', 'Auto mode needs a Full key', 'month plan ·', 'Recalibrate', 'New plan…', 'Recommended', 'Steady training', 'Per $1M', 'Other plans', 'Why it isn’t the pick', 'Where your energy comes from', 'Natural energy', 'Build', 'High stat', "Hank's", 'pick yours', 'Ignorance Is Bliss', 'what-if'],
     buy: ['Buy for', 'Your list', 'Xanax', 'Iron_Monk', 'Points market', 'Deals', '7-day prices', 'You hold', 'TornW3B'],
     progress: ['Total stats against the plan', 'Each stat', 'Gained against plan', 'Receipts', 'Energy trained', '$ per 1,000 stats', 'What if you’d done another plan', 'the comparison appears after two days', 'Last trains', 'This week', 'Budget', 'Force Training'],
     eye: ['Targets', 'Chain', 'War', 'How sure', 'FFScouter', 'Gear seen', 'Your side'],
@@ -130,6 +132,57 @@ const { page, errors, tornHits } = await openApp('');
 for (const [tab, want] of Object.entries(TABS)) {
     if (only.length && !only.includes(tab)) continue;
     await checkTab(page, tab, errors, want);
+}
+
+// Round 6: the Plan page's buttons, really clicked. No plan → Create plan (3 months) → Recalibrate → New plan 12 months
+// through the replace confirm. Nothing is worked out until a click.
+{
+    const o = await openApp('&noplan=1&who=owner&build=hank');
+    const sr = () => "document.getElementById('pi-app').shadowRoot";
+    const text = () => o.page.evaluate(`${sr()}.textContent`);
+    const click = (label) => o.page.evaluate((l) => {
+        const b = [...document.getElementById('pi-app').shadowRoot.querySelectorAll('button')].find((x) => x.textContent.trim() === l && !x.disabled);
+        if (!b) return false;
+        b.click();
+        return true;
+    }, label);
+    const waitText = async (re, ms = 30000) => {
+        const t0 = Date.now();
+        while (Date.now() - t0 < ms) {
+            if (re.test(await text())) return true;
+            await o.page.waitForTimeout(250);
+        }
+        return false;
+    };
+    await o.page.evaluate(() => (location.hash = 'home'));
+    ok(await waitText(/Create your plan/), 'buttons: Home asks for a plan when there is none');
+    await o.page.evaluate(() => (location.hash = 'plan'));
+    ok(await waitText(/No plan yet/), 'buttons: Plan says "No plan yet" with the lengths and Create plan');
+    const stored0 = await o.page.evaluate(() => _store['pumpingIron.v1.planNow'] || null);
+    ok(stored0 === null, 'buttons: nothing worked out before a click');
+    ok(await click('3 months'), 'buttons: pick 3 months');
+    ok(await click('Create plan'), 'buttons: Create plan clicked');
+    ok(await waitText(/3-month plan · /), 'buttons: the 3-month plan is made and shown');
+    ok(await waitText(/you are here/), 'buttons: its months, with "you are here"');
+    const pn = await o.page.evaluate(() => JSON.parse(_store['pumpingIron.v1.planNow'] || 'null'));
+    ok(pn && pn.months === 3 && pn.days >= 89 && pn.days <= 92, 'buttons: saved for 3 months (' + (pn && pn.days) + ' days)');
+    const shotA = resolve(shots, 'app-plan-card.png');
+    await o.page.screenshot({ path: shotA, fullPage: true });
+    console.log('     shot ' + shotA);
+    ok(await click('Recalibrate'), 'buttons: Recalibrate clicked');
+    ok(await waitText(/recalibrated /), 'buttons: recalibrated (same end)');
+    const pn2 = await o.page.evaluate(() => JSON.parse(_store['pumpingIron.v1.planNow'] || 'null'));
+    ok(pn2 && pn2.end === pn.end && pn2.rev !== pn.rev && pn2.recalibratedAt, 'buttons: the end date stays, the plan is re-worked');
+    ok(await click('New plan…'), 'buttons: New plan… opens the lengths');
+    ok(await click('12 months'), 'buttons: pick 12 months');
+    ok(await click('Create plan'), 'buttons: Create plan (replacing) asks first');
+    ok(await waitText(/Replace your 3-month plan\?/, 3000), 'buttons: "Replace your 3-month plan?"');
+    ok(await click('Replace it'), 'buttons: Replace it');
+    ok(await waitText(/12-month plan · /), 'buttons: the 12-month plan replaces it');
+    const pn3 = await o.page.evaluate(() => JSON.parse(_store['pumpingIron.v1.planNow'] || 'null'));
+    ok(pn3 && pn3.months === 12 && pn3.days >= 365, 'buttons: saved for a year');
+    ok(o.errors.length === 0, 'buttons: no page errors ' + JSON.stringify(o.errors.slice(0, 2)));
+    await o.page.close();
 }
 
 // A worse pick warns, and nothing is saved until you choose.
