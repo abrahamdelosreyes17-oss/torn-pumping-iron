@@ -58,7 +58,7 @@ test('learning data: the export leaves ids out, rounds stats, and reads back', (
 });
 
 test('learning: a kept model changes the engine (per-stat multiplier, damping mode); nothing kept changes nothing', () => {
-    assert.deepEqual(learnedModel(null), { mult: { str: 1, spd: 1, def: 1, dex: 1 }, mode: null, fight: null });
+    assert.deepEqual(learnedModel(null), { mult: { str: 1, spd: 1, def: 1, dex: 1 }, mode: null, fight: null, happyLoss: 1 });
     const fake = { gym: { accepted: true, model: { mult: { str: 1, spd: 1.04, def: 1, dex: 1 }, mode: 'power' }, current: { mult: { str: 1, spd: 1, def: 1, dex: 1 }, mode: 'log10' } }, fights: { accepted: false, model: { winScale: 1, hpScale: 1 } } };
     const l = learnedModel(fake);
     assert.equal(l.mult.spd, 1.04);

@@ -27,6 +27,7 @@ import { livePrices } from './core/market.js';
 import { TORN_PER_MINUTE_ALONE } from './core/turns.js';
 import { isPaused, onPauseChange } from './turns.js';
 import { useDampingMode } from './core/gain.js';
+import { parsePerks } from './core/perks.js';
 import { joinFights, runLearning, learnedModel } from './core/learndata.js';
 import { applyGymModel } from './core/learn.js';
 
@@ -237,7 +238,7 @@ export async function createPlan({ months = 1, recalibrate = false, pause = paus
         const keptCandy = prev && prev.compare && prev.compare[plan.strategy] && prev.compare[plan.strategy].candy;
         const statics = { ...(getShared(K.userStatic, {}) || {}), xanaxCds: get(K.xanaxCds, []) || [], candyPick: keptCandy ? { day: tornDayStart(state.at), id: keptCandy.id } : null };
         const win = recalibrate ? { start: prev.start, end: prev.end, months: prev.months, days: daysLeft(prev, now) } : planWindow(months, now);
-        const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult });
+        const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult, learnedHappyLoss: learnedNow().happyLoss });
         const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
         const prices = getPrices();
         const special = specialLeft(plan, state);
@@ -354,7 +355,7 @@ export function currentModel(now = Date.now()) {
     const app = pi.where === 'app';
     const pn = planNowStored();
     const saved = app ? savedFor(pn) : null;
-    const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult });
+    const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult, learnedHappyLoss: learnedNow().happyLoss });
     // The saved plan's numbers: every plan's whole result on the webpage, the small part on Torn's pages.
     let compare = null;
     let rec = null;
@@ -446,7 +447,8 @@ export function maybeLearn(now = Date.now(), force = false) {
     const samples = cal.samples || [];
     const fights = joinFights(pageGet(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], archived(K.eyePredictions, []) || []);
     // New trains or fights since the last run (counts stop growing at the cap; the newest time doesn't).
-    const sig = [samples.length, samples.length ? samples[samples.length - 1].at || 0 : 0, fights.length, fights.length ? fights[fights.length - 1].at : 0].join(':');
+    const logNewest = ((pageGet(K.gymLog, null) || {}).newest) || 0;
+    const sig = [samples.length, samples.length ? samples[samples.length - 1].at || 0 : 0, fights.length, fights.length ? fights[fights.length - 1].at : 0, logNewest].join(':');
     if (!force && prev && prev.sig === sig) {
         // Nothing new: checked again in 6 hours, not on every refresh (`at` stays when it last learned).
         set(K.learned, { ...prev, checkedAt: now });
@@ -455,7 +457,10 @@ export function maybeLearn(now = Date.now(), force = false) {
     pageSet(K.fightLog, fights);
     // The model in use (kept earlier, or kept over and over since) is the one a new one must beat.
     const current = prev && prev.gym ? applyGymModel(prev.gym) : null;
-    const res = { ...runLearning({ samples, fights, now, current }), sig };
+    const statics = getShared(K.userStatic, {}) || {};
+    const lossMult = parsePerks(statics.perks || {}).happyLossMult || 1;
+    const gymLog = (pageGet(K.gymLog, null) || {}).lines || [];
+    const res = { ...runLearning({ samples, fights, now, current, gymLog, lossMult, happyCurrent: prev && prev.happy && prev.happy.factor > 0 ? prev.happy.factor : 1 }), sig };
     set(K.learned, res);
     const log = pageGet(K.learnLog, []) || [];
     log.push({ at: now, gym: { accepted: res.gym.accepted, heldOut: res.gym.heldOut, mode: res.gym.model.mode, mult: res.gym.model.mult, sessions: res.gym.sessions, candidates: res.gym.candidates }, fights: { accepted: res.fights.accepted, model: res.fights.model, fights: res.fights.fights, heldOut: res.fights.heldOut } });

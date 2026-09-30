@@ -76,6 +76,8 @@ export function playerContext(state, statics = {}, extra = {}) {
     const perks = parsePerks(statics.perks || {});
     // What the learner found in your own trains (an unknown perk): on top of the perks Torn lists.
     if (extra.learnedMult) for (const k of STATS) perks.mult[k] *= Number(extra.learnedMult[k]) > 0 ? Number(extra.learnedMult[k]) : 1;
+    // Happy lost per energy as your own gym log measured it (R6.6), on top of the perks'.
+    if (Number(extra.learnedHappyLoss) > 0) perks.happyLossMult = (perks.happyLossMult || 1) * Number(extra.learnedHappyLoss);
     const unlocked = unlockedGyms(state && state.gymId, extra.unlockedKnown || null);
     const stats = (state && state.stats) || { str: 0, spd: 0, def: 0, dex: 0 };
     const best = {};

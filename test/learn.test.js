@@ -189,3 +189,53 @@ test('F3 fewer than 10 learning fights: never accepted', () => {
     assert.deepEqual(r.model, { winScale: 1, hpScale: 1 });
     assert.match(describeFights(r)[0], /Still learning/);
 });
+
+// ---- R6.6 (docs/research-learner-retrain.md P1, P3): the per-stat keep test, and happy loss from the gym log.
+
+function noisySessions(truthMult, { n = 200, seed = 11, noise = 0.01, stat = 'def', S = 82440191 } = {}) {
+    const rnd = simRng(seed);
+    const out = [];
+    let s0 = S;
+    for (let i = 0; i < n; i++) {
+        const x = { at: T0 + i * 4 * HOUR, stat, S: s0, H: 4000 + rnd() * 500, dots: 8.0, E: 10, trains: 20 + Math.floor(rnd() * 20) };
+        let s = x.S;
+        let h = x.H;
+        for (let k = 0; k < x.trains; k++) {
+            s += gainPerTrain(stat, s, h, x.dots, x.E, truthMult, 'log10');
+            h = Math.max(0, h - 0.5 * x.E);
+        }
+        // Session noise (what a session's reading carries): about 1% each, uniform.
+        const actual = (s - x.S) * (1 + (rnd() - 0.5) * 2 * noise * 1.7);
+        s0 += actual;
+        out.push({ ...x, actual });
+    }
+    return out;
+}
+
+test('R6.6 per-stat test: a real +1% on the trained stat is kept at 200 noisy sessions; pure noise is not', () => {
+    const real = learnGym(noisySessions(1.01), { now: T0 + 200 * 4 * HOUR });
+    assert.equal(real.accepted, true, real.reasons.join(' '));
+    assert.ok(Math.abs(applyGymModel(real).mult.def - 1.01) < 0.004, 'about +1%: ' + applyGymModel(real).mult.def);
+    let falseKeeps = 0;
+    for (const seed of [3, 5, 8, 13, 21, 34]) if (learnGym(noisySessions(1.0, { seed }), { now: T0 + 200 * 4 * HOUR }).accepted) falseKeeps++;
+    assert.ok(falseKeeps <= 1, 'noise kept ' + falseKeeps + ' of 6');
+});
+
+test('R6.6 happy loss from the gym log: a real 0.55 kept at 300 trains; floors (happy hit 0) left out; too few trains wait', async () => {
+    const { learnHappyLoss, HAPPY_LOSS_MIN_TRAINS } = await import('../src/core/learn.js');
+    const rnd = simRng(4);
+    const lines = [];
+    for (let i = 0; i < 60; i++) lines.push({ at: T0 + i * 3 * HOUR, trains: 5, energy: 50, happy: Math.round(50 * 0.55 * (1 + (rnd() - 0.5) * 0.1)) });
+    // Two clicks where happy ran out: they'd pull the estimate down.
+    lines.push({ at: T0 + 61 * 3 * HOUR, trains: 5, energy: 50, happy: 3 }, { at: T0 + 62 * 3 * HOUR, trains: 5, energy: 50, happy: 0 });
+    const r = learnHappyLoss(lines, { now: T0 + 63 * 3 * HOUR });
+    assert.equal(r.accepted, true, r.reasons.join(' '));
+    assert.ok(Math.abs(r.factor - 1.1) < 0.02, 'factor ' + r.factor);
+    const few = learnHappyLoss(lines.slice(0, 10), { now: T0 + 63 * 3 * HOUR });
+    assert.equal(few.accepted, false);
+    assert.equal(few.factor, 1);
+    assert.match(few.reasons[0], new RegExp(HAPPY_LOSS_MIN_TRAINS + ' are needed'));
+    // The constant already right: nothing changes.
+    const same = learnHappyLoss(lines.slice(0, 60).map((l) => ({ ...l, happy: 25 })), { now: T0 + 63 * 3 * HOUR });
+    assert.equal(same.accepted, false);
+});

@@ -4,7 +4,7 @@
  * and player ids left out by default). Pure.
  */
 
-import { learnGym, learnFights, applyGymModel } from './learn.js';
+import { learnGym, learnFights, applyGymModel, learnHappyLoss } from './learn.js';
 
 /** Fight results that count as a win for you. */
 export const WIN_RESULTS = new Set(['attacked', 'mugged', 'hospitalized', 'arrested', 'bounty', 'special']);
@@ -67,18 +67,21 @@ export function round4sig(v) {
  * Run both learners. `current` is the gym model in use (so a new one must
  * beat it on the newest sessions to replace it).
  */
-export function runLearning({ samples = [], fights = [], now, current = null }) {
+export function runLearning({ samples = [], fights = [], now, current = null, gymLog = [], lossMult = 1, happyCurrent = 1 }) {
     const gym = learnGym(samples, { now, current: current || undefined });
     const fight = learnFights(fights, { now });
-    return { at: now, gym, fights: fight };
+    // R6.6: happy lost per energy, from Torn's gym log (every click's happy_used and energy_used).
+    const happy = learnHappyLoss(gymLog, { now, lossMult, current: happyCurrent });
+    return { at: now, gym, fights: fight, happy };
 }
 
 /** What the engine uses from a learning run: per-stat multipliers, the damping mode, the fight model. */
 export function learnedModel(learned) {
-    if (!learned) return { mult: { str: 1, spd: 1, def: 1, dex: 1 }, mode: null, fight: null };
+    if (!learned) return { mult: { str: 1, spd: 1, def: 1, dex: 1 }, mode: null, fight: null, happyLoss: 1 };
     // The model in use: the learned one when kept, else the one it was checked against (itself possibly learned earlier).
     const g = applyGymModel(learned.gym || null);
-    return { mult: g.mult, mode: learned.gym ? g.mode : null, fight: learned.fights && learned.fights.accepted ? learned.fights.model : null };
+    const happyLoss = learned.happy && learned.happy.factor > 0 ? learned.happy.factor : 1;
+    return { mult: g.mult, mode: learned.gym ? g.mode : null, fight: learned.fights && learned.fights.accepted ? learned.fights.model : null, happyLoss };
 }
 
 /**

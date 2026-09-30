@@ -87,6 +87,28 @@ function learnPredict(r, mode, mult, baseMode) {
     return s - r.S;
 }
 
+/**
+ * Round 6 (R6.6, docs/research-learner-retrain.md P3): a per-stat keep test.
+ * The pooled rule dilutes a 1% error on one stat with the others' sessions:
+ * at 200 sessions it kept a real +1% only 6% of the time. Per stat, on the
+ * newest sessions of that stat, the log of actual ÷ predicted must lean the
+ * learned way by z ≥ 3 (94% kept at 200 sessions, noise kept under 5%).
+ */
+export const LEARN_STAT_Z = 3;
+export const LEARN_STAT_MIN_TEST = 8;
+export const LEARN_STAT_MIN_CHANGE = 0.003;
+
+/** z of the newest sessions' residuals against the model in use, signed toward the learned multiplier. */
+function learnStatZ(test, stat, base, learnedMult, baseMode) {
+    const rows = test.filter((r) => r.stat === stat);
+    if (rows.length < LEARN_STAT_MIN_TEST) return { z: 0, n: rows.length };
+    const res = rows.map((r) => Math.log(r.actual / learnPredict(r, base.mode, base.mult[stat] || 1, baseMode)));
+    const mean = res.reduce((a, x) => a + x, 0) / res.length;
+    const sd = Math.max(0.002, Math.sqrt(res.reduce((a, x) => a + (x - mean) * (x - mean), 0) / Math.max(1, res.length - 1)));
+    const dir = Math.sign(Math.log(learnedMult / (base.mult[stat] || 1)));
+    return { z: (dir * mean) / (sd / Math.sqrt(res.length)), n: rows.length };
+}
+
 /** Mean absolute error in % of the actual gain. */
 function learnMape(rows, model, baseMode) {
     if (!rows.length) return null;
@@ -135,6 +157,20 @@ export function learnGym(samples, { now, current, cut } = {}) {
 
     if (!allInputs && rows.length) reasons.push('Some sessions lack the stat, happy and gym, so only the multipliers were learned.');
     let accepted = false;
+    // The per-stat test (same mode as in use): a stat whose newest sessions clearly lean the learned way is kept.
+    const perStat = {};
+    const statModel = { mode: base.mode, mult: { ...base.mult } };
+    if (test.length) {
+        const sameMode = best.mode === base.mode ? best.mult : null;
+        if (sameMode) {
+            for (const stat of STATS) {
+                const change = Math.abs((sameMode[stat] || 1) / (base.mult[stat] || 1) - 1);
+                const t = learnStatZ(test, stat, base, sameMode[stat] || 1, base.mode);
+                perStat[stat] = { z: Math.round(t.z * 100) / 100, n: t.n, keep: t.z >= LEARN_STAT_Z && change >= LEARN_STAT_MIN_CHANGE };
+                if (perStat[stat].keep) statModel.mult[stat] = sameMode[stat];
+            }
+        }
+    }
     if (train.length < LEARN_MIN) {
         reasons.push(`Only ${train.length} sessions to learn from; ${LEARN_MIN} are needed.`);
     } else if (!test.length) {
@@ -142,14 +178,68 @@ export function learnGym(samples, { now, current, cut } = {}) {
     } else {
         const gain = heldOut.current - heldOut.learned;
         const words = `On the newest ${test.length} sessions the formula was off by ${heldOut.current.toFixed(2)}%, the learned model by ${heldOut.learned.toFixed(2)}%.`;
+        const kept = STATS.filter((k) => perStat[k] && perStat[k].keep);
+        const statErr = kept.length ? learnMape(test, statModel, base.mode) : null;
         if (gain >= LEARN_MARGIN_PCT) {
             accepted = true;
             reasons.push(`${words} Kept: better by ${gain.toFixed(2)} points.`);
+        } else if (kept.length && statErr !== null && statErr <= heldOut.current) {
+            // The per-stat test: only the stats that clearly lean, and only if the newest sessions don't get worse.
+            accepted = true;
+            model.mode = statModel.mode;
+            model.mult = statModel.mult;
+            heldOut.learned = statErr;
+            reasons.push(`${words} Kept for ${kept.map((k) => STAT_LABEL[k]).join(', ')}: their newest sessions lean that way clearly (z ≥ ${LEARN_STAT_Z}).`);
         } else {
-            reasons.push(`${words} Not kept: the gain (${gain.toFixed(2)} points) is under the ${LEARN_MARGIN_PCT} needed.`);
+            reasons.push(`${words} Not kept: the gain (${gain.toFixed(2)} points) is under the ${LEARN_MARGIN_PCT} needed, and no stat leans clearly on its own.`);
         }
     }
-    return { accepted, model, current: base, heldOut, sessions: rows.length, learnSessions: train.length, testSessions: test.length, reasons, candidates, at: Number.isFinite(now) ? now : null };
+    return { accepted, model, current: base, heldOut, perStat, sessions: rows.length, learnSessions: train.length, testSessions: test.length, reasons, candidates, at: Number.isFinite(now) ? now : null };
+}
+
+// ---------------------------------------------------------------- happy loss (R6.6, P1)
+
+/** Happy lost per energy the formula assumes (0.5), and what the learned factor must clear. */
+export const HAPPY_LOSS_MIN_TRAINS = 150;
+export const HAPPY_LOSS_Z = 3;
+export const HAPPY_LOSS_MIN_CHANGE = 0.02;
+/** Per-click spread of happy_used ÷ energy_used (research: 0.058). */
+export const HAPPY_LOSS_SD = 0.058;
+
+/**
+ * Happy lost per energy, from Torn's gym log (Full key: every click's
+ * `happy_used` and `energy_used`), as a factor on 0.5 × your perks'.
+ * Clicks where happy hit 0 (happy_used under 80% of the expected) are left
+ * out. Kept only with ≥ 150 trains, a change ≥ 2%, the newest 30% of clicks
+ * leaning the same way by z ≥ 3, and closer on them than the constant.
+ * @param {object[]} lines - core/gymlog.js lines ({at, trains, energy, happy})
+ * @param {object} o - {now, lossMult: your perks' happy-loss multiplier, current: the factor in use (1)}
+ * @returns {{accepted, factor, current, trains, heldOut:{current, learned}|null, reasons:string[]}}
+ */
+export function learnHappyLoss(lines, { now, lossMult = 1, current = 1 } = {}) {
+    const expected = HAPPY_LOSS_PER_ENERGY * (lossMult || 1);
+    const rows = (lines || [])
+        .filter((l) => l && l.energy > 0 && Number.isFinite(l.happy) && l.happy >= 0.8 * expected * l.energy && (!now || now - l.at <= 30 * 86400e3))
+        .sort((a, b) => a.at - b.at);
+    const trains = rows.reduce((a, l) => a + (l.trains || 0), 0);
+    const k = Math.floor(rows.length * LEARN_SPLIT);
+    const train = rows.slice(0, k);
+    const test = rows.slice(k);
+    const ratio = (list) => list.reduce((a, l) => a + l.happy, 0) / Math.max(1, list.reduce((a, l) => a + l.energy, 0));
+    const reasons = [];
+    const base = Number(current) > 0 ? Number(current) : 1;
+    if (trains < HAPPY_LOSS_MIN_TRAINS || !train.length || !test.length) {
+        reasons.push(`Happy lost per energy: ${trains} trains in your gym log so far; ${HAPPY_LOSS_MIN_TRAINS} are needed.`);
+        return { accepted: false, factor: base, current: base, trains, heldOut: null, reasons };
+    }
+    const factor = ratio(train) / expected;
+    const testTrains = test.reduce((a, l) => a + (l.trains || 0), 0);
+    const z = ((ratio(test) - expected * base) / (HAPPY_LOSS_SD / Math.sqrt(Math.max(1, testTrains)))) * Math.sign(factor - base);
+    const err = (f) => test.reduce((a, l) => a + Math.abs(l.happy - expected * f * l.energy), 0) / test.length;
+    const heldOut = { current: err(base), learned: err(factor) };
+    const accepted = Math.abs(factor / base - 1) >= HAPPY_LOSS_MIN_CHANGE && z >= HAPPY_LOSS_Z && heldOut.learned < heldOut.current;
+    reasons.push(`Happy lost per energy: ${(expected * factor).toFixed(3)} learned vs ${(expected * base).toFixed(3)} in use (${trains} trains). ${accepted ? 'Kept.' : 'Not kept: needs a 2% change your newest clicks clearly back (z ' + z.toFixed(1) + ' of ' + HAPPY_LOSS_Z + ').'}`);
+    return { accepted, factor: accepted ? factor : base, learned: factor, current: base, trains, heldOut, reasons };
 }
 
 /**

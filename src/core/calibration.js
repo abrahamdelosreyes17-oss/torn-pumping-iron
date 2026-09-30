@@ -9,7 +9,7 @@ import { trainSession } from './gain.js';
 import { gymById } from './gyms.js';
 
 /** Samples kept (the learner wants many; each is ~150 bytes). */
-export const CALIBRATION_KEEP = 200;
+export const CALIBRATION_KEEP = 500;
 
 /**
  * @param {object} prev - normalizeState() before
