@@ -35,8 +35,11 @@ Links:
 - Repo: https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron (public; `main` + `gh-pages`)
 - Discord service: https://pumping-iron.pumping-iron-worker.workers.dev (the owner's Cloudflare; bot in the owner's server)
 
+**Round 6 coding is under way (2026-09-30, "round 6 build"; newest session entry below).** Done, locally committed, not released: R6.0 perf check, R6.1 engine (saved plans; no automatic), R6.2 store diet, most of R6.3, and the owner's Torn Eye rule. **Waiting on the owner:** pick A, B or C in `mockups/round6/R6-plan.html` (the Plan page's Create plan / Recalibrate buttons; until then the webpage has no button for them, only `__pi.createPlan` in the harness). Next: R6.3 rest (Torn Eye memo/flush/hover), R6.4–R6.7 (ask about the beer and rush what-ifs first), R6.8 bug hunt.
+
 **Next session, start here (round 6, 2026-09-30):**
-0. **Read `docs/ROUND6-PLAN.md` first.** 1.2.3 is still laggy on real Torn. The owner decided: **no more automatic** (the plan is made on a click and saved: Create plan for 1/3/6/12 months; Recalibrate keeps the end date and re-reads everything; everything else follows the saved plan as now). Research for the lag and the friend's suggestions (year plan, events, gym rush, beer/crimes, passive income, learner) is in `docs/research-*.md`; §8 of the plan is the build order (R6.0 perf check first). **Code only after the owner approves the plan** and answers its §7 questions. The owner wants a NEW session to code it. No spending, not on phones, stick to Tampermonkey (no extension); the owner's answers are in the plan's §7a.
+0. **Read `docs/ROUND6-PLAN.md` first.** 1.2.3 is still laggy on real Torn. The owner decided: **no more automatic** (the plan is made on a click and saved: Create plan for 1/3/6/12 months; Recalibrate keeps the end date, re-reads everything, and works any time, a day later too; everything else follows the saved plan as now). §8 of the plan is the build order. No spending, not on phones, stick to Tampermonkey (no extension); the owner's answers are in the plan's §7a.
+   - **Owner, mid-build (2026-09-30):** "Torn Eye should only run when I'm on the Torn Eye tab, and it should only call the API of the person I am viewing and attacking." Built: see the newest session entry.
 1. Read this file (§2 how the owner works, §3 settled decisions), then **`docs/ROUND4-PLAN.md`** (§0 is the owner's round-4 decisions) and the two newest session entries below.
 2. **Live state (2026-09-29, end of session):**
    - The owner is logged in with Discord. The bot DMs work: test ping, a jump ping and "Energy is full" auto-closing all seen in the `sent` table.
@@ -228,6 +231,41 @@ Done on the owner's yes. For later releases, the same steps minus the one-time r
 ---
 
 ## What each session did (newest first)
+
+### 2026-09-30 (night): round 6 build: perf check, saved plans, store diet, gym page, Torn Eye on its tab (not released)
+Owner: build round 6 in the plan's §8 order, prove each lag fix with perf-check numbers, mockup first for the Plan page buttons, local commits only.
+- **R6.0 perf check** (`test/perf-check.mjs`, `npm run perf`; same PWPATH as the browser checks):
+  - a realistic seeded store (`test/perf/seed.mjs`: ~780 KB GM + 3,000 players in IndexedDB, receipts 1 day like the owner);
+  - Tampermonkey-like GM (`harness-live.html &gm=tm`: a copy per read, writes sent to other tabs), 3 tabs on one thread, a churning Torn-like page (`&churn=1`), 4× CPU;
+  - the warm-up opens the webpage (Create plan 12 months, the archive drain), then a Torn page, like a player who updated;
+  - prints load and steady script, long tasks, GM size, which keys were written, what was requested; `RUNS=3` gives medians (one run varies ±80 ms);
+  - targets (4×): load script ≤ 350 ms, worst task ≤ 200 ms, steady ≤ 60 ms/10 s, GM ≤ 30 KB, ≤ 2 GM writes/10 s. Logs `docs/perf-*.log`, rows `docs/perf-round6.jsonl`.
+- **Numbers (4× CPU; gym / plain / profile; single runs):**
+
+  | Step | Load script ms | Worst task ms | Steady ms/10 s | GM KB | GM writes/10 s |
+  |---|---|---|---|---|---|
+  | Baseline 1.2.3 | 2,090 / 2,049 / 2,189 | 495 / 481 / 479 | 278 / 238 / 271 | 696 | 7–10 |
+  | R6.1 saved plans | 432 / 402 / 567 | 355 / 312 / 349 | 194 / 184 / 214 | 689 | 7–9.5 |
+  | R6.3 gym + refresh costs | 307 / 341 / 392 | 177 / 185 / 140 | 169 / 171 / 101 | 689 | 8 |
+  | R6.2 store diet + Torn Eye rule | 300 / 232 / 327 | 196 / 137 / 140 | 63 / 67 / 65 | 55 | 1–2 |
+
+  The final before/after will build 1.2.3 and the final version and run them back to back, median of 3.
+- **R6.1 saved plans (engine):**
+  - `core/saved-plan.js` (pure): `planWindow` (1/3/6/12 months), `daysLeft`, `planProgress`, `monthlyOf`, `snapshotOf`, `makeSavedPlan` (with a recalibration `history`), `planNowOf` (the small part Torn pages follow). `platform/plan-store.js`: the whole plan in the webpage's IndexedDB, GM fallback.
+  - `runtime.js`: `createPlan({months})`, `recalibratePlan()` (same end, the days left from today, any time), `followStrategy(id)` (another saved plan), `setWhere('app'|'torn')`.
+  - Removed: the comparison on every page (`compareCache`, `compareBusy`, the turn), Auto's background re-pick, the event comparison and switch, `candyPick` writes; `dropOldKeys()` deletes them once.
+  - Torn pages build a light model from `planNow` (no ladder, a 2-day projection, no unlock rows); the webpage reads the whole saved plan. Home says "Create your plan" until one exists (steps follow the picked plan, steady by default). Recalibrate keeps a plan you picked yourself.
+  - Interim Plan page: shows the saved plan; its controls are what the next Create/Recalibrate uses. Harness: `&plan=1&follow=steady`.
+- **Mockup** `mockups/round6/R6-plan.html`: A (the plan as the page's chalk card with Recalibrate and New plan), B (length and buttons in the control bar), C (a row of months with "you are here"); plus the no-plan state. Numbers from `docs/sims/round6/mockup-plan.mjs` (the owner's real stats). **Finding:** the year compounds fast for low SPD (4M → 36M in a month): year totals shown as "~" until R6.5's band.
+- **R6.3 (done so far):** the gym page never greys Torn's boxes; one strip line "This session trains at X: open it · then STAT × N"; the page's selected gym wins over the API's; the gym observer redraws only when Torn's own values change (`gymPageSig`, `takeRecords` after drawing); the learner's 6-hour check before its reads; `livePrices` once per price load; the first model on `requestIdleCallback`; the panel placed after the first paint.
+- **R6.2 store diet** (`platform/archive.js`, `docs/research-gm-keys.md`). IndexedDB is per site (torn.com vs github.io) and the leader can be a Torn tab, so:
+  - histories keep their recent part in GM (stats history 8 days, day totals 2, receipts 3, price history 8, calibration 20 samples, eye predictions 30); the webpage moves the rest into its IndexedDB (`drainArchives` at start and every 10 min; GM trimmed only of what was copied) and reads both (`archived`);
+  - webpage-only data lives in its IndexedDB (`pageGet/pageSet`: money log, gym log, fights, learn log, plan line, targets, watch state, flights); the gym log and the learner run on the webpage only (Torn's log refills gaps);
+  - prices: one small row per item in GM (`slimPriceRow`: `u` unit, `low`), the listings per site (`localPrices`);
+  - writes: leader claim every 10 s (stale 30 s), request windows once per 2 s burst, focus heartbeat on change or every 20 s (it wrote every 4 s: a bug), stats history and day log on change, receipts parsed once per inventory read, the stored inventory keeps only known items;
+  - GM 696 → 55 KB (left: userStatic 14K, myAttacks 10K, prices 5K, eyeWatch 4K, calibration 4K). **The 30 KB target isn't met yet.**
+- **Torn Eye (owner's rule):** on Torn's pages only the player on the profile or attack page is asked about; faction/war lists and mini-profiles show what's known (war rows sorted from the page, "live war mode on Pumping Iron's Torn Eye tab"). The watch list, war mode, own-faction wars, target estimates, your attacks and gear run only while the webpage's Torn Eye tab is open. **Trade-off to tell the owner:** the bot's war/watch lists sync only while that tab is open.
+- Checks: 581 tests (`test/lag.test.js` rewritten for saved plans, `test/store-diet.test.js` new), ux-check and torn-check ALL PASSED (both updated for the new rules).
 
 ### 2026-09-30 (evening): 1.2.3 still laggy → research only, round 6 planned (no code)
 - The owner: with Pumping Iron on, the whole of Torn is laggy (start-up, the gym). The 1.2.3 harness had missed it because its store starts empty. Eight researchers (docs/research-lag-*.md, research-year-events, -gym-unlock, -beer-crimes, -passive-income, -learner-retrain) found the causes:
