@@ -7,6 +7,7 @@
  */
 
 import { K, get, set, getKey, getSettings, getShared } from './platform/store.js';
+import { pageSet } from './platform/archive.js';
 import { learnedModel } from './core/learndata.js';
 import { applyFightModel } from './core/learn.js';
 import { idbGet, idbSet } from './platform/idb.js';
@@ -122,7 +123,8 @@ export async function clearEye() {
     set('eyeGearCount', 0);
     await idbSet('eye', eye.cache).catch(() => {});
     set('myAttacks', null);
-    for (const k of [TARGETS_KEY, WATCH_KEY, WATCH_STATE_KEY, FLIGHTS_KEY, 'eyeWarAuto']) set(k, null);
+    pageSet(TARGETS_KEY, null);
+    for (const k of [WATCH_KEY, WATCH_STATE_KEY, FLIGHTS_KEY, 'eyeWarAuto']) set(k, null);
     notify();
 }
 
@@ -431,7 +433,7 @@ function viewJudge(r) {
  * @param {object} input - {minLevel, maxLevel, inactiveOnly, factionless}
  * @param {object} [deps] - {client, judge, store, sleep, now} (tests)
  */
-export async function importTargets(input = {}, { client = null, judge = null, store = (v) => set(TARGETS_KEY, v), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() } = {}) {
+export async function importTargets(input = {}, { client = null, judge = null, store = (v) => pageSet(TARGETS_KEY, v), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() } = {}) {
     const ffs = client || sharedFfsClient();
     if (!judge && !(pi.model && pi.model.ready)) throw new Error('Waiting for your stats from Torn.');
     const params = targetParams(input);

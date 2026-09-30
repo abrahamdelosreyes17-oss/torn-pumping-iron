@@ -23,7 +23,7 @@ import {
     PAGE_ATTACK,
     PAGE_OTHER,
 } from '../src/sources/route.js';
-import { decideLeader, LEADER_STALE_MS } from '../src/core/leader.js';
+import { decideLeader, LEADER_STALE_MS, LEADER_RENEW_MS } from '../src/core/leader.js';
 
 test('each Torn page is recognised by its own address', () => {
     const cases = [
@@ -85,6 +85,9 @@ test('only one visible tab leads, and a hidden leader steps down', () => {
     assert.equal(d.lead, false);
     d = decideLeader(record, 'A', { now: now + 5000, visible: true });
     assert.deepEqual([d.lead, d.confirmed], [true, true]);
+    assert.equal(d.write, null, 'round 6: the claim is not rewritten on every check (each GM write reaches every tab)');
+    d = decideLeader(record, 'A', { now: now + LEADER_RENEW_MS, visible: true });
+    assert.deepEqual(d.write, { id: 'A', ts: now + LEADER_RENEW_MS }, 'renewed every 10 s');
     d = decideLeader(record, 'A', { now: now + 6000, visible: false });
     assert.deepEqual(d.write, { id: null, ts: 0 });
     d = decideLeader({ id: 'A', ts: now }, 'B', { now: now + LEADER_STALE_MS + 1, visible: true });

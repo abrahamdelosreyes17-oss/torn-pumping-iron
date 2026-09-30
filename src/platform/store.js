@@ -6,6 +6,8 @@
  */
 
 import { gmGet, gmSet, gmDel, gmGetShared } from './gm.js';
+import { idbGet, idbSet } from './idb.js';
+import { slimPriceRow } from '../core/market.js';
 
 export const K = {
     apiKey: 'apiKey',
@@ -144,9 +146,57 @@ export function getShared(name, fallback = null) {
     return v === null || v === undefined ? fallback : v;
 }
 
-/** Prices, parsed once per change (read-only: copy before changing). */
+/*
+ * Prices (round 6): GM keeps one small row per item (when it was read, the
+ * unit price the plan uses, the cheapest, the 7-day average); the listings
+ * themselves (60 per item) stay on the site that loaded them, in its
+ * IndexedDB, for its Buy list and market outlines.
+ */
+const local = { rows: null, loading: null, ver: 0 };
+const pricesMemo = { slim: null, ver: -1, value: null };
+
+/** This site's own listings, read once from its IndexedDB (market pages and the webpage). */
+export function loadLocalPrices() {
+    if (local.loading) return local.loading;
+    local.loading = idbGet('prices')
+        .then((v) => {
+            local.rows = { ...(v || {}), ...(local.rows || {}) };
+            local.ver++;
+            return local.rows;
+        })
+        .catch(() => {
+            local.rows = local.rows || {};
+            return local.rows;
+        });
+    return local.loading;
+}
+
+/** This site's listings (only what it loaded itself). */
+export function localPrices() {
+    return local.rows || {};
+}
+
+/** Keep newly loaded listings on this site (memory now, IndexedDB after). */
+export function setLocalPrices(rows) {
+    local.rows = { ...(local.rows || {}), ...rows };
+    local.ver++;
+    idbSet('prices', local.rows).catch(() => {});
+}
+
+/**
+ * Prices (read-only: copy before changing): GM's small rows, with this site's
+ * listings where it has the newest read.
+ */
 export function getPrices() {
-    return gmGetShared(K.prices, {}) || {};
+    const slim = gmGetShared(K.prices, {}) || {};
+    if (!local.rows) return slim;
+    if (pricesMemo.slim === slim && pricesMemo.ver === local.ver) return pricesMemo.value;
+    const out = { ...slim };
+    for (const [id, row] of Object.entries(local.rows)) if (row && (!slim[id] || (row.at || 0) >= (slim[id].at || 0))) out[id] = row;
+    pricesMemo.slim = slim;
+    pricesMemo.ver = local.ver;
+    pricesMemo.value = out;
+    return out;
 }
 
 /** Listings kept per item: the cheapest, enough to fill a week's plan from many sellers. */
@@ -168,6 +218,12 @@ export const DROPPED_KEYS = ['compareCache', 'eventCompareCache', 'compareBusy',
 
 export function dropOldKeys() {
     for (const k of DROPPED_KEYS) if (gmGet(k, null) !== null) gmDel(k);
+    // 1.2.3 kept every listing in GM (~140 KB): this site keeps them, GM gets the small rows.
+    const prices = gmGet(K.prices, null);
+    if (prices && Object.values(prices).some((r) => r && Array.isArray(r.listings))) {
+        setLocalPrices(Object.fromEntries(Object.entries(prices).filter(([, r]) => r && Array.isArray(r.listings))));
+        gmSet(K.prices, Object.fromEntries(Object.entries(prices).map(([id, r]) => [id, slimPriceRow(id, r)])));
+    }
 }
 
 /** What "Your data" in Settings can clear, by group. */

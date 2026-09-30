@@ -6,6 +6,7 @@
  */
 
 import { K, get, set, del, getKey, setKey, getPlan } from './platform/store.js';
+import { pageGet, pageSet } from './platform/archive.js';
 import { fetchKeyInfo, fetchLogCategories, fetchMoneyLog, fetchGymLog, ACCESS_FULL } from './api/torn.js';
 import { MONEY_LOG_CATEGORY } from './core/auto.js';
 import { parseGymLog, mergeGymLog, gymLogFrom, GYM_LOG_EVERY_MS } from './core/gymlog.js';
@@ -32,9 +33,9 @@ export async function saveFullKey(v) {
             return { ok: false, text: 'Saved, but this is a ' + (info.type || 'lower') + ' key. Auto mode needs a Full key.' };
         }
         set(K.fullKeyState, { ok: true, at: Date.now(), type: info.type || 'Full Access' });
-        del(K.moneyLog);
+        pageSet(K.moneyLog, null);
         // Another key may be another account: its gym log starts fresh.
-        del(K.gymLog);
+        pageSet(K.gymLog, null);
         refreshMoneyLog({ force: true }).catch(() => {});
         return { ok: true, text: getPlan().pickBy === 'auto' ? 'Saved · Full key. Auto mode is on.' : 'Saved · Full key. Pick Auto (from your income) on Plan to use it.' };
     } catch (error) {
@@ -47,40 +48,43 @@ export async function saveFullKey(v) {
 export function forgetFullKey() {
     setKey(K.fullKey, '');
     del(K.fullKeyState);
-    del(K.moneyLog);
-    del(K.gymLog);
+    pageSet(K.moneyLog, null);
+    pageSet(K.gymLog, null);
     pi.fullClient = null;
 }
 
 /**
- * Your trains from Torn's log (Full key), at most every 15 minutes, in the
- * leader tab (visible), never while Torn Trading runs: what's new since the
+ * Your trains from Torn's log (Full key), at most every 15 minutes, on the
+ * webpage (visible), never while Torn Trading runs: what's new since the
  * newest line kept, a week back the first time. Trains on your phone, or
  * with the laptop closed, show in Progress' "Last trains".
  */
 export async function refreshGymLog({ force = false, now = Date.now() } = {}) {
     const st = get(K.fullKeyState, {}) || {};
     if (!getKey(K.fullKey) || !st.ok || st.dead || isPaused()) return null;
-    const kept = get(K.gymLog, null);
+    const kept = pageGet(K.gymLog, null);
     // A gap left by a long time away (more than a read's 300 lines) is filled a read a minute until it's done.
     const gap = kept && kept.gap ? kept.gap : null;
     if (!force && kept && !gap && now - (kept.at || 0) < GYM_LOG_EVERY_MS) return null;
     if (!force && kept && gap && now - (kept.at || 0) < 50e3) return null;
     // Asked before a slow answer came back: one read at a time.
-    set(K.gymLog, { ...(kept || { lines: [], newest: null }), at: now });
+    pageSet(K.gymLog, { ...(kept || { lines: [], newest: null }), at: now });
     const range = gap || { from: gymLogFrom(kept, now), to: null };
     const rows = await fetchGymLog(fullKeyClient(), range);
     // What's still missing: from where this read started back to the oldest line it reached.
     const left = rows.complete || !(rows.oldest > range.from) ? null : { from: range.from, to: rows.oldest };
-    const next = mergeGymLog(get(K.gymLog, null), parseGymLog(rows), now, left);
-    set(K.gymLog, next);
+    const next = mergeGymLog(pageGet(K.gymLog, null), parseGymLog(rows), now, left);
+    pageSet(K.gymLog, next);
     return next;
 }
 
-/** The leader tab's gym-log clock (main.js calls it every minute). */
+/**
+ * The gym-log clock (main.js calls it every minute), on the webpage only
+ * (round 6): only the webpage shows it, and it keeps it in its own IndexedDB.
+ * Torn's log goes back far enough that a day away is filled in when it opens.
+ */
 export function gymLogTick() {
-    const lead = get(K.leader, null);
-    if (!lead || lead.id !== pi.tabId || typeof document === 'undefined' || document.visibilityState === 'hidden') return;
+    if (pi.where !== 'app' || typeof document === 'undefined' || document.visibilityState === 'hidden') return;
     refreshGymLog().catch((error) => set(K.lastError, { at: Date.now(), where: 'gym log', code: error && error.code, message: String((error && error.message) || error) }));
 }
 
@@ -91,7 +95,7 @@ export function gymLogTick() {
 export async function refreshMoneyLog({ force = false, now = Date.now() } = {}) {
     const st = get(K.fullKeyState, {}) || {};
     if (!getKey(K.fullKey) || !st.ok || st.dead || isPaused()) return null;
-    const prev = get(K.moneyLog, null);
+    const prev = pageGet(K.moneyLog, null);
     if (!force && prev && now - prev.at < MONEY_LOG_EVERY_MS) return prev;
     const cats = (await fetchLogCategories(tornClient())).filter((c) => MONEY_LOG_CATEGORY.test(String(c.title || ''))).slice(0, MONEY_LOG_MAX_CATS);
     const log = await fetchMoneyLog(fullKeyClient(), { from: Math.floor(now / 1000) - MONEY_LOG_DAYS * 86400, categories: cats });
@@ -100,6 +104,6 @@ export async function refreshMoneyLog({ force = false, now = Date.now() } = {}) 
     const since = log.coveredFrom || now - MONEY_LOG_DAYS * 86400e3;
     const kept = log.filter((e) => e.at >= since);
     const row = { at: now, days: Math.max(1, (now - since) / 86400e3), cats: cats.map((c) => c.title), log: kept.slice(0, 1500).map((e) => ({ at: e.at, title: e.title, money: e.money })) };
-    set(K.moneyLog, row);
+    pageSet(K.moneyLog, row);
     return row;
 }

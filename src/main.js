@@ -50,9 +50,11 @@ export function boot() {
     startFeed();
     // The plan's next steps go to your Discord Worker when they change (if you set one up).
     onModel((m) => maybeSyncPlan(m));
-    // Trains Torn logged that no read saw (your phone, the laptop closed): the leader reads them every 15 minutes (Full key).
-    setTimeout(gymLogTick, 20000);
-    setInterval(gymLogTick, 60000);
+    // Trains Torn logged that no read saw (your phone, the laptop closed): the webpage reads them every 15 minutes (Full key).
+    if (where === 'app') {
+        setTimeout(gymLogTick, 20000);
+        setInterval(gymLogTick, 60000);
+    }
     // Off torn.com (the harness), expose the model for checks. On torn.com the sandbox keeps it private anyway.
     if (/^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed, createPlan, recalibratePlan, followStrategy };
 }

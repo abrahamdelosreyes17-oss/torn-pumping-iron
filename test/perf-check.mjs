@@ -230,9 +230,10 @@ async function warmStore(page) {
     await seedIdb(ctx);
     await ctx.addInitScript({ content: 'window.__piSeedRaw = ' + JSON.stringify(JSON.stringify(store.gm)) + ';' });
     const p = await ctx.newPage();
-    await p.goto(BASE + PAGES[page]);
+    // Round 6: the webpage is where a plan is made (Create plan), and where the older history and webpage-only data
+    // move out of GM; the warm-up opens it like a player who updated, made a plan, then went back to Torn.
+    await p.goto(BASE + 'pi=app&' + PAGES[page]);
     await p.waitForTimeout(3000);
-    // Round 6: the plan is made on a click (Create plan) and saved; the check makes one the way the Plan page does.
     const made = await p.evaluate(async () => (window.__pi && window.__pi.createPlan ? Boolean(await window.__pi.createPlan({ months: 12 })) : null));
     await p.waitForTimeout(12000);
     const gm = await p.evaluate(() => ({ ..._store }));
@@ -270,7 +271,7 @@ async function runCase(name) {
     await A.waitForTimeout(Math.max(0, LOAD_S * 1000 - (Date.now() - t0)));
     const load = analyse(await pa.stop());
     await A.waitForTimeout(Math.max(0, STEADY_FROM_S * 1000 - (Date.now() - t0)));
-    const setsAt = await A.evaluate(() => ({ sets: window.__tm.sets, chars: window.__tm.setChars }));
+    const setsAt = await A.evaluate(() => ({ sets: window.__tm.sets, chars: window.__tm.setChars, keys: { ...window.__tm.setKeys } }));
     await pa.start();
     await A.waitForTimeout(STEADY_S * 1000);
     const steady = analyse(await pa.stop());
@@ -320,6 +321,8 @@ async function runCase(name) {
         gmWritesPer10s: Math.round(((info.sets - setsAt.sets) * 10 * 10) / STEADY_S) / 10,
         gmWriteKBPer10s: Math.round(((info.setChars - setsAt.chars) * 10) / STEADY_S / 100) / 10,
         gmTop: info.gmTop,
+        // Which keys this tab wrote in the steady window.
+        gmWrites: Object.entries(info.setKeys || {}).map(([k, n]) => [k.replace(P, ''), n - ((setsAt.keys || {})[k] || 0)]).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]).map(([k, n]) => k + ' ' + n),
         loadTop: load.top,
         steadyTop: steady.top,
         errors: errors.concat(info.lastError ? [info.lastError.where + ': ' + info.lastError.message] : []),
@@ -341,6 +344,7 @@ for (const name of wanted) {
     console.log(`  load:   script ${row.loadScriptMs} ms · busy ${row.loadBusyMs} ms · long tasks ${row.loadLongTasks} / ${row.loadLongMs} ms, worst ${row.loadWorstMs} ms`);
     console.log(`  steady: script ${row.steadyScriptPer10s} ms/10 s · busy ${row.steadyBusyPer10s} ms/10 s · long tasks ${row.steadyLongMs} ms/20 s`);
     console.log(`  GM:     ${row.gmKB} KB in ${row.gmKeys} keys · ${row.gmWritesPer10s} writes/10 s (${row.gmWriteKBPer10s} KB) · biggest ${row.gmTop.slice(0, 5).join(', ')}`);
+    console.log(`  writes in 20 s: ${row.gmWrites.join(', ') || 'none'}`);
     console.log(`  load top:   ${row.loadTop.slice(0, 6).join(' · ')}`);
     console.log(`  steady top: ${row.steadyTop.slice(0, 6).join(' · ')}`);
     if (row.errors.length) console.log('  errors: ' + row.errors.join(' | '));

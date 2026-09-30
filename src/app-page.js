@@ -5,9 +5,10 @@
  */
 
 import { gmOnChange } from './platform/gm.js';
-import { K, get, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup, getPrices, PRICE_LISTINGS_KEPT } from './platform/store.js';
+import { K, get, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup, DATA_GROUPS, getPrices, PRICE_LISTINGS_KEPT, loadLocalPrices, localPrices, setLocalPrices } from './platform/store.js';
 import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE, beatFocus, apiFocus, createPlan, recalibratePlan, followStrategy } from './runtime.js';
 import { forgetSavedPlan } from './platform/plan-store.js';
+import { archived, pageGet, loadArchives, drainArchives, clearArchived } from './platform/archive.js';
 import { PiApp } from './ui/app/app.js';
 import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, fetchFactionMembers, fetchFactionWars, keyIsEnough } from './api/torn.js';
 import { outEarly, enemiesFromWars } from './core/eye/war.js';
@@ -21,7 +22,7 @@ import { discordState, discordRaw, connectDiscord, testDiscord, forgetDiscord, l
 import { saveFullKey, forgetFullKey, refreshMoneyLog } from './income.js';
 import { WORKER_SETUP_URL } from './api/worker.js';
 import { tabWindow } from './platform/tab-window.js';
-import { listingsFromItemMarket, listingsFromW3b, listingsFromPoints } from './core/market.js';
+import { listingsFromItemMarket, listingsFromW3b, listingsFromPoints, slimPriceRow } from './core/market.js';
 import { recordPrice, average7, dailyLows, readPriceHistory } from './core/history.js';
 import { parsePerks } from './core/perks.js';
 import { POINTS } from './core/items.js';
@@ -35,7 +36,7 @@ import { maybeLearn } from './runtime.js';
 /** What Settings shows about the Full key (never the key itself). */
 function fullKeyView() {
     const st = get(K.fullKeyState, null) || {};
-    const ml = get(K.moneyLog, null);
+    const ml = pageGet(K.moneyLog, null);
     return { has: Boolean(getKey(K.fullKey)), ok: Boolean(st.ok && !st.dead), error: st.error || null, logAt: ml ? ml.at : null, logLines: ml && ml.log ? ml.log.length : 0 };
 }
 
@@ -73,16 +74,28 @@ export const PRICE_SLIM_FRESH_MS = 30 * 60 * 1000;
 export async function loadPrices(ids, slim = []) {
     // Nothing from Torn or TornW3B while Torn Trading runs (the two take turns).
     if (!getKey(K.apiKey) || isPaused() || get(K.apiKeyDead, false)) return;
-    const prices = { ...(getPrices()) };
+    // This site's own listings decide what is due (the other site's reads left only small rows in GM).
+    const first = !page.localPrices;
+    await loadLocalPrices();
+    page.localPrices = true;
+    const prices = { ...localPrices() };
     const skip = new Set();
     const now = Date.now();
     const full = new Set(ids.map(String));
     const slimSet = new Set(slim.map(String).filter((id) => !full.has(id)));
     const fresh = (id) => (slimSet.has(id) ? PRICE_SLIM_FRESH_MS : PRICE_FRESH_MS);
     const due = [...new Set([...full, ...slimSet])].filter((id) => !page.loading.has(id) && !(prices[id] && now - (prices[id].at || 0) < fresh(id)));
-    if (!due.length) return;
+    if (!due.length) {
+        // This site's listings just came from its IndexedDB: the Buy list and market outlines can show them now.
+        if (first) {
+            refresh();
+            if (page.app) page.app.render(true);
+        }
+        return;
+    }
     for (const id of due) page.loading.add(id);
     let hist = readPriceHistory(get(K.priceHistory, null));
+    const loaded = {};
     for (const id of due) {
         // Paused mid-load: keep what's stored, ask again once Torn Trading stops.
         if (isPaused()) {
@@ -121,6 +134,7 @@ export async function loadPrices(ids, slim = []) {
             const retryAt = Date.now() - PRICE_FRESH_MS + 30000;
             if (old && Array.isArray(old.listings) && old.listings.length) {
                 prices[id] = { ...old, error: row.error, at: retryAt };
+                loaded[id] = prices[id];
                 page.loading.delete(id);
                 continue;
             }
@@ -134,11 +148,17 @@ export async function loadPrices(ids, slim = []) {
         row.avg7 = avg.days >= 2 ? avg.avg : null;
         row.lows7 = dailyLows(hist, id, Date.now(), 7);
         prices[id] = row;
+        loaded[id] = row;
         page.loading.delete(id);
     }
     set(K.priceHistory, hist);
-    const merged = { ...(getPrices()), ...Object.fromEntries(due.filter((id) => prices[id] && !skip.has(id)).map((id) => [id, prices[id]])) };
-    set(K.prices, merged);
+    // The listings stay on this site; GM gets one small row per item (every Torn page is handed GM).
+    const got = Object.fromEntries(Object.entries(loaded).filter(([id]) => !skip.has(id)));
+    setLocalPrices(got);
+    const small = { ...(get(K.prices, {}) || {}) };
+    for (const [id, row] of Object.entries(small)) if (row && row.listings) small[id] = slimPriceRow(id, row);
+    for (const [id, row] of Object.entries(got)) small[id] = slimPriceRow(id, row);
+    set(K.prices, small);
     refresh();
     if (page.app) page.app.render(true);
 }
@@ -201,10 +221,10 @@ function diagnostics() {
         lastError: err ? new Date(err.at).toISOString().slice(11, 16) + ' ' + err.message : null,
         unknownPerks: parsePerks(statics.perks || {}).unknown.length,
         version: PI_BUILD_VERSION,
-        historyDays: Object.keys(get(K.statsHistory, {}) || {}).length,
-        priceItems: Object.keys((readPriceHistory(get(K.priceHistory, null)) || {}).items || {}).length,
+        historyDays: Object.keys(archived(K.statsHistory, {}) || {}).length,
+        priceItems: Object.keys((readPriceHistory(archived(K.priceHistory, null)) || {}).items || {}).length,
         eyeLine: 'targets, estimates and gear for ' + page.eye.gear + ' player' + (page.eye.gear === 1 ? '' : 's'),
-        learnLine: (((get('calibration', null) || {}).samples) || []).length + ' sessions · ' + (get(K.fightLog, []) || []).length + ' fights · what it learned',
+        learnLine: (((archived('calibration', null) || {}).samples) || []).length + ' sessions · ' + (pageGet(K.fightLog, []) || []).length + ' fights · what it learned',
     };
 }
 
@@ -306,7 +326,7 @@ function warName(fid) {
 
 /** Stored targets, judged again now: only players you still beat show (your stats or colours may have changed). */
 function eyeRows() {
-    const stored = get(TARGETS_KEY, null);
+    const stored = pageGet(TARGETS_KEY, null);
     if (!stored || !Array.isArray(stored.list)) return [];
     const rows = stored.list.map((x) => {
         const v = eyeView(x.playerId, { level: x.level, name: x.name });
@@ -368,19 +388,19 @@ function getCtx() {
         statics,
         prices,
         compare: pi.model && pi.model.compare,
-        history: get(K.statsHistory, {}) || {},
-        dayTotals: get(K.dayTotals, {}) || {},
+        history: archived(K.statsHistory, {}) || {},
+        dayTotals: archived(K.dayTotals, {}) || {},
         gymProgress: get(K.gymProgress, null),
-        calibration: get('calibration', null),
-        gymLog: get(K.gymLog, null),
-        planProjection: get(K.planLine, null),
-        receipts: get(K.receipts, null),
-        priceHistory: get(K.priceHistory, null),
+        calibration: archived('calibration', null),
+        gymLog: pageGet(K.gymLog, null),
+        planProjection: pageGet(K.planLine, null),
+        receipts: archived(K.receipts, null),
+        priceHistory: archived(K.priceHistory, null),
         flags: { hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)), hasFfs: Boolean(getKey(K.ffsKey)), ffsDead: Boolean(ffsState && ffsState.registered === false), hasTs: Boolean(getKey(K.tsKey)) },
         keyProblem: keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: statics.keyInfo || null }),
         planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
         fullKey: fullKeyView(),
-        sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (get(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), (get(K.planLine, null) || {}).key || ''].join('|'),
+        sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (pageGet(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), (pageGet(K.planLine, null) || {}).key || ''].join('|'),
         setSettings: (p) => {
             setSettings(p);
             refresh();
@@ -436,6 +456,9 @@ function getCtx() {
                 pi.saved = null;
                 forgetSavedPlan().catch(() => {});
             }
+            // The webpage's own copy (older history, webpage-only data) goes with GM's.
+            clearArchived(DATA_GROUPS[g] || []);
+            if (g === 'eye') clearArchived([TARGETS_KEY]);
             clearGroup(g);
             refresh();
             page.app.render(true);
@@ -453,23 +476,23 @@ function getCtx() {
             setupUrl: WORKER_SETUP_URL,
         },
         dev: {
-            data: () => ({ samples: ((get('calibration', null) || {}).samples) || [], gymLog: ((get(K.gymLog, null) || {}).lines) || [], fights: joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []), learned: get(K.learned, null), version: PI_BUILD_VERSION }),
+            data: () => ({ samples: ((archived('calibration', null) || {}).samples) || [], gymLog: ((pageGet(K.gymLog, null) || {}).lines) || [], fights: joinFights(pageGet(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], archived(K.eyePredictions, []) || []), learned: get(K.learned, null), version: PI_BUILD_VERSION }),
             unlocked: () => Boolean(get(K.devUnlocked, false)),
             setUnlocked: (v) => (v ? set(K.devUnlocked, true) : del(K.devUnlocked)),
-            log: () => get(K.learnLog, []) || [],
+            log: () => pageGet(K.learnLog, []) || [],
             sizes: () => Object.fromEntries(['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions, K.prices, K.priceHistory, K.statsHistory].map((k) => [k, JSON.stringify(get(k, null) || '').length])),
         },
         eye: {
             rows: eyeRows,
-            stored: () => get(TARGETS_KEY, null),
+            stored: () => pageGet(TARGETS_KEY, null),
             load: (params) => loadTargets(params).catch(() => {}),
             loading: () => page.eye.loading,
             error: () => page.eye.error,
             sources: () => ({ fights: ((get('myAttacks', null) || {}).list || []).length, ffsFree: page.ffs ? page.ffs.stats().remaining : 60, gear: page.eye.gear }),
             view: (id, extra, o) => eyeView(id, extra, o),
             attacks: () => (get('myAttacks', null) || {}).list || [],
-            updatedAt: () => (get(TARGETS_KEY, null) || {}).at || null,
-            params: () => (get(TARGETS_KEY, null) || {}).params || null,
+            updatedAt: () => (pageGet(TARGETS_KEY, null) || {}).at || null,
+            params: () => (pageGet(TARGETS_KEY, null) || {}).params || null,
             war: {
                 state: () => {
                     const fid = warFid();
@@ -521,10 +544,20 @@ export function bootAppPage({ renderers = {} } = {}) {
         page.app.render(true);
     });
     gearCount().then((n) => (page.eye.gear = n));
-    const stored = get(TARGETS_KEY, null);
+    const stored = pageGet(TARGETS_KEY, null);
     if (stored && Array.isArray(stored.list)) setTimeout(() => wantPlayers(stored.list.map((x) => x.playerId)), 500);
     page.app.mount();
     onModel(() => page.app.render());
+    // The webpage keeps the older history and its own data in its IndexedDB (GM stays small for Torn's pages).
+    loadArchives()
+        .then(() => {
+            refresh();
+            page.app.render(true);
+            return drainArchives();
+        })
+        .catch(() => {});
+    setInterval(() => drainArchives().catch(() => {}), 10 * 60 * 1000);
+    loadLocalPrices().then(() => page.app.render(true)).catch(() => {});
     for (const k of [K.prices, K.settings, K.plan, K.userStatic, K.stateError, K.apiKeyDead]) gmOnChange(k, () => page.app.render());
     // The watch list is changed from Torn's pages too (☆ on a profile or the attack page) and read there.
     for (const k of ['eyeWatch', 'eyeWatchState']) gmOnChange(k, () => page.app.tab === 'eye' && page.app.render(true));

@@ -174,7 +174,7 @@ export function receiptPriceNow(id, { prices = {}, priceHistory = null, now }) {
     const h = readPriceHistory(priceHistory).items[id] || {};
     const low = h[Math.floor(now / DAY_MS)] > 0 ? h[Math.floor(now / DAY_MS)] : null;
     const row = prices[id];
-    const fresh = row && typeof row === 'object' && tornDayStart(row.at || 0) === tornDayStart(now) ? unitPrice({ listings: row.listings }, id === POINTS ? REFILL_POINTS : 1) : null;
+    const fresh = row && typeof row === 'object' && tornDayStart(row.at || 0) === tornDayStart(now) ? (Array.isArray(row.listings) && row.listings.length ? unitPrice({ listings: row.listings }, id === POINTS ? REFILL_POINTS : 1) : row.low || null) : null;
     const p = [low, fresh].filter((v) => v > 0);
     return p.length ? Math.min(...p) : null;
 }

@@ -18,6 +18,7 @@ import { targetShares } from './core/plan.js';
 import { INCOME_MIN_DAYS, budgetOf, incomeFrom, autoState, effectivePickBy, incomeBreakdown } from './core/auto.js';
 import { planWindow, daysLeft, planProgress, snapshotOf, makeSavedPlan, planNowOf, usablePlanNow, SAVED_PLAN_V } from './core/saved-plan.js';
 import { loadSavedPlan, saveSavedPlan } from './platform/plan-store.js';
+import { archived, pageGet, pageSet } from './platform/archive.js';
 import { summarizeReceipts } from './core/receipts.js';
 import { livePrices } from './core/market.js';
 import { TORN_PER_MINUTE_ALONE } from './core/turns.js';
@@ -147,13 +148,13 @@ function autoFor(plan, settings, statics, steadyPerDay) {
     // What the gym really cost over the same days (receipts), added back: it left your networth and shows in the log's "out".
     // Never the plan's own projected cost, which would feed the budget back into itself.
     const now = Date.now();
-    const rc = get(K.receipts, null);
+    const rc = archived(K.receipts, null);
     const today = tornDayStart(now);
     // 30 Torn days, today included.
-    const sum = rc ? summarizeReceipts(rc, today - 29 * 86400e3, today, { prices: getPrices(), priceHistory: get(K.priceHistory, null) }) : null;
+    const sum = rc ? summarizeReceipts(rc, today - 29 * 86400e3, today, { prices: getPrices(), priceHistory: archived(K.priceHistory, null) }) : null;
     const spentPerDay = sum && sum.days >= INCOME_MIN_DAYS ? sum.cost / sum.days : plan.pickBy === 'auto' && hasFullKey() ? steadyPerDay() : 0;
     const income = incomeFrom(statics.income || [], { spentPerDay });
-    const ml = get(K.moneyLog, null);
+    const ml = pageGet(K.moneyLog, null);
     const breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now(), ml.days || null) : null;
     const auto = autoState({ plan, settings, hasFullKey: hasFullKey(), income, log: breakdown, spentPerDay });
     auto.breakdown = breakdown;
@@ -324,7 +325,7 @@ export function currentModel(now = Date.now()) {
     // Income (Plan's "Plan from my income"): read on the webpage only, where a plan is made.
     const auto = app ? autoFor(plan, settings, statics, () => (pn && pn.slim.steady ? pn.slim.steady.cost / pn.days : 0)) : null;
     const planInfo = pn ? { start: pn.start, end: pn.end, months: pn.months, days: pn.days, from: pn.from, createdAt: pn.createdAt, recalibratedAt: pn.recalibratedAt, progress: planProgress(pn, now), whole: Boolean(saved) } : null;
-    const m = buildModel({ state, statics, plan, settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: get(K.statsHistory, {}) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+    const m = buildModel({ state, statics, plan, settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: (app ? archived(K.statsHistory, {}) : get(K.statsHistory, {})) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
     if (m.ready) {
         m.planBusy = pi.planBusy ? { recalibrate: pi.planBusy.recalibrate, months: pi.planBusy.months, at: pi.planBusy.at } : null;
         m.savedPlan = saved;
@@ -366,7 +367,7 @@ function recordPlanLine(saved, strategy, now) {
     if (!r || !Array.isArray(r.daily)) return;
     const plan = getPlan();
     const stats = saved.snapshot.stats;
-    set(K.planLine, { key: [plan.createdAt || 0, strategy, plan.build].join('|'), start: tornDayStart(now), total: Object.values(stats).reduce((a, v) => a + v, 0), perStat: { ...stats }, daily: r.daily, perStatGain: r.perStat, cost: r.cost, days: r.daily.length });
+    pageSet(K.planLine, { key: [plan.createdAt || 0, strategy, plan.build].join('|'), start: tornDayStart(now), total: Object.values(stats).reduce((a, v) => a + v, 0), perStat: { ...stats }, daily: r.daily, perStatGain: r.perStat, cost: r.cost, days: r.daily.length });
 }
 
 /**
@@ -388,14 +389,14 @@ export const LEARN_EVERY_MS = 6 * 60 * 60 * 1000;
  * sessions better (docs/research-learning.md). Cheap: a few ms.
  */
 export function maybeLearn(now = Date.now(), force = false) {
-    const lead = get(K.leader, null);
-    if (!force && (!lead || lead.id !== pi.tabId)) return null;
+    // On the webpage only (round 6: learning is a developer thing, and its data lives in the webpage's IndexedDB).
+    if (!force && pi.where !== 'app') return null;
     // The 6-hour check first: reading and joining the samples and fights costs more than the check (every 5 s refresh).
     const prev = get(K.learned, null);
     if (!force && prev && now - Math.max(prev.at || 0, prev.checkedAt || 0) < LEARN_EVERY_MS) return prev;
-    const cal = get('calibration', null) || {};
+    const cal = archived('calibration', null) || {};
     const samples = cal.samples || [];
-    const fights = joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []);
+    const fights = joinFights(pageGet(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], archived(K.eyePredictions, []) || []);
     // New trains or fights since the last run (counts stop growing at the cap; the newest time doesn't).
     const sig = [samples.length, samples.length ? samples[samples.length - 1].at || 0 : 0, fights.length, fights.length ? fights[fights.length - 1].at : 0].join(':');
     if (!force && prev && prev.sig === sig) {
@@ -403,14 +404,14 @@ export function maybeLearn(now = Date.now(), force = false) {
         set(K.learned, { ...prev, checkedAt: now });
         return prev;
     }
-    set(K.fightLog, fights);
+    pageSet(K.fightLog, fights);
     // The model in use (kept earlier, or kept over and over since) is the one a new one must beat.
     const current = prev && prev.gym ? applyGymModel(prev.gym) : null;
     const res = { ...runLearning({ samples, fights, now, current }), sig };
     set(K.learned, res);
-    const log = get(K.learnLog, []) || [];
+    const log = pageGet(K.learnLog, []) || [];
     log.push({ at: now, gym: { accepted: res.gym.accepted, heldOut: res.gym.heldOut, mode: res.gym.model.mode, mult: res.gym.model.mult, sessions: res.gym.sessions, candidates: res.gym.candidates }, fights: { accepted: res.fights.accepted, model: res.fights.model, fights: res.fights.fights, heldOut: res.fights.heldOut } });
-    set(K.learnLog, log.slice(-30));
+    pageSet(K.learnLog, log.slice(-30));
     return res;
 }
 

@@ -265,7 +265,25 @@ export function unitPrice(row, qty = 10) {
         const f = fillCheapest(ls, qty, null);
         if (f.filled > 0) return f.total / f.filled;
     }
+    // A small row (GM keeps no listings, round 6): the unit price worked out when they were read.
+    if (row.u > 0) return row.u;
     return row.avg7 > 0 ? row.avg7 : null;
+}
+
+/**
+ * The small row GM keeps for an item (round 6): no listings, the unit price
+ * the plan uses (`u`, as livePrices works it out) and the cheapest (`low`).
+ */
+export function slimPriceRow(id, row) {
+    if (!row || typeof row !== 'object') return row;
+    const { listings, ...rest } = row;
+    const ls = Array.isArray(listings) ? listings : [];
+    const out = { ...rest };
+    const u = ls.length ? unitPrice({ listings: ls }, String(id) === String(POINTS) ? 300 : isCandy(Number(id)) ? 50 : 10) : row.u;
+    if (u > 0) out.u = u;
+    const low = ls.length ? Math.min(...ls.filter((l) => l && l.price > 0).map((l) => l.price)) : row.low;
+    if (low > 0 && Number.isFinite(low)) out.low = low;
+    return out;
 }
 
 /** The last answer per stored price object: prices are parsed once per change, so this sorts each item's listings once per price load, not on every priceFor. */

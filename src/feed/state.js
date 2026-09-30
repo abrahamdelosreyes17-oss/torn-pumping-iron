@@ -129,8 +129,9 @@ export class StateFeed {
             const prev = last && last.api ? normalizeState(last.api, last.at) : null;
             if (prev) {
                 const diff = diffStates(prev, next);
-                const log = logFromDiff(this.store.get(this.keys.log, []), diff, { at, nextStep: this.nextStep(), catchUp: at - last.at > CATCH_UP_GAP_MS && Number(this.store.get(TRADING_SEEN_KEY, 0)) > last.at });
-                this.store.set(this.keys.log, log);
+                const before = this.store.get(this.keys.log, []);
+                const log = logFromDiff(before, diff, { at, nextStep: this.nextStep(), catchUp: at - last.at > CATCH_UP_GAP_MS && Number(this.store.get(TRADING_SEEN_KEY, 0)) > last.at });
+                if (JSON.stringify(log) !== JSON.stringify(before)) this.store.set(this.keys.log, log);
                 // The gain model checks itself against your own trains.
                 const st = this.store.get(this.keys.static, {}) || {};
                 const sample = calibrationSample(prev, next, diff, { table: st.gyms && st.gyms.length ? mergeLiveGyms(st.gyms) : GYMS, perks: parsePerks(st.perks || {}).mult });
@@ -173,7 +174,10 @@ export class StateFeed {
         const special = h[day] && h[day].special !== undefined ? h[day].special : state.specialRefills;
         // The stats as the day's first read saw them (today's real gain, when yesterday wasn't read).
         const open = h[day] ? h[day].open : { ...state.stats };
-        h[day] = { ...state.stats, total: totalOf(state.stats), ...(special !== null && special !== undefined ? { special } : {}), ...(open ? { open } : {}) };
+        const row = { ...state.stats, total: totalOf(state.stats), ...(special !== null && special !== undefined ? { special } : {}), ...(open ? { open } : {}) };
+        // Written only when the day's row changes (round 6: every GM write reaches every open Torn tab).
+        if (JSON.stringify(h[day]) === JSON.stringify(row)) return;
+        h[day] = row;
         const days = Object.keys(h).map(Number).sort((a, b) => a - b);
         while (days.length > 120) delete h[days.shift()];
         this.store.set(this.keys.history, h);
@@ -193,6 +197,9 @@ export class StateFeed {
     /** Receipts: a new inventory read names the uses since the last one. */
     recordInventory(st) {
         if (!st || !st.inventory || !(st.inventoryAt > 0)) return;
+        // Once per inventory read (this ran on every 3 s check and parsed the receipts each time).
+        if (this.inventorySeen === st.inventoryAt) return;
+        this.inventorySeen = st.inventoryAt;
         const before = this.store.get(this.keys.receipts, null);
         if (before && before.inv && before.inv.at >= st.inventoryAt) return;
         this.store.set(this.keys.receipts, applyInventory(before, st.inventory, st.inventoryAt, { priceOf: this.priceOf(st.inventoryAt) }));

@@ -13,11 +13,17 @@
  * hidden gives up the role instead of keeping it.
  */
 
-/** A leader that has not renewed in this long is presumed gone. */
-export const LEADER_STALE_MS = 10000;
+/** A leader that has not renewed in this long is presumed gone (a page that closes hands over at once, on pagehide). */
+export const LEADER_STALE_MS = 30000;
 
-/** How often the leader renews its claim. */
+/** How often every tab checks the lead (and the leader polls when due). */
 export const LEADER_HEARTBEAT_MS = 3000;
+
+/**
+ * How often the leader writes its claim (round 6): every GM write goes to
+ * every open Torn tab, so the claim is renewed every 10 s, not every check.
+ */
+export const LEADER_RENEW_MS = 10000;
 
 /**
  * @param {object|null} record - { id, ts } as last stored
@@ -39,7 +45,7 @@ export function decideLeader(record, me, { now, visible, staleMs = LEADER_STALE_
 
     if (mine) {
         if (visible) {
-            return { lead: true, confirmed: true, write: { id: me, ts: now } };
+            return { lead: true, confirmed: true, write: now - record.ts >= LEADER_RENEW_MS ? { id: me, ts: now } : null };
         }
         // Hidden: step down so a visible tab can take over at once.
         return { lead: false, confirmed: false, write: { id: null, ts: 0 } };
