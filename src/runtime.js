@@ -420,6 +420,20 @@ export function maybeLearn(now = Date.now(), force = false) {
     return res;
 }
 
+/** On Torn's pages a model with nothing new is kept this long (a new read or another tab's change redraws at once). */
+export const TORN_MODEL_MAX_AGE_MS = 30000;
+
+/**
+ * Is a Torn page's model due again without anything new (round 6: rebuilding today's plan every 5 s was most of what
+ * a Torn page cost)? When it's 30 s old, when a step's time has come, or at Torn midnight.
+ */
+export function modelDue(m, at, now) {
+    if (!m || !m.ready || !at) return true;
+    if (now - at >= TORN_MODEL_MAX_AGE_MS) return true;
+    if (tornDayStart(now) !== tornDayStart(at)) return true;
+    return (m.steps || []).some((x) => x.at > at && x.at <= now);
+}
+
 export function refresh() {
     // A tab you can't see works nothing out (same-site tabs often share one thread with the tab you're on, so its work
     // was your lag): it's worked out again when the tab is shown.
@@ -431,6 +445,7 @@ export function refresh() {
     try {
         maybeLearn();
         pi.model = currentModel();
+        pi.modelAt = Date.now();
         recordDayTotals(pi.model);
     } catch (error) {
         set(K.lastError, { at: Date.now(), where: 'model', message: String((error && error.message) || error) });
@@ -505,9 +520,10 @@ export function startFeed() {
         pi.focusOf = null;
         beatFocus();
     });
-    // Countdowns tick by themselves every second; the model itself is worked out again every 5 s, in a tab you can see.
+    // Countdowns tick by themselves every second; the model is worked out again every 5 s in a tab you can see (on
+    // Torn's pages only when it's due: see modelDue).
     setInterval(() => {
-        if (isVisible()) refresh();
+        if (isVisible() && (pi.where === 'app' || modelDue(pi.model, pi.modelAt, Date.now()))) refresh();
     }, 5000);
     // The first model once Torn's page has settled (idle), not inside the page's own start-up.
     whenIdle(refresh);

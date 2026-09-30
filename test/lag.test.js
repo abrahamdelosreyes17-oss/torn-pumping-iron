@@ -213,3 +213,16 @@ test('happyTerms (kept for the last few happy values) gives gainPerTrain’s exa
         assert.strictEqual(happyTerms(H), happyTerms(H), 'kept');
     }
 });
+
+test('Torn pages rebuild the model only when due: 30 s old, a step\'s time come, or Torn midnight', async () => {
+    const { modelDue, TORN_MODEL_MAX_AGE_MS } = await import('../src/runtime.js');
+    const at = Date.parse('2026-09-30T10:00:00Z');
+    const m = { ready: true, steps: [{ at: at + 60e3 }, { at: at + 3600e3 }] };
+    assert.equal(modelDue(m, at, at + 5000), false, 'nothing new 5 s later: kept');
+    assert.equal(modelDue(m, at, at + 25000), false);
+    assert.equal(modelDue(m, at, at + TORN_MODEL_MAX_AGE_MS), true, '30 s old');
+    const m2 = { ready: true, steps: [{ at: at + 10e3 }] };
+    assert.equal(modelDue(m2, at, at + 12e3), true, 'a step\'s time came');
+    assert.equal(modelDue({ ready: true, steps: [] }, Date.parse('2026-09-30T23:59:58Z'), Date.parse('2026-10-01T00:00:03Z')), true, 'Torn midnight');
+    assert.equal(modelDue(null, at, at), true);
+});
