@@ -26,7 +26,7 @@ import { fmtInt } from './core/format.js';
 import { POINTS } from './core/items.js';
 import { detectPage, bazaarOwnerId, itemMarketItemOf, APP_PAGE_URL, PAGE_GYM, PAGE_ITEMS, PAGE_BAZAAR, PAGE_ITEM_MARKET, PAGE_POINTS, PAGE_PROFILE, PAGE_FACTION, PAGE_ATTACK } from './sources/route.js';
 
-const tp = { overlay: null, model: null, observer: null, drawing: false, lastGymPlan: null };
+const tp = { overlay: null, model: null, observer: null, gymSig: '', lastGymPlan: null };
 
 /** Torn's page (its sidebar and content column) as {left, right}; a centred 976 px guess if it can't be measured. */
 function pageRect() {
@@ -144,12 +144,17 @@ function drawGym(m) {
     if (JSON.stringify(session) !== JSON.stringify(prev)) set(K.gymSession, session);
     const plan = planGymPage(m, { selectedId: sum.selectedId || m.state.gymId, boxes, reading }, session, now);
     tp.lastGymPlan = plan;
-    tp.drawing = true;
-    try {
-        drawGymMarks(root, plan, boxes, (stat) => readStatBoxes(gymRoot()).find((b) => b.stat === stat), buttons);
-    } finally {
-        tp.drawing = false;
-    }
+    drawGymMarks(root, plan, boxes, (stat) => readStatBoxes(gymRoot()).find((b) => b.stat === stat), buttons);
+    // Our own drawing is not Torn changing the page: those records are dropped, and what Torn shows now is remembered.
+    if (tp.observer) tp.observer.takeRecords();
+    tp.gymSig = gymPageSig(root);
+}
+
+/** What Torn's gym page shows that the marks depend on: the stat boxes, the gym selected, the energy bar. */
+function gymPageSig(root) {
+    const boxes = readStatBoxes(root).map((b) => b.stat + ':' + b.value + ':' + (b.locked ? 1 : 0)).join(',');
+    const sel = gymListSummary(readGymButtons(root)).selectedId;
+    return [boxes, sel, JSON.stringify(readEnergyBar()), gymLoading(root) ? 1 : 0, root.querySelector('.pi-strip') ? 1 : 0].join('|');
 }
 
 function watchGym() {
@@ -160,12 +165,19 @@ function watchGym() {
     if (tp.observer) tp.observer.disconnect();
     tp.observedRoot = root;
     let timer = null;
+    // Redraw only when Torn's own values change (a train, another gym, the energy bar, our marks wiped by a re-render),
+    // never on any mutation: other scripts (TornTools) and Torn's timers change the page all the time, and two
+    // scripts redrawing on each other's changes could loop.
     tp.observer = new MutationObserver((muts) => {
-        if (tp.drawing || isPaused()) return;
+        if (isPaused()) return;
         // Our own marks changing is not Torn re-rendering.
         if (muts.every((mu) => [...mu.addedNodes, ...mu.removedNodes].every((n) => n.nodeType === 1 && n.classList && n.classList.contains('pi-mark')))) return;
         clearTimeout(timer);
-        timer = setTimeout(() => drawGym(tp.model), 150);
+        timer = setTimeout(() => {
+            const r = gymRoot();
+            if (r && gymPageSig(r) === tp.gymSig) return;
+            drawGym(tp.model);
+        }, 150);
     });
     tp.observer.observe(root, { childList: true, subtree: true });
 }

@@ -251,8 +251,10 @@ export function planGymPage(m, page = {}, session = null, now = m.now) {
                 warn: cur.stopAt !== undefined ? 'Stop at ' + n + ' trains. More puts you under the rule for ' + cur.stopReason + ' and you lose it.' : null,
             };
         } else if (cur && !here) {
-            // The current part is in another gym: every box here waits.
-            perStat[k] = { kind: 'grey', text: k === cur.stat ? 'Next · ' + STAT_LABEL[k] + ' × ' + cur.left + ' at ' + cur.gymName : greyWord(k, mine, open, locked) };
+            // The current part is in another gym: the strip says so in one line; Torn's boxes are left as they are
+            // (owner, round 6: greying them read as "the gym is disabled").
+            // A part already done here still says so.
+            perStat[k] = { kind: 'away', text: mine.length && !open.length ? greyWord(k, mine, open, locked) : '' };
         } else {
             const text = greyWord(k, mine, open, locked);
             perStat[k] = { kind: open.length ? 'next' : mine.length ? 'done' : text === 'Not trained here' ? 'none' : text.startsWith('Next') ? 'next' : 'skip', text };
@@ -262,7 +264,7 @@ export function planGymPage(m, page = {}, session = null, now = m.now) {
     if (cur && !here) {
         const label = 'Next: ' + cur.gymName + ' · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
         out.nextGym = { id: cur.gymId, label, group: gymGroupWord(cur.gymId) };
-        out.switchHint = 'Switch to ' + cur.gymName + ' (' + gymGroupWord(cur.gymId) + ') · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
+        out.switchHint = 'This session trains at ' + cur.gymName + ': open it · then ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
     }
     // In the right gym: its button is outlined too, so where to train is never a guess.
     if (cur && here) out.hereGym = { id: cur.gymId, label: 'Train here · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left };

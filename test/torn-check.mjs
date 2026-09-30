@@ -136,8 +136,24 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
         return b ? { icon: b.querySelector('[class*="gymIcon___"]').className, label: (b.querySelector('.pi-label') || {}).textContent } : null;
     });
     ok(next && /gym-23/.test(next.icon) && /^Next: The Edge · SPD × \d+$/.test(next.label), 'gym (Hank\'s): The Edge\'s button is outlined with "Next: The Edge · SPD × N" (' + JSON.stringify(next) + ')');
-    const dim = await page.evaluate(() => document.querySelectorAll('li.pi-dim').length);
-    ok(dim === 4, 'gym (Hank\'s): the four stat boxes are greyed while the part is in another gym (' + dim + ')');
+    const dim = await page.evaluate(() => document.querySelectorAll('li.pi-dim, .pi-dim').length);
+    ok(dim === 0, 'gym (Hank\'s): Torn\'s stat boxes are never greyed (round 6) (' + dim + ')');
+    const hint = await page.evaluate(() => [...document.querySelectorAll('.pi-strip .pi-hint')].map((e) => e.textContent).join(' '));
+    ok(/This session trains at The Edge: open it · then SPD × \d+/.test(hint), 'gym (Hank\'s): one line in the strip says where this session trains (' + hint + ')');
+    // Another script changing the gym page (not Torn's values): no redraw.
+    const same = await page.evaluate(async () => {
+        const strip = document.querySelector('.pi-strip');
+        const root = document.getElementById('gymroot');
+        for (let i = 0; i < 5; i++) {
+            const x = document.createElement('div');
+            x.className = 'tt-extra';
+            root.appendChild(x);
+            await new Promise((r) => setTimeout(r, 60));
+        }
+        await new Promise((r) => setTimeout(r, 400));
+        return document.querySelector('.pi-strip') === strip;
+    });
+    ok(same, 'gym (Hank\'s): changes that are not Torn\'s values (another script) redraw nothing');
     const fills = await page.evaluate(() => document.querySelectorAll('.pi-fill').length);
     ok(fills === 0, 'gym (Hank\'s): no Fill in a gym the part isn\'t in');
     const clicks = await page.evaluate(() => document.querySelectorAll('.gymButton___3OFdI.selected___2PmTc').length && document.querySelector('.gymButton___3OFdI.selected___2PmTc [class*="gym-27"]') !== null);

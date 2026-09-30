@@ -26,7 +26,6 @@ export const MARK_CSS = `
 .pi-warn { display: flex; align-items: center; gap: 10px; padding: 7px 10px; margin: 6px 0; background: #2a1f10; border-left: 3px solid #e8a33d; border-radius: 0 5px 5px 0; font-size: 12px; color: #ffd79a; }
 .pi-warn b { color: #ffe3b3; }
 .pi-outlined { box-shadow: inset 0 0 0 2px #efebe2 !important; position: relative; }
-.pi-dim { opacity: .45; }
 .pi-strip .pi-part { color: #939aa1; white-space: nowrap; }
 .pi-strip .pi-part.pi-cur { color: #fff; font-weight: bold; }
 .pi-strip .pi-part.pi-done { color: #9bdc8a; }
@@ -122,9 +121,8 @@ export function drawGymMarks(root, plan, boxes, rereadBox, buttons = []) {
             });
             const panel = p.warn ? h('div', { class: 'pi-mark pi-warn' }, [h('span', {}, [h('b', { text: p.warn.split('. ')[0] + '.' }), ' ' + p.warn.split('. ').slice(1).join('. ')]), fill]) : h('div', { class: 'pi-mark pi-panel' }, [h('b', { text: p.text }), h('span', { text: p.sub }), fill]);
             box.content.insertBefore(panel, box.content.firstChild);
-        } else {
-            // Waiting on another gym's part: the whole box greys out.
-            if (p.kind === 'grey') box.li.classList.add('pi-dim');
+        } else if (p.text) {
+            // Never dims Torn's boxes (round 6): a grey line only.
             box.content.insertBefore(h('div', { class: 'pi-mark pi-grey', text: p.text }), box.content.firstChild);
         }
     }
