@@ -35,7 +35,8 @@ Links:
 - Repo: https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron (public; `main` + `gh-pages`)
 - Discord service: https://pumping-iron.pumping-iron-worker.workers.dev (the owner's Cloudflare; bot in the owner's server)
 
-**Next session, start here:**
+**Next session, start here (round 6, 2026-09-30):**
+0. **Read `docs/ROUND6-PLAN.md` first.** 1.2.3 is still laggy on real Torn. The owner decided: **no more automatic** (the plan is made on a click and saved: Create plan for 1/3/6/12 months; Recalibrate keeps the end date and re-reads everything; everything else follows the saved plan as now). Research for the lag and the friend's suggestions (year plan, events, gym rush, beer/crimes, passive income, learner) is in `docs/research-*.md`; §8 of the plan is the build order (R6.0 perf check first). **Code only after the owner approves the plan** and answers its §7 questions. The owner wants a NEW session to code it. No spending, not on phones; a free browser extension is on the table (§3.6).
 1. Read this file (§2 how the owner works, §3 settled decisions), then **`docs/ROUND4-PLAN.md`** (§0 is the owner's round-4 decisions) and the two newest session entries below.
 2. **Live state (2026-09-29, end of session):**
    - The owner is logged in with Discord. The bot DMs work: test ping, a jump ping and "Energy is full" auto-closing all seen in the `sent` table.
@@ -227,6 +228,18 @@ Done on the owner's yes. For later releases, the same steps minus the one-time r
 ---
 
 ## What each session did (newest first)
+
+### 2026-09-30 (evening): 1.2.3 still laggy → research only, round 6 planned (no code)
+- The owner: with Pumping Iron on, the whole of Torn is laggy (start-up, the gym). The 1.2.3 harness had missed it because its store starts empty. Eight researchers (docs/research-lag-*.md, research-year-events, -gym-unlock, -beer-crimes, -passive-income, -learner-retrain) found the causes:
+  - **Auto** runs the comparison twice on every page (its budget falls back on a null `pi.compare`);
+  - every page builds the whole model cold;
+  - training actions keep re-keying the comparison;
+  - Tampermonkey hands the whole ~0.5 MB GM store to every page and re-sends it on every small write;
+  - the gym observer redraws on any mutation.
+
+  Torn Bids isn't laggy because it keeps its growing data in IndexedDB.
+- The owner's decisions (memory `owner-decisions`, "Round-6 answers"): no automatic; Create plan / Recalibrate; follow the saved plan; no money; no phone; extension OK. The gym page "greyed out" issue is added (plan §3.3b).
+- `docs/ROUND6-PLAN.md` holds the consolidated plan and the questions for the owner. `research-lag-measured.md` was still running when it was written; fold its numbers into the plan's §2.
 
 ### 2026-09-30 (later): 1.2.3 — lag fix, bot pings early and without a plan, 48 h plan, phone trains
 Owner: "fix all issues, commit and push, remember to bug hunt before releasing".
