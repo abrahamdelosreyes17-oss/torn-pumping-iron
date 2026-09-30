@@ -121,13 +121,19 @@ function drawGym(m) {
     if (sum.unlocked.length) {
         const prev = get(K.unlocked, null);
         const next = [...new Set(sum.unlocked)].sort((a, b) => a - b);
-        if (JSON.stringify(prev) !== JSON.stringify(next)) set(K.unlocked, next);
+        if (JSON.stringify(prev) !== JSON.stringify(next)) {
+            set(K.unlocked, next);
+            pi.modelAt = 0;
+        }
     }
     if (sum.inProgress && sum.inProgress.percent !== null) {
         const need = unlockEnergyAfter(sum.inProgress.id - 1, m && m.pc ? m.pc.perks.gymExpMult : 1) || 0;
         const gp = { nextId: sum.inProgress.id, energy: Math.round((need * sum.inProgress.percent) / 100), at: Date.now() };
         const prev = get(K.gymProgress, null);
-        if (!prev || prev.nextId !== gp.nextId || prev.energy !== gp.energy) set(K.gymProgress, gp);
+        if (!prev || prev.nextId !== gp.nextId || prev.energy !== gp.energy) {
+            set(K.gymProgress, gp);
+            pi.modelAt = 0;
+        }
     }
     if (!m || !m.ready || !getSettings().gymMarks) {
         clearMarks(root);
@@ -154,7 +160,8 @@ function drawGym(m) {
 function gymPageSig(root) {
     const boxes = readStatBoxes(root).map((b) => b.stat + ':' + b.value + ':' + (b.locked ? 1 : 0)).join(',');
     const sel = gymListSummary(readGymButtons(root)).selectedId;
-    return [boxes, sel, JSON.stringify(readEnergyBar()), gymLoading(root) ? 1 : 0, root.querySelector('.pi-strip') ? 1 : 0].join('|');
+    // Our marks' count too: Torn re-rendering a box (a message, same value) wipes its panel without changing a value.
+    return [boxes, sel, JSON.stringify(readEnergyBar()), gymLoading(root) ? 1 : 0, root.querySelectorAll('.pi-mark').length].join('|');
 }
 
 function watchGym() {
@@ -177,6 +184,8 @@ function watchGym() {
             const r = gymRoot();
             if (r && gymPageSig(r) === tp.gymSig) return;
             drawGym(tp.model);
+            // The panel's pill follows the walk-through at once (a train, another gym), not at the next model.
+            if (tp.showView) tp.showView(tp.model);
         }, 150);
     });
     tp.observer.observe(root, { childList: true, subtree: true });
@@ -294,6 +303,14 @@ export function bootTornPage() {
     });
     let lastSig = '';
     let lastView = '';
+    tp.showView = (m) => {
+        const view = overlayView(m, detectPage(location.href));
+        const vs = JSON.stringify(view);
+        if (vs !== lastView) {
+            lastView = vs;
+            tp.overlay.update(view);
+        }
+    };
     onModel((m) => {
         tp.model = m;
         if (!isVisible()) return;
@@ -322,12 +339,7 @@ export function bootTornPage() {
             } else if (p === PAGE_ITEMS) drawItems(m);
             else if (p === PAGE_BAZAAR || p === PAGE_ITEM_MARKET || p === PAGE_POINTS) drawMarket(m, p);
         }
-        const view = overlayView(m, p);
-        const vs = JSON.stringify(view);
-        if (vs !== lastView) {
-            lastView = vs;
-            tp.overlay.update(view);
-        }
+        tp.showView(m);
     });
     setInterval(() => tp.overlay.tick(), 1000);
     // Torn's pages change the hash without a load (Item Market search, items tabs).

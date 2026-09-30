@@ -103,11 +103,14 @@ export async function fetchMoney(client) {
  * left out (null), the rest still count.
  */
 export async function fetchPassiveIncome(client) {
+    let failed = 0;
     const part = async (fn) => {
         try {
             return await fn();
         } catch (error) {
-            if (error && (error.takingTurns || KEY_DEAD_CODES_API.has(error.code))) throw error;
+            // Paused, rate-limited, offline or a dead key: the whole read waits and is asked again (5 minutes).
+            if (error && (error.takingTurns || error.paused || KEY_DEAD_CODES_API.has(error.code) || !(error instanceof TornApiError))) throw error;
+            failed++;
             return null;
         }
     };
@@ -116,6 +119,8 @@ export async function fetchPassiveIncome(client) {
     const userStocks = await part(async () => ((await client.get('v2/user/stocks')) || {}).stocks || []);
     const tornStocks = userStocks && userStocks.length ? await part(async () => ((await client.get('v2/torn/stocks')) || {}).stocks || []) : [];
     const properties = await part(async () => ((await client.get('v2/user/properties', { filters: 'ownedByUser', limit: 100 })) || {}).properties || []);
+    // Every part refused: not "nothing certain", a failed read.
+    if (failed >= 3) throw new Error('The income reads all failed.');
     const slimStocks = (tornStocks || []).filter((s) => (userStocks || []).some((u) => Number(u.id) === Number(s.id))).map((s) => ({ id: s.id, name: s.name, acronym: s.acronym, bonus: s.bonus }));
     return {
         cityBank: cb ? { amount: cb.amount, profit: cb.profit, duration: cb.duration, until: cb.until, rate: cb.interest_rate } : null,

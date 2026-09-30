@@ -5,7 +5,7 @@
  */
 
 import { gmOnChange } from './platform/gm.js';
-import { K, get, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup, DATA_GROUPS, getPrices, PRICE_LISTINGS_KEPT, loadLocalPrices, localPrices, setLocalPrices } from './platform/store.js';
+import { K, get, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup, DATA_GROUPS, getPrices, PRICE_LISTINGS_KEPT, loadLocalPrices, localPrices, setLocalPrices, clearLocalPrices } from './platform/store.js';
 import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE, beatFocus, apiFocus, createPlan, recalibratePlan, followStrategy, followPath } from './runtime.js';
 import { forgetSavedPlan } from './platform/plan-store.js';
 import { archived, pageGet, loadArchives, drainArchives, clearArchived } from './platform/archive.js';
@@ -375,7 +375,8 @@ function runPlan(fn) {
 
 function getCtx() {
     const settings = getSettings();
-    const plan = getPlan();
+    // The plan followed today: the saved path's for this stretch (its switches happen on their dates) or your pick.
+    const plan = { ...getPlan(), ...(pi.model && pi.model.ready && pi.model.strategy ? { strategy: pi.model.strategy } : {}) };
     const statics = get(K.userStatic, {}) || {};
     const prices = getPrices();
     const ffsState = get(K.ffsState, null);
@@ -412,7 +413,7 @@ function getCtx() {
             // recommended one means the saved path (it switches plans on its dates).
             const rec = pi.saved && pi.saved.rec ? pi.saved.rec.recommended : null;
             if (strategy !== undefined && strategy === rec) followPath();
-            else if (strategy !== undefined && strategy !== getPlan().strategy) followStrategy(strategy);
+            else if (strategy !== undefined && (strategy !== ((pi.model && pi.model.strategy) || getPlan().strategy) || !getPlan().strategyPicked)) followStrategy(strategy);
             // Build, goal, the Plan rule, special refills: kept for the next Create plan or Recalibrate (a click).
             if (Object.keys(rest).length) setPlan({ ...getPlan(), ...rest });
             refresh();
@@ -462,6 +463,7 @@ function getCtx() {
             // The webpage's own copy (older history, webpage-only data) goes with GM's.
             clearArchived(DATA_GROUPS[g] || []);
             if (g === 'eye') clearArchived([TARGETS_KEY]);
+            if (g === 'prices') clearLocalPrices();
             clearGroup(g);
             refresh();
             page.app.render(true);
@@ -569,7 +571,9 @@ export function bootAppPage({ renderers = {} } = {}) {
             return drainArchives();
         })
         .catch(() => {});
-    setInterval(() => drainArchives().catch(() => {}), 10 * 60 * 1000);
+    setInterval(() => {
+        if (isVisible()) drainArchives().catch(() => {});
+    }, 10 * 60 * 1000);
     loadLocalPrices().then(() => page.app.render(true)).catch(() => {});
     for (const k of [K.prices, K.settings, K.plan, K.userStatic, K.stateError, K.apiKeyDead]) gmOnChange(k, () => page.app.render());
     // The watch list is changed from Torn's pages too (☆ on a profile or the attack page) and read there.
@@ -581,6 +585,7 @@ export function bootAppPage({ renderers = {} } = {}) {
     if (auto && Array.isArray(auto.enemies) && auto.myFaction === myFactionId()) war.enemies = auto.enemies;
     setInterval(() => {
         // Nothing of Torn Eye's runs unless its tab is open (owner, round 6: it only runs on the Torn Eye tab).
+        eyeTab();
         if (page.app.tab !== 'eye') return;
         pollOwnWars().catch(() => {});
         pollWarTab().catch(() => {});

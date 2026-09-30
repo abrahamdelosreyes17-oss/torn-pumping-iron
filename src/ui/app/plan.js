@@ -490,7 +490,7 @@ export function renderPlan(m, ctx) {
     const days = m.planDays || ctx.settings.horizonDays || 30;
     // Every candy a plan might pick is priced (a few listings, every 30 min), so the candy choice follows prices.
     if (ctx.wantPrices) ctx.wantPrices([], CANDY_IDS);
-    if (!rec || !rec.recommended || !compare[rec.recommended]) {
+    if (!rec || !rec.recommended || !compare[rec.recommended] || (m.saved && !m.saved.whole)) {
         // Round 6: plans are made on a click (Create plan / Recalibrate) and saved; nothing is worked out by itself.
         const text = m.planBusy ? 'Working out your plan…' : m.saved ? 'Loading your saved plan…' : 'No plan yet: your steps follow ' + ((STRATEGIES[ctx.plan.strategy] || STRATEGIES.steady).name || '').toLowerCase() + ' until you create one.';
         return { ctl: controls(m, ctx), main: [h('div', { class: 'lead' }, [h('p', { class: 'muted', style: 'margin:0', text }), ctx.ui.planError ? h('p', { class: 'c-bad', style: 'margin:6px 0 0', text: ctx.ui.planError }) : null])], pane: [] };

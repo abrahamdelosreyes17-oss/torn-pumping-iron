@@ -261,6 +261,8 @@ export function unitPrice(row, qty = 10) {
     if (typeof row === 'number') return row > 0 ? row : null;
     if (!row || typeof row !== 'object') return null;
     const ls = Array.isArray(row.listings) ? row.listings : [];
+    // Listings older than the row's unit price (the other site read later): the newer unit price.
+    if (row.u > 0 && row.listingsAt && (row.at || 0) > row.listingsAt) return row.u;
     if (ls.length) {
         const f = fillCheapest(ls, qty, null);
         if (f.filled > 0) return f.total / f.filled;

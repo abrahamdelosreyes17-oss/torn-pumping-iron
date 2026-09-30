@@ -250,6 +250,15 @@ export function bootEyePage() {
         lastSig = '';
         drawAll();
     });
+    // Faction and war lists render after the page: a cheap look each second (row ids only) draws their chips then.
+    let rowsSig = '';
+    setInterval(() => {
+        if (!isVisible() || isPaused() || !getSettings().eyeChips || detectPage(location.href) !== PAGE_FACTION) return;
+        const sig = readFactionRows().map((r) => r.id).join(',') + '|' + readWarRows().map((r) => r.id + ':' + r.status).join(',');
+        if (sig === rowsSig) return;
+        rowsSig = sig;
+        drawAll();
+    }, 1000);
     // The mini-profile popup is added to the body on the first hover, then re-drawn for each player.
     let watchedRoot = null;
     const onMini = () => {

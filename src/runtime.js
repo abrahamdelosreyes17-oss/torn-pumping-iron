@@ -12,7 +12,7 @@ import { focusFrom, FOCUS_FRESH_MS } from './core/lanes.js';
 import { TornApiClient } from './api/client.js';
 import { StateFeed } from './feed/state.js';
 import { normalizeState, tornDayStart } from './core/bars.js';
-import { buildModel, compareSteps, compareStrategiesAsync, blissWhatIf, companyWhatIf, playerContext, buildOf, isDrugEntry, specialLeft, heldBoosters, steadyCostPerDay } from './core/model.js';
+import { buildModel, compareSteps, simInputs, compareStrategiesAsync, blissWhatIf, companyWhatIf, playerContext, buildOf, isDrugEntry, specialLeft, heldBoosters, steadyCostPerDay } from './core/model.js';
 import { recommend, pickWarning, PICK_BY } from './core/recommend.js';
 import { targetShares } from './core/plan.js';
 import { INCOME_MIN_DAYS, budgetOf, incomeFrom, autoState, effectivePickBy, incomeBreakdown } from './core/auto.js';
@@ -21,7 +21,7 @@ import { eventsBetween } from './core/events.js';
 import { yearSteps, segEvents, unlockHook } from './core/year.js';
 import { planWindow, scheduleAt, daysLeft, planProgress, snapshotOf, makeSavedPlan, planNowOf, usablePlanNow, SAVED_PLAN_V } from './core/saved-plan.js';
 import { loadSavedPlan, saveSavedPlan } from './platform/plan-store.js';
-import { archived, pageGet, pageSet } from './platform/archive.js';
+import { archived, pageGet, pageSet, archivesReady } from './platform/archive.js';
 import { summarizeReceipts } from './core/receipts.js';
 import { livePrices } from './core/market.js';
 import { TORN_PER_MINUTE_ALONE } from './core/turns.js';
@@ -99,10 +99,22 @@ export function beatFocus(now = Date.now()) {
     if (!same(had, all[pi.tabId]) || (all[pi.tabId] && now - ((had && had.at) || 0) > FOCUS_FRESH_MS / 3)) set(FOCUS_KEY, all);
 }
 
+/** This tab's request window (one for every Torn client here: two on the same key hid each other's slots). */
+function apiWindow() {
+    if (!pi.apiWindow) pi.apiWindow = tabWindow('apiWindow', pi.tabId, storeApi, undefined, { batchMs: WINDOW_BATCH_MS });
+    return pi.apiWindow;
+}
+
+/** Write every batched request window now (the page is going). */
+function flushWindows() {
+    if (pi.apiWindow) pi.apiWindow.flush();
+    for (const w of Object.values(laneWindows)) w.flush();
+}
+
 /** The one Torn client every part of this tab uses: 85/min across tabs, visible only, nothing while paused; what's open goes first. */
 export function tornClient() {
     if (pi.client) return pi.client;
-    const win = tabWindow('apiWindow', pi.tabId, storeApi, undefined, { batchMs: WINDOW_BATCH_MS });
+    const win = apiWindow();
     pi.client = new TornApiClient({
         maxPerMinute: TORN_PER_MINUTE,
         // A key Torn refused (2, 13, 18) is not used again, by any part of any tab, until a new one is saved.
@@ -125,7 +137,7 @@ export function tornClient() {
  */
 export function fullKeyClient() {
     if (pi.fullClient) return pi.fullClient;
-    const win = tabWindow('apiWindow', pi.tabId, storeApi, undefined, { batchMs: WINDOW_BATCH_MS });
+    const win = apiWindow();
     pi.fullClient = new TornApiClient({
         maxPerMinute: TORN_PER_MINUTE,
         getKey: () => ((get(K.fullKeyState, {}) || {}).dead ? '' : getKey(K.fullKey)),
@@ -164,10 +176,10 @@ function autoFor(plan, settings, statics, steadyPerDay) {
     const spentPerDay = sum && sum.days >= INCOME_MIN_DAYS ? sum.cost / sum.days : plan.pickBy === 'auto' && hasFullKey() ? steadyPerDay() : 0;
     const income = incomeFrom(statics.income || [], { spentPerDay });
     const ml = pageGet(K.moneyLog, null);
-    const breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now(), ml.days || null) : null;
     // The income that is certain (bank, dividends, rent), read with the main key: the floor under the rest.
     const pv = statics.passive || null;
     const floor = pv ? incomeFloor({ ...pv, meId: statics.keyInfo && statics.keyInfo.userId, now }) : null;
+    const breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now(), ml.days || null, floor) : null;
     const auto = autoState({ plan, settings, hasFullKey: hasFullKey(), income, log: breakdown, spentPerDay, floor });
     auto.breakdown = breakdown;
     auto.income = income;
@@ -207,9 +219,11 @@ function savedFor(pn) {
                 if (p && p.rev === pn.rev) {
                     pi.saved = p;
                     refresh();
-                }
+                } else pi.savedLoading = null;
             })
-            .catch(() => {});
+            .catch(() => {
+                pi.savedLoading = null;
+            });
     }
     return null;
 }
@@ -232,6 +246,7 @@ export async function createPlan({ months = 1, recalibrate = false, pause = paus
         if (!state) throw new Error('Waiting for the first read of your stats.');
         const prev = recalibrate ? await loadSavedPlan() : null;
         if (recalibrate && !(prev && prev.v === SAVED_PLAN_V)) throw new Error('No plan to recalibrate yet: create one first.');
+        if (recalibrate && planProgress(prev, now).ended) throw new Error('Your plan has ended: create a new one.');
         const plan = getPlan();
         const settings = getSettings();
         // The candy the plan named stays unless another is clearly cheaper now (candy.js's 10% rule).
@@ -255,7 +270,7 @@ export async function createPlan({ months = 1, recalibrate = false, pause = paus
         const gp = get(K.gymProgress, null);
         const top = Math.max(1, ...pc.unlocked.filter((id) => id <= 24));
         const progress = gp && Number(gp.nextId) === top + 1 ? { top, energy: Number(gp.energy) || 0 } : null;
-        const hook = unlockHook({ top, progress: progress ? progress.energy : 0, gymExpMult: pc.perks.gymExpMult || 1, table: pc.table, active: state.gymId, known: pc.unlocked.filter((id) => id > 24) });
+        const hook = unlockHook({ top, progress: progress ? progress.energy : 0, gymExpMult: pc.perks.gymExpMult || 1, table: pc.table, active: state.gymId, known: pc.unlocked.filter((id) => id > 24), paid: new Set(pc.unlocked.filter((id) => id > 24)) });
         const compare = await compareStrategiesAsync({ ...args, events: segEvents(events, { from, to: win.end }), unlock: hook }, { pause });
         await pause();
         const goal = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
@@ -267,7 +282,7 @@ export async function createPlan({ months = 1, recalibrate = false, pause = paus
         const jobWhatIf = companyWhatIf({ ...args, compare, recommended: rec.recommended });
         // The path: the best plan again every 30 days and for each event, from the stats projected for that day.
         const goalYear = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
-        const year = await runSteps(yearSteps({ compare: compareSteps, args, start: from, end: win.end, budgetPerDay: perDay, events, progress, goal: goalYear }), pause);
+        const year = await runSteps(yearSteps({ compare: compareSteps, inputs: simInputs, args, start: from, end: win.end, budgetPerDay: perDay, events, progress, goal: goalYear }), pause);
         const snapshot = snapshotOf({ state, pc, statics, plan, prices: livePrices(prices), income: auto.ready ? { perDay: auto.perDay, source: auto.source, days: auto.days, certain: auto.floor ? { perDay: auto.floor.perDay, bank: auto.floor.bank, dividends: auto.floor.dividends, rent: auto.floor.rent } : null } : null, budgetPerDay: Number.isFinite(perDay) ? perDay : null, held: heldBoosters(statics.inventory), now });
         const saved = makeSavedPlan({ compare, rec, snapshot, start: win.start, end: win.end, months: win.months, days: win.days, budget, whatIf, jobWhatIf, prev, year, now });
         const best = compare[rec.recommended];
@@ -372,7 +387,7 @@ export function currentModel(now = Date.now()) {
     // Income (Plan's "Plan from my income"): read on the webpage only, where a plan is made.
     const auto = app ? autoFor(plan, settings, statics, () => (pn && pn.slim.steady ? pn.slim.steady.cost / pn.days : 0)) : null;
     const planInfo = pn ? { start: pn.start, end: pn.end, months: pn.months, days: pn.days, from: pn.from, createdAt: pn.createdAt, recalibratedAt: pn.recalibratedAt, progress: planProgress(pn, now), whole: Boolean(saved) } : null;
-    const m = buildModel({ state, statics, plan: followed, settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: (app ? archived(K.statsHistory, {}) : get(K.statsHistory, {})) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+    const m = buildModel({ state, statics, plan: followed, onPath: Boolean(seg && seg.strategy), settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: (app ? archived(K.statsHistory, {}) : get(K.statsHistory, {})) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
     if (m.ready) {
         m.strategy = followed.strategy;
         m.planBusy = pi.planBusy ? { recalibrate: pi.planBusy.recalibrate, months: pi.planBusy.months, at: pi.planBusy.at } : null;
@@ -416,7 +431,7 @@ function recordPlanLine(saved, strategy, now) {
     if (!r || !Array.isArray(r.daily)) return;
     const plan = getPlan();
     const stats = saved.snapshot.stats;
-    pageSet(K.planLine, { key: [plan.createdAt || 0, strategy, plan.build].join('|'), start: tornDayStart(now), total: Object.values(stats).reduce((a, v) => a + v, 0), perStat: { ...stats }, daily: r.daily, perStatGain: r.perStat, cost: r.cost, days: r.daily.length });
+    pageSet(K.planLine, { key: [plan.createdAt || 0, strategy, plan.build].join('|'), start: saved.from || tornDayStart(now), total: Object.values(stats).reduce((a, v) => a + v, 0), perStat: { ...stats }, daily: r.daily, perStatGain: r.perStat, cost: r.cost, days: r.daily.length });
 }
 
 /**
@@ -438,8 +453,9 @@ export const LEARN_EVERY_MS = 6 * 60 * 60 * 1000;
  * sessions better (docs/research-learning.md). Cheap: a few ms.
  */
 export function maybeLearn(now = Date.now(), force = false) {
-    // On the webpage only (round 6: learning is a developer thing, and its data lives in the webpage's IndexedDB).
-    if (!force && pi.where !== 'app') return null;
+    // On the webpage only (round 6: learning is a developer thing, and its data lives in the webpage's IndexedDB), once
+    // that copy has loaded (before, it would learn from GM's few recent samples and wait 6 hours).
+    if (!force && (pi.where !== 'app' || !archivesReady())) return null;
     // The 6-hour check first: reading and joining the samples and fights costs more than the check (every 5 s refresh).
     const prev = get(K.learned, null);
     if (!force && prev && now - Math.max(prev.at || 0, prev.checkedAt || 0) < LEARN_EVERY_MS) return prev;
@@ -539,6 +555,7 @@ export function startFeed() {
     window.addEventListener('pagehide', () => {
         const rec = get(K.leader, null);
         if (rec && rec.id === pi.tabId) set(K.leader, { id: null, ts: 0 });
+        flushWindows();
     });
     const tick = () => pi.feed.tick().catch(() => {});
     tick();
@@ -558,6 +575,7 @@ export function startFeed() {
     gmOnChange(K.userStatic, refresh);
     gmOnChange(K.plan, refresh);
     gmOnChange(K.planNow, refresh);
+    gmOnChange(K.skipped, refresh);
     gmOnChange(K.settings, refresh);
     gmOnChange(K.stateError, refresh);
     gmOnChange(K.apiKeyDead, refresh);

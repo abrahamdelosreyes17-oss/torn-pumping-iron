@@ -14,13 +14,15 @@ export const SAVED_PLAN_GM_FALLBACK = 'savedPlanFull';
 
 /** @returns {Promise<object|null>} */
 export async function loadSavedPlan() {
+    const gm = gmGet(SAVED_PLAN_GM_FALLBACK, null);
     try {
         const v = await idbGet(IDB_KEY);
-        if (v) return v;
+        // The newer of the two (a save that fell back to GM after an IndexedDB one).
+        if (v && !(gm && gm.rev > v.rev)) return v;
     } catch {
         // No IndexedDB here: the GM copy below.
     }
-    return gmGet(SAVED_PLAN_GM_FALLBACK, null);
+    return gm;
 }
 
 /** @returns {Promise<'idb'|'gm'>} where it went */
@@ -31,6 +33,12 @@ export async function saveSavedPlan(plan) {
         return 'idb';
     } catch {
         gmSet(SAVED_PLAN_GM_FALLBACK, plan);
+        // An older copy there would be read first next time.
+        try {
+            await idbDel(IDB_KEY);
+        } catch {
+            // No IndexedDB at all.
+        }
         return 'gm';
     }
 }

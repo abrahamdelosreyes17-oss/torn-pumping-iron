@@ -14,7 +14,7 @@
  * Without IndexedDB (some private windows) everything stays in GM, as before.
  */
 
-import { idbGet, idbSet } from './idb.js';
+import { idbGet, idbUpdate } from './idb.js';
 import { gmGet, gmSet, gmDel } from './gm.js';
 import { DAY } from '../core/bars.js';
 
@@ -130,9 +130,22 @@ export const PAGE_KEYS = ['moneyLog', 'gymLog', 'fightLog', 'learnLog', 'planLin
 
 const mem = { loaded: false, loading: null, arch: {}, page: {}, idb: false };
 
+/** One IndexedDB entry per key (round 6 review: one shared entry let two webpage tabs overwrite each other). */
+const archKey = (k) => 'arch.' + k;
+const pageKey = (k) => 'page.' + k;
+
 /** The webpage's copy is in memory (after `loadArchives`). */
 export function archivesReady() {
     return mem.loaded;
+}
+
+/** Read every key's copy from IndexedDB into memory (at start, and before each drain: another tab may have added). */
+async function readAll() {
+    for (const k of Object.keys(ARCHIVES)) mem.arch[k] = (await idbGet(archKey(k))) || undefined;
+    for (const k of PAGE_KEYS) {
+        const v = await idbGet(pageKey(k));
+        if (v !== null && v !== undefined) mem.page[k] = v;
+    }
 }
 
 /**
@@ -143,39 +156,28 @@ export function loadArchives() {
     if (mem.loading) return mem.loading;
     mem.loading = (async () => {
         try {
-            const saved = (await idbGet('archives')) || {};
-            mem.arch = saved.arch || {};
-            mem.page = saved.page || {};
+            await readAll();
             mem.idb = true;
         } catch {
             mem.idb = false;
         }
         if (mem.idb) {
-            let moved = false;
             for (const k of PAGE_KEYS) {
                 const v = gmGet(k, null);
-                if (v !== null && v !== undefined) {
-                    if (mem.page[k] === undefined) mem.page[k] = v;
-                    moved = true;
+                if (v === null || v === undefined) continue;
+                try {
+                    // A newer copy another tab saved wins; otherwise GM's moves over.
+                    mem.page[k] = await idbUpdate(pageKey(k), (old) => (old === null ? v : old));
+                    gmDel(k);
+                } catch {
+                    // Left in GM: tried again next start.
                 }
-            }
-            if (moved) {
-                await persist();
-                for (const k of PAGE_KEYS) gmDel(k);
             }
         }
         mem.loaded = true;
         return mem;
     })();
     return mem.loading;
-}
-
-let writing = Promise.resolve();
-/** One write at a time, the whole webpage copy (a few hundred KB, off Torn's pages). */
-function persist() {
-    const snap = { arch: mem.arch, page: mem.page };
-    writing = writing.catch(() => {}).then(() => idbSet('archives', snap));
-    return writing;
 }
 
 /** A history, whole: the webpage's older part with GM's recent part (elsewhere: GM's part). */
@@ -197,58 +199,73 @@ export function pageGet(key, fallback = null) {
 }
 
 export function pageSet(key, value) {
+    // The webpage before its copy has loaded: wait for it (a write now would go to GM and be dropped at the next start).
+    if (mem.loading && !mem.loaded) {
+        mem.loading.then(() => pageSet(key, value)).catch(() => {});
+        return;
+    }
     if (mem.loaded && mem.idb) {
         if (value === null || value === undefined) delete mem.page[key];
         else mem.page[key] = value;
-        persist().catch(() => {});
+        idbUpdate(pageKey(key), () => (value === undefined ? null : value)).catch(() => {});
         return;
     }
     if (value === null || value === undefined) gmDel(key);
     else gmSet(key, value);
 }
 
+/** One tab at a time drains (Web Locks where the browser has them; else this tab goes ahead). */
+function withDrainLock(fn) {
+    const locks = typeof navigator !== 'undefined' && navigator.locks;
+    if (!locks || typeof locks.request !== 'function') return fn();
+    return locks.request('pumpingIron.drain', { ifAvailable: true }, (lock) => (lock ? fn() : 0));
+}
+
 /**
  * The webpage moves the older part of each history out of GM into its
- * IndexedDB. GM is trimmed only after the copy is saved, and only of what was
- * copied (a newer entry the leader wrote meanwhile stays).
+ * IndexedDB. Each key is merged inside one transaction (another tab's rows
+ * stay), and GM is trimmed only of what is now safe there (a newer entry the
+ * leader wrote meanwhile stays).
  */
 export async function drainArchives(now = Date.now()) {
     await loadArchives();
     if (!mem.idb) return 0;
-    let moved = 0;
-    for (const [key, spec] of Object.entries(ARCHIVES)) {
-        const rows = spec.old(gmGet(key, null), now);
-        const keys = spec.keysOf(rows);
-        if (!keys.length) continue;
-        mem.arch[key] = spec.absorb(mem.arch[key], rows);
+    return withDrainLock(async () => {
+        let moved = 0;
         try {
-            await persist();
+            await readAll();
         } catch {
-            return moved;
+            return 0;
         }
-        // Synchronous from here: read the newest GM value, drop only what is now safe in IndexedDB.
-        const done = new Set(keys);
-        const cur = gmGet(key, null);
-        if (cur !== null) gmSet(key, spec.trim(cur, done));
-        moved += keys.length;
-    }
-    return moved;
+        for (const [key, spec] of Object.entries(ARCHIVES)) {
+            const rows = spec.old(gmGet(key, null), now);
+            const keys = spec.keysOf(rows);
+            if (!keys.length) continue;
+            try {
+                mem.arch[key] = await idbUpdate(archKey(key), (old) => spec.absorb(old || undefined, rows));
+            } catch {
+                return moved;
+            }
+            // Synchronous from here: read the newest GM value, drop only what is now safe in IndexedDB.
+            const done = new Set(keys);
+            const cur = gmGet(key, null);
+            if (cur !== null) gmSet(key, spec.trim(cur, done));
+            moved += keys.length;
+        }
+        return moved;
+    });
 }
 
 /** Forget the webpage's copy of some keys (Settings › Your data). */
 export function clearArchived(keys) {
-    let changed = false;
     for (const k of keys) {
-        if (mem.arch[k] !== undefined) {
-            delete mem.arch[k];
-            changed = true;
-        }
-        if (mem.page[k] !== undefined) {
-            delete mem.page[k];
-            changed = true;
+        delete mem.arch[k];
+        delete mem.page[k];
+        if (mem.idb) {
+            idbUpdate(archKey(k), () => null).catch(() => {});
+            idbUpdate(pageKey(k), () => null).catch(() => {});
         }
     }
-    if (changed && mem.idb) persist().catch(() => {});
 }
 
 /** For tests: start again as a fresh page. */

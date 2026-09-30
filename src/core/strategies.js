@@ -208,6 +208,8 @@ export function simulateStrategy(id, o) {
     // Gyms opening as energy is trained (year plans).
     const unlocked = [];
     let unlockLeft = o.unlock && o.unlock.left > 0 ? o.unlock.left : Infinity;
+    // This run's own (the specialists it has joined): plans compared side by side don't share it.
+    const unlockMemo = {};
     let ebDay = -1;
     let ebToday = 0;
     const isConsole = id === 'consoleJump' || id === 'consoleJumpToy';
@@ -239,12 +241,12 @@ export function simulateStrategy(id, o) {
     };
     // The next gym opened: train there from now on (its fee is the caller's; `unlocked` says when).
     function openGym() {
-        const n = o.unlock.next(S, trainedE);
+        const n = o.unlock.next(S, trainedE, unlockMemo);
         if (!n) {
             unlockLeft = Infinity;
             return;
         }
-        unlocked.push({ at: trainedE, gymId: n.gymId, cost: n.cost || 0 });
+        unlocked.push({ at: trainedE, gymId: n.gymId, cost: n.cost || 0, joined: n.joined || [] });
         cost += n.cost || 0;
         if (n.gyms) {
             o = { ...o, gyms: n.gyms };

@@ -130,7 +130,7 @@ export function itemContext(statics = {}, settings = {}, now = null) {
 }
 
 /** The simulation inputs every strategy shares. */
-function simInputs({ state, pc, shares, settings, prices, special = 0, statics = {}, events = null, unlock = null }) {
+export function simInputs({ state, pc, shares, settings, prices, special = 0, statics = {}, events = null, unlock = null }) {
     const gyms = {};
     for (const k of STATS) if (pc.best[k]) gyms[k] = { dots: pc.best[k].dots[k], energy: pc.best[k].energy };
     const ic = itemContext(statics, settings);
@@ -385,7 +385,7 @@ export function drugNotBefore(skipped, now, cdMin = XANAX_CD_MIN) {
  * worked out (today's steps, the 48 h look-ahead, the strip, the gym page's next two days); no ladder, no 30-day
  * projection. `saved`: where the saved plan stands (null: no plan yet).
  */
-export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, rec: recIn = null, warn = null, lite = false, saved = null, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, warOn = null, now }) {
+export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, rec: recIn = null, warn = null, lite = false, saved = null, onPath = false, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, warOn = null, now }) {
     if (!state) return { ready: false };
     // One player context per refresh: the comparison's, when the caller has it.
     const pc = pcIn || playerContext(state, statics, { unlockedKnown, learnedMult });
@@ -570,7 +570,9 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         const r = recIn || recommend(compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy, goal: goalKind });
         rec = r;
         const mine = compare[plan.strategy];
-        if (r.recommended === plan.strategy) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is your plan' });
+        // Following the saved path (its plan for this stretch): that is the plan, not a pick to warn about.
+        if (onPath) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is your plan', sub: 'your saved plan for these days' });
+        else if (r.recommended === plan.strategy) heads.push({ tone: 'good', text: (STRATEGIES[plan.strategy] || {}).name + ' is your plan' });
         else if (mine && r.recommended && compare[r.recommended]) {
             const w = warn ? { warn: Boolean(warn[plan.strategy]) } : pickWarning(compare[r.recommended], mine, { bliss: pc.perks.bliss, days: settings.horizonDays || 30 });
             if (w.warn) heads.push({ tone: 'warn', text: (STRATEGIES[r.recommended] || {}).name + ' would gain more', sub: 'see Plan', go: 'plan' });

@@ -52,8 +52,11 @@ test('Auto: the floor plans without a Full key; with one, certain + other (no do
         { at: T - 2 * DAY, title: 'Bazaar sell', money: 30e6 },
         { at: T - 3 * DAY, title: 'Bank investment matured', money: 2.171e9 },
         { at: T - 4 * DAY, title: 'Stock dividend', money: 100e6 },
-    ], T, 30);
+    ], T, 30, floor);
     assert.equal(log.lines.length, 1, 'only the bazaar sale is "other" income');
+    // With nothing certain counted, a dividend that arrived is income; a maturity line (principal + profit) never is.
+    const bare = incomeBreakdown([{ at: T - 4 * DAY, title: 'Stock dividend', money: 100e6 }, { at: T - 3 * DAY, title: 'Bank investment matured', money: 2.171e9 }], T, 30);
+    assert.deepEqual(bare.lines.map((l) => l.title), ['Stock dividend']);
     const withLog = autoState({ plan, settings, hasFullKey: true, income: { perDay: 80e6, days: 30 }, log, floor });
     assert.equal(Math.round(withLog.perDay), Math.round(floor.perDay + 1e6));
     assert.match(affordLine(withLog, 2e6), /certain: .*bank \$1\.9M/);

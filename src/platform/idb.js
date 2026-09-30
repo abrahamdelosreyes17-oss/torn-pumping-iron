@@ -57,6 +57,31 @@ export function idbSet(key, value) {
     return idbRun('readwrite', (s) => s.put(value, key));
 }
 
+/**
+ * Read, change and write one key in a single transaction: two tabs doing it
+ * at once are run one after the other by IndexedDB, so neither loses the
+ * other's change. Resolves to the value written.
+ */
+export function idbUpdate(key, fn) {
+    return idbOpen().then(
+        (db) =>
+            new Promise((resolve, reject) => {
+                const tx = db.transaction(IDB_STORE, 'readwrite');
+                const store = tx.objectStore(IDB_STORE);
+                let next;
+                const req = store.get(key);
+                req.onsuccess = () => {
+                    next = fn(req.result === undefined ? null : req.result);
+                    if (next === null || next === undefined) store.delete(key);
+                    else store.put(next, key);
+                };
+                tx.oncomplete = () => resolve(next === undefined ? null : next);
+                tx.onerror = () => reject(tx.error || new Error('IndexedDB error.'));
+                tx.onabort = () => reject(tx.error || new Error('IndexedDB aborted.'));
+            }),
+    );
+}
+
 export function idbDel(key) {
     return idbRun('readwrite', (s) => s.delete(key));
 }

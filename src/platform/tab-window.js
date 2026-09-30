@@ -43,6 +43,13 @@ export function tabWindow(name, tabId, store, now = () => Date.now(), { batchMs 
     };
 
     return {
+        /** Write a pending batch now (the page is going: its slots must reach the other tabs). */
+        flush() {
+            if (!pending) return;
+            clearTimeout(pending);
+            pending = null;
+            writeOwn();
+        },
         /** Every live tab's timestamps of the last minute, oldest first. */
         load() {
             const t = now();

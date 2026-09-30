@@ -570,13 +570,15 @@ export async function pollWatch({ members = null } = {}) {
     if (!w.list.length) return false;
     const now = Date.now();
     const st = pageGet(WATCH_STATE_KEY, null) || {};
-    if (st.lockAt && now - st.lockAt < 20000 && st.lockTab !== pi.tabId) return false;
+    // The lock is shared (GM, tiny): two webpage tabs on Watched don't both read everyone.
+    const lock = get('eyeWatchLock', null) || {};
+    if (lock.at && now - lock.at < 20000 && lock.tab !== pi.tabId) return false;
     const flights = flightsSeen();
     const fromList = new Map((members || []).map((m) => [Number(m.id), m]));
     const players = { ...(st.players || {}) };
     const due = w.list.filter((x) => fromList.has(Number(x.id)) || dueForRead(players[x.id], now, flights[x.id] ? flights[x.id].at : null));
     if (!due.length) return false;
-    pageSet(WATCH_STATE_KEY, { ...st, lockAt: now, lockTab: pi.tabId });
+    set('eyeWatchLock', { at: now, tab: pi.tabId });
     watchRun.busy = true;
     const read = [];
     try {

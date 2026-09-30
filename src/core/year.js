@@ -20,7 +20,7 @@
 
 import { STATS, totalOf } from './gain.js';
 import { DAY } from './bars.js';
-import { GEORGES, gymsOpenAt, bestGymFor, gymById, unlockEnergyAfter } from './gyms.js';
+import { GEORGES, SSL, gymsOpenAt, bestGymFor, gymById, unlockEnergyAfter } from './gyms.js';
 import { simulateStrategy } from './strategies.js';
 import { recommend } from './recommend.js';
 import { budgetOf } from './auto.js';
@@ -37,6 +37,7 @@ export const BAND_HAPPY_LOSS = 0.1;
 
 /** Segment boundaries: every REPICK_DAYS, and each event's lead-in and end (ms, from start to end). */
 export function segmentsOf(start, end, events = []) {
+    if (!(end > start)) return [];
     const cuts = new Set([start, end]);
     for (let t = start + REPICK_DAYS * DAY; t < end; t += REPICK_DAYS * DAY) cuts.add(t);
     for (const e of events) {
@@ -48,16 +49,25 @@ export function segmentsOf(start, end, events = []) {
         }
     }
     const list = [...cuts].sort((x, y) => x - y);
-    // A sliver under 3 days joins its neighbour (a 30-day cut right before an event's lead-in).
-    const out = [];
+    const segs = [];
     for (let i = 0; i < list.length - 1; i++) {
         const seg = { from: list[i], to: list[i + 1] };
-        const isEvent = events.some((e) => e.start < seg.to && e.end > seg.from && seg.from >= Math.floor((e.start - EVENT_LEAD_MS) / DAY) * DAY - 1);
-        const prev = out[out.length - 1];
-        if (prev && seg.to - seg.from < 3 * DAY && !isEvent && !prev.event) prev.to = seg.to;
-        else out.push({ ...seg, event: isEvent });
+        seg.event = events.some((e) => e.start < seg.to && e.end > seg.from && seg.from >= Math.floor((e.start - EVENT_LEAD_MS) / DAY) * DAY - 1);
+        segs.push(seg);
     }
-    return out.map((s) => ({ ...s, days: Math.round((s.to - s.from) / DAY) })).filter((s) => s.days > 0);
+    // A plain sliver under 3 days joins the stretch before it (the first one, the stretch after): a plan re-picked
+    // over a day or two can't even finish a jump's stack.
+    const out = [];
+    for (const seg of segs) {
+        const prev = out[out.length - 1];
+        if (!seg.event && seg.to - seg.from < 3 * DAY && prev) prev.to = seg.to;
+        else out.push({ ...seg });
+    }
+    if (out.length > 1 && !out[0].event && out[0].to - out[0].from < 3 * DAY) {
+        out[1].from = out[0].from;
+        out.shift();
+    }
+    return out.map((x) => ({ ...x, days: Math.round((x.to - x.from) / DAY) })).filter((x) => x.days > 0);
 }
 
 /** The events inside a span, in the simulator's minutes from its start. */
@@ -65,6 +75,11 @@ export function segEvents(events, seg) {
     return events
         .filter((e) => e.start < seg.to && e.end > seg.from)
         .map((e) => ({ from: Math.max(0, Math.round((e.start - seg.from) / 60000)), to: Math.round((e.end - seg.from) / 60000), candyMult: e.candyMult || 1, canMult: e.canMult || 1, freeEnergy: e.freeEnergy || 0, freeHappy: e.freeHappy || 0, id: e.id }));
+}
+
+/** Gyms open with the ladder at `top`: its gyms, the specialists it opens (not Sports Science Lab: its ≤ 150 Xanax + Ecstasy rule fails for any plan that takes Xanax), and specialists you already joined. */
+export function openAt(top, known = []) {
+    return [...new Set([...gymsOpenAt(top).filter((id) => id !== SSL), ...known])].sort((a, b) => a - b);
 }
 
 /** Each stat's gym (per stat {dots, energy}) with these gyms open and these stats (specialists only while their rule holds). */
@@ -78,11 +93,21 @@ function gymsFor(stats, open, { table, active, drugsTaken }) {
     return { best, gyms };
 }
 
+/** Specialist memberships a gym choice needs that aren't paid yet: [{id, cost}]. */
+function newMemberships(best, paid, table) {
+    const out = [];
+    for (const g of Object.values(best || {})) if (g && g.id > GEORGES && !paid.has(g.id) && !out.some((x) => x.id === g.id)) out.push({ id: g.id, cost: (gymById(g.id, table) || {}).cost || 0 });
+    return out;
+}
+
 /**
  * The ladder still to climb (gym experience = energy trained, any gym): a
- * stateless helper the simulator asks when a step's energy is reached.
+ * helper the simulator asks when a step's energy is reached. `memo` is one
+ * run's own (the specialists that run has joined), so plans compared side by
+ * side don't share it. The ladder gym's fee and a specialist's membership are
+ * paid when they're first used.
  */
-export function unlockHook({ top, progress, gymExpMult, table, active, drugsTaken, known }) {
+export function unlockHook({ top, progress, gymExpMult, table, active, drugsTaken, known, paid = new Set() }) {
     if (!(top >= 1 && top < GEORGES)) return null;
     const steps = [];
     let acc = -Math.max(0, progress || 0);
@@ -95,15 +120,37 @@ export function unlockHook({ top, progress, gymExpMult, table, active, drugsTake
     if (!steps.length) return null;
     return {
         left: Math.max(1, steps[0].at),
-        next(S, trained) {
+        next(S, trained, memo = {}) {
             let i = -1;
             for (let j = 0; j < steps.length; j++) if (steps[j].at <= trained) i = j;
             if (i < 0) return null;
             const gymTop = steps[i].gymId;
-            const open = [...new Set([...gymsOpenAt(gymTop), ...(known || [])])];
+            const open = openAt(gymTop, known || []);
             const g = gymById(gymTop, table);
-            return { gymId: gymTop, cost: g ? g.cost : 0, gyms: gymsFor(S, open, { table, active, drugsTaken }).gyms, left: i + 1 < steps.length ? steps[i + 1].at - steps[i].at : Infinity };
+            const { best, gyms } = gymsFor(S, open, { table, active, drugsTaken });
+            memo.paid = memo.paid || new Set(paid);
+            const joined = newMemberships(best, memo.paid, table);
+            for (const x of joined) memo.paid.add(x.id);
+            return { gymId: gymTop, cost: (g ? g.cost : 0) + joined.reduce((a, x) => a + x.cost, 0), joined: joined.map((x) => x.id), gyms, left: i + 1 < steps.length ? steps[i + 1].at - steps[i].at : Infinity };
         },
+    };
+}
+
+/** What's left of today's one-off resources after a stretch (held boosters, special refills), for the next one. */
+function carryOver(args, r) {
+    const usedHeld = (r.used && r.used.held) || {};
+    const inv = { ...((args.statics && args.statics.inventory) || {}) };
+    for (const [id, n] of Object.entries(usedHeld)) inv[id] = Math.max(0, (Number(inv[id]) || 0) - n);
+    // used.special counts every special refill (the daily one too); dailySpecial the daily ones among them.
+    const specialUsed = (r.used && r.used.special) || 0;
+    const extraUsed = Math.max(0, specialUsed - ((r.used && r.used.dailySpecial) || 0));
+    const held = Math.max(0, (Number(args.state.specialRefills) || 0) - specialUsed);
+    return {
+        ...args,
+        statics: { ...(args.statics || {}), inventory: inv },
+        // The live booster cooldown is today's only; later stretches start with it spent.
+        state: { ...args.state, specialRefills: args.state.specialRefills === null || args.state.specialRefills === undefined ? args.state.specialRefills : held, boosterCd: 0 },
+        special: Math.max(0, (args.special || 0) - extraUsed),
     };
 }
 
@@ -112,6 +159,7 @@ export function unlockHook({ top, progress, gymExpMult, table, active, drugsTake
  * pauses between them, like compareStrategiesAsync).
  * @param {object} o
  * @param {function} o.compare - (args) → a generator like model.js compareSteps (yields between plans, returns the comparison)
+ * @param {function} o.inputs - model.js simInputs (the band re-runs each stretch's plan with the same inputs)
  * @param {object} o.args - compareStrategies' arguments now ({state, pc, shares, settings, prices, special, statics, pickBy})
  * @param {number} o.start - the plan's first day (ms)
  * @param {number} o.end
@@ -121,15 +169,19 @@ export function unlockHook({ top, progress, gymExpMult, table, active, drugsTake
  * @param {string|null} [o.goal] - recommend's goal ('unlock')
  * @returns {Generator} whose value is {segments, result, band, unlocks, events}
  */
-export function* yearSteps({ compare, args, start, end, budgetPerDay = Infinity, events = [], progress = null, goal = null }) {
+export function* yearSteps({ compare, inputs = null, args, start, end, budgetPerDay = Infinity, events = [], progress = null, goal = null }) {
     const pc0 = args.pc;
     const table = pc0.table;
     const gymExpMult = (pc0.perks && pc0.perks.gymExpMult) || 1;
     const active = args.state.gymId;
     let stats = { ...pc0.stats };
     const knownSpecialists = (pc0.unlocked || []).filter((id) => id > GEORGES);
-    let top = Math.max(1, ...(pc0.unlocked || []).filter((id) => id <= GEORGES));
-    let toNext = progress && Number(progress.top) === top ? Number(progress.energy) || 0 : 0;
+    // Memberships held already: the specialists you've joined (Torn's gym page lists them as unlocked).
+    const paid = new Set(knownSpecialists);
+    const top0 = Math.max(1, ...(pc0.unlocked || []).filter((id) => id <= GEORGES));
+    let top = top0;
+    const toNext0 = progress && Number(progress.top) === top0 ? Number(progress.energy) || 0 : 0;
+    let toNext = toNext0;
     const segs = segmentsOf(start, end, events);
     const out = [];
     const daily = [];
@@ -138,17 +190,24 @@ export function* yearSteps({ compare, args, start, end, budgetPerDay = Infinity,
     const unlocks = [];
     let cost = 0;
     let energy = 0;
+    let cur = args;
     const startTotal = totalOf(stats);
     for (const seg of segs) {
         yield seg;
-        const open = [...new Set([...gymsOpenAt(top), ...knownSpecialists])];
+        const open = openAt(top, knownSpecialists);
         const { best } = gymsFor(stats, open, { table, active, drugsTaken: null });
+        // A specialist first used now: its membership is paid now.
+        let fees = 0;
+        for (const x of newMemberships(best, paid, table)) {
+            fees += x.cost;
+            paid.add(x.id);
+        }
         const pc = { ...pc0, stats: { ...stats }, unlocked: open, best };
-        const state = { ...args.state, stats: { ...stats } };
-        const unlock = unlockHook({ top, progress: toNext, gymExpMult, table, active, known: knownSpecialists });
-        const segArgs = { ...args, state, pc, settings: { ...args.settings, horizonDays: seg.days, budget: Number.isFinite(budgetPerDay) ? budgetPerDay * seg.days : Infinity }, events: segEvents(events, seg), unlock };
+        const state = { ...cur.state, stats: { ...stats } };
+        const unlock = unlockHook({ top, progress: toNext, gymExpMult, table, active, known: knownSpecialists, paid });
+        const segArgs = { ...cur, state, pc, settings: { ...cur.settings, horizonDays: seg.days, budget: Number.isFinite(budgetPerDay) ? Math.max(0, budgetPerDay * seg.days - fees) : Infinity }, events: segEvents(events, seg), unlock };
         const cmp = yield* compare(segArgs);
-        const rec = recommend(cmp, { budget: budgetOf(segArgs.settings), bliss: pc.perks.bliss, pickBy: args.pickBy || 'most', goal });
+        const rec = recommend(cmp, { budget: budgetOf(segArgs.settings), bliss: pc.perks.bliss, pickBy: cur.pickBy || 'most', goal });
         const r = cmp[rec.recommended];
         if (!r) break;
         const base = totalOf(stats) - startTotal;
@@ -158,16 +217,18 @@ export function* yearSteps({ compare, args, start, end, budgetPerDay = Infinity,
             perStat[k] += r.perStat[k] || 0;
         }
         for (const [id, n] of Object.entries(r.used || {})) if (typeof n === 'number') used[id] = (used[id] || 0) + n;
-        cost += r.cost;
+        cost += r.cost + fees;
         energy += r.energyTrained || 0;
         // The ladder: what this segment's energy opened (the simulator switched gyms when it did).
         for (const u of r.unlocked || []) unlocks.push({ gymId: u.gymId, day: Math.round((seg.from - start) / DAY) + Math.floor((u.at / Math.max(1, r.energyTrained || 1)) * seg.days), cost: u.cost });
+        for (const u of r.unlocked || []) for (const id of u.joined || []) paid.add(id);
         ({ top, toNext } = climb(top, toNext, r.energyTrained || 0, gymExpMult));
-        out.push({ from: seg.from, to: seg.to, days: seg.days, event: seg.event ? segEvents(events, seg).map((e) => e.id) : null, strategy: rec.recommended, gained: r.gained, cost: r.cost, energy: r.energyTrained || 0, statsEnd: { ...stats }, candy: r.candy || null, refill: r.refill, alternatives: rec.alternatives.slice(0, 3).map((a) => ({ id: a.id, deltaStatsPct: a.deltaStatsPct })) });
+        out.push({ from: seg.from, to: seg.to, days: seg.days, event: seg.event ? segEvents(events, seg).map((e) => e.id) : null, strategy: rec.recommended, gained: r.gained, cost: r.cost + fees, energy: r.energyTrained || 0, statsEnd: { ...stats }, candy: r.candy || null, refill: r.refill, booster: r.booster || null, alternatives: rec.alternatives.slice(0, 3).map((a) => ({ id: a.id, deltaStatsPct: a.deltaStatsPct })) });
+        cur = carryOver(cur, r);
     }
     const result = { id: 'year', gained: Math.round(totalOf(stats) - startTotal), perStat: Object.fromEntries(STATS.map((k) => [k, Math.round(perStat[k])])), cost: Math.round(cost), energyTrained: energy, daily, used, unlocks };
     yield 'band';
-    const band = yearBand(out, args, { start, events, progress, gymExpMult, knownSpecialists, table, active, top0: Math.max(1, ...(pc0.unlocked || []).filter((id) => id <= GEORGES)), toNext0: progress && Number(progress.top) === Math.max(1, ...(pc0.unlocked || []).filter((id) => id <= GEORGES)) ? Number(progress.energy) || 0 : 0 });
+    const band = inputs ? yearBand(out, args, { inputs, events, gymExpMult, knownSpecialists, table, active, top0, toNext0 }) : null;
     return { segments: out, result, band, unlocks, events };
 }
 
@@ -184,41 +245,44 @@ export function climb(top, toNext, energy, gymExpMult = 1) {
     return { top: t, toNext: t < GEORGES ? left : 0 };
 }
 
-/** The same path (the plan picked for each segment) with the model a little off each way: low and high year totals. */
-function yearBand(segments, args, { start, events, gymExpMult, knownSpecialists, table, active, top0, toNext0 }) {
+/**
+ * The same path (the plan, candy, booster and refill picked for each stretch,
+ * with the simulator's own inputs) with the model a little off each way: low
+ * and high totals. `centre` is the same re-run unchanged (it should match the path).
+ */
+function yearBand(segments, args, { inputs, events, gymExpMult, knownSpecialists, table, active, top0, toNext0 }) {
     const run = (gainMult, lossMult) => {
         let stats = { ...args.pc.stats };
         let top = top0;
         let toNext = toNext0;
+        let cur = args;
+        const paid = new Set(knownSpecialists);
         const t0 = totalOf(stats);
         for (const s of segments) {
-            const open = [...new Set([...gymsOpenAt(top), ...knownSpecialists])];
-            const { gyms } = gymsFor(stats, open, { table, active, drugsTaken: null });
-            const perks = Object.fromEntries(STATS.map((k) => [k, ((args.pc.perks.mult && args.pc.perks.mult[k]) || 1) * gainMult]));
-            const unlock = unlockHook({ top, progress: toNext, gymExpMult, table, active, known: knownSpecialists });
-            const r = simulateStrategy(s.strategy, {
-                stats,
-                target: args.shares,
-                gyms,
-                perks,
-                happyMax: args.state.happy.maximum,
-                energyMax: args.state.energy.maximum,
-                fastEnergy: args.state.energy.interval <= 600,
-                days: s.days,
-                prices: {},
-                happyLossMult: (args.pc.perks.happyLossMult || 1) * lossMult,
-                bliss: args.pc.perks.bliss,
-                candyId: s.candy ? s.candy.id : undefined,
-                candyCount: s.candy ? s.candy.count : undefined,
+            const open = openAt(top, knownSpecialists);
+            const { best } = gymsFor(stats, open, { table, active, drugsTaken: null });
+            for (const x of newMemberships(best, paid, table)) paid.add(x.id);
+            const pc = { ...args.pc, stats: { ...stats }, unlocked: open, best };
+            const base = inputs({ ...cur, state: { ...cur.state, stats: { ...stats } }, pc, settings: { ...cur.settings, horizonDays: s.days } });
+            const o = {
+                ...base,
+                perks: Object.fromEntries(STATS.map((k) => [k, ((base.perks && base.perks[k]) || 1) * gainMult])),
+                happyLossMult: (base.happyLossMult || 1) * lossMult,
+                ...(s.candy ? { candyId: s.candy.id, candyCount: s.candy.count } : {}),
+                ...(s.booster ? { energyBooster: { id: s.booster.id, perDay: s.booster.perDay } } : {}),
+                ...(s.refill === false ? { noRefill: true } : {}),
+                special: 0,
                 events: segEvents(events, s),
-                unlock,
-            });
+                unlock: unlockHook({ top, progress: toNext, gymExpMult, table, active, known: knownSpecialists, paid }),
+            };
+            const r = simulateStrategy(s.strategy, o);
             stats = { ...stats };
             for (const k of STATS) stats[k] += r.perStat[k] || 0;
+            for (const u of r.unlocked || []) for (const id of u.joined || []) paid.add(id);
             ({ top, toNext } = climb(top, toNext, r.energyTrained || 0, gymExpMult));
+            cur = carryOver(cur, r);
         }
         return Math.round(totalOf(stats) - t0);
     };
-    void start;
-    return { low: run(1 - BAND_GAIN, 1 + BAND_HAPPY_LOSS), high: run(1 + BAND_GAIN, 1 - BAND_HAPPY_LOSS) };
+    return { low: run(1 - BAND_GAIN, 1 + BAND_HAPPY_LOSS), centre: run(1, 1), high: run(1 + BAND_GAIN, 1 - BAND_HAPPY_LOSS) };
 }

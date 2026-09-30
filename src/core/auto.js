@@ -22,7 +22,6 @@ import { STRATEGIES, JUMP_STACK, CONSOLE_STACK } from './strategies.js';
 import { XANAX_CD_MIN } from './items.js';
 import { fmtMoney } from './format.js';
 import { unlockEnergyAfter } from './gyms.js';
-import { FLOOR_LOG_WORDS } from './income-floor.js';
 
 /** Personal stats read for income: networth and its cash parts (10 at most per call). */
 export const NETWORTH_STATS = ['networth', 'networthwallet', 'networthvault', 'networthbank', 'networthcayman'];
@@ -222,7 +221,7 @@ const OUT_WORDS = /(buy|bought|purchase|send|sent|paid|fee|lose|lost|bet|donat|d
  * @param {number} [windowDays] - how far back the log was read
  * @returns {{days:number, inPerDay:number, outPerDay:number, lines:{title:string, perDay:number, n:number, dir:'in'|'out'}[]}|null}
  */
-export function incomeBreakdown(log, now, windowDays = null) {
+export function incomeBreakdown(log, now, windowDays = null, floor = null) {
     const rows = (log || []).filter((e) => e && e.money > 0 && Number.isFinite(e.at));
     if (!rows.length) return null;
     // Spread over the whole span that was read (one sale 2 days ago in a 30-day read is 1/30 a day, not 1/2).
@@ -230,8 +229,11 @@ export function incomeBreakdown(log, now, windowDays = null) {
     const days = Math.max(1, windowDays || 0, (now - oldest) / DAY);
     const by = new Map();
     for (const e of rows) {
-        // Bank investment and dividend lines are the certain income (core/income-floor.js), counted there, not here.
-        if (FLOOR_LOG_WORDS.test(e.title)) continue;
+        // Bank investment and dividend lines are the certain income (core/income-floor.js), counted there, not here
+        // (a maturity line carries the principal too: never income). Only the kinds the floor counted are left out.
+        if (/matur/i.test(e.title)) continue;
+        if (floor && floor.bank > 0 && /(invest|city bank|bank interest)/i.test(e.title)) continue;
+        if (floor && floor.dividends > 0 && /dividend/i.test(e.title)) continue;
         const dir = IN_WORDS.test(e.title) ? 'in' : OUT_WORDS.test(e.title) ? 'out' : null;
         if (!dir) continue;
         const k = dir + '|' + e.title;

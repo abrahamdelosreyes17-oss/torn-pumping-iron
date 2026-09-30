@@ -14,6 +14,12 @@ import { fetchDiscord } from './api/torn.js';
 import { workerBase, newSecret, stepsForWorker, workerSync, workerTest, workerForget, workerLink, workerLoginStart, workerLoginStatus, workerLoginCancel, DEFAULT_WORKER } from './api/worker.js';
 import { gmOpenTab } from './platform/gm.js';
 
+/** Set by the runtime: a Discord skip redraws this tab's model. */
+let onSkippedChange = null;
+export function onSkipped(fn) {
+    onSkippedChange = fn;
+}
+
 export const SYNC_MIN_MS = 60 * 1000;
 
 /** Sync at least this often while a tab is visible (a plan not synced for 12 h is "out of date" on the Worker). */
@@ -82,7 +88,10 @@ export function applyAcks(acks, now = Date.now()) {
         ids.push(a.id);
         if (a.kind === 'skip' && a.step && a.step.kind !== 'test') skipped.push({ at: now, stepAt: Number(a.step.at) * 1000, kind: a.step.kind, label: a.step.label || null });
     }
+    const before = JSON.stringify(get(K.skipped, []) || []);
     set(K.skipped, skipped);
+    // A step skipped in Discord: this tab's model follows at once (a local write fires no change event here).
+    if (JSON.stringify(skipped) !== before && typeof onSkippedChange === 'function') onSkippedChange();
     return ids;
 }
 

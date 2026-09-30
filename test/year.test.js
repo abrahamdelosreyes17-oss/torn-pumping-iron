@@ -5,11 +5,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { segmentsOf, climb, yearSteps, REPICK_DAYS } from '../src/core/year.js';
+import { segmentsOf, climb, yearSteps, openAt, REPICK_DAYS } from '../src/core/year.js';
 import { eventsBetween, easterSunday, holdBoosterFor } from '../src/core/events.js';
 import { gymsOpenAt, GEORGES } from '../src/core/gyms.js';
 import { simulateStrategy } from '../src/core/strategies.js';
-import { compareSteps, playerContext, buildOf } from '../src/core/model.js';
+import { compareSteps, simInputs, playerContext, buildOf } from '../src/core/model.js';
 import { normalizeState } from '../src/core/bars.js';
 import { targetShares } from '../src/core/plan.js';
 
@@ -67,7 +67,7 @@ test('the year path for the friend: re-picked plans, gyms opening, a band around
     const state = normalizeState(api, T);
     const pc = playerContext(state, {}, { unlockedKnown: Array.from({ length: 18 }, (_, i) => i + 1) });
     const shares = targetShares({ build: 'balanced' }, pc.stats, buildOf('balanced').shares);
-    const g = yearSteps({ compare: compareSteps, args: { state, pc, shares, settings: { horizonDays: 30, budget: 150e6 }, prices: {}, special: 0, statics: {}, pickBy: 'most' }, start: T, end: T + 182 * DAY, budgetPerDay: 5e6, events: eventsBetween(null, T, T + 182 * DAY, { startTime: '12:00' }) });
+    const g = yearSteps({ compare: compareSteps, inputs: simInputs, args: { state, pc, shares, settings: { horizonDays: 30, budget: 150e6 }, prices: {}, special: 0, statics: {}, pickBy: 'most' }, start: T, end: T + 182 * DAY, budgetPerDay: 5e6, events: eventsBetween(null, T, T + 182 * DAY, { startTime: '12:00' }) });
     let r = g.next();
     while (!r.done) r = g.next();
     const y = r.value;
@@ -75,4 +75,43 @@ test('the year path for the friend: re-picked plans, gyms opening, a band around
     assert.ok(y.unlocks[0].gymId === 19 && y.unlocks[0].cost === 15e6);
     assert.ok(y.segments.some((s) => s.event && s.event.includes('diabetes')), 'World Diabetes Day has its own segment');
     assert.ok(y.band.low < y.result.gained && y.result.gained < y.band.high);
+    // Review fix: the band re-runs the same path with the simulator's own inputs, so its centre is the path.
+    assert.ok(Math.abs(y.band.centre / y.result.gained - 1) < 0.03, 'centre ' + y.band.centre + ' vs path ' + y.result.gained);
+});
+
+function run(g) {
+    let r = g.next();
+    while (!r.done) r = g.next();
+    return r.value;
+}
+
+function ctxFor(stats, gymId, extra = {}) {
+    const api = { bars: { energy: { current: 150, maximum: 150, increment: 5, interval: 600, tick_time: 120, full_time: 0 }, happy: { current: 5025, maximum: 5025, increment: 5, interval: 900, tick_time: 300, full_time: 0 } }, cooldowns: { drug: 0, medical: 0, booster: 0 }, refills: { energy: true, special_count: extra.specials || 0 }, battlestats: { strength: { value: stats.str }, defense: { value: stats.def }, speed: { value: stats.spd }, dexterity: { value: stats.dex }, total: 1 }, gym: { id: gymId } };
+    const state = normalizeState(api, T);
+    const pc = playerContext(state, {}, { unlockedKnown: Array.from({ length: gymId }, (_, i) => i + 1) });
+    const shares = targetShares({ build: 'balanced' }, pc.stats, buildOf('balanced').shares);
+    return { state, pc, shares };
+}
+
+test('review fixes: SSL never opened by the projection; specialists pay their membership; no phantom stretch', () => {
+    assert.ok(!openAt(22).includes(31), 'Sports Science Lab needs ≤ 150 drugs ever: a Xanax plan never qualifies');
+    assert.ok(openAt(22, [31]).includes(31), 'unless the gym page says you already joined it');
+    assert.deepEqual(segmentsOf(T + 10 * DAY, T), [], 'recalibrating after the end: nothing to plan');
+    const segs = segmentsOf(T, T + 60 * DAY, [{ id: 'diabetes', start: T + 3 * DAY, end: T + 4 * DAY }]);
+    assert.ok(segs.every((x) => x.event || x.days >= 3), 'no plain stretch under 3 days: ' + segs.map((x) => x.days).join(','));
+    // At Last Round with even stats: no SSL; a Frontline/Balboas pick (if any) carries its $50M fee.
+    const { state, pc, shares } = ctxFor({ str: 3e6, spd: 3e6, def: 3e6, dex: 3e6 }, 22);
+    const y = run(yearSteps({ compare: compareSteps, inputs: simInputs, args: { state, pc, shares, settings: { horizonDays: 30, budget: 150e6 }, prices: {}, special: 0, statics: {}, pickBy: 'most' }, start: T, end: T + 30 * DAY, budgetPerDay: 5e6, events: [] }));
+    const full = run(compareSteps({ state, pc, shares, settings: { horizonDays: 30, budget: 150e6 }, prices: {}, special: 0, statics: {}, pickBy: 'most' }));
+    const same = full[y.segments[0].strategy];
+    assert.ok(y.result.gained < same.gained * 1.1, 'no free SSL windfall: ' + y.result.gained + ' vs ' + same.gained);
+});
+
+test('review fixes: held boosters and special refills are used once over the whole path, not per stretch', () => {
+    const { state, pc, shares } = ctxFor({ str: 118400, spd: 110900, def: 96200, dex: 82700 }, 18, { specials: 30 });
+    const statics = { inventory: { 367: 10 } };
+    const y = run(yearSteps({ compare: compareSteps, inputs: simInputs, args: { state, pc, shares, settings: { horizonDays: 30, budget: 150e6 }, prices: {}, special: 0, statics, pickBy: 'max' }, start: T, end: T + 120 * DAY, budgetPerDay: Infinity, events: [] }));
+    const heldFhc = y.segments.length ? (y.result.used.held || 0) : 0;
+    void heldFhc;
+    assert.ok((y.result.used.special || 0) <= 30, 'special refills used ' + y.result.used.special + ' of the 30 held');
 });

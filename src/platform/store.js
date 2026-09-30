@@ -171,6 +171,13 @@ export function loadLocalPrices() {
     return local.loading;
 }
 
+/** Forget this site's listings (Settings › Your data › Prices). */
+export function clearLocalPrices() {
+    local.rows = {};
+    local.ver++;
+    idbSet('prices', {}).catch(() => {});
+}
+
 /** This site's listings (only what it loaded itself). */
 export function localPrices() {
     return local.rows || {};
@@ -192,7 +199,13 @@ export function getPrices() {
     if (!local.rows) return slim;
     if (pricesMemo.slim === slim && pricesMemo.ver === local.ver) return pricesMemo.value;
     const out = { ...slim };
-    for (const [id, row] of Object.entries(local.rows)) if (row && (!slim[id] || (row.at || 0) >= (slim[id].at || 0))) out[id] = row;
+    for (const [id, row] of Object.entries(local.rows)) {
+        if (!row) continue;
+        // This site's read is the newest: all of it. The other site read later: its unit price, these listings (the
+        // Buy list and market outlines need them; they're reloaded here when due).
+        if (!slim[id] || (row.at || 0) >= (slim[id].at || 0)) out[id] = row;
+        else if (Array.isArray(row.listings) && row.listings.length) out[id] = { ...slim[id], listings: row.listings, listingsAt: row.at || 0 };
+    }
     pricesMemo.slim = slim;
     pricesMemo.ver = local.ver;
     pricesMemo.value = out;

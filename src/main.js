@@ -12,7 +12,7 @@
 import { gmMenu, gmOpenTab } from './platform/gm.js';
 import { set, dropOldKeys } from './platform/store.js';
 import { pi, startFeed, refresh, onModel, setWhere, createPlan, recalibratePlan, followStrategy } from './runtime.js';
-import { maybeSyncPlan } from './discord.js';
+import { maybeSyncPlan, onSkipped } from './discord.js';
 import { bootAppPage } from './app-page.js';
 import { bootTornPage } from './torn-page.js';
 import { bootEyePage } from './eye-page.js';
@@ -50,6 +50,8 @@ export function boot() {
     startFeed();
     // The plan's next steps go to your Discord Worker when they change (if you set one up).
     onModel((m) => maybeSyncPlan(m));
+    // A step skipped in Discord: the model follows at once (Torn pages rebuild only when due otherwise).
+    onSkipped(() => refresh());
     // Trains Torn logged that no read saw (your phone, the laptop closed): the webpage reads them every 15 minutes (Full key).
     if (where === 'app') {
         setTimeout(gymLogTick, 20000);
