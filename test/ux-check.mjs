@@ -277,7 +277,7 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
 
 // Auto mode: without a Full key the top bar says so on every page; with one, the plan runs on your income.
 {
-    const o = await openApp('&full=1');
+    const o = await openApp('&full=1&who=owner');
     await o.page.evaluate(() => (location.hash = 'plan'));
     // The money log is read 5 s after the page opens; then Create plan (round 6: a plan is made on a click, from your income).
     await o.page.waitForTimeout(7000);
@@ -287,6 +287,7 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     ok(!/Auto mode needs a Full key · Add it/.test(m.text), 'auto: no header warning with a Full key');
     ok(/a day from your income/.test(m.text) && /You can afford this with your income/.test(m.text), 'auto: the plan runs on your income (' + (m.text.match(/[^.]*from your income[^.]*/) || [''])[0].slice(0, 120) + ')');
     ok(/Bazaar sell/.test(m.text), 'auto: where the income comes from (money log)');
+    ok(/of it certain/.test(m.text), 'auto: the certain income (bank, dividends, rent) is counted (R6.4)');
     ok(o.errors.length === 0, 'auto: no page errors ' + JSON.stringify(o.errors.slice(0, 2)));
     await o.page.screenshot({ path: resolve(shots, 'app-auto.png'), fullPage: true });
     // Settings › Discord: one button, the old form under Advanced.

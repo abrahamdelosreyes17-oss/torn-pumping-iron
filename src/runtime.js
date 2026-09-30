@@ -16,6 +16,7 @@ import { buildModel, compareStrategiesAsync, blissWhatIf, companyWhatIf, playerC
 import { recommend, pickWarning, PICK_BY } from './core/recommend.js';
 import { targetShares } from './core/plan.js';
 import { INCOME_MIN_DAYS, budgetOf, incomeFrom, autoState, effectivePickBy, incomeBreakdown } from './core/auto.js';
+import { incomeFloor } from './core/income-floor.js';
 import { planWindow, daysLeft, planProgress, snapshotOf, makeSavedPlan, planNowOf, usablePlanNow, SAVED_PLAN_V } from './core/saved-plan.js';
 import { loadSavedPlan, saveSavedPlan } from './platform/plan-store.js';
 import { archived, pageGet, pageSet } from './platform/archive.js';
@@ -161,7 +162,10 @@ function autoFor(plan, settings, statics, steadyPerDay) {
     const income = incomeFrom(statics.income || [], { spentPerDay });
     const ml = pageGet(K.moneyLog, null);
     const breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now(), ml.days || null) : null;
-    const auto = autoState({ plan, settings, hasFullKey: hasFullKey(), income, log: breakdown, spentPerDay });
+    // The income that is certain (bank, dividends, rent), read with the main key: the floor under the rest.
+    const pv = statics.passive || null;
+    const floor = pv ? incomeFloor({ ...pv, meId: statics.keyInfo && statics.keyInfo.userId, now }) : null;
+    const auto = autoState({ plan, settings, hasFullKey: hasFullKey(), income, log: breakdown, spentPerDay, floor });
     auto.breakdown = breakdown;
     auto.income = income;
     return auto;
@@ -250,7 +254,7 @@ export async function createPlan({ months = 1, recalibrate = false, pause = paus
         const whatIf = pc.perks.bliss ? null : blissWhatIf(args);
         await pause();
         const jobWhatIf = companyWhatIf({ ...args, compare, recommended: rec.recommended });
-        const snapshot = snapshotOf({ state, pc, statics, plan, prices: livePrices(prices), income: auto.ready ? { perDay: auto.perDay, source: auto.source, days: auto.days } : null, budgetPerDay: Number.isFinite(perDay) ? perDay : null, held: heldBoosters(statics.inventory), now });
+        const snapshot = snapshotOf({ state, pc, statics, plan, prices: livePrices(prices), income: auto.ready ? { perDay: auto.perDay, source: auto.source, days: auto.days, certain: auto.floor ? { perDay: auto.floor.perDay, bank: auto.floor.bank, dividends: auto.floor.dividends, rent: auto.floor.rent } : null } : null, budgetPerDay: Number.isFinite(perDay) ? perDay : null, held: heldBoosters(statics.inventory), now });
         const saved = makeSavedPlan({ compare, rec, snapshot, start: win.start, end: win.end, months: win.months, days: win.days, budget, whatIf, jobWhatIf, prev, now });
         const best = compare[rec.recommended];
         const warn = {};

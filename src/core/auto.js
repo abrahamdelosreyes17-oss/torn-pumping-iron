@@ -22,6 +22,7 @@ import { STRATEGIES, JUMP_STACK, CONSOLE_STACK } from './strategies.js';
 import { XANAX_CD_MIN } from './items.js';
 import { fmtMoney } from './format.js';
 import { unlockEnergyAfter } from './gyms.js';
+import { FLOOR_LOG_WORDS } from './income-floor.js';
 
 /** Personal stats read for income: networth and its cash parts (10 at most per call). */
 export const NETWORTH_STATS = ['networth', 'networthwallet', 'networthvault', 'networthbank', 'networthcayman'];
@@ -67,17 +68,26 @@ export function incomeFrom(snaps, { spentPerDay = 0 } = {}) {
  * @param {number} [o.spentPerDay] - what the gym plan spends a day (added back to the log's net)
  * @returns {{on:boolean, ready:boolean, needsKey:boolean, waiting:boolean, perDay:number|null, budgetPerDay:number|null, budget:number|null, source:'log'|'networth'|null, networthPerDay:number|null}}
  */
-export function autoState({ plan, settings, hasFullKey, income, log = null, spentPerDay = 0 }) {
+export function autoState({ plan, settings, hasFullKey, income, log = null, spentPerDay = 0, floor = null }) {
     const on = Boolean(plan && plan.pickBy === 'auto');
     const horizon = (settings && settings.horizonDays) || 30;
+    const certain = floor && floor.perDay > 0 ? floor.perDay : 0;
     if (!on) return { on, ready: false, needsKey: false, waiting: false, perDay: null, budgetPerDay: null, budget: null };
-    if (!hasFullKey) return { on, ready: false, needsKey: true, waiting: false, perDay: null, budgetPerDay: null, budget: null };
+    // Round 6 (R6.4): the income that is certain (bank, dividends, rent: Limited key) lets Auto plan without the Full key.
+    if (!hasFullKey) {
+        if (!certain) return { on, ready: false, needsKey: true, waiting: false, perDay: null, budgetPerDay: null, budget: null };
+        return { on, ready: true, needsKey: false, waiting: false, perDay: certain, budgetPerDay: certain, budget: certain * horizon, days: null, source: 'floor', networthPerDay: null, floor };
+    }
     const nw = income && Number.isFinite(income.perDay) ? income.perDay : null;
-    const fromLog = log && log.lines && log.lines.some((l) => l.dir === 'in') ? log.inPerDay - log.outPerDay + Math.max(0, spentPerDay || 0) : null;
-    const perDay = fromLog !== null ? fromLog : nw;
+    // The log's other income leaves out the bank and dividend lines (the floor counts those): certain + the rest.
+    const fromLog = log && log.lines && log.lines.some((l) => l.dir === 'in') ? certain + Math.max(0, log.inPerDay - log.outPerDay + Math.max(0, spentPerDay || 0)) : null;
+    // Networth growth already holds the certain part: whichever is higher, never both.
+    const measured = fromLog !== null ? fromLog : nw !== null ? Math.max(certain, nw) : null;
+    const perDay = measured !== null ? measured : certain || null;
     if (perDay === null) return { on, ready: false, needsKey: false, waiting: true, perDay: null, budgetPerDay: null, budget: null, source: null, networthPerDay: null };
     const budgetPerDay = Math.max(0, perDay);
-    return { on, ready: true, needsKey: false, waiting: false, perDay, budgetPerDay, budget: budgetPerDay * horizon, days: fromLog !== null ? log.days : income.days, source: fromLog !== null ? 'log' : 'networth', networthPerDay: nw };
+    const source = fromLog !== null ? 'log' : nw !== null ? (certain > nw ? 'floor' : 'networth') : 'floor';
+    return { on, ready: true, needsKey: false, waiting: false, perDay, budgetPerDay, budget: budgetPerDay * horizon, days: fromLog !== null ? log.days : income ? income.days : null, source, networthPerDay: nw, floor };
 }
 
 /**
@@ -108,7 +118,15 @@ export function affordLine(auto, planPerDay) {
     const inText = fmtMoney(Math.round(auto.perDay));
     if (!(auto.perDay > 0)) return 'Your networth hasn’t grown over the last ' + Math.round(auto.days) + ' days, so Auto picks a plan that costs nothing.';
     if (!(planPerDay > 0)) return 'About ' + inText + ' a day comes in; this plan costs nothing.';
-    return 'You can afford this with your income: about ' + inText + ' a day comes in, this plan costs ' + fmtMoney(Math.round(planPerDay)) + ' a day.';
+    return 'You can afford this with your income: about ' + inText + ' a day comes in' + certainWords(auto) + ', this plan costs ' + fmtMoney(Math.round(planPerDay)) + ' a day.';
+}
+
+/** " (about $2.2M a day of it is certain: bank $1.9M, dividends $0.3M)" when the floor counts. */
+export function certainWords(auto) {
+    const f = auto && auto.floor;
+    if (!f || !(f.perDay > 0)) return '';
+    const parts = [['bank', f.bank], ['dividends', f.dividends], ['rent', f.rent]].filter(([, v]) => v > 0).map(([k, v]) => k + ' ' + fmtMoney(Math.round(v)));
+    return ' (' + (auto.source === 'floor' ? 'all of it certain' : 'about ' + fmtMoney(Math.round(f.perDay)) + ' a day of it certain') + ': ' + parts.join(', ') + ')';
 }
 
 /** How long before an event a plan must start to have its stack ready (jumps stack Xanax). */
@@ -212,6 +230,8 @@ export function incomeBreakdown(log, now, windowDays = null) {
     const days = Math.max(1, windowDays || 0, (now - oldest) / DAY);
     const by = new Map();
     for (const e of rows) {
+        // Bank investment and dividend lines are the certain income (core/income-floor.js), counted there, not here.
+        if (FLOOR_LOG_WORDS.test(e.title)) continue;
         const dir = IN_WORDS.test(e.title) ? 'in' : OUT_WORDS.test(e.title) ? 'out' : null;
         if (!dir) continue;
         const k = dir + '|' + e.title;

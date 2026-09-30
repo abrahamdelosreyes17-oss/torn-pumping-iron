@@ -115,7 +115,7 @@ export function snapshotOf({ state, pc, statics = {}, plan = {}, prices = {}, in
         perks: { mult: { ...pc.perks.mult }, bliss: Boolean(pc.perks.bliss), happyLossMult: pc.perks.happyLossMult || 1, boosterCapExtraH: pc.perks.boosterCapExtraH || 0 },
         happyMax: state.happy.maximum,
         energyMax: state.energy.maximum,
-        income: income ? { perDay: income.perDay, source: income.source || null, days: income.days || null } : null,
+        income: income ? { perDay: income.perDay, source: income.source || null, days: income.days || null, certain: income.certain || null } : null,
         budgetPerDay: Number.isFinite(budgetPerDay) ? budgetPerDay : null,
         prices: { ...prices },
         held: { ...held },

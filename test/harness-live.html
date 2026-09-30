@@ -126,7 +126,11 @@ const CANNED = {
     { title: 'World Diabetes Day', description: 'Candy effects are tripled', start: Math.floor(Date.parse('2026-10-08T00:00:00Z') / 1000), end: Math.floor(Date.parse('2026-10-08T23:59:59Z') / 1000), fixed_start_time: false },
   ] } }),
   '/v2/user/calendar': () => ({ calendar: { start_time: '12:00 TCT' } }),
-  '/v2/user/money': () => ({ money: { points: 45, wallet: 1000000, company: 0, vault: 0, cayman_bank: 0, city_bank: null, faction: null, daily_networth: 0 } }),
+  '/v2/user/money': () => ({ money: { points: 45, wallet: 1000000, company: 0, vault: 0, cayman_bank: 0, city_bank: OWNER ? { amount: 2000000000, profit: 171000000, duration: 90, interest_rate: 34.7, until: Math.floor(Date.now() / 1000) + 40 * 86400, invested_at: Math.floor(Date.now() / 1000) - 50 * 86400 } : null, faction: null, daily_networth: 0 } }),
+  // The income that is certain (R6.4): a money dividend, and a property rented out (the owner only).
+  '/v2/user/stocks': () => ({ stocks: OWNER ? [{ id: 1, shares: 3000000, transactions: [], bonus: { available: false, increment: 2, progress: 3, frequency: 7 } }] : [] }),
+  '/v2/torn/stocks': () => ({ stocks: [{ id: 1, name: 'Torn City Investments', acronym: 'TCI', market: { price: 900, cap: 1, shares: 1, investors: 1 }, bonus: { passive: false, frequency: 7, requirement: 1500000, description: '$50,000,000' } }] }),
+  '/v2/user/properties': () => ({ properties: OWNER ? [{ id: 5, owner: { id: 2345678 }, property: { id: 13, name: 'Private Island' }, happy: 5025, upkeep: { property: 0, staff: 0 }, market_price: 1, modifications: [], staff: [], status: 'rented', rented_by: { id: 1 }, used_by: [], cost: 18000000, cost_per_day: 600000, rental_period: 30, rental_period_remaining: 12, lease_extension: null }] : [] }),
   '/v2/user/inventory': (u) => ({ inventory: { items: u.searchParams.get('cat') === 'Drug' ? [{ id: 206, amount: 1, name: 'Xanax' }] : [] } }),
   '/v2/key/info': () => ({ info: { access: { level: 3, type: 'Limited Access' }, user: { id: 2345678 }, selections: {} } }),
   '/v2/market/206/itemmarket': () => ({ itemmarket: { item: { id: 206, name: 'Xanax' }, listings: [{ price: 829500, amount: 3 }, { price: 830000, amount: 1805 }] } }),

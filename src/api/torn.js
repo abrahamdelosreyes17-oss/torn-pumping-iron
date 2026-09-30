@@ -95,6 +95,40 @@ export async function fetchMoney(client) {
     }
 }
 
+/**
+ * The income that is certain (round 6, R6.4): the city bank investment
+ * (/user/money, Limited), your stocks' benefits (/user/stocks, Limited, with
+ * /torn/stocks for what each pays), and properties you rent out
+ * (/user/properties?filters=ownedByUser). Four calls; a part that fails is
+ * left out (null), the rest still count.
+ */
+export async function fetchPassiveIncome(client) {
+    const part = async (fn) => {
+        try {
+            return await fn();
+        } catch (error) {
+            if (error && (error.takingTurns || KEY_DEAD_CODES_API.has(error.code))) throw error;
+            return null;
+        }
+    };
+    const money = await part(async () => ((await client.get('v2/user/money')) || {}).money || null);
+    const cb = money && money.city_bank;
+    const userStocks = await part(async () => ((await client.get('v2/user/stocks')) || {}).stocks || []);
+    const tornStocks = userStocks && userStocks.length ? await part(async () => ((await client.get('v2/torn/stocks')) || {}).stocks || []) : [];
+    const properties = await part(async () => ((await client.get('v2/user/properties', { filters: 'ownedByUser', limit: 100 })) || {}).properties || []);
+    const slimStocks = (tornStocks || []).filter((s) => (userStocks || []).some((u) => Number(u.id) === Number(s.id))).map((s) => ({ id: s.id, name: s.name, acronym: s.acronym, bonus: s.bonus }));
+    return {
+        cityBank: cb ? { amount: cb.amount, profit: cb.profit, duration: cb.duration, until: cb.until, rate: cb.interest_rate } : null,
+        userStocks: (userStocks || []).map((u) => ({ id: u.id, shares: u.shares, bonus: u.bonus })),
+        tornStocks: slimStocks,
+        // Only what the rent needs (the full answer carries every modification and staff).
+        properties: (properties || []).filter((p) => p && p.status === 'rented').map((p) => ({ status: p.status, owner: p.owner ? { id: p.owner.id } : null, property: p.property ? { name: p.property.name } : null, cost_per_day: p.cost_per_day, rental_period_remaining: p.rental_period_remaining })),
+    };
+}
+
+/** Torn's codes for a key that no longer works (the caller stops on these). */
+const KEY_DEAD_CODES_API = new Set([2, 13, 18]);
+
 /** Points held, or null (see fetchMoney). */
 export async function fetchPoints(client) {
     const m = await fetchMoney(client);
