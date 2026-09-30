@@ -338,13 +338,26 @@ async function runCase(name) {
 }
 
 const wanted = process.argv.slice(2).length ? process.argv.slice(2) : ['gym', 'plain', 'profile'];
+// RUNS=3: each case three times, the median of each number (one run varies by ±80 ms at 4×).
+const RUNS = Math.max(1, Number(process.env.RUNS || 1));
+const median = (xs) => xs.slice().sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+async function runMedian(name) {
+    const runs = [];
+    for (let i = 0; i < RUNS; i++) runs.push(await runCase(name));
+    if (RUNS === 1) return runs[0];
+    const out = { ...runs[0], runs: RUNS };
+    for (const k of ['loadScriptMs', 'loadBusyMs', 'loadLongTasks', 'loadLongMs', 'loadWorstMs', 'steadyScriptPer10s', 'steadyBusyPer10s', 'steadyLongMs', 'gmKB', 'gmKeys', 'gmWritesPer10s', 'gmWriteKBPer10s']) out[k] = median(runs.map((r) => r[k]));
+    out.errors = runs.flatMap((r) => r.errors);
+    out.ready = runs.every((r) => r.ready);
+    return out;
+}
 const rows = [];
 for (const name of wanted) {
     if (!CASES[name]) {
         console.log('unknown case ' + name);
         continue;
     }
-    const row = await runCase(name);
+    const row = await runMedian(name);
     rows.push(row);
     if (process.env.PERF_OUT) await appendFile(process.env.PERF_OUT, JSON.stringify(row) + '\n');
     console.log(`\n${name} (${CPU}× CPU, realistic store, Tampermonkey-like, 3 tabs, changing page)${row.planMade === null ? '' : ' · saved plan made: ' + row.planMade}`);
