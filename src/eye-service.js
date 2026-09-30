@@ -216,7 +216,12 @@ async function flushOnce() {
     const withProfile = new Set(want.filter((x) => String(x).endsWith(':p')).map((x) => Number(String(x).split(':')[0])));
     const c = await cache();
     const now = Date.now();
-    const rec = (id) => (c.players[id] = c.players[id] || {});
+    let changed = false;
+    // Every write goes through here: the sweep saves only when one happened.
+    const rec = (id) => {
+        changed = true;
+        return (c.players[id] = c.players[id] || {});
+    };
     clients();
     // FFScouter, batched, for anything not fresh.
     if (getKey(K.ffsKey)) {
@@ -277,8 +282,10 @@ async function flushOnce() {
             }
         }
     }
-    for (const id of ids) rec(id).seen = Date.now();
-    saveSoon();
+    // Saved only when something changed (round 6: the whole cache was written on every sweep); `seen` (which players to
+    // keep) moves at most hourly.
+    for (const id of ids) if (!c.players[id] || !(now - (c.players[id].seen || 0) < 3600e3)) rec(id).seen = Date.now();
+    if (changed) saveSoon();
     // Your own attacks and gear: read on the webpage's Torn Eye tab only (owner, round 6: Torn's pages ask about the
     // player you view or attack, nothing else).
     if (pi.where === 'app') {
@@ -317,7 +324,9 @@ export function eyeView(id, extra = {}, { war = false } = {}) {
     let fGear = null;
     if (est) {
         // The fight Monte Carlo runs again only when something it reads changed (a war page redraws every 10 s).
-        const key = JSON.stringify([est.bss, est.stats, life, myLife, meStats, gearRec ? gearRec.seenAt : 0, statics.equipmentAt || 0]);
+        // Your stats in ~1% steps (round 6): every train moved them, and every chip's Monte Carlo ran again (~50 ms for 100).
+        const meKey = Object.values(meStats).map((v) => Math.round(Math.log1p(v) * 100));
+        const key = JSON.stringify([est.bss, est.stats, life, myLife, meKey, gearRec ? gearRec.seenAt : 0, statics.equipmentAt || 0]);
         const memo = eye.fc.get(id);
         if (memo && memo.key === key) {
             f = memo.f;

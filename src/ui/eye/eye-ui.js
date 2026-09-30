@@ -131,18 +131,26 @@ export function cardEl(v) {
 /** One floating card for the page, shown next to the chip under the pointer. */
 export function bindCard(doc, getView) {
     let card = null;
+    let shownFor = null;
     const hide = () => {
         if (card) card.remove();
         card = null;
+        shownFor = null;
     };
     // Hover, keyboard focus or a tap shows the card; Escape or leaving hides it.
     const show = (e) => {
         const chip = e.target && e.target.closest ? e.target.closest('.pi-chip[data-pi-player]') : null;
-        if (!chip) return hide();
+        if (!chip) {
+            if (card) hide();
+            return;
+        }
+        // Moving within the same chip (its dot, its words) keeps the card: it was rebuilt on every move (round 6).
+        if (card && shownFor === chip && e.type === 'mouseover') return;
         const v = getView(Number(chip.getAttribute('data-pi-player')));
         if (!v) return;
         hide();
         card = cardEl(v);
+        shownFor = chip;
         doc.body.appendChild(card);
         const r = chip.getBoundingClientRect();
         const x = Math.min(window.innerWidth - 340, Math.max(8, r.left));
