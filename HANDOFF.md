@@ -239,7 +239,7 @@ Done on the owner's yes. For later releases, the same steps minus the one-time r
 
   Torn Bids isn't laggy because it keeps its growing data in IndexedDB.
 - The owner's decisions (memory `owner-decisions`, "Round-6 answers"): no automatic; Create plan / Recalibrate; follow the saved plan; no money; no phone; extension OK. The gym page "greyed out" issue is added (plan §3.3b).
-- `docs/ROUND6-PLAN.md` holds the consolidated plan and the questions for the owner. `research-lag-measured.md` was still running when it was written; fold its numbers into the plan's §2.
+- `docs/ROUND6-PLAN.md` holds the consolidated plan and the questions for the owner, with the measured numbers in its §2. At 4× CPU with the owner's setup (Auto + Full key, receipts under 3 days): 1.6–2.0 s of script per page load; without that bug, 0.35–0.5 s. All research and profiling scripts are in `docs/sims/round6/`.
 
 ### 2026-09-30 (later): 1.2.3 — lag fix, bot pings early and without a plan, 48 h plan, phone trains
 Owner: "fix all issues, commit and push, remember to bug hunt before releasing".
