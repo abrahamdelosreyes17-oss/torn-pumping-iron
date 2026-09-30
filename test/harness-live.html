@@ -24,7 +24,12 @@
  *   &hidden=1     the tab reports itself hidden (nothing may be asked)
  *   &trading=MS   a stand-in Torn Trading panel (#ttv2-host) appears after MS ms: Pumping Iron pauses
  *   &ffs=1        save an FFScouter key (canned estimates for the fixture players)
+ *   &gm=tm        Tampermonkey-like storage (perf check): the store handed over at start, a copy on every read,
+ *                 every write sent to the other open tabs (BroadcastChannel); counts in window.__tm
+ *   &churn=1      a Torn-like page that keeps changing (header, sidebar, chat, bars every second, a train every 15 s)
+ *   &noscript=1   the page without Pumping Iron (what the page alone costs)
  *   window.__piSeed  {storeKey: raw} set before load (Playwright addInitScript): the store an earlier page left
+ *   window.__piSeedRaw  the same as one JSON string (the perf check's realistic store)
  */
 const Q = new URLSearchParams(location.search);
 if (Q.get('at')) {
@@ -32,12 +37,58 @@ if (Q.get('at')) {
   const shift = Date.parse(Q.get('at')) - realNow();
   Date.now = () => realNow() + shift;
 }
-// window.__piSeed (set by a check before the page loads): what an earlier page stored, as the next Torn page would find it.
-const _store = Object.assign({}, window.__piSeed || {});
+// window.__piSeed / __piSeedRaw (set by a check before the page loads): what an earlier page stored, as the next Torn page would find it.
+// gm=plain: plain object reads (the original harness). gm=tm: Tampermonkey-like: every value handed to the page at
+// start (parsed from one serialized blob), a copy on every read, writes serialized and sent to every other open tab
+// (BroadcastChannel), which deserializes them and fires its value-change listeners with remote=true.
+const GMMODE = Q.get('gm') || 'plain';
+window.__tm = { mode: GMMODE, startupMs: 0, startupChars: 0, gets: 0, getMs: 0, getChars: 0, sets: 0, setMs: 0, setChars: 0, recv: 0, recvMs: 0, recvChars: 0, setKeys: {} };
+let _store;
+{
+  const t = performance.now();
+  const raw = window.__piSeedRaw || JSON.stringify(window.__piSeed || {});
+  __tm.startupChars = raw.length;
+  _store = JSON.parse(raw);
+  __tm.startupMs = performance.now() - t;
+}
 const _listeners = {};
+const _bc = GMMODE === 'tm' ? new BroadcastChannel('pi-tm-store') : null;
+if (GMMODE === 'tm') {
+  window.GM_getValue = (k, d) => {
+    const t = performance.now();
+    __tm.gets++;
+    if (!(k in _store)) return d;
+    const v = JSON.parse(JSON.stringify(_store[k]));
+    __tm.getChars += v.length || 0;
+    const gk = (__tm.getKeys = __tm.getKeys || {}); gk[k] = gk[k] || [0, 0]; gk[k][0]++; gk[k][1] += v.length || 0;
+    __tm.getMs += performance.now() - t;
+    return v;
+  };
+  window.GM_setValue = (k, v) => {
+    const t = performance.now();
+    const old = _store[k];
+    const msg = JSON.stringify({ k, v });
+    _store[k] = JSON.parse(msg).v;
+    _bc.postMessage(msg);
+    __tm.sets++; __tm.setChars += msg.length; __tm.setKeys[k] = (__tm.setKeys[k] || 0) + 1;
+    __tm.setMs += performance.now() - t;
+    (_listeners[k] || []).forEach((f) => f(k, old, v, false));
+  };
+  window.GM_deleteValue = (k) => { const old = _store[k]; delete _store[k]; _bc.postMessage(JSON.stringify({ k, del: true })); (_listeners[k] || []).forEach((f) => f(k, old, undefined, false)); };
+  _bc.onmessage = (e) => {
+    const t = performance.now();
+    const m = JSON.parse(e.data);
+    const old = _store[m.k];
+    if (m.del) delete _store[m.k]; else _store[m.k] = m.v;
+    __tm.recv++; __tm.recvChars += e.data.length;
+    __tm.recvMs += performance.now() - t;
+    (_listeners[m.k] || []).forEach((f) => f(m.k, old, m.v, true));
+  };
+} else {
 window.GM_getValue = (k, d) => (k in _store ? _store[k] : d);
 window.GM_setValue = (k, v) => { const old = _store[k]; _store[k] = v; (_listeners[k] || []).forEach((f) => f(k, old, v, false)); };
 window.GM_deleteValue = (k) => { delete _store[k]; };
+}
 window.GM_registerMenuCommand = (label) => { (window.__menus = window.__menus || []).push(label); };
 window.GM_openInTab = (url) => { (window.__opened = window.__opened || []).push(url); };
 window.GM_addValueChangeListener = (k, f) => { (_listeners[k] = _listeners[k] || []).push(f); };
@@ -142,7 +193,65 @@ if (Q.get('fixture')) {
 if (Q.get('trading')) setTimeout(() => { const d = document.createElement('div'); d.id = 'ttv2-host'; d.style.cssText = 'position:fixed;right:16px;bottom:16px;width:300px;height:300px;background:#2e2e2e'; document.body.appendChild(d); }, Number(Q.get('trading')) || 0);
 window.onerror = (m) => { document.getElementById('out').textContent = 'BOOT ERROR: ' + m; };
 </script>
-<script>document.write('<script src="../torn-pumping-iron.user.js?v=' + Date.now() + '"><\/script>');</script>
+<script>
+// Torn-like page (churn=1, the perf check): ~3,000 extra nodes (header, sidebar areas, chat, footer, content filler),
+// timers and bars ticking every second, chat every 3 s, a toast on <body> every 7 s, and on the gym page a "train"
+// every 15 s (stat value, notification text and energy bar change inside #gymroot / the sidebar).
+if (Q.get('churn')) {
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+  const header = el('div', 'header-wrapper___x1'); header.id = 'header-root';
+  for (let i = 0; i < 25; i++) { const li = el('div', 'menu-item___a' + i); li.append(el('a', 'link___b', 'Menu ' + i), el('span', 'icon___c')); header.append(li); }
+  const clock = el('span', 'server-date-time___t', '10:48:00'); header.append(clock);
+  document.body.prepend(header);
+  let sb = document.getElementById('sidebarroot');
+  if (!sb) { sb = el('div'); sb.id = 'sidebarroot'; document.body.prepend(sb); }
+  const timers = [];
+  for (const name of ['Energy', 'Nerve', 'Happy', 'Life']) {
+    let bar = document.getElementById('bar' + name);
+    if (!bar) { bar = el('div', 'bar___3xcUo'); bar.id = 'bar' + name; bar.append(el('p', 'bar-name___x1Kd2', name + ':'), el('p', 'bar-value___uxnah', '100/150')); sb.append(bar); }
+    const tl = el('p', 'bar-timeleft___B9RGV', '0:05:00'); const prog = el('div', 'progress___z'); const fill = el('div', 'progress-line___FhcBg'); prog.append(fill);
+    bar.append(tl, prog); timers.push([tl, fill]);
+  }
+  const areas = el('div', 'areas___x');
+  for (let i = 0; i < 40; i++) { const a = el('div', 'area-desktop___bpqAS'); const l = el('a', 'desktopLink___SG2RU'); l.append(el('span', 'svgIconWrap___AMIqR'), el('span', 'linkName___FoKha', 'Area ' + i)); a.append(l); areas.append(a); }
+  sb.append(areas);
+  const chat = el('div', 'chat-app__chat-list___x'); chat.id = 'chatRoot';
+  const boxes = [];
+  for (let b = 0; b < 3; b++) {
+    const box = el('div', 'chat-box___m'); const list = el('div', 'chat-box-body___n');
+    for (let i = 0; i < 60; i++) { const m = el('div', 'message___RSW3S'); m.append(el('a', 'sender___Ziikz', 'Player' + i + ':'), el('span', 'text___Ab', 'hello there ' + i), el('span', 'time___x', '10:4' + (i % 10))); list.append(m); }
+    box.append(el('div', 'chat-box-header___q', 'Faction'), list); chat.append(box); boxes.push(list);
+  }
+  document.body.append(chat);
+  const filler = el('div', 'torn-filler'); filler.style.cssText = 'display:none';
+  for (let i = 0; i < 500; i++) { const r = el('div', 'row___f'); r.append(el('span', 'c1', 'x' + i), el('span', 'c2', 'y')); filler.append(r); }
+  document.body.append(filler);
+  const footer = el('div', 'footer___x'); for (let i = 0; i < 40; i++) footer.append(el('a', 'f', 'Footer link ' + i)); document.body.append(footer);
+  window.__churn = { ticks: 0, trains: 0, nodes: document.getElementsByTagName('*').length };
+  let s = 300;
+  setInterval(() => {
+    s = (s + 299) % 300; __churn.ticks++;
+    const t = '0:0' + Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    for (const [tl, fill] of timers) { tl.textContent = t; fill.style.width = (100 - s / 3) + '%'; }
+    clock.textContent = new Date(Date.now()).toISOString().slice(11, 19);
+  }, 1000);
+  let n = 0;
+  setInterval(() => { const list = boxes[n++ % 3]; const m = el('div', 'message___RSW3S'); m.append(el('a', 'sender___Ziikz', 'Someone:'), el('span', 'text___Ab', 'msg ' + n), el('span', 'time___x', 'now')); list.append(m); list.firstChild.remove(); }, 3000);
+  setInterval(() => { const toast = el('div', 'toast___x', 'New event'); document.body.append(toast); setTimeout(() => toast.remove(), 3000); }, 7000);
+  setInterval(() => {
+    const root = document.getElementById('gymroot');
+    if (!root) return;
+    __churn.trains++;
+    const v = root.querySelector('li[class*="strength___"] [class*="propertyValue___"]');
+    if (v) { const now = Number(v.textContent.replace(/,/g, '')) + 2150000; v.textContent = now.toLocaleString('en-US', { minimumFractionDigits: 2 }); }
+    const note = root.querySelector('[class*="notificationText___"]');
+    if (note) { note.textContent = ''; note.append(el('p', null, 'You used 50 energy training your strength. You gained 2,150,000.00 strength.')); }
+    const ev = document.querySelector('#barEnergy [class*="bar-value___"]');
+    if (ev) { const [c, m] = ev.textContent.split('/').map(Number); ev.textContent = Math.max(0, c - 50) + '/' + m; }
+  }, 15000);
+}
+</script>
+<script>if (!Q.get('noscript')) document.write('<script src="../torn-pumping-iron.user.js?v=' + Date.now() + '"><\/script>');</script>
 <script>
 setTimeout(() => {
   const out = document.getElementById('out');
