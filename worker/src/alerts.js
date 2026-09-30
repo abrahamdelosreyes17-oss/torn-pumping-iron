@@ -13,7 +13,14 @@ export const DRUG_IDLE_S = 15 * 60;
 /** Jump sequence steps (not strict): ping this close to their time. */
 export const STEP_LEAD_S = 2 * 60;
 
+/**
+ * Energy pings this far ahead of full at most. Runs come a minute apart, so the last run
+ * before full that is still 30 s ahead sends it: the ping lands 30–90 s before the tick.
+ */
+export const ENERGY_LEAD_S = 90;
+
 const clock = (s) => new Date(s * 1000).toISOString().slice(11, 16);
+const clockS = (s) => new Date(s * 1000).toISOString().slice(11, 19);
 
 const TORN = 'https://www.torn.com/';
 export const LINKS = { items: TORN + 'item.php', gym: TORN + 'gym.php', points: TORN + 'points.php' };
@@ -89,12 +96,17 @@ export function dueAlerts(state, plan, nowS, rules = {}, ctx = {}) {
         out.push({ id: 'drug:' + Math.round(endS / 300), kind: 'drug', link: LINKS.items, title: 'Drug cooldown ends in ' + Math.max(1, Math.round(drug / 60)) + ' min', text: step ? step.label + (step.train ? ', then ' + step.train : '') : 'Ready for the next drug', step: step || null });
     }
 
-    // Energy full while the plan trains natural energy (not while stacking for a jump).
+    // Energy full while the plan trains natural energy (not while stacking for a jump); ahead of time when Torn's
+    // full_time says it fills before the next run is ENERGY_LEAD_S early (owner: the ping came ~50 s after the tick).
     const e = bars.energy || {};
     const stacking = plan && plan.type === 'jump';
-    if (on.energy && !stacking && Number(e.maximum) > 0 && Number(e.current) >= Number(e.maximum)) {
+    const full = Number(e.maximum) > 0 && Number(e.current) >= Number(e.maximum);
+    const fullIn = full ? 0 : Number(e.full_time) || 0;
+    if (on.energy && !stacking && Number(e.maximum) > 0 && (full || (fullIn > 0 && fullIn <= ENERGY_LEAD_S))) {
         const step = nextStep(plan, nowS, (s) => s.kind === 'natural' || !!s.train);
-        out.push({ id: 'energy:' + Math.floor(nowS / 3600), kind: 'energy', link: LINKS.gym, title: 'Energy is full', text: step && step.train ? 'Train ' + step.train : 'Train your energy so none is wasted', step: step || null, skip: false });
+        const fullAt = nowS + fullIn;
+        // The id is the hour it fills: the early ping and the next run's "full" are one ping.
+        out.push({ id: 'energy:' + Math.floor(fullAt / 3600), kind: 'energy', link: LINKS.gym, title: full ? 'Energy is full' : 'Energy full in ' + fullIn + ' s (' + clockS(fullAt) + ' TCT)', text: step && step.train ? 'Train ' + step.train : 'Train your energy so none is wasted', step: step || null, skip: false, fullAt });
     }
 
     // Refill unused, two hours before Torn midnight (UTC).
@@ -161,7 +173,8 @@ export function resolvedBy(kind, state, nowS, body = {}) {
     const e = bars.energy || {};
     if (kind === 'drug' || kind === 'drugready') return Number(cd.drug) > DRUG_LEAD_S;
     if (kind === 'booster') return Number(cd.booster) > 0;
-    if (kind === 'energy') return Number(e.maximum) > 0 && Number(e.current) < Number(e.maximum);
+    // A ping sent ahead of full isn't closed by energy still filling: only once the fill time has passed.
+    if (kind === 'energy') return Number(e.maximum) > 0 && Number(e.current) < Number(e.maximum) && !(Number(body.fullAt) > nowS);
     if (kind === 'refill') return Boolean(state && state.refills && state.refills.energy === true);
     if (kind === 'jump' || kind === 'step' || kind === 'landed') return Boolean(body.step && nowS > Number(body.step.at) + 15 * 60);
     return false;

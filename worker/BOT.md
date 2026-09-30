@@ -39,7 +39,7 @@ Commands that read Torn: at most one per user every 5 seconds.
 
 ## Pings (cron, every minute)
 
-Existing: drug cooldown ≤ 5 min, energy full (not while stacking), refill unused 2 h before Torn midnight, strict jump steps 5 min before their tick.
+Existing: drug cooldown ≤ 5 min, energy full (not while stacking; since 2026-09-30 ahead of time: when Torn's `full_time` is ≤ 90 s the ping goes then, 30–90 s before the tick, id = the hour it fills so the "full" read after is the same ping, and it isn't closed as seen in Torn before the fill time; runs land ~52 s into each minute, so the old full-only ping came up to a minute late), refill unused 2 h before Torn midnight, strict jump steps 5 min before their tick.
 Added: booster cooldown over (booster step next), drug ready 15 min and unused (one nudge), back from travel with a step waiting, jump sequence steps without a tick, plan out of date after 12 h (then only state pings and strict jump steps still ahead; "plan out of date" once per synced plan), price watches (kind `price`, 5 minutes after the user's last check), war pings (kind `war`), watch list (kind `watch`), chain timeout (off by default).
 
 - **Delivery:** a DM from the bot (DM channel kept); on 50007 or 403, the channel webhook (mention, no buttons) and DMs rest 6 h. `/settings delivery:channel` forces the webhook.

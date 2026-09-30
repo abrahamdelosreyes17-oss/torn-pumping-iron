@@ -139,3 +139,31 @@ test('a user with neither webhook nor link is skipped without a Torn read', asyn
     assert.deepEqual(await runCron(env, T0, f), [], 'not even picked: it would block the line');
     assert.equal(f.calls.length, 0);
 });
+
+test('energy: pinged ahead when Torn says it fills within 90 s; the full read after is the same ping, and filling does not close it', async () => {
+    const { env, id } = await linkedEnv();
+    // 146/150: full in 144 s, past the lead: nothing about energy yet (the drug ping goes).
+    await runCron(env, T0, world({ torn: tornState({ drug: 3600, energy: 146 }) }));
+    assert.ok(![...env.DB.sent.keys()].some((k) => k.includes('|energy:')), 'not yet: 144 s is more than a run ahead');
+    // A minute on, 148/150: full in 72 s, the last run 30 s ahead of it.
+    const f = world({ torn: tornState({ drug: 3600, energy: 148 }) });
+    await runCron(env, T0 + 60, f);
+    const post = discordCalls(f).find((c) => (c.init.method || 'GET') === 'POST' && /messages$/.test(c.url));
+    assert.equal(post.body.content, 'Energy full in 72 s (' + new Date((T0 + 132) * 1000).toISOString().slice(11, 19) + ' TCT)');
+    const key = id + '|energy:' + Math.floor((T0 + 132) / 3600);
+    assert.ok(env.DB.sent.has(key));
+    assert.equal(JSON.parse(env.DB.sent.get(key).body).fullAt, T0 + 132);
+    // Still filling at the next run (149/150, 36 s left): not "Seen in Torn", no second ping.
+    const g = world({ torn: tornState({ drug: 3600, energy: 149 }) });
+    await runCron(env, T0 + 96, g);
+    assert.equal(discordCalls(g).length, 0, 'no edit, no new message');
+    assert.equal(env.DB.sent.get(key).state, 'sent');
+    // Full: the same ping (same id), nothing new.
+    const h = world({ torn: tornState({ drug: 3600, energy: 150 }) });
+    await runCron(env, T0 + 156, h);
+    assert.equal(discordCalls(h).length, 0);
+    // Trained after it filled: closed as seen in Torn.
+    const k = world({ torn: tornState({ drug: 3600, energy: 20 }) });
+    await runCron(env, T0 + 216, k);
+    assert.equal(env.DB.sent.get(key).state, 'resolved');
+});
