@@ -83,3 +83,52 @@ test('"Last trains": the log’s sessions join the reads’ ones, except where a
     const both = mergeSessions(reads, [...later, ...logged]);
     assert.deepEqual(both.map((x) => Boolean(x.fromLog)), [true, false], 'newest first');
 });
+
+test('a long time away (more than one read’s 300 lines): the rest is read a minute at a time until nothing is missing', async () => {
+    const { K, set, get } = await import('../src/platform/store.js');
+    const { refreshGymLog } = await import('../src/income.js');
+    // Torn's log: 450 clicks, one every 5 minutes, newest first, honouring from (after) and to (up to and including).
+    const ALL = Array.from({ length: 450 }, (_, i) => line('L' + i, T + i * 300, 5300 + (i % 4), { trains: 1, energy_used: 10, gym: 9, strength_increased: 1, defense_increased: 1, speed_increased: 1, dexterity_increased: 1 }));
+    let calls = 0;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+        calls++;
+        const u = new URL(url);
+        const from = Number(u.searchParams.get('from'));
+        const to = u.searchParams.get('to') ? Number(u.searchParams.get('to')) : Infinity;
+        const limit = Number(u.searchParams.get('limit')) || 20;
+        const log = ALL.filter((e) => e.timestamp > from && e.timestamp <= to).sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
+        return { ok: true, status: 200, json: async () => ({ log }), text: async () => JSON.stringify({ log }) };
+    };
+    try {
+        set(K.apiKey, 'MainKeyHarness12');
+        set(K.fullKey, 'FullKeyHarness12');
+        set(K.fullKeyState, { ok: true, at: 1 });
+        set(K.gymLog, { lines: [], newest: (T - 60) * 1000, at: 0 });
+        let now = (T + 450 * 300) * 1000;
+        await refreshGymLog({ now });
+        let kept = get(K.gymLog, null);
+        assert.ok(kept.lines.length < 450 && kept.gap, 'the first read stopped at its page limit and left a gap (' + kept.lines.length + ')');
+        for (let i = 0; i < 5 && kept.gap; i++) {
+            now += 60e3;
+            await refreshGymLog({ now });
+            kept = get(K.gymLog, null);
+        }
+        assert.equal(kept.gap, null, 'the gap is filled');
+        assert.equal(kept.lines.length, 450, 'every click is kept');
+        assert.equal(new Set(kept.lines.map((x) => x.id)).size, 450);
+        // Then back to every 15 minutes, from the newest.
+        const before = calls;
+        await refreshGymLog({ now: now + 60e3 });
+        assert.equal(calls, before, 'not due for 15 minutes');
+    } finally {
+        globalThis.fetch = realFetch;
+    }
+});
+
+test('a session whose gain Torn didn’t give (an unknown field name) shows no gain, not +0', () => {
+    const s = logSessions(parseGymLog([line('q', T, 5301, { trains: 4, energy_used: 40, defence_increased: 9, gym: 9 })]));
+    assert.equal(s[0].actual, null);
+    const t = logSessions(parseGymLog([line('q', T, 5301, { trains: 4, energy_used: 40, defense_increased: 9, gym: 9 })]));
+    assert.equal(t[0].actual, 9);
+});

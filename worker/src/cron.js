@@ -240,6 +240,9 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
     const next = nextPrev(prev, state, nowS);
     next.watchAt = watching ? nowS : (prev && prev.watchAt) || null;
     next.staleFor = out.ids.some((id) => id.startsWith('stale:')) ? planAt : (prev && prev.staleFor) || null;
+    // The "drug unused" nudge for this ready spell went (now or before): not again once its row is cleaned up.
+    const ready = alerts.find((a) => a.kind === 'drugready');
+    if (ready && next.drugZeroAt !== null && (seen.has(ready.id) || out.ids.includes(ready.id))) next.drugNudged = next.drugZeroAt;
     const oldWar = row.war || null;
     row.prev = JSON.stringify(next);
     await db.prepare(Q.userRan).bind(nowS, row.prev, oldWar, row.id).run();

@@ -146,20 +146,19 @@ function lastTrains(m, ctx) {
         return h('tr', {}, [
             h('td', { class: 't', text: clock(x.at, ctx.settings) }),
             h('td', { class: stats.length === 1 ? 's-' + stats[0] : null, text: stats.map((k) => STAT_LABEL[k] + ' × ' + x.trains[k]).join(' · ') }),
-            h('td', {}, [x.gyms.join(' / '), x.fromLog ? h('span', { class: 'muted', title: 'Seen only in Torn’s log (trained while Pumping Iron wasn’t open): no plan figure to check it against', text: ' · Torn log' }) : null]),
+            h('td', {}, [x.gyms.join(' / '), x.fromLog ? h('span', { class: 'muted', title: 'From Torn’s own log: Pumping Iron had no clean read of this session (you trained elsewhere, e.g. on your phone, or a drug, booster or refill came between two reads), so there’s no plan figure to check it against', text: ' · Torn log' }) : null]),
             h('td', { class: 'r', text: checked ? fmtSigned(x.predicted) : '—' }),
-            h('td', { class: 'r', text: fmtSigned(x.actual) }),
+            h('td', { class: 'r', text: x.actual === null || x.actual === undefined ? '—' : fmtSigned(x.actual) }),
             h('td', { class: checked ? 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn') : 'r muted', text: checked ? fmtPct(off, 1) : '—' }),
         ]);
     });
     if (rows.length > 1) {
-        // Off by: over the checked sessions only (the log's have no prediction).
-        const checked = sessions.filter((x) => x.predicted !== null && x.predicted !== undefined);
-        const p = checked.reduce((a, x) => a + x.predicted, 0);
-        const pa = checked.reduce((s, x) => s + x.actual, 0);
-        const a = sessions.reduce((s, x) => s + x.actual, 0);
-        const off = offOf(p, pa);
-        rows.push(h('tr', { class: 'total' }, [h('td'), h('td', {}, [h('b', { text: 'Total' })]), h('td'), h('td', { class: 'r', text: checked.length ? fmtSigned(p) : '—' }), h('td', { class: 'r' }, [h('b', { text: fmtSigned(a) })]), h('td', { class: checked.length ? 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn') : 'r muted', text: checked.length ? fmtPct(off, 1) : '—' })]));
+        // "Plan said" and "Off by" add up only when every row has a plan figure (the log's sessions have none).
+        const all = sessions.every((x) => x.predicted !== null && x.predicted !== undefined);
+        const p = all ? sessions.reduce((s, x) => s + x.predicted, 0) : 0;
+        const a = sessions.reduce((s, x) => s + (x.actual || 0), 0);
+        const off = offOf(p, a);
+        rows.push(h('tr', { class: 'total' }, [h('td'), h('td', {}, [h('b', { text: 'Total' })]), h('td'), h('td', { class: 'r', text: all ? fmtSigned(p) : '—' }), h('td', { class: 'r' }, [h('b', { text: fmtSigned(a) })]), h('td', { class: all ? 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn') : 'r muted', text: all ? fmtPct(off, 1) : '—' })]));
     }
     return h('div', {}, [
         sectionHead('Last trains', meta(['what the plan said, what Torn showed']), null, 'h3'),

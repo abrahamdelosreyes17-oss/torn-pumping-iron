@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Pumping Iron
 // @namespace    torn-pumping-iron
-// @version      1.2.2
+// @version      1.2.3
 // @description  Gym planner and fight scout for Torn: what to take, what to train, what to buy, who you can beat. Reads the API and the page you're on; never acts for you.
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
@@ -48,7 +48,8 @@
 (function () {
     'use strict';
 
-    const PI_BUILD_VERSION = '1.2.2';
+    const PI_BUILD_VERSION = '1.2.3';
+    const PI_BUILD_HASH = '253d838f6715';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -280,6 +281,12 @@
         // Your real Xanax cooldowns (core/drugcd.js) and the candy picked today (kept steady: core/candy.js).
         xanaxCds: 'xanaxCds',
         candyPick: 'candyPick',
+        // The plan comparison kept between pages (runtime.js), the event comparison, and which tab is working one out.
+        compareCache: 'compareCache',
+        eventCompareCache: 'eventCompareCache',
+        compareBusy: 'compareBusy',
+        // Your trains from Torn's log (Full key): the sessions no read of ours saw (core/gymlog.js).
+        gymLog: 'gymLog',
     };
 
     /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */
@@ -390,8 +397,8 @@
     /** What "Your data" in Settings can clear, by group. */
     const DATA_GROUPS = {
         keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker, K.fullKey, K.fullKeyState, K.moneyLog],
-        plan: [K.plan, K.recheck, K.gymSession],
-        progress: [K.statsHistory, K.dayLog, K.dayTotals, K.planLine, K.receipts],
+        plan: [K.plan, K.recheck, K.gymSession, K.compareCache, K.eventCompareCache, K.compareBusy],
+        progress: [K.statsHistory, K.dayLog, K.dayTotals, K.planLine, K.receipts, K.gymLog],
         learning: ['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions],
         prices: [K.priceHistory, K.prices],
         eye: ['eyeTargets', 'myAttacks'],
@@ -1272,14 +1279,33 @@
     function gainPerTrain(stat, S, H, dots, E, perks = 1, mode = dampingMode) {
         const ab = STAT_AB[stat];
         if (!ab || !(dots > 0) || !(E > 0)) return 0;
-        const h = Math.min(HAPPY_CAP, Math.max(0, H || 0));
+        const t = happyTerms(H);
         const [A, B] = ab;
-        const inner =
-            effectiveStat(S, mode) * round4(1 + 0.07 * round4(Math.log(1 + h / 250))) +
-            8 * Math.pow(h, 1.05) +
-            (1 - Math.pow(h / HAPPY_CAP, 2)) * A +
-            B;
+        const inner = effectiveStat(S, mode) * t.f + t.p + t.q * A + B;
         return Math.max(0, (inner / 200000) * dots * E * perks);
+    }
+
+    /** Slots of happyTerms' cache: a simulated train asks for the happy now (twice) and the split's reference happy. */
+    const TERMS_SLOTS = 4;
+    const termsKey = new Array(TERMS_SLOTS).fill(NaN);
+    const termsVal = new Array(TERMS_SLOTS).fill(null);
+    let termsNext = 0;
+
+    /**
+     * The happy-only parts of the formula, for one happy: f (the stat's
+     * multiplier), p and q. The same numbers gainPerTrain always used; kept for
+     * the last few happy values, since the simulator asks for the same happy
+     * several times per train (the split's pick and the train itself), and the
+     * log and powers were most of the plan comparison's time.
+     */
+    function happyTerms(H) {
+        const h = Math.min(HAPPY_CAP, Math.max(0, H || 0));
+        for (let i = 0; i < TERMS_SLOTS; i++) if (termsKey[i] === h) return termsVal[i];
+        const v = { f: round4(1 + 0.07 * round4(Math.log(1 + h / 250))), p: 8 * Math.pow(h, 1.05), q: 1 - Math.pow(h / HAPPY_CAP, 2) };
+        termsKey[termsNext] = h;
+        termsVal[termsNext] = v;
+        termsNext = (termsNext + 1) % TERMS_SLOTS;
+        return v;
     }
 
     /**
@@ -1315,7 +1341,11 @@
 
     /** Sum of the four stats. */
     function totalOf(stats) {
-        return STATS.reduce((a, k) => a + (Number(stats && stats[k]) || 0), 0);
+        // A plain loop, same order and sum as a reduce: the split asks for it on every simulated train.
+        let a = 0;
+        if (!stats) return a;
+        for (let i = 0; i < STATS.length; i++) a += Number(stats[STATS[i]]) || 0;
+        return a;
     }
 
     /* ===== src/core/bars.js ===== */
@@ -1922,11 +1952,8 @@
     /** [calibrate] The happy later trains happen at: steady training runs it down to about 0 (the simulator). */
     const SPLIT_HAPPY_REF = 0;
 
-    /** The happy-only parts of gain.js's formula (gainPerTrain), for one happy. */
-    function happyTerms(H) {
-        const h = Math.min(HAPPY_CAP, Math.max(0, H || 0));
-        return { f: round4(1 + 0.07 * round4(Math.log(1 + h / 250))), p: 8 * Math.pow(h, 1.05), q: 1 - Math.pow(h / HAPPY_CAP, 2) };
-    }
+    /** pickStat's two passes: stats more than the on-build band under their share, then any under it. */
+    const CUTS = [ON_BUILD_PP / 100, 0];
 
     /** gainPerTrain's bracket (before × dots × energy × perks ÷ 200,000): what a train gains per energy, up to that factor. */
     function innerGain(stat, eff, t) {
@@ -1960,14 +1987,13 @@
     function pickStat(cands, s, shares, happy, perks = null, rule = SPLIT_RULE, happyRef = SPLIT_HAPPY_REF, happyMax = null) {
         const total = totalOf(s);
         if (rule !== 'deficit') {
-            const band = ON_BUILD_PP / 100;
             const hNow = happyMax !== null && happy > happyMax ? happyMax : happy;
             const weigh = SPLIT_HAPPY_WEIGHT > 0 && hNow !== happyRef;
             // The happy parts of the formula are the same for every stat: once per pick (this runs for every simulated train).
             const tNow = happyTerms(happy);
             const tAt = hNow === happy ? tNow : happyTerms(hNow);
             const tRef = weigh ? happyTerms(happyRef) : null;
-            for (const cut of [band, 0]) {
+            for (const cut of CUTS) {
                 let pick = null;
                 let best = 0;
                 for (const c of cands) {
@@ -5080,6 +5106,38 @@
         }
         out.sort((a, b) => b.at - a.at);
         out.coveredFrom = coveredFrom;
+        return out;
+    }
+
+    /**
+     * Your gym trains from Torn's log since a time (Full key only): the four
+     * train types in one call, newest first, 100 a page. A full page means more
+     * are older: walk back with `to` (pages overlap at the edge second, so the
+     * caller dedupes by id), at most `pages` calls. Raw v2 lines, with
+     * `complete` (it reached back to `from`) and `oldest` (the oldest second
+     * read: where the next read goes on from when it didn't).
+     */
+    async function fetchGymLog(client, { from, to = null, pages = 3, limit = 100 }) {
+        const out = [];
+        out.complete = false;
+        out.oldest = to;
+        for (let i = 0; i < pages; i++) {
+            const d = await client.get('v2/user/log', { log: '5300,5301,5302,5303', from, limit, ...(to ? { to } : {}) });
+            const rows = (d && d.log) || [];
+            out.push(...rows);
+            const oldest = rows.length ? Math.min(...rows.map((e) => Number(e.timestamp) || Infinity)) : Infinity;
+            if (Number.isFinite(oldest)) out.oldest = out.oldest === null ? oldest : Math.min(out.oldest, oldest);
+            if (rows.length < limit || !Number.isFinite(oldest) || oldest <= from) {
+                out.complete = true;
+                break;
+            }
+            // A whole page in one second (never for trains): nothing further back can be asked for; take it as complete.
+            if (oldest === to) {
+                out.complete = true;
+                break;
+            }
+            to = oldest;
+        }
         return out;
     }
 
@@ -8214,13 +8272,16 @@
      * The export's files: gym-samples.json, fights.json, model.json, meta.json.
      * Player ids are left out (fights carry a hashed stand-in) unless asked.
      */
-    function exportFiles({ samples = [], fights = [], learned = null, version = '', now = Date.now(), includeIds = false }) {
+    function exportFiles({ samples = [], fights = [], gymLog = [], learned = null, version = '', now = Date.now(), includeIds = false }) {
         const gym = samples.map((s) => ({ at: s.at || null, stat: s.stat, trains: s.trains, predicted: Math.round(s.predicted), actual: Math.round(s.actual), S: round4sig(s.S), H: s.H, dots: s.dots, E: s.E, perks: s.perks, gym: s.gym || null }));
         const fl = fights.map((f) => ({ at: f.at, who: includeIds ? f.key.split(':')[0] : f.who, predictedWin: f.predictedWin, won: f.won, predictedHpKept: f.predictedHpKept, hpKept: f.hpKept }));
         const model = learned ? { at: learned.at, gym: learned.gym ? { accepted: learned.gym.accepted, model: learned.gym.model, heldOut: learned.gym.heldOut, sessions: learned.gym.sessions } : null, fights: learned.fights ? { accepted: learned.fights.accepted, model: learned.fights.model, fights: learned.fights.fights } : null } : null;
-        const meta = { app: 'Torn Pumping Iron', version, exportedAt: new Date(now).toISOString(), sessions: gym.length, fights: fl.length, ids: includeIds ? 'included' : 'left out' };
+        // Every TRAIN click from Torn's log (Full key): the stat before, trains, gym and gain, for checking the split on real sessions.
+        const log = (gymLog || []).map((x) => ({ at: x.at, stat: x.stat, trains: x.trains, energy: x.energy, happy: x.happy, gym: x.gymId, before: x.before === null || x.before === undefined ? null : round4sig(x.before), gain: x.gain }));
+        const meta = { app: 'Torn Pumping Iron', version, exportedAt: new Date(now).toISOString(), sessions: gym.length, fights: fl.length, gymLog: log.length, ids: includeIds ? 'included' : 'left out' };
         return [
             { name: 'gym-samples.json', data: JSON.stringify(gym) },
+            { name: 'gym-log.json', data: JSON.stringify(log) },
             { name: 'fights.json', data: JSON.stringify(fl) },
             { name: 'model.json', data: JSON.stringify(model) },
             { name: 'meta.json', data: JSON.stringify(meta, null, 1) },
@@ -8444,8 +8505,15 @@
         const days = Math.max(1, Math.round((event.end - event.start) / (24 * 3600e3)));
         const key = [event.id, event.start, pi.compareKey, days, Math.round(budgetPerDay || 0)].join('|');
         if (pi.eventCompare && pi.eventCompare.key === key) return pi.eventCompare;
-        // Two more full comparisons: never inside a redraw. The last answer stands until the new one is ready.
-        if (pi.eventWanted !== key) {
+        // Kept between pages like the plan comparison (another page or tab worked it out).
+        const kept = getShared(K.eventCompareCache, null);
+        if (kept && kept.v === BUILD && kept.key === key) {
+            pi.eventCompare = kept;
+            return kept;
+        }
+        // Two more full comparisons: never inside a redraw, and only in a tab you can see. The last answer stands until the new one is ready.
+        // Not from a comparison still being worked out (it would run twice, once for the old inputs).
+        if (pi.eventWanted !== key && isVisible() && (!pi.compareWanted || pi.compareWanted === pi.compareKey)) {
             pi.eventWanted = key;
             setTimeout(async () => {
                 if (pi.eventWanted !== key) return;
@@ -8464,7 +8532,10 @@
         // Same inputs as the plan's own comparison (shops, console held, job), with the event's multiplier on one side.
         const eventCompare = await compareStrategiesAsync({ state, pc: boosted, shares, settings: es, prices, special, statics, pickBy: 'most' });
         const normalCompare = await compareStrategiesAsync({ state, pc, shares, settings: es, prices, special, statics, pickBy: 'most' });
-        if (pi.eventWanted === key) pi.eventCompare = { key, eventCompare, normalCompare };
+        if (pi.eventWanted === key) {
+            pi.eventCompare = { v: BUILD, key, eventCompare, normalCompare };
+            set(K.eventCompareCache, pi.eventCompare);
+        }
         return pi.eventCompare;
     }
 
@@ -8472,7 +8543,54 @@
     const COMPARE_CLICK_DELAY_MS = 80;
     const COMPARE_PRICE_DELAY_MS = 5000;
 
-    /** Re-run the strategy comparison at most once per Torn hour or when inputs change. */
+    /** This build's version: a comparison kept by another version is never used (its results may have another shape). */
+    const BUILD = (typeof PI_BUILD_VERSION !== 'undefined' ? PI_BUILD_VERSION : 'dev') + '+' + (typeof PI_BUILD_HASH !== 'undefined' ? PI_BUILD_HASH : 'dev');
+
+    /**
+     * A tab working out the comparison holds the turn this long, renewed after
+     * every plan it runs; other tabs take its result instead of running their
+     * own. Short, so a page left mid-run (a click to another Torn page) holds
+     * the others back for seconds, not half a minute; and the page lets go of it
+     * as it goes (pagehide).
+     */
+    const COMPARE_BUSY_MS = 5000;
+
+    /** Thrown inside a run that newer inputs made pointless: it stops at its next slice. */
+    const SUPERSEDED = { superseded: true };
+
+    /** Let go of the turn to work out the comparison, if this tab holds it. */
+    function releaseCompareTurn() {
+        const busy = get(K.compareBusy, null);
+        if (busy && busy.tab === pi.tabId) del(K.compareBusy);
+    }
+
+    /** The comparison kept between pages (K.compareCache), if this build wrote it. */
+    function storedCompare() {
+        const c = getShared(K.compareCache, null);
+        return c && c.v === BUILD && c.key && c.compare ? c : null;
+    }
+
+    /** Use a kept comparison. `exact`: it is for the inputs now, so nothing is waiting. */
+    function adoptCompare(c, exact) {
+        pi.compare = c.compare;
+        pi.whatIf = c.whatIf || null;
+        pi.jobWhatIf = c.jobWhatIf || [];
+        pi.compareKey = c.key;
+        pi.compareKeyNoPrice = c.keyNoPrice;
+        if (exact) {
+            pi.compareWanted = c.key;
+            pi.compareScheduled = '';
+        }
+    }
+
+    /**
+     * Re-run the strategy comparison at most once per Torn hour or when inputs
+     * change, in one tab, and keep it between pages: Torn loads a new page on
+     * nearly every click, and each one used to work the whole comparison out
+     * again in one go (owner's friend, 2026-09-30: "masyadong laggy"; ~1 s a
+     * page on a slow machine). A page opens on the kept one; when the inputs
+     * moved, the last one shows while the new one is worked out in slices.
+     */
     function comparisonFor(state, statics, plan, settings) {
         const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult });
         const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
@@ -8484,46 +8602,107 @@
         const perkSig = JSON.stringify([learnedNow().mode, pc.perks.mult, pc.perks.happyLossMult, pc.perks.canMult, pc.perks.candyMult, pc.perks.consoleMult, pc.perks.edvdMult, pc.perks.boosterCapExtraH]);
         // Items and job: the candy rule (Plan dropdown), shops ticked, Torn's item data, a console held, the job, specials held.
         const pickBy = plan.pickBy || 'most';
-        const itemSig = JSON.stringify([pickBy, shopsAllowed(settings), statics.itemsAt || 0, Number((statics.inventory || {})[104]) > 0, statics.job || null, statics.jobPoints || null, state.specialRefills || 0, Math.round((state.boosterCd || 0) / 3600), heldBoosters(statics.inventory), statics.candyPick || null, xanaxCdOf(statics.xanaxCds).min]);
-        const keyNoPrice = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, pc.unlocked.join(','), special, itemSig].join('|');
-        const key = keyNoPrice + '|' + priceSig;
-        if (key !== pi.compareKey) {
-            // The what-ifs after the plans (they're small); `compare` is the plans' results.
-            const finish = (compare) => {
-                pi.compare = compare;
-                // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
-                pi.whatIf = pc.perks.bliss ? null : blissWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy });
-                // Company what-ifs: hired where a jump variant would beat the recommended plan.
-                const rec = recommend(pi.compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy });
-                pi.jobWhatIf = companyWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy, compare: pi.compare, recommended: rec.recommended });
-                pi.compareKey = key;
-                pi.compareKeyNoPrice = keyNoPrice;
-                // Today's candy stays named unless another is clearly cheaper (owner: it flipped on every price load).
-                const mine = compare && compare[plan.strategy] && compare[plan.strategy].candy;
-                const kept = get(K.candyPick, null);
-                const day = tornDayStart(Date.now());
-                if (mine && !(kept && kept.day === day && kept.id === mine.id)) set(K.candyPick, { day, id: mine.id });
-            };
-            const run = () => finish(compareStrategies({ state, pc, shares, settings, prices, special, statics, pickBy }));
-            if (!pi.compare) run();
-            else if (pi.compareWanted !== key) {
-                // A click (build, budget, days, a shop tick) redraws at once and the plan runs follow once the page has
-                // painted. New prices alone (they arrive in batches while Buy loads) are gathered: one run 5 s later.
-                const priceOnly = pi.compareKeyNoPrice === keyNoPrice;
+        const keysFor = (candyPick) => {
+            const itemSig = JSON.stringify([pickBy, shopsAllowed(settings), statics.itemsAt || 0, Number((statics.inventory || {})[104]) > 0, statics.job || null, statics.jobPoints || null, state.specialRefills || 0, Math.round((state.boosterCd || 0) / 3600), heldBoosters(statics.inventory), candyPick || null, xanaxCdOf(statics.xanaxCds).min]);
+            const keyNoPrice = [BUILD, Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, pc.unlocked.join(','), special, itemSig].join('|');
+            return { keyNoPrice, key: keyNoPrice + '|' + priceSig };
+        };
+        const { keyNoPrice, key } = keysFor(statics.candyPick);
+        if (key === pi.compareKey) {
+            // Back to the inputs of the comparison shown (a click undone): whatever was scheduled for the others is dropped.
+            if (pi.compareWanted !== key) {
                 pi.compareWanted = key;
+                pi.compareScheduled = '';
                 clearTimeout(pi.compareTimer);
-                pi.compareTimer = setTimeout(async () => {
-                    if (pi.compareWanted !== key) return;
-                    // One plan at a time, with the page free in between; a newer change drops this run.
-                    const compare = await compareStrategiesAsync({ state, pc, shares, settings, prices, special, statics, pickBy });
-                    if (pi.compareWanted !== key) return;
-                    finish(compare);
-                    refresh();
-                }, priceOnly ? COMPARE_PRICE_DELAY_MS : COMPARE_CLICK_DELAY_MS);
             }
+            return { compare: pi.compare, pc };
+        }
+        const stored = storedCompare();
+        // Worked out already, on another page or in another tab.
+        if (stored && stored.key === key) {
+            adoptCompare(stored, true);
+            return { compare: pi.compare, pc };
+        }
+        // A new page: the last one shows while the new one is worked out.
+        if (!pi.compare && stored) adoptCompare(stored, false);
+        pi.compareWanted = key;
+        const whatIfs = (compare) => {
+            // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
+            const whatIf = pc.perks.bliss ? null : blissWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy });
+            // Company what-ifs: hired where a jump variant would beat the recommended plan.
+            const rec = recommend(compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy });
+            return { whatIf, jobWhatIf: companyWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy, compare, recommended: rec.recommended }) };
+        };
+        const finish = (compare, { whatIf, jobWhatIf }) => {
+            let keys = { key, keyNoPrice };
+            // Today's candy stays named unless another is clearly cheaper (owner: it flipped on every price load). Keeping
+            // it is one of the comparison's own inputs: the key it's kept under says so, so it doesn't run a second time.
+            const mine = compare && compare[plan.strategy] && compare[plan.strategy].candy;
+            const kept = get(K.candyPick, null);
+            const day = tornDayStart(Date.now());
+            if (mine && !(kept && kept.day === day && kept.id === mine.id)) {
+                const pick = { day, id: mine.id };
+                set(K.candyPick, pick);
+                keys = keysFor(pick);
+            }
+            const c = { v: BUILD, key: keys.key, keyNoPrice: keys.keyNoPrice, at: Date.now(), tab: pi.tabId, compare, whatIf, jobWhatIf };
+            set(K.compareCache, c);
+            adoptCompare(c, true);
+            releaseCompareTurn();
+        };
+        const args = { state, pc, shares, settings, prices, special, statics, pickBy };
+        if (!pi.compare) {
+            // Nothing kept yet (the first page after an install or an update): once, in one go.
+            const compare = compareStrategies(args);
+            finish(compare, whatIfs(compare));
+        } else if (pi.compareScheduled !== key && isVisible()) {
+            // A click (build, budget, days, a shop tick) redraws at once and the plan runs follow once the page has
+            // painted. New prices alone (they arrive in batches while Buy loads) are gathered: one run 5 s later.
+            const priceOnly = pi.compareKeyNoPrice === keyNoPrice;
+            pi.compareScheduled = key;
+            clearTimeout(pi.compareTimer);
+            pi.compareTimer = setTimeout(async () => {
+                if (pi.compareWanted !== key) return;
+                // Another tab may have it by now, or be working it out: take its result at the next redraw.
+                const again = storedCompare();
+                if (again && again.key === key) {
+                    adoptCompare(again, true);
+                    refresh();
+                    return;
+                }
+                const busy = get(K.compareBusy, null);
+                if (busy && busy.key === key && busy.tab !== pi.tabId && Date.now() - (busy.at || 0) < COMPARE_BUSY_MS) {
+                    pi.compareScheduled = '';
+                    return;
+                }
+                set(K.compareBusy, { key, tab: pi.tabId, at: Date.now() });
+                // One plan at a time, with the page free in between: the turn is renewed each time, and a newer change
+                // stops the run at its next slice.
+                const pause = async () => {
+                    await pauseForPage();
+                    if (pi.compareWanted !== key) throw SUPERSEDED;
+                    set(K.compareBusy, { key, tab: pi.tabId, at: Date.now() });
+                };
+                try {
+                    const compare = await compareStrategiesAsync(args, { pause });
+                    await pause();
+                    const w = whatIfs(compare);
+                    if (pi.compareWanted !== key) throw SUPERSEDED;
+                    finish(compare, w);
+                    refresh();
+                } catch (error) {
+                    releaseCompareTurn();
+                    // Stopped for newer inputs: they have their own run. Failed: kept as failed until the inputs change (not
+                    // retried every redraw), the last comparison showing; the error goes to Diagnostics.
+                    if (error !== SUPERSEDED) set(K.lastError, { at: Date.now(), where: 'plan comparison', message: String((error && error.message) || error) });
+                }
+            }, priceOnly ? COMPARE_PRICE_DELAY_MS : COMPARE_CLICK_DELAY_MS);
         }
         return { compare: pi.compare, pc };
     }
+
+    /** A break for the page between two pieces of work. */
+    const pauseForPage = () => new Promise((r) => setTimeout(r, 0));
 
     /** The model every surface renders from. */
     function currentModel(now = Date.now()) {
@@ -8643,6 +8822,13 @@
     }
 
     function refresh() {
+        // A tab you can't see works nothing out (same-site tabs often share one thread with the tab you're on, so its work
+        // was your lag): it's worked out again when the tab is shown.
+        if (!isVisible()) {
+            pi.stale = true;
+            return;
+        }
+        pi.stale = false;
         try {
             maybeLearn();
             pi.model = currentModel();
@@ -8692,6 +8878,8 @@
         window.addEventListener('pagehide', () => {
             const rec = get(K.leader, null);
             if (rec && rec.id === pi.tabId) set(K.leader, { id: null, ts: 0 });
+            // A comparison this page was working out: another page takes the turn at once.
+            releaseCompareTurn();
         });
         const tick = () => pi.feed.tick().catch(() => {});
         tick();
@@ -8701,6 +8889,8 @@
         // Coming back to a tab: take the lead and read at once, not at the next heartbeat.
         document.addEventListener('visibilitychange', () => {
             if (!isVisible()) return;
+            // What changed while it was hidden, shown at once (the read that follows may take a moment).
+            if (pi.stale) refresh();
             tick();
             setTimeout(tick, 500);
         });
@@ -8773,8 +8963,12 @@
         return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
     }
 
-    /** The plan's steps as the Worker needs them (seconds, words only). */
-    function stepsForWorker(steps, limit = 24) {
+    /**
+     * The plan's steps as the Worker needs them (seconds, words only). Up to 48:
+     * the next 48 h even on a busy plan, so the bot can follow them while the
+     * laptop is closed (the Worker uses them for up to 48 h after a sync).
+     */
+    function stepsForWorker(steps, limit = 48) {
         return (steps || []).slice(0, limit).map((s) => ({
             at: Math.round(s.at / 1000),
             kind: s.kind,
@@ -11884,6 +12078,129 @@
         return REFILL_POINTS + ' a day for the refill';
     }
 
+    /* ===== src/core/gymlog.js ===== */
+    /*
+     * Your trains from Torn's own log (owner, 2026-09-30: "how about tracking of
+     * stats such as training on phone since laptop was closed"). The log has one
+     * line per TRAIN click: the stat, trains, energy, the gym, happy used, and
+     * the stat before and after. With the Full key (the log is Full only), the
+     * leader tab reads what's new; Progress' "Last trains" shows the sessions no
+     * read of ours saw. Pure. Research: docs/research-gym-log.md.
+     *
+     * Not a gain-model check: the log doesn't say the happy a click started at,
+     * so these sessions have no "Plan said" (Your gains already count them, from
+     * Torn's stats).
+     */
+
+
+
+
+
+    /** Torn's log types for a train, by stat [code: factionops probe; snippet: logtypes dumps]. */
+    const GYM_LOG_TYPES = { 5300: 'str', 5301: 'def', 5302: 'spd', 5303: 'dex' };
+
+    /** Lines kept (one a TRAIN click, ~120 bytes each: a few months for a heavy trainer), and for how long. */
+    const GYM_LOG_KEEP = 600;
+    const GYM_LOG_DAYS = 120;
+
+    /** How often the leader reads it, and how far back the first read goes. */
+    const GYM_LOG_EVERY_MS = 15 * 60 * 1000;
+    const GYM_LOG_FIRST_DAYS = 7;
+
+    const logNum = (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+    };
+
+    /**
+     * Torn's log lines (v2 `log` array) as trains: {id, at (ms), stat, trains,
+     * energy, happy, gymId, before, after, gain}. Lines that aren't a train, or
+     * carry no trains or energy, are left out. The stat comes from the log type,
+     * or from the title ("Gym train defense") when the type is missing.
+     * `before` is a string in the one real sample seen [snippet]: numbers are read with Number().
+     */
+    function parseGymLog(rows) {
+        const out = [];
+        for (const e of Array.isArray(rows) ? rows : []) {
+            if (!e || !e.data) continue;
+            const type = Number(e.details && e.details.id);
+            const title = String((e.details && e.details.title) || '').toLowerCase();
+            const stat = GYM_LOG_TYPES[type] || (/^gym train /.test(title) ? { strength: 'str', defense: 'def', defence: 'def', speed: 'spd', dexterity: 'dex' }[title.slice(10).trim()] : null);
+            if (!stat) continue;
+            const trains = logNum(e.data.trains);
+            const energy = logNum(e.data.energy_used);
+            const at = logNum(e.timestamp);
+            if (!(trains > 0) || !(energy > 0) || !(at > 0)) continue;
+            const name = STAT_API[stat];
+            const before = logNum(e.data[name + '_before']);
+            const after = logNum(e.data[name + '_after']);
+            let gain = logNum(e.data[name + '_increased']);
+            if (gain === null && before !== null && after !== null) gain = after - before;
+            out.push({ id: String(e.id || at + ':' + type), at: at * 1000, stat, trains, energy, happy: logNum(e.data.happy_used), gymId: logNum(e.data.gym), before, after, gain });
+        }
+        return out;
+    }
+
+    /**
+     * Add new lines to the kept ones: deduped by id (pages overlap at the edge), oldest first, the last GYM_LOG_DAYS
+     * and GYM_LOG_KEEP. `gap` ({from, to} in unix seconds, or null): what a read couldn't reach yet (it stopped at its
+     * page limit), read next; the newest line can be newer than the gap, so `newest` alone would skip it.
+     */
+    function mergeGymLog(kept, lines, now, gap = null) {
+        const byId = new Map();
+        for (const x of [...((kept && kept.lines) || []), ...(lines || [])]) if (x && x.id) byId.set(x.id, x);
+        const since = now - GYM_LOG_DAYS * 86400e3;
+        const all = [...byId.values()].filter((x) => x.at >= since).sort((a, b) => a.at - b.at);
+        // A gap older than what's kept doesn't need filling.
+        const g = gap && gap.to > gap.from && gap.to * 1000 > since ? { from: Math.max(gap.from, Math.floor(since / 1000)), to: gap.to } : null;
+        return { lines: all.slice(-GYM_LOG_KEEP), at: now, newest: all.length ? all[all.length - 1].at : (kept && kept.newest) || null, gap: g };
+    }
+
+    /** Where the next read starts (unix seconds): after the newest line kept, or GYM_LOG_FIRST_DAYS back. */
+    function gymLogFrom(kept, now) {
+        const newest = kept && kept.newest;
+        return Math.floor((newest ? newest : now - GYM_LOG_FIRST_DAYS * 86400e3) / 1000);
+    }
+
+    /**
+     * The log's lines as sessions (clicks within SESSION_GAP_MS of each other),
+     * like gains.js' sessionsOf: {at, end, trains:{stat: n}, gyms:[names], actual, energy, fromLog: true}. Newest first.
+     */
+    function logSessions(lines, table) {
+        const list = (lines || []).filter((x) => x && x.at).slice().sort((a, b) => a.at - b.at);
+        const out = [];
+        for (const x of list) {
+            let s = out[out.length - 1];
+            if (!s || x.at - s.end > SESSION_GAP_MS) out.push((s = { at: x.at, end: x.at, trains: {}, gyms: [], actual: 0, gained: false, energy: 0, reads: 0, predicted: null, fromLog: true }));
+            s.end = x.at;
+            s.trains[x.stat] = (s.trains[x.stat] || 0) + x.trains;
+            const g = x.gymId ? gymById(x.gymId, table) : null;
+            const name = g ? g.name : x.gymId ? 'Gym ' + x.gymId : null;
+            if (name && !s.gyms.includes(name)) s.gyms.push(name);
+            // A gain Torn didn't give (a field name we haven't seen) is unknown, not zero: a session with none shows "—".
+            if (x.gain !== null && x.gain !== undefined) {
+                s.actual = (s.actual || 0) + x.gain;
+                s.gained = true;
+            }
+            s.energy += x.energy;
+            s.reads++;
+        }
+        for (const s of out) if (!s.gained) s.actual = null;
+        return out.reverse();
+    }
+
+    /**
+     * "Last trains": the sessions our reads saw (with the plan's prediction) and
+     * the ones only Torn's log has (a phone, another device, the laptop closed).
+     * A log session that overlaps a read session is the same session: the read's
+     * one is kept. Newest first.
+     */
+    function mergeSessions(readSessions, logList) {
+        const reads = readSessions || [];
+        const overlaps = (l) => reads.some((r) => l.at <= r.end + SESSION_GAP_MS && l.end >= r.at - SESSION_GAP_MS);
+        return [...reads, ...(logList || []).filter((l) => !overlaps(l))].sort((a, b) => b.at - a.at);
+    }
+
     /* ===== src/ui/app/progress.js ===== */
     /*
      * Progress (mockups/round3/V-progress.html): one question, "am I on the
@@ -11892,6 +12209,7 @@
      * said, what Torn showed). Before any history: the planned line and today,
      * never a "come back tomorrow" paragraph (owner).
      */
+
 
 
 
@@ -12019,33 +12337,39 @@
     }
 
     function lastTrains(m, ctx) {
-        // One row a session (owner: "my 15 trains = +305,123 showed as three rows"), its reads added up.
-        const sessions = sessionsOf((ctx.calibration && ctx.calibration.samples) || []).slice(0, 6);
+        // One row a session (owner: "my 15 trains = +305,123 showed as three rows"), its reads added up. Sessions only
+        // Torn's log saw (your phone, the laptop closed; Full key) join them, without a prediction.
+        const reads = sessionsOf((ctx.calibration && ctx.calibration.samples) || []);
+        const logged = logSessions((ctx.gymLog && ctx.gymLog.lines) || [], m.pc && m.pc.table);
+        const sessions = mergeSessions(reads, logged).slice(0, 6);
         const offOf = (p, a) => (p > 0 ? (100 * (a - p)) / p : 0);
         const rows = sessions.map((x) => {
+            const checked = x.predicted !== null && x.predicted !== undefined;
             const off = offOf(x.predicted, x.actual);
             const stats = Object.keys(x.trains);
             return h('tr', {}, [
                 h('td', { class: 't', text: clock(x.at, ctx.settings) }),
                 h('td', { class: stats.length === 1 ? 's-' + stats[0] : null, text: stats.map((k) => STAT_LABEL[k] + ' × ' + x.trains[k]).join(' · ') }),
-                h('td', { text: x.gyms.join(' / ') }),
-                h('td', { class: 'r', text: fmtSigned(x.predicted) }),
-                h('td', { class: 'r', text: fmtSigned(x.actual) }),
-                h('td', { class: 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn'), text: fmtPct(off, 1) }),
+                h('td', {}, [x.gyms.join(' / '), x.fromLog ? h('span', { class: 'muted', title: 'From Torn’s own log: Pumping Iron had no clean read of this session (you trained elsewhere, e.g. on your phone, or a drug, booster or refill came between two reads), so there’s no plan figure to check it against', text: ' · Torn log' }) : null]),
+                h('td', { class: 'r', text: checked ? fmtSigned(x.predicted) : '—' }),
+                h('td', { class: 'r', text: x.actual === null || x.actual === undefined ? '—' : fmtSigned(x.actual) }),
+                h('td', { class: checked ? 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn') : 'r muted', text: checked ? fmtPct(off, 1) : '—' }),
             ]);
         });
         if (rows.length > 1) {
-            const p = sessions.reduce((a, x) => a + x.predicted, 0);
-            const a = sessions.reduce((s, x) => s + x.actual, 0);
+            // "Plan said" and "Off by" add up only when every row has a plan figure (the log's sessions have none).
+            const all = sessions.every((x) => x.predicted !== null && x.predicted !== undefined);
+            const p = all ? sessions.reduce((s, x) => s + x.predicted, 0) : 0;
+            const a = sessions.reduce((s, x) => s + (x.actual || 0), 0);
             const off = offOf(p, a);
-            rows.push(h('tr', { class: 'total' }, [h('td'), h('td', {}, [h('b', { text: 'Total' })]), h('td'), h('td', { class: 'r', text: fmtSigned(p) }), h('td', { class: 'r' }, [h('b', { text: fmtSigned(a) })]), h('td', { class: 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn'), text: fmtPct(off, 1) })]));
+            rows.push(h('tr', { class: 'total' }, [h('td'), h('td', {}, [h('b', { text: 'Total' })]), h('td'), h('td', { class: 'r', text: all ? fmtSigned(p) : '—' }), h('td', { class: 'r' }, [h('b', { text: fmtSigned(a) })]), h('td', { class: all ? 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn') : 'r muted', text: all ? fmtPct(off, 1) : '—' })]));
         }
         return h('div', {}, [
             sectionHead('Last trains', meta(['what the plan said, what Torn showed']), null, 'h3'),
             rows.length
                 ? h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Session' }), h('th', { text: 'Gym' }), h('th', { class: 'r', text: 'Plan said' }), h('th', { class: 'r', text: 'You got' }), h('th', { class: 'r', style: 'width:80px', text: 'Off by' })])]), h('tbody', {}, rows)])
                 : null,
-            h('p', { class: 'muted', style: rows.length ? 'margin:6px 0 0;font-size:12px' : 'margin:0', text: 'Only the reads with one stat trained and nothing taken in between (no drug, booster or refill): they check the gain maths, so a session’s total here can be less than what you really gained. Your real gains are under “Your gains”.' }),
+            h('p', { class: 'muted', style: rows.length ? 'margin:6px 0 0;font-size:12px' : 'margin:0', text: 'Only the reads with one stat trained and nothing taken in between (no drug, booster or refill): they check the gain maths, so a session’s total here can be less than what you really gained. Your real gains are under “Your gains”.' + (ctx.gymLog ? ' Sessions marked “Torn log” are from Torn’s own log (your Full key): trains while Pumping Iron wasn’t open, e.g. on your phone.' : ' With a Full key (Settings), trains on your phone show here too, from Torn’s log.') }),
         ]);
     }
 
@@ -13000,7 +13324,7 @@
 
     function exportZip(ctx) {
         const d = ctx.dev.data();
-        const files = exportFiles({ samples: d.samples, fights: d.fights, learned: d.learned, version: d.version, now: Date.now() });
+        const files = exportFiles({ samples: d.samples, fights: d.fights, gymLog: d.gymLog, learned: d.learned, version: d.version, now: Date.now() });
         download(makeZip(files), 'learning-' + new Date().toISOString().slice(0, 10) + '.zip');
     }
 
@@ -13260,13 +13584,13 @@
         ['Key access level', 'The key on your TornStats account; we only read spies'],
     ];
 
-    /** Auto mode's Full key: only in this browser, only for the money log. */
+    /** Auto mode's Full key: only in this browser, only for your log (money and gym trains). */
     const TOS_FULL = [
-        ['Data storage', 'Only locally, in this browser: the key, and a summary of your money log (titles, amounts, times; 30 days)'],
+        ['Data storage', 'Only locally, in this browser: the key, a summary of your money log (titles, amounts, times; 30 days) and your gym trains from the log (stat, trains, energy, gym, gain; up to 120 days)'],
         ['Data sharing', 'Nobody. Never sent to the Pumping Iron service, FFScouter, TornStats or TornW3B'],
-        ['Purpose of use', 'Personal gain: Auto mode sizes your gym plan to your income'],
+        ['Purpose of use', 'Personal gain: Auto mode sizes your gym plan to your income; Progress shows the trains you did while Pumping Iron wasn’t open (e.g. on your phone)'],
         ['Key storage & sharing', 'Stored locally / Not shared'],
-        ['Key access level', 'Full (used only for user: log, the money categories; nothing else is read with it)'],
+        ['Key access level', 'Full (used only for user: log, the money categories and the gym trains; nothing else is read with it)'],
     ];
 
     /** Your own service (Advanced): the key you give it, stored on your own Cloudflare Worker. */
@@ -13578,12 +13902,12 @@
 
         const discordSec = discordSection(ctx);
 
-        // Auto mode's Full key: only for the money log.
+        // Auto mode's Full key: only for your log (money, gym trains).
         const fk = ctx.fullKey || {};
         const full = keyRow({ label: 'Full key', placeholder: fk.has ? 'Saved · paste a new one to replace it' : 'Paste a Full access key', saveText: 'Check and save', onSave: ctx.saveFullKey, onReveal: () => ctx.revealKey(K.fullKey) });
         const fullState = !fk.has ? stateTag('off', ctx.plan && ctx.plan.pickBy === 'auto' ? 'Auto mode needs it' : 'Optional') : fk.ok ? stateTag('ok', 'Connected · Full') : stateTag('bad', fk.error || 'Not a Full key');
         const fullSec = settingsSection('Full key (Auto mode)', fullState, [
-            h('p', { text: 'Auto mode, the default plan, sizes your gym spending to your income. It needs a Full key, used for one thing only: reading your money log to see where your income comes from. It never leaves this browser.' }),
+            h('p', { text: 'Auto mode, the default plan, sizes your gym spending to your income. It needs a Full key, used only to read your log: the money lines, to see where your income comes from, and your gym trains, so trains on your phone show in Progress. It never leaves this browser.' }),
             full.row,
             ctx.ui.fullKeyMsg ? h('span', { class: 'msg ' + (ctx.ui.fullKeyMsg.ok ? 'ok' : 'bad'), text: ctx.ui.fullKeyMsg.text }) : full.msg,
             fk.has ? h('div', { class: 'row' }, [fk.logAt ? h('span', { class: 'muted num', text: 'Money log read ' + new Date(fk.logAt).toISOString().slice(11, 16) + ' UTC' + (fk.logLines ? ' · ' + fk.logLines + ' lines' : '') }) : h('span', { class: 'muted', text: 'Money log not read yet' }), confirmButton(ctx, 'full-forget', 'Forget the Full key', () => { ctx.forgetFullKey(); ctx.rerender(); })]) : null,
@@ -15898,6 +16222,7 @@
 
 
 
+
     /** How often the money log is read, how far back, and how many categories at most (one call each). */
     const MONEY_LOG_EVERY_MS = 6 * 60 * 60 * 1000;
     const MONEY_LOG_DAYS = 30;
@@ -15919,6 +16244,8 @@
             }
             set(K.fullKeyState, { ok: true, at: Date.now(), type: info.type || 'Full Access' });
             del(K.moneyLog);
+            // Another key may be another account: its gym log starts fresh.
+            del(K.gymLog);
             refreshMoneyLog({ force: true }).catch(() => {});
             return { ok: true, text: getPlan().pickBy === 'auto' ? 'Saved · Full key. Auto mode is on.' : 'Saved · Full key. Pick Auto (from your income) on Plan to use it.' };
         } catch (error) {
@@ -15932,7 +16259,40 @@
         setKey(K.fullKey, '');
         del(K.fullKeyState);
         del(K.moneyLog);
+        del(K.gymLog);
         pi.fullClient = null;
+    }
+
+    /**
+     * Your trains from Torn's log (Full key), at most every 15 minutes, in the
+     * leader tab (visible), never while Torn Trading runs: what's new since the
+     * newest line kept, a week back the first time. Trains on your phone, or
+     * with the laptop closed, show in Progress' "Last trains".
+     */
+    async function refreshGymLog({ force = false, now = Date.now() } = {}) {
+        const st = get(K.fullKeyState, {}) || {};
+        if (!getKey(K.fullKey) || !st.ok || st.dead || isPaused()) return null;
+        const kept = get(K.gymLog, null);
+        // A gap left by a long time away (more than a read's 300 lines) is filled a read a minute until it's done.
+        const gap = kept && kept.gap ? kept.gap : null;
+        if (!force && kept && !gap && now - (kept.at || 0) < GYM_LOG_EVERY_MS) return null;
+        if (!force && kept && gap && now - (kept.at || 0) < 50e3) return null;
+        // Asked before a slow answer came back: one read at a time.
+        set(K.gymLog, { ...(kept || { lines: [], newest: null }), at: now });
+        const range = gap || { from: gymLogFrom(kept, now), to: null };
+        const rows = await fetchGymLog(fullKeyClient(), range);
+        // What's still missing: from where this read started back to the oldest line it reached.
+        const left = rows.complete || !(rows.oldest > range.from) ? null : { from: range.from, to: rows.oldest };
+        const next = mergeGymLog(get(K.gymLog, null), parseGymLog(rows), now, left);
+        set(K.gymLog, next);
+        return next;
+    }
+
+    /** The leader tab's gym-log clock (main.js calls it every minute). */
+    function gymLogTick() {
+        const lead = get(K.leader, null);
+        if (!lead || lead.id !== pi.tabId || typeof document === 'undefined' || document.visibilityState === 'hidden') return;
+        refreshGymLog().catch((error) => set(K.lastError, { at: Date.now(), where: 'gym log', code: error && error.code, message: String((error && error.message) || error) }));
     }
 
     /**
@@ -16347,6 +16707,7 @@
             dayTotals: get(K.dayTotals, {}) || {},
             gymProgress: get(K.gymProgress, null),
             calibration: get('calibration', null),
+            gymLog: get(K.gymLog, null),
             planProjection: get(K.planLine, null),
             receipts: get(K.receipts, null),
             priceHistory: get(K.priceHistory, null),
@@ -16418,7 +16779,7 @@
                 setupUrl: WORKER_SETUP_URL,
             },
             dev: {
-                data: () => ({ samples: ((get('calibration', null) || {}).samples) || [], fights: joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []), learned: get(K.learned, null), version: PI_BUILD_VERSION }),
+                data: () => ({ samples: ((get('calibration', null) || {}).samples) || [], gymLog: ((get(K.gymLog, null) || {}).lines) || [], fights: joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []), learned: get(K.learned, null), version: PI_BUILD_VERSION }),
                 unlocked: () => Boolean(get(K.devUnlocked, false)),
                 setUnlocked: (v) => (v ? set(K.devUnlocked, true) : del(K.devUnlocked)),
                 log: () => get(K.learnLog, []) || [],
@@ -18145,6 +18506,7 @@
 
 
 
+
     function menus() {
         gmMenu('Open Pumping Iron', () => gmOpenTab(APP_PAGE_URL));
         gmMenu('Diagnostics', () => gmOpenTab(APP_PAGE_URL + '#settings'));
@@ -18171,6 +18533,9 @@
         startFeed();
         // The plan's next steps go to your Discord Worker when they change (if you set one up).
         onModel((m) => maybeSyncPlan(m));
+        // Trains Torn logged that no read saw (your phone, the laptop closed): the leader reads them every 15 minutes (Full key).
+        setTimeout(gymLogTick, 20000);
+        setInterval(gymLogTick, 60000);
         // Off torn.com (the harness), expose the model for checks. On torn.com the sandbox keeps it private anyway.
         if (/^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed };
     }

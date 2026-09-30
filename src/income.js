@@ -33,6 +33,8 @@ export async function saveFullKey(v) {
         }
         set(K.fullKeyState, { ok: true, at: Date.now(), type: info.type || 'Full Access' });
         del(K.moneyLog);
+        // Another key may be another account: its gym log starts fresh.
+        del(K.gymLog);
         refreshMoneyLog({ force: true }).catch(() => {});
         return { ok: true, text: getPlan().pickBy === 'auto' ? 'Saved · Full key. Auto mode is on.' : 'Saved · Full key. Pick Auto (from your income) on Plan to use it.' };
     } catch (error) {
@@ -46,6 +48,7 @@ export function forgetFullKey() {
     setKey(K.fullKey, '');
     del(K.fullKeyState);
     del(K.moneyLog);
+    del(K.gymLog);
     pi.fullClient = null;
 }
 
@@ -59,11 +62,17 @@ export async function refreshGymLog({ force = false, now = Date.now() } = {}) {
     const st = get(K.fullKeyState, {}) || {};
     if (!getKey(K.fullKey) || !st.ok || st.dead || isPaused()) return null;
     const kept = get(K.gymLog, null);
-    if (!force && kept && now - (kept.at || 0) < GYM_LOG_EVERY_MS) return null;
+    // A gap left by a long time away (more than a read's 300 lines) is filled a read a minute until it's done.
+    const gap = kept && kept.gap ? kept.gap : null;
+    if (!force && kept && !gap && now - (kept.at || 0) < GYM_LOG_EVERY_MS) return null;
+    if (!force && kept && gap && now - (kept.at || 0) < 50e3) return null;
     // Asked before a slow answer came back: one read at a time.
     set(K.gymLog, { ...(kept || { lines: [], newest: null }), at: now });
-    const lines = parseGymLog(await fetchGymLog(fullKeyClient(), { from: gymLogFrom(kept, now) }));
-    const next = mergeGymLog(get(K.gymLog, null), lines, now);
+    const range = gap || { from: gymLogFrom(kept, now), to: null };
+    const rows = await fetchGymLog(fullKeyClient(), range);
+    // What's still missing: from where this read started back to the oldest line it reached.
+    const left = rows.complete || !(rows.oldest > range.from) ? null : { from: range.from, to: rows.oldest };
+    const next = mergeGymLog(get(K.gymLog, null), parseGymLog(rows), now, left);
     set(K.gymLog, next);
     return next;
 }

@@ -185,7 +185,8 @@ function eventComparisonFor(event, state, pc, shares, settings, budgetPerDay, st
         return kept;
     }
     // Two more full comparisons: never inside a redraw, and only in a tab you can see. The last answer stands until the new one is ready.
-    if (pi.eventWanted !== key && isVisible()) {
+    // Not from a comparison still being worked out (it would run twice, once for the old inputs).
+    if (pi.eventWanted !== key && isVisible() && (!pi.compareWanted || pi.compareWanted === pi.compareKey)) {
         pi.eventWanted = key;
         setTimeout(async () => {
             if (pi.eventWanted !== key) return;
@@ -216,10 +217,25 @@ export const COMPARE_CLICK_DELAY_MS = 80;
 export const COMPARE_PRICE_DELAY_MS = 5000;
 
 /** This build's version: a comparison kept by another version is never used (its results may have another shape). */
-const BUILD = typeof PI_BUILD_VERSION !== 'undefined' ? PI_BUILD_VERSION : 'dev';
+const BUILD = (typeof PI_BUILD_VERSION !== 'undefined' ? PI_BUILD_VERSION : 'dev') + '+' + (typeof PI_BUILD_HASH !== 'undefined' ? PI_BUILD_HASH : 'dev');
 
-/** A tab working out the comparison holds the turn this long; other tabs take its result instead of running their own. */
-export const COMPARE_BUSY_MS = 30000;
+/**
+ * A tab working out the comparison holds the turn this long, renewed after
+ * every plan it runs; other tabs take its result instead of running their
+ * own. Short, so a page left mid-run (a click to another Torn page) holds
+ * the others back for seconds, not half a minute; and the page lets go of it
+ * as it goes (pagehide).
+ */
+export const COMPARE_BUSY_MS = 5000;
+
+/** Thrown inside a run that newer inputs made pointless: it stops at its next slice. */
+const SUPERSEDED = { superseded: true };
+
+/** Let go of the turn to work out the comparison, if this tab holds it. */
+export function releaseCompareTurn() {
+    const busy = get(K.compareBusy, null);
+    if (busy && busy.tab === pi.tabId) del(K.compareBusy);
+}
 
 /** The comparison kept between pages (K.compareCache), if this build wrote it. */
 export function storedCompare() {
@@ -265,7 +281,15 @@ function comparisonFor(state, statics, plan, settings) {
         return { keyNoPrice, key: keyNoPrice + '|' + priceSig };
     };
     const { keyNoPrice, key } = keysFor(statics.candyPick);
-    if (key === pi.compareKey) return { compare: pi.compare, pc };
+    if (key === pi.compareKey) {
+        // Back to the inputs of the comparison shown (a click undone): whatever was scheduled for the others is dropped.
+        if (pi.compareWanted !== key) {
+            pi.compareWanted = key;
+            pi.compareScheduled = '';
+            clearTimeout(pi.compareTimer);
+        }
+        return { compare: pi.compare, pc };
+    }
     const stored = storedCompare();
     // Worked out already, on another page or in another tab.
     if (stored && stored.key === key) {
@@ -297,7 +321,7 @@ function comparisonFor(state, statics, plan, settings) {
         const c = { v: BUILD, key: keys.key, keyNoPrice: keys.keyNoPrice, at: Date.now(), tab: pi.tabId, compare, whatIf, jobWhatIf };
         set(K.compareCache, c);
         adoptCompare(c, true);
-        del(K.compareBusy);
+        releaseCompareTurn();
     };
     const args = { state, pc, shares, settings, prices, special, statics, pickBy };
     if (!pi.compare) {
@@ -325,14 +349,26 @@ function comparisonFor(state, statics, plan, settings) {
                 return;
             }
             set(K.compareBusy, { key, tab: pi.tabId, at: Date.now() });
-            // One plan at a time, with the page free in between; a newer change drops this run.
-            const compare = await compareStrategiesAsync(args);
-            if (pi.compareWanted !== key) return;
-            await pauseForPage();
-            const w = whatIfs(compare);
-            if (pi.compareWanted !== key) return;
-            finish(compare, w);
-            refresh();
+            // One plan at a time, with the page free in between: the turn is renewed each time, and a newer change
+            // stops the run at its next slice.
+            const pause = async () => {
+                await pauseForPage();
+                if (pi.compareWanted !== key) throw SUPERSEDED;
+                set(K.compareBusy, { key, tab: pi.tabId, at: Date.now() });
+            };
+            try {
+                const compare = await compareStrategiesAsync(args, { pause });
+                await pause();
+                const w = whatIfs(compare);
+                if (pi.compareWanted !== key) throw SUPERSEDED;
+                finish(compare, w);
+                refresh();
+            } catch (error) {
+                releaseCompareTurn();
+                // Stopped for newer inputs: they have their own run. Failed: kept as failed until the inputs change (not
+                // retried every redraw), the last comparison showing; the error goes to Diagnostics.
+                if (error !== SUPERSEDED) set(K.lastError, { at: Date.now(), where: 'plan comparison', message: String((error && error.message) || error) });
+            }
         }, priceOnly ? COMPARE_PRICE_DELAY_MS : COMPARE_CLICK_DELAY_MS);
     }
     return { compare: pi.compare, pc };
@@ -515,6 +551,8 @@ export function startFeed() {
     window.addEventListener('pagehide', () => {
         const rec = get(K.leader, null);
         if (rec && rec.id === pi.tabId) set(K.leader, { id: null, ts: 0 });
+        // A comparison this page was working out: another page takes the turn at once.
+        releaseCompareTurn();
     });
     const tick = () => pi.feed.tick().catch(() => {});
     tick();

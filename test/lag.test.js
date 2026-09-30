@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { pi, currentModel, storedCompare, refresh } from '../src/runtime.js';
+import { pi, currentModel, storedCompare, refresh, releaseCompareTurn } from '../src/runtime.js';
 import { K, get, set } from '../src/platform/store.js';
 import { gainPerTrain, happyTerms, HAPPY_CAP, STAT_AB, effectiveStat, round4 } from '../src/core/gain.js';
 
@@ -136,4 +136,43 @@ test('happyTerms (kept for the last few happy values) gives gainPerTrain’s exa
         for (const [stat, S] of [['str', 118400], ['def', 2.88e8], ['dex', 0]]) assert.equal(gainPerTrain(stat, S, H, 7.3, 10), old(stat, S, H, 7.3, 10), stat + ' at happy ' + H);
         assert.strictEqual(happyTerms(H), happyTerms(H), 'kept');
     }
+});
+
+test('a click undone before its run: the run is dropped, nothing waits (Auto may rewrite the plan again)', () => {
+    setup('steady');
+    currentModel();
+    const shown = pi.compareKey;
+    set(K.settings, { budget: 99e6 });
+    currentModel();
+    assert.notEqual(pi.compareWanted, shown);
+    assert.ok(pi.compareScheduled);
+    set(K.settings, null);
+    currentModel();
+    assert.equal(pi.compareKey, shown);
+    assert.equal(pi.compareWanted, shown, 'fresh again');
+    assert.equal(pi.compareScheduled, '', 'the run for the undone click is dropped');
+});
+
+test('a run that newer inputs overtake stops at its next slice and lets go of the turn', async () => {
+    setup('steady');
+    currentModel();
+    const kept = storedCompare();
+    set(K.compareCache, { ...kept, key: kept.key + '|older', keyNoPrice: kept.keyNoPrice + '|older' });
+    newPage();
+    currentModel();
+    // The run starts ~80 ms on; newer inputs arrive while it is under way.
+    await new Promise((r) => setTimeout(r, 90));
+    pi.compareWanted = 'newer';
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(storedCompare().key, kept.key + '|older', 'it did not finish for the old inputs');
+    assert.equal(get(K.compareBusy, null), null, 'and let go of the turn');
+});
+
+test('a page lets go only of its own turn', () => {
+    set(K.compareBusy, { key: 'k', tab: 'other-tab', at: Date.now() });
+    releaseCompareTurn();
+    assert.equal(get(K.compareBusy, null).tab, 'other-tab');
+    set(K.compareBusy, { key: 'k', tab: pi.tabId, at: Date.now() });
+    releaseCompareTurn();
+    assert.equal(get(K.compareBusy, null), null);
 });

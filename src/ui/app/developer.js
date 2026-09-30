@@ -49,7 +49,7 @@ function download(bytes, name) {
 
 function exportZip(ctx) {
     const d = ctx.dev.data();
-    const files = exportFiles({ samples: d.samples, fights: d.fights, learned: d.learned, version: d.version, now: Date.now() });
+    const files = exportFiles({ samples: d.samples, fights: d.fights, gymLog: d.gymLog, learned: d.learned, version: d.version, now: Date.now() });
     download(makeZip(files), 'learning-' + new Date().toISOString().slice(0, 10) + '.zip');
 }
 

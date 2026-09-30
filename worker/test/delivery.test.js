@@ -37,7 +37,8 @@ test('a linked user gets a DM from the bot, with Done, Snooze, Skip and Open in 
     assert.deepEqual(discordCalls(g).map((c) => (c.init.method || 'GET') + ' ' + new URL(c.url).pathname), ['PATCH /api/v10/channels/dm-chan-1/messages/' + row.message, 'POST /api/v10/channels/dm-chan-1/messages']);
     assert.equal(discordCalls(g)[0].body.embeds[0].footer.text, 'Seen in Torn');
     assert.deepEqual(discordCalls(g)[0].body.components[0].components.map((b) => b.label), ['Open in Torn']);
-    assert.ok(env.DB.sent.has(id + '|energy:' + Math.floor((T0 + 3600) / 3600)));
+    // The last read expected the bar full ~13:06, it's full at 11:48: this fill is the tick just past.
+    assert.ok(env.DB.sent.has(id + '|energy:' + Math.round((Math.floor((T0 + 3600) / 300) * 300) / 300) + ':0'));
 });
 
 test('DMs closed (50007): the ping goes to the channel webhook with a mention, and DMs rest for 6 h', async () => {
@@ -152,7 +153,7 @@ test('energy: pinged ahead when Torn says it fills within 90 s; the full read af
     // Torn fills on its 5-minute ticks: 72 s from 10:49:00 is the 10:50:00 tick.
     const tick = Math.round((T0 + 132) / 300) * 300;
     assert.equal(post.body.content, 'Energy full in ' + (tick - T0 - 60) + ' s (' + new Date(tick * 1000).toISOString().slice(11, 19) + ' TCT)');
-    const key = id + '|energy:' + Math.floor(tick / 3600);
+    const key = id + '|energy:' + tick / 300 + ':0';
     assert.ok(env.DB.sent.has(key));
     assert.equal(JSON.parse(env.DB.sent.get(key).body).fullAt, tick);
     // Still filling at the next run (149/150, 36 s left): not "Seen in Torn", no second ping.

@@ -286,18 +286,29 @@ export async function fetchMoneyLog(client, { from, categories, perCategory = 10
  * Your gym trains from Torn's log since a time (Full key only): the four
  * train types in one call, newest first, 100 a page. A full page means more
  * are older: walk back with `to` (pages overlap at the edge second, so the
- * caller dedupes by id), at most `pages` calls. Raw v2 lines.
+ * caller dedupes by id), at most `pages` calls. Raw v2 lines, with
+ * `complete` (it reached back to `from`) and `oldest` (the oldest second
+ * read: where the next read goes on from when it didn't).
  */
-export async function fetchGymLog(client, { from, pages = 3, limit = 100 }) {
+export async function fetchGymLog(client, { from, to = null, pages = 3, limit = 100 }) {
     const out = [];
-    let to = null;
+    out.complete = false;
+    out.oldest = to;
     for (let i = 0; i < pages; i++) {
         const d = await client.get('v2/user/log', { log: '5300,5301,5302,5303', from, limit, ...(to ? { to } : {}) });
         const rows = (d && d.log) || [];
         out.push(...rows);
-        if (rows.length < limit) break;
-        const oldest = Math.min(...rows.map((e) => Number(e.timestamp) || Infinity));
-        if (!Number.isFinite(oldest) || oldest <= from || oldest === to) break;
+        const oldest = rows.length ? Math.min(...rows.map((e) => Number(e.timestamp) || Infinity)) : Infinity;
+        if (Number.isFinite(oldest)) out.oldest = out.oldest === null ? oldest : Math.min(out.oldest, oldest);
+        if (rows.length < limit || !Number.isFinite(oldest) || oldest <= from) {
+            out.complete = true;
+            break;
+        }
+        // A whole page in one second (never for trains): nothing further back can be asked for; take it as complete.
+        if (oldest === to) {
+            out.complete = true;
+            break;
+        }
         to = oldest;
     }
     return out;

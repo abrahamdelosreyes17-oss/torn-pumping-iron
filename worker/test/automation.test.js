@@ -132,7 +132,8 @@ test('a plan out of date: state pings only, plus one "out of date" a day', () =>
 test('cron keeps what it read for next time (users.prev)', async () => {
     const { env, user } = await linkedEnv();
     await runCron(env, T0, world({ torn: tornState({ drug: 0, booster: 30, travel: 0 }) }));
-    assert.deepEqual(JSON.parse(user().prev), { at: T0, drug: 0, booster: 30, travel: 0, drugZeroAt: T0, watchAt: T0, staleFor: null });
+    // Energy 20/150 fills in 4,680 s: on the tick nearest T0 + 4,680 (the energy ping's id).
+    assert.deepEqual(JSON.parse(user().prev), { at: T0, drug: 0, booster: 30, travel: 0, drugZeroAt: T0, drugNudged: null, fill: Math.round((T0 + 4680) / 300) * 300, watchAt: T0, staleFor: null });
     assert.equal(user().ran, T0);
 });
 

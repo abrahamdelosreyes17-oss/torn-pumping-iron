@@ -60,13 +60,19 @@ export function parseGymLog(rows) {
     return out;
 }
 
-/** Add new lines to the kept ones: deduped by id (pages overlap at the edge), oldest first, the last GYM_LOG_DAYS and GYM_LOG_KEEP. */
-export function mergeGymLog(kept, lines, now) {
+/**
+ * Add new lines to the kept ones: deduped by id (pages overlap at the edge), oldest first, the last GYM_LOG_DAYS
+ * and GYM_LOG_KEEP. `gap` ({from, to} in unix seconds, or null): what a read couldn't reach yet (it stopped at its
+ * page limit), read next; the newest line can be newer than the gap, so `newest` alone would skip it.
+ */
+export function mergeGymLog(kept, lines, now, gap = null) {
     const byId = new Map();
     for (const x of [...((kept && kept.lines) || []), ...(lines || [])]) if (x && x.id) byId.set(x.id, x);
     const since = now - GYM_LOG_DAYS * 86400e3;
     const all = [...byId.values()].filter((x) => x.at >= since).sort((a, b) => a.at - b.at);
-    return { lines: all.slice(-GYM_LOG_KEEP), at: now, newest: all.length ? all[all.length - 1].at : (kept && kept.newest) || null };
+    // A gap older than what's kept doesn't need filling.
+    const g = gap && gap.to > gap.from && gap.to * 1000 > since ? { from: Math.max(gap.from, Math.floor(since / 1000)), to: gap.to } : null;
+    return { lines: all.slice(-GYM_LOG_KEEP), at: now, newest: all.length ? all[all.length - 1].at : (kept && kept.newest) || null, gap: g };
 }
 
 /** Where the next read starts (unix seconds): after the newest line kept, or GYM_LOG_FIRST_DAYS back. */
@@ -84,16 +90,21 @@ export function logSessions(lines, table) {
     const out = [];
     for (const x of list) {
         let s = out[out.length - 1];
-        if (!s || x.at - s.end > SESSION_GAP_MS) out.push((s = { at: x.at, end: x.at, trains: {}, gyms: [], actual: 0, energy: 0, reads: 0, predicted: null, fromLog: true }));
+        if (!s || x.at - s.end > SESSION_GAP_MS) out.push((s = { at: x.at, end: x.at, trains: {}, gyms: [], actual: 0, gained: false, energy: 0, reads: 0, predicted: null, fromLog: true }));
         s.end = x.at;
         s.trains[x.stat] = (s.trains[x.stat] || 0) + x.trains;
         const g = x.gymId ? gymById(x.gymId, table) : null;
         const name = g ? g.name : x.gymId ? 'Gym ' + x.gymId : null;
         if (name && !s.gyms.includes(name)) s.gyms.push(name);
-        s.actual += x.gain || 0;
+        // A gain Torn didn't give (a field name we haven't seen) is unknown, not zero: a session with none shows "—".
+        if (x.gain !== null && x.gain !== undefined) {
+            s.actual = (s.actual || 0) + x.gain;
+            s.gained = true;
+        }
         s.energy += x.energy;
         s.reads++;
     }
+    for (const s of out) if (!s.gained) s.actual = null;
     return out.reverse();
 }
 

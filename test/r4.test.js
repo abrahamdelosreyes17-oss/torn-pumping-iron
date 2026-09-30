@@ -42,8 +42,10 @@ test('learning data: fights joined to what Torn Eye said before them; one predic
 test('learning data: the export leaves ids out, rounds stats, and reads back', () => {
     const samples = [{ at: 1, stat: 'spd', trains: 20, predicted: 1000.4, actual: 1040.6, S: 4061234, H: 5000, dots: 7.3, E: 10, perks: 1, gym: "George's" }];
     const fights = [{ key: '12345:99', at: 2, who: hashId(12345), predictedWin: 0.9, won: true, predictedHpKept: 0.6, hpKept: null }];
-    const files = exportFiles({ samples, fights, version: '1.1.0', now: Date.UTC(2026, 8, 29) });
-    assert.deepEqual(files.map((f) => f.name), ['gym-samples.json', 'fights.json', 'model.json', 'meta.json']);
+    const gymLog = [{ id: 'x', at: 3, stat: 'str', trains: 10, energy: 100, happy: 49, gymId: 9, before: 360123456.7, after: 360124000, gain: 543.3 }];
+    const files = exportFiles({ samples, fights, gymLog, version: '1.1.0', now: Date.UTC(2026, 8, 29) });
+    assert.deepEqual(files.map((f) => f.name), ['gym-samples.json', 'gym-log.json', 'fights.json', 'model.json', 'meta.json']);
+    assert.deepEqual(JSON.parse(files[1].data), [{ at: 3, stat: 'str', trains: 10, energy: 100, happy: 49, gym: 9, before: 360100000, gain: 543.3 }], 'the gym log goes too, its stat rounded like the samples');
     const all = files.map((f) => f.data).join('\n');
     assert.ok(!all.includes('12345'), 'no player id');
     assert.equal(JSON.parse(files[0].data)[0].S, 4061000, '4 significant digits');

@@ -1,6 +1,8 @@
 # HANDOFF: Torn Pumping Iron
 
-**Released: 1.2.2 (2026-09-29): the owner's reports 7–13 (booster cooldown planned for, candy pool, Sally's, real gains, Xanax cooldowns, candy words, why this mix). Details in the newest session entry.**
+**Released: 1.2.3 (2026-09-30): the lag fix (the plan comparison kept between pages), bot pings early (energy, booster) and without a plan, the synced plan used for up to 48 h, trains on your phone from Torn's log. Details in the newest session entry.**
+
+1.2.2 (2026-09-29): the owner's reports 7–13 (booster cooldown planned for, candy pool, Sally's, real gains, Xanax cooldowns, candy words, why this mix).
 
 1.2.1 fixes and additions:
 - **Gym walk-through actually outlines gyms on live Torn:** the gym-icon class is hashed (`gym-1___Ij5f9`), and buttons carry no state class. Checked with the owner's console output.
@@ -51,6 +53,8 @@ Links:
    - `user/{id}/profile` last_action for watch pings;
    - the gym-page energy-bar selector (`#barEnergy [class*="bar-value___"]`);
    - money-log title matching [calibrate].
+   - (1.2.3) the gym log's field names for DEF/SPD/DEX (`defense_increased`…, [guess]): once the owner's Full key is in, Diagnostics or Progress › Last trains should show a "Torn log" session with a gain, not "—";
+   - (1.2.3) the energy ping lands 30–90 s before the bar fills; the booster one 30–90 s before its cooldown ends.
 5. **Owner defaults to confirm:**
    - watch list 50 players (60 s for those close to out, 5 min for the rest) and bot pings on;
    - Keep for war days starts at 0;
@@ -222,6 +226,14 @@ Done on the owner's yes. For later releases, the same steps minus the one-time r
 ---
 
 ## What each session did (newest first)
+
+### 2026-09-30 (later): 1.2.3 — lag fix, bot pings early and without a plan, 48 h plan, phone trains
+Owner: "fix all issues, commit and push, remember to bug hunt before releasing".
+- **Lag:** the comparison is kept between pages (`K.compareCache`: build version + content hash `PI_BUILD_HASH` from build.mjs, key, compare, whatIf, jobWhatIf). A page adopts it when its key matches; otherwise the last one shows while a visible tab works the new one out in slices (`K.compareBusy` turn, 5 s, renewed per slice, released on pagehide; a newer change stops a run at its next slice; a click undone drops its run). Saving today's candy re-keys the cache instead of running again. Hidden tabs don't refresh (`pi.stale`, caught up on visibilitychange). Event comparison cached too, and not started from a comparison still being worked out. Engine: `happyTerms` (gain.js) cached for the last 4 happy values, used by `gainPerTrain` and `pickStat` — bit-identical output (scratchpad bench compared JSON), ~20% faster. Measured at 4× CPU: a second Torn page went from ~2.2 s of long tasks to one ~0.44 s task (0.15 s of it is parsing the script). Minifying would save ~10 ms at 1×: not done (adds a dependency, unreadable errors).
+- **Bot (deployed):** energy id is the fill (`energyFill`, kept in `prev.fill`): one ping per fill across hour boundaries, a new fill pinged, hourly while full. Booster 30–90 s ahead (`BOOSTER_LEAD_S`), "over" only after a missed window from a fresh read (`PREV_FRESH_S` 10 min; landed too). With no plan in use (out of date, none, or nothing ahead) booster and "drug unused" come with plain text; the nudge once per spell (`prev.drugNudged`). `planStale`: 12–48 h old stays in use while a step is ahead; 48 steps synced.
+- **Phone trains:** `core/gymlog.js` + `fetchGymLog` (v2 `user/log`, `log=5300,5301,5302,5303`, Full key) every 15 min in the leader tab; gaps longer than one read (300 lines) filled a minute at a time (`gap`). Progress › Last trains shows sessions only the log has ("Torn log", Plan said "—"). In the learning-data export as `gym-log.json`. Cleared when the Full key is replaced or forgotten. Full key ToS table updated (README + Settings). Research: `docs/research-gym-log.md` (field names for def/spd/dex are [guess]: check one real answer).
+- **Bug hunt:** three reviewers (comparison cache, bot pings, gym log) found 15 issues (1 medium each in cache and gym log, 1 medium in bot; the rest low), all fixed with tests (`test/lag.test.js`, `test/gymlog.test.js`, `worker/test/review-123.test.js`).
+- Checks: 570 tests, ux-check and torn-check pass (new: second page adopts the comparison; phone session in Last trains).
 
 ### 2026-09-30: bot timing, lag diagnosis (no release)
 - **Bot pings were sent, not missing:** the `sent` table shows "Energy is full" at 07:40:52 UTC and hourly after, drug at 09:34, "Plan out of date" at 08:42, all `via dm`. The owner got no phone notification: Discord settings on their side (asked them to check the bot DM).

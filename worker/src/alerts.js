@@ -53,8 +53,31 @@ export function nextPrev(prev, state, nowS) {
     const cd = (state && state.cooldowns) || {};
     const drug = Number(cd.drug) || 0;
     const zeroAt = drug === 0 ? (prev && Number(prev.drug) === 0 && prev.drugZeroAt ? Number(prev.drugZeroAt) : nowS) : null;
-    return { at: nowS, drug, booster: Number(cd.booster) || 0, travel: Number(state && state.travel && state.travel.time_left) || 0, drugZeroAt: zeroAt };
+    // The "drug unused" nudge sent for this ready spell (one per spell, even after its sent row is cleaned up).
+    const nudged = zeroAt !== null && prev && Number(prev.drugNudged) === zeroAt ? zeroAt : null;
+    return { at: nowS, drug, booster: Number(cd.booster) || 0, travel: Number(state && state.travel && state.travel.time_left) || 0, drugZeroAt: zeroAt, drugNudged: nudged, fill: energyFill(prev, state, nowS) };
 }
+
+/**
+ * When the energy bar fills (or filled), on Torn's 5-minute ticks: the
+ * energy ping's id, so the early ping and the "full" read after are one
+ * ping, and every new fill is a new one. Full now: the fill the last read
+ * expected (or saw), else the tick just past. Filling: now + Torn's full_time.
+ * Null when neither is known.
+ */
+export function energyFill(prev, state, nowS) {
+    const e = (state && state.bars && state.bars.energy) || {};
+    if (!(Number(e.maximum) > 0)) return null;
+    if (Number(e.current) >= Number(e.maximum)) {
+        const was = prev ? Number(prev.fill) : NaN;
+        return was > 0 && was <= nowS + 60 && nowS - was < 2 * DAY_S ? was : Math.floor(nowS / 300) * 300;
+    }
+    const inS = Number(e.full_time) || 0;
+    return inS > 0 ? Math.round((nowS + inS) / 300) * 300 : null;
+}
+
+/** A read this old (or older) is not "the last read" any more: a paused key, a skipped day. Its transitions are not pinged. */
+export const PREV_FRESH_S = 10 * 60;
 
 /** When a timer seen last read ended (last read + what was left), in 5-minute steps. */
 function eventBucket(prev, left, nowS) {
@@ -106,11 +129,12 @@ export function dueAlerts(state, plan, nowS, rules = {}, ctx = {}) {
     const fullIn = full ? 0 : Number(e.full_time) || 0;
     if (on.energy && !stacking && Number(e.maximum) > 0 && (full || (fullIn > 0 && fullIn <= ENERGY_LEAD_S))) {
         const step = nextStep(plan, nowS, (s) => s.kind === 'natural' || !!s.train);
-        // Energy fills on Torn's 5-minute ticks: the estimate is rounded to one, so a read a few seconds off can't
-        // put the fill in another hour. The id is the hour it fills: the early ping and the next run's "full" are one.
-        const fullAt = full ? nowS : Math.round((nowS + fullIn) / 300) * 300;
+        // The id is the fill (on Torn's 5-minute ticks, see energyFill), and every hour it stays full after it: the
+        // early ping and the next run's "full" are one ping, a new fill is a new one, and a full bar is re-pinged hourly.
+        const fullAt = energyFill(prev, state, nowS);
+        const hours = nowS > fullAt ? Math.floor((nowS - fullAt) / 3600) : 0;
         const inS = Math.max(1, fullAt - nowS);
-        out.push({ id: 'energy:' + Math.floor(fullAt / 3600), kind: 'energy', link: LINKS.gym, title: full ? 'Energy is full' : 'Energy full in ' + inS + ' s (' + clockS(fullAt) + ' TCT)', text: step && step.train ? 'Train ' + step.train : 'Train your energy so none is wasted', step: step || null, skip: false, fullAt });
+        out.push({ id: 'energy:' + Math.round(fullAt / 300) + ':' + hours, kind: 'energy', link: LINKS.gym, title: full ? 'Energy is full' : 'Energy full in ' + inS + ' s (' + clockS(fullAt) + ' TCT)', text: step && step.train ? 'Train ' + step.train : 'Train your energy so none is wasted', step: step || null, skip: false, fullAt: full ? nowS : fullAt });
     }
 
     // Refill unused, two hours before Torn midnight (UTC).
@@ -140,14 +164,17 @@ export function dueAlerts(state, plan, nowS, rules = {}, ctx = {}) {
 
     // Is a synced plan in use? Out of date (the laptop closed for long) or never synced, the bot can't tell which
     // boosts and drugs the plan wants, so those pings come every time (owner, 2026-09-30).
-    const planInUse = Boolean(!ctx.planStale && plan && Array.isArray(plan.steps));
+    // A synced plan with nothing left ahead (an empty list, every step past) says nothing either.
+    const planInUse = Boolean(!ctx.planStale && plan && Array.isArray(plan.steps) && plan.steps.some((s) => s && Number(s.at) >= nowS - 60));
+    // Transitions ("over", "landed") only from a recent read: after a paused key or a long gap it's old news.
+    const prevFresh = Boolean(prev && nowS - Number(prev.at) <= PREV_FRESH_S);
 
     // Booster cooldown ending within BOOSTER_LEAD_S (the ping lands 30–90 s ahead, like energy), or just over when no
     // read saw it inside that window (a missed run). With a plan in use, only when a boost or jump step is next.
     const booster = Number(cd.booster) || 0;
     const prevB = prev ? Number(prev.booster) || 0 : 0;
     const boosterSoon = booster > 0 && booster <= BOOSTER_LEAD_S && !(prevB > 0 && prevB <= BOOSTER_LEAD_S);
-    const boosterOver = booster === 0 && prevB > BOOSTER_LEAD_S;
+    const boosterOver = booster === 0 && prevB > BOOSTER_LEAD_S && prevFresh && Number(prev.at) + prevB >= nowS - PREV_FRESH_S;
     if (on.booster && (boosterSoon || boosterOver)) {
         const step = nextStep(plan, nowS, (s) => s.kind === 'boost' || s.kind === 'jump');
         // The id is the Torn event (when the cooldown ends), so a replayed run can't ping twice.
@@ -156,13 +183,14 @@ export function dueAlerts(state, plan, nowS, rules = {}, ctx = {}) {
     }
 
     // Drug ready for 15 minutes, unused: one nudge per ready spell. With a plan in use, only when a drug step is due.
-    if (on.drugready && drug === 0 && prev && prev.drugZeroAt && nowS - Number(prev.drugZeroAt) >= DRUG_IDLE_S) {
+    // Once per spell: prev.drugNudged remembers it (its sent row is cleaned up after 2 days; the spell can last longer).
+    if (on.drugready && drug === 0 && prev && prev.drugZeroAt && nowS - Number(prev.drugZeroAt) >= DRUG_IDLE_S && Number(prev.drugNudged) !== Number(prev.drugZeroAt)) {
         const step = dueStep(plan, nowS, 60, DRUG_STEP);
         if (step || !planInUse) out.push({ id: 'drugready:' + prev.drugZeroAt, kind: 'drugready', link: LINKS.items, title: 'Drug ready for ' + Math.round((nowS - Number(prev.drugZeroAt)) / 60) + ' min, unused', text: step ? withTrain(step) : 'Your next Xanax, if you train today (open Pumping Iron for the plan)', step: step || null });
     }
 
     // Back from travel with a step waiting.
-    if (on.landed && prev && Number(prev.travel) > 0 && !traveling) {
+    if (on.landed && prevFresh && Number(prev.travel) > 0 && !traveling) {
         const step = dueStep(plan, nowS, 10 * 60);
         if (step) out.push({ id: 'landed:' + eventBucket(prev, prev.travel, nowS), kind: 'landed', link: stepLink(step), title: 'Back in Torn', text: 'Next: ' + withTrain(step), step });
     }

@@ -17,6 +17,7 @@
 
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import vm from 'node:vm';
+import { createHash } from 'node:crypto';
 import { dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -268,7 +269,10 @@ async function main() {
         HEADER +
         '\n(function () {\n' +
         "    'use strict';\n\n" +
-        `    const PI_BUILD_VERSION = '${VERSION}';\n\n` +
+        `    const PI_BUILD_VERSION = '${VERSION}';\n` +
+        // The code's own fingerprint: work kept between pages (the plan comparison) is never reused by other code,
+        // even a rebuild with the same version.
+        `    const PI_BUILD_HASH = '${createHash('sha256').update(body).digest('hex').slice(0, 12)}';\n\n` +
         indent(body) +
         '\n\n    boot();\n' +
         '})();\n';
