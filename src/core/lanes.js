@@ -15,8 +15,11 @@
 /** Lanes, by the Torn API path a call reads. */
 export const LANES = ['plan', 'war', 'eye', 'prices', 'other'];
 
-/** A tab's focus counts this long after its last heartbeat (a closed or hidden tab drops out). */
-export const FOCUS_FRESH_MS = 15 * 1000;
+/**
+ * A tab's focus counts this long after its last heartbeat. A tab that closes or is hidden drops out at once (its
+ * pagehide/visibility beat); this only covers a tab that died. 60 s (round 6): renewed every 20 s, not every few.
+ */
+export const FOCUS_FRESH_MS = 60 * 1000;
 
 /** Share of the minute a lane that isn't in front may use while another is (the rest is kept for the front one). */
 export const BACK_LANE_SHARE = 0.3;

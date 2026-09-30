@@ -7,7 +7,7 @@
  */
 
 import { K, get, set, getKey, getSettings, getShared } from './platform/store.js';
-import { pageSet } from './platform/archive.js';
+import { pageGet, pageSet } from './platform/archive.js';
 import { learnedModel } from './core/learndata.js';
 import { applyFightModel } from './core/learn.js';
 import { idbGet, idbSet } from './platform/idb.js';
@@ -124,7 +124,9 @@ export async function clearEye() {
     await idbSet('eye', eye.cache).catch(() => {});
     set('myAttacks', null);
     pageSet(TARGETS_KEY, null);
-    for (const k of [WATCH_KEY, WATCH_STATE_KEY, FLIGHTS_KEY, 'eyeWarAuto']) set(k, null);
+    for (const k of [WATCH_KEY, 'eyeWarAuto']) set(k, null);
+    pageSet(WATCH_STATE_KEY, null);
+    pageSet(FLIGHTS_KEY, null);
     notify();
 }
 
@@ -488,12 +490,12 @@ export async function importTargets(input = {}, { client = null, judge = null, s
 
 /** When each flight was first seen, kept across reloads (GM storage, so every tab agrees). */
 export function flightsSeen() {
-    return get(FLIGHTS_KEY, {}) || {};
+    return pageGet(FLIGHTS_KEY, {}) || {};
 }
 
 export function rememberFlights(members, now = Date.now()) {
     const { seen, changed } = trackFlights(flightsSeen(), members, now);
-    if (changed) set(FLIGHTS_KEY, seen);
+    if (changed) pageSet(FLIGHTS_KEY, seen);
     return seen;
 }
 
@@ -504,7 +506,7 @@ export function getWatch() {
 }
 
 export function watchStates() {
-    const s = get(WATCH_STATE_KEY, null) || {};
+    const s = pageGet(WATCH_STATE_KEY, null) || {};
     return { at: s.at || 0, players: s.players || {} };
 }
 
@@ -558,14 +560,14 @@ export async function pollWatch({ members = null } = {}) {
     const w = getWatch();
     if (!w.list.length) return false;
     const now = Date.now();
-    const st = get(WATCH_STATE_KEY, null) || {};
+    const st = pageGet(WATCH_STATE_KEY, null) || {};
     if (st.lockAt && now - st.lockAt < 20000 && st.lockTab !== pi.tabId) return false;
     const flights = flightsSeen();
     const fromList = new Map((members || []).map((m) => [Number(m.id), m]));
     const players = { ...(st.players || {}) };
     const due = w.list.filter((x) => fromList.has(Number(x.id)) || dueForRead(players[x.id], now, flights[x.id] ? flights[x.id].at : null));
     if (!due.length) return false;
-    set(WATCH_STATE_KEY, { ...st, lockAt: now, lockTab: pi.tabId });
+    pageSet(WATCH_STATE_KEY, { ...st, lockAt: now, lockTab: pi.tabId });
     watchRun.busy = true;
     const read = [];
     try {
@@ -610,7 +612,7 @@ export async function pollWatch({ members = null } = {}) {
     }
     const ids = new Set(getWatch().list.map((x) => String(x.id)));
     for (const k of Object.keys(players)) if (!ids.has(k)) delete players[k];
-    set(WATCH_STATE_KEY, { at: Date.now(), players });
+    pageSet(WATCH_STATE_KEY, { at: Date.now(), players });
     rememberFlights(read);
     // Life and level for the fight model (this page's own cache).
     const c = await cache();

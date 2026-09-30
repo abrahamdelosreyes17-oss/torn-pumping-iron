@@ -19,7 +19,7 @@ import { parsePerks } from '../core/perks.js';
 import { fetchUserState, fetchPerks, fetchProperty, fetchGyms, fetchInventory, fetchMoney, fetchCalendar, fetchKeyInfo, fetchNetworthHistory, fetchJob, fetchJobPoints, fetchItemsInfo, fetchFactionWars, fetchPersonalStats, personalStatValues } from '../api/torn.js';
 import { enemiesFromWars } from '../core/eye/war.js';
 import { NETWORTH_STATS, INCOME_DAYS } from '../core/auto.js';
-import { POINTS, CANDY_IDS, GAME_CONSOLE } from '../core/items.js';
+import { POINTS, CANDY_IDS, GAME_CONSOLE, ITEMS } from '../core/items.js';
 import { TRADING_SEEN_KEY } from '../core/turns.js';
 import { KEY_DEAD_CODES } from '../api/client.js';
 import { receiptChange, recordChange, applyInventory, receiptPriceNow } from '../core/receipts.js';
@@ -237,7 +237,9 @@ export class StateFeed {
             [
                 'inventory',
                 async () => {
-                    const inv = await fetchInventory(this.client);
+                    // Only the items the plan knows (round 6: GM is handed to every Torn page; a full inventory is hundreds of rows).
+                    const all = await fetchInventory(this.client);
+                    const inv = Object.fromEntries(Object.entries(all || {}).filter(([id]) => ITEMS[id]));
                     // Points held (for the refill) come from /user/money; a failure there keeps the inventory.
                     try {
                         const money = await fetchMoney(this.client);

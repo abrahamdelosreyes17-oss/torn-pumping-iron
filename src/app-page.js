@@ -570,7 +570,7 @@ export function bootAppPage({ renderers = {} } = {}) {
     loadLocalPrices().then(() => page.app.render(true)).catch(() => {});
     for (const k of [K.prices, K.settings, K.plan, K.userStatic, K.stateError, K.apiKeyDead]) gmOnChange(k, () => page.app.render());
     // The watch list is changed from Torn's pages too (☆ on a profile or the attack page) and read there.
-    for (const k of ['eyeWatch', 'eyeWatchState']) gmOnChange(k, () => page.app.tab === 'eye' && page.app.render(true));
+    gmOnChange('eyeWatch', () => page.app.tab === 'eye' && page.app.render(true));
     onPauseChange(() => page.app.render(true));
     // War mode: a faction picked by id stays until "Back to our war"; otherwise your faction's war, found by itself.
     war.manual = getSettings().warFaction || null;

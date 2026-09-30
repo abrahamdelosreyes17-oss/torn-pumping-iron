@@ -90,7 +90,9 @@ export function beatFocus(now = Date.now()) {
     for (const [id, b] of Object.entries(all)) if (!b || !(now - (b.at || 0) < FOCUS_FRESH_MS * 4)) delete all[id];
     if (mine && (mine.focus || mine.war)) all[pi.tabId] = { focus: mine.focus || null, war: Boolean(mine.war), at: now };
     else delete all[pi.tabId];
-    if (JSON.stringify(had || null) !== JSON.stringify(all[pi.tabId] || null) || (all[pi.tabId] && now - ((had && had.at) || 0) > FOCUS_FRESH_MS / 3)) set(FOCUS_KEY, all);
+    // Written when what this tab shows changes, or to renew it (the time alone is not a change).
+    const same = (x, y) => (x ? x.focus + ':' + x.war : '') === (y ? y.focus + ':' + y.war : '');
+    if (!same(had, all[pi.tabId]) || (all[pi.tabId] && now - ((had && had.at) || 0) > FOCUS_FRESH_MS / 3)) set(FOCUS_KEY, all);
 }
 
 /** The one Torn client every part of this tab uses: 85/min across tabs, visible only, nothing while paused; what's open goes first. */

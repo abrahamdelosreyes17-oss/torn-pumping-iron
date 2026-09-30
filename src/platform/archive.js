@@ -126,7 +126,7 @@ export const ARCHIVES = {
 };
 
 /** Data only the webpage uses: its IndexedDB, never GM (moved out of GM once). */
-export const PAGE_KEYS = ['moneyLog', 'gymLog', 'fightLog', 'learnLog', 'planLine', 'eyeTargets'];
+export const PAGE_KEYS = ['moneyLog', 'gymLog', 'fightLog', 'learnLog', 'planLine', 'eyeTargets', 'eyeFlights', 'eyeWatchState'];
 
 const mem = { loaded: false, loading: null, arch: {}, page: {}, idb: false };
 
