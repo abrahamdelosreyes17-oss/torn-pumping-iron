@@ -1,6 +1,8 @@
 # HANDOFF: Torn Pumping Iron
 
-**Released: 1.2.3 (2026-09-30): the lag fix (the plan comparison kept between pages), bot pings early (energy, booster) and without a plan, the synced plan used for up to 48 h, trains on your phone from Torn's log. Details in the newest session entry.**
+**Released: 1.3.0 (2026-09-30, round 6): the lag fix (Torn page load 2.0–2.3 s → 0.14–0.26 s of script at 4× CPU; no background re-planning; Tampermonkey store 696 → 58 KB), Create plan / Recalibrate on the Plan page (the owner's pick: mockup A's card + C's months; clicks verified in ux-check), long plans (gyms, events, a range), the certain income, Torn Eye asks only about the player viewed or attacked, the gym page never greyed. Pinned: https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/f0b448ab325e6d2bddb467a7ac7da617a1aefad3/torn-pumping-iron.user.js (the Worker and gh-pages didn't change).**
+
+1.2.3 (2026-09-30): the lag fix (the plan comparison kept between pages), bot pings early (energy, booster) and without a plan, the synced plan used for up to 48 h, trains on your phone from Torn's log. Details in the newest session entry.**
 
 1.2.2 (2026-09-29): the owner's reports 7–13 (booster cooldown planned for, candy pool, Sally's, real gains, Xanax cooldowns, candy words, why this mix).
 
@@ -28,14 +30,14 @@
 - Company what-ifs, receipts and the what-if graph, unlock goal, war reserve.
 
 Links:
-- Install (pinned 1.2.3): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/328f7d66863deb7786cfce100b90ca0570c4b41c/torn-pumping-iron.user.js
+- Install (pinned 1.3.0): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/f0b448ab325e6d2bddb467a7ac7da617a1aefad3/torn-pumping-iron.user.js
 - Bot: deployed with 1.2.3 (Worker version c96ec8b1), first run clean.
 - Auto-update URL (`@updateURL`): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/main/torn-pumping-iron.user.js
 - Webpage: https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html (gh-pages branch; unchanged since 1.0.0, `site/` didn't change)
 - Repo: https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron (public; `main` + `gh-pages`)
 - Discord service: https://pumping-iron.pumping-iron-worker.workers.dev (the owner's Cloudflare; bot in the owner's server)
 
-**Round 6 is built (2026-09-30, "round 6 build"; newest session entry below): R6.0–R6.8 done, locally committed, not released.** Lag at 4× CPU (median of 3, 1.2.3 and now back to back): page load 2.0–2.3 s → 0.15–0.26 s of script, worst task ~0.5 s → 0.1–0.15 s, steady 230–340 → 22 ms per 10 s, GM 696 → 57 KB, GM writes ~10–42 → 1–2 per 10 s. **Waiting on the owner:** (1) pick A, B or C in `mockups/round6/R6-plan.html` (the Plan page's Create plan / Recalibrate buttons: until then the webpage has no button for them, only `__pi.createPlan` in the harness, so **don't release before that UI exists**); (2) the release go-ahead.
+**Round 6 is built and released as 1.3.0 (2026-09-30; newest session entry below).** Owner picked "a mix of A and C" for the Plan page; built and released on "push and commit". Next: the owner's live check of 1.3.0 (is Torn still laggy? do Create plan / Recalibrate make sense?), then the backlog below. Lag at 4× CPU (median of 3, 1.2.3 and now back to back): page load 2.0–2.3 s → 0.15–0.26 s of script, worst task ~0.5 s → 0.1–0.15 s, steady 230–340 → 22 ms per 10 s, GM 696 → 57 KB, GM writes ~10–42 → 1–2 per 10 s. 
 
 **Next session, start here (round 6, 2026-09-30):**
 0. **Read `docs/ROUND6-PLAN.md` first.** 1.2.3 is still laggy on real Torn. The owner decided: **no more automatic** (the plan is made on a click and saved: Create plan for 1/3/6/12 months; Recalibrate keeps the end date, re-reads everything, and works any time, a day later too; everything else follows the saved plan as now). §8 of the plan is the build order. No spending, not on phones, stick to Tampermonkey (no extension); the owner's answers are in the plan's §7a.
