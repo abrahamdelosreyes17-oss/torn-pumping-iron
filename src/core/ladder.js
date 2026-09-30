@@ -47,7 +47,7 @@ export function statsPerEnergy({ stats, shares, best, happy, perks = {} }) {
 
 /** The price to count for an item: live (10 units from the cheapest up) or the sample. */
 export function priceFor(id, prices) {
-    const live = livePrices(prices || {});
+    const live = prices ? livePrices(prices) : {};
     return live[id] || SAMPLE_PRICES[id] || LADDER_SAMPLE_PRICES[id] || null;
 }
 

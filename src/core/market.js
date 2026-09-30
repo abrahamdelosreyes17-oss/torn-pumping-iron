@@ -268,8 +268,24 @@ export function unitPrice(row, qty = 10) {
     return row.avg7 > 0 ? row.avg7 : null;
 }
 
-/** {itemId: price row} → {itemId: $ per unit}, only the ones known (points: per point, 300 at a time; candy: a boost's 50). */
+/** The last answer per stored price object: prices are parsed once per change, so this sorts each item's listings once per price load, not on every priceFor. */
+const liveMemo = new WeakMap();
+
+/**
+ * {itemId: price row} → {itemId: $ per unit}, only the ones known (points: per point, 300 at a time; candy: a boost's 50).
+ * Read-only: the same object comes back for the same rows (copy before changing).
+ */
 export function livePrices(rows) {
+    if (rows && typeof rows === 'object') {
+        const hit = liveMemo.get(rows);
+        if (hit) return hit;
+    }
+    const out = computeLivePrices(rows);
+    if (rows && typeof rows === 'object') liveMemo.set(rows, out);
+    return out;
+}
+
+function computeLivePrices(rows) {
     const out = {};
     for (const [id, row] of Object.entries(rows || {})) {
         const p = unitPrice(row, id === POINTS ? 300 : isCandy(Number(id)) ? 50 : 10);

@@ -390,13 +390,19 @@ export const LEARN_EVERY_MS = 6 * 60 * 60 * 1000;
 export function maybeLearn(now = Date.now(), force = false) {
     const lead = get(K.leader, null);
     if (!force && (!lead || lead.id !== pi.tabId)) return null;
+    // The 6-hour check first: reading and joining the samples and fights costs more than the check (every 5 s refresh).
+    const prev = get(K.learned, null);
+    if (!force && prev && now - Math.max(prev.at || 0, prev.checkedAt || 0) < LEARN_EVERY_MS) return prev;
     const cal = get('calibration', null) || {};
     const samples = cal.samples || [];
     const fights = joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []);
-    const prev = get(K.learned, null);
     // New trains or fights since the last run (counts stop growing at the cap; the newest time doesn't).
     const sig = [samples.length, samples.length ? samples[samples.length - 1].at || 0 : 0, fights.length, fights.length ? fights[fights.length - 1].at : 0].join(':');
-    if (!force && prev && (now - prev.at < LEARN_EVERY_MS || prev.sig === sig)) return prev;
+    if (!force && prev && prev.sig === sig) {
+        // Nothing new: checked again in 6 hours, not on every refresh (`at` stays when it last learned).
+        set(K.learned, { ...prev, checkedAt: now });
+        return prev;
+    }
     set(K.fightLog, fights);
     // The model in use (kept earlier, or kept over and over since) is the one a new one must beat.
     const current = prev && prev.gym ? applyGymModel(prev.gym) : null;
@@ -497,6 +503,13 @@ export function startFeed() {
     setInterval(() => {
         if (isVisible()) refresh();
     }, 5000);
-    refresh();
+    // The first model once Torn's page has settled (idle), not inside the page's own start-up.
+    whenIdle(refresh);
+}
+
+/** Run when the page is idle (at most ~1.5 s later). */
+export function whenIdle(fn) {
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(() => fn(), { timeout: 1500 });
+    else setTimeout(fn, 200);
 }
 

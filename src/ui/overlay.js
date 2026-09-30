@@ -153,10 +153,23 @@ export class Overlay {
         window.addEventListener('resize', () => this.place());
         // Torn's page settles after load (sidebar, React): fit again then.
         setTimeout(() => this.place(), 1500);
-        this.setCollapsed(Boolean(this.loadCollapsed()), false);
+        // Hidden until placed: where it goes is measured after Torn's first paint, never inside the page's boot.
+        this.wrap.style.visibility = 'hidden';
+        this.setCollapsed(Boolean(this.loadCollapsed()), false, true);
     }
 
-    setCollapsed(on, save) {
+    /** Place it after the page's next paint (measuring Torn's layout inside the boot task forced a layout: 80–136 ms at 4× CPU). */
+    placeSoon() {
+        if (this.placeTimer) return;
+        const later = (fn) => (typeof requestAnimationFrame === 'function' ? requestAnimationFrame(() => setTimeout(fn, 0)) : setTimeout(fn, 0));
+        this.placeTimer = true;
+        later(() => {
+            this.placeTimer = null;
+            this.place();
+        });
+    }
+
+    setCollapsed(on, save, soon = false) {
         this.collapsed = Boolean(on);
         this.wrap.classList.toggle('collapsed', this.collapsed);
         this.colBtn.textContent = this.collapsed ? '+' : '–';
@@ -164,7 +177,8 @@ export class Overlay {
         this.colBtn.title = (this.collapsed ? 'Expand' : 'Collapse') + ' (Alt+`)';
         this.head.setAttribute('aria-expanded', String(!this.collapsed));
         if (save) this.saveCollapsed(this.collapsed);
-        this.place();
+        if (soon) this.placeSoon();
+        else this.place();
     }
 
     spotList() {
@@ -176,6 +190,7 @@ export class Overlay {
         if (!this.wrap) return;
         this.wrap.style.display = this.off ? 'none' : 'flex';
         if (this.off) return;
+        this.wrap.style.visibility = '';
         const list = this.spotList();
         const stored = this.loadPos();
         const pos = stored && stored.side ? stored : null;
@@ -256,7 +271,7 @@ export class Overlay {
         ]);
         if (wasOff || !this.placed) {
             this.placed = true;
-            this.place();
+            this.placeSoon();
         }
     }
 
