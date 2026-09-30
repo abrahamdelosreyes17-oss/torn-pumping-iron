@@ -12,12 +12,14 @@ import { focusFrom, FOCUS_FRESH_MS } from './core/lanes.js';
 import { TornApiClient } from './api/client.js';
 import { StateFeed } from './feed/state.js';
 import { normalizeState, tornDayStart } from './core/bars.js';
-import { buildModel, compareStrategiesAsync, blissWhatIf, companyWhatIf, playerContext, buildOf, isDrugEntry, specialLeft, heldBoosters, steadyCostPerDay } from './core/model.js';
+import { buildModel, compareSteps, compareStrategiesAsync, blissWhatIf, companyWhatIf, playerContext, buildOf, isDrugEntry, specialLeft, heldBoosters, steadyCostPerDay } from './core/model.js';
 import { recommend, pickWarning, PICK_BY } from './core/recommend.js';
 import { targetShares } from './core/plan.js';
 import { INCOME_MIN_DAYS, budgetOf, incomeFrom, autoState, effectivePickBy, incomeBreakdown } from './core/auto.js';
 import { incomeFloor } from './core/income-floor.js';
-import { planWindow, daysLeft, planProgress, snapshotOf, makeSavedPlan, planNowOf, usablePlanNow, SAVED_PLAN_V } from './core/saved-plan.js';
+import { eventsBetween } from './core/events.js';
+import { yearSteps, segEvents, unlockHook } from './core/year.js';
+import { planWindow, scheduleAt, daysLeft, planProgress, snapshotOf, makeSavedPlan, planNowOf, usablePlanNow, SAVED_PLAN_V } from './core/saved-plan.js';
 import { loadSavedPlan, saveSavedPlan } from './platform/plan-store.js';
 import { archived, pageGet, pageSet } from './platform/archive.js';
 import { summarizeReceipts } from './core/receipts.js';
@@ -245,7 +247,15 @@ export async function createPlan({ months = 1, recalibrate = false, pause = paus
         const runSettings = { ...settings, horizonDays: win.days, budget: Number.isFinite(perDay) ? perDay * win.days : Infinity };
         const pickBy = effectivePickBy(PICK_BY[plan.pickBy] ? plan.pickBy : 'most', auto);
         const args = { state, pc, shares, settings: runSettings, prices, special, statics, pickBy };
-        const compare = await compareStrategiesAsync(args, { pause });
+        // R6.5: the events on their dates and the gyms opening as energy is trained, in every plan's run.
+        const from = recalibrate ? tornDayStart(now) : win.start;
+        const cal = statics.calendar || null;
+        const events = eventsBetween(cal && cal.calendar, from, win.end, { startTime: cal && cal.startTime });
+        const gp = get(K.gymProgress, null);
+        const top = Math.max(1, ...pc.unlocked.filter((id) => id <= 24));
+        const progress = gp && Number(gp.nextId) === top + 1 ? { top, energy: Number(gp.energy) || 0 } : null;
+        const hook = unlockHook({ top, progress: progress ? progress.energy : 0, gymExpMult: pc.perks.gymExpMult || 1, table: pc.table, active: state.gymId, known: pc.unlocked.filter((id) => id > 24) });
+        const compare = await compareStrategiesAsync({ ...args, events: segEvents(events, { from, to: win.end }), unlock: hook }, { pause });
         await pause();
         const goal = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
         const budget = budgetOf(runSettings);
@@ -254,19 +264,23 @@ export async function createPlan({ months = 1, recalibrate = false, pause = paus
         const whatIf = pc.perks.bliss ? null : blissWhatIf(args);
         await pause();
         const jobWhatIf = companyWhatIf({ ...args, compare, recommended: rec.recommended });
+        // The path: the best plan again every 30 days and for each event, from the stats projected for that day.
+        const goalYear = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
+        const year = await runSteps(yearSteps({ compare: compareSteps, args, start: from, end: win.end, budgetPerDay: perDay, events, progress, goal: goalYear }), pause);
         const snapshot = snapshotOf({ state, pc, statics, plan, prices: livePrices(prices), income: auto.ready ? { perDay: auto.perDay, source: auto.source, days: auto.days, certain: auto.floor ? { perDay: auto.floor.perDay, bank: auto.floor.bank, dividends: auto.floor.dividends, rent: auto.floor.rent } : null } : null, budgetPerDay: Number.isFinite(perDay) ? perDay : null, held: heldBoosters(statics.inventory), now });
-        const saved = makeSavedPlan({ compare, rec, snapshot, start: win.start, end: win.end, months: win.months, days: win.days, budget, whatIf, jobWhatIf, prev, now });
+        const saved = makeSavedPlan({ compare, rec, snapshot, start: win.start, end: win.end, months: win.months, days: win.days, budget, whatIf, jobWhatIf, prev, year, now });
         const best = compare[rec.recommended];
         const warn = {};
         for (const [id, r] of Object.entries(compare)) if (r && best && id !== rec.recommended) warn[id] = pickWarning(best, r, { bliss: pc.perks.bliss, days: win.days }).warn;
         await saveSavedPlan(saved);
         pi.saved = saved;
         set(K.planNow, planNowOf(saved, warn));
-        // The plan followed: the recommended one (a plan you picked yourself stays through a recalibration).
+        // The plan followed: the path (today's segment); a plan you picked yourself stays through a recalibration.
         const cur = getPlan();
-        const strategy = recalibrate && cur.strategyPicked && compare[cur.strategy] ? cur.strategy : rec.recommended;
-        setPlan({ ...cur, strategy, strategyPicked: strategy !== rec.recommended && Boolean(cur.strategyPicked), createdAt: now });
-        recordPlanLine(saved, strategy, now);
+        const keep = recalibrate && cur.strategyPicked && compare[cur.strategy];
+        const strategy = keep ? cur.strategy : year.segments.length ? year.segments[0].strategy : rec.recommended;
+        setPlan({ ...cur, strategy, strategyPicked: Boolean(keep), createdAt: now });
+        recordPlanLine(saved, keep ? strategy : 'path', now);
         return saved;
     })();
     pi.planBusy = { recalibrate, months, at: Date.now(), promise: run };
@@ -285,20 +299,39 @@ export function recalibratePlan(o = {}) {
 }
 
 /**
- * Picking another of the saved plans (the Plan page): nothing is worked out
- * again; Progress's line follows the pick.
+ * Picking another of the saved plans yourself (the Plan page): followed the
+ * whole length, nothing worked out again; Progress's line follows the pick.
  */
 export function followStrategy(id) {
     const saved = pi.saved;
     const cur = getPlan();
-    const rec = saved && saved.rec ? saved.rec.recommended : null;
-    setPlan({ ...cur, strategy: id, strategyPicked: id !== rec, createdAt: Date.now() });
+    setPlan({ ...cur, strategy: id, strategyPicked: true, createdAt: Date.now() });
     if (saved && saved.compare && saved.compare[id]) recordPlanLine(saved, id, Date.now());
+    refresh();
+}
+
+/** Back to the saved path (the recommended plan for each stretch, switching on its dates). */
+export function followPath() {
+    const saved = pi.saved;
+    const cur = getPlan();
+    const seg = scheduleAt(saved && saved.year ? saved.year.segments : null, Date.now());
+    setPlan({ ...cur, strategy: seg ? seg.strategy : cur.strategy, strategyPicked: false, createdAt: Date.now() });
+    if (saved) recordPlanLine(saved, saved.year ? 'path' : cur.strategy, Date.now());
     refresh();
 }
 
 /** A break for the page between two pieces of work. */
 const pauseForPage = () => new Promise((r) => setTimeout(r, 0));
+
+/** Run a generator of work to its end, with a break for the page after each step. */
+async function runSteps(gen, pause) {
+    let r = gen.next();
+    while (!r.done) {
+        await pause();
+        r = gen.next();
+    }
+    return r.value;
+}
 
 /**
  * Where this tab runs: 'app' (the webpage: the whole saved plan, Plan,
@@ -326,16 +359,21 @@ export function currentModel(now = Date.now()) {
     let compare = null;
     let rec = null;
     let planSettings = settings;
+    // The saved path: today's segment's plan, unless you picked one yourself (a switch on its date is the plan).
+    const seg = pn && !plan.strategyPicked ? scheduleAt(pn.schedule, now) : null;
+    const followed = seg && seg.strategy ? { ...plan, strategy: seg.strategy } : plan;
     if (pn) {
         compare = saved ? saved.compare : pn.slim;
+        if (seg && seg.candy && compare[seg.strategy]) compare = { ...compare, [seg.strategy]: { ...compare[seg.strategy], candy: seg.candy } };
         rec = saved ? saved.rec : { recommended: pn.recommended, pickBy: pn.pickBy, alternatives: [], reasons: [] };
         planSettings = { ...settings, horizonDays: pn.days, budget: pn.budget === null ? Infinity : pn.budget };
     }
     // Income (Plan's "Plan from my income"): read on the webpage only, where a plan is made.
     const auto = app ? autoFor(plan, settings, statics, () => (pn && pn.slim.steady ? pn.slim.steady.cost / pn.days : 0)) : null;
     const planInfo = pn ? { start: pn.start, end: pn.end, months: pn.months, days: pn.days, from: pn.from, createdAt: pn.createdAt, recalibratedAt: pn.recalibratedAt, progress: planProgress(pn, now), whole: Boolean(saved) } : null;
-    const m = buildModel({ state, statics, plan, settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: (app ? archived(K.statsHistory, {}) : get(K.statsHistory, {})) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+    const m = buildModel({ state, statics, plan: followed, settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: (app ? archived(K.statsHistory, {}) : get(K.statsHistory, {})) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
     if (m.ready) {
+        m.strategy = followed.strategy;
         m.planBusy = pi.planBusy ? { recalibrate: pi.planBusy.recalibrate, months: pi.planBusy.months, at: pi.planBusy.at } : null;
         m.savedPlan = saved;
     }
@@ -372,7 +410,8 @@ function recordDayTotals(m) {
  * the day it was made or recalibrated (or picked).
  */
 function recordPlanLine(saved, strategy, now) {
-    const r = saved && saved.compare ? saved.compare[strategy] : null;
+    // 'path': the saved path (a plan per segment); else one plan over the whole length.
+    const r = strategy === 'path' ? saved && saved.year && saved.year.path : saved && saved.compare ? saved.compare[strategy] : null;
     if (!r || !Array.isArray(r.daily)) return;
     const plan = getPlan();
     const stats = saved.snapshot.stats;

@@ -7,11 +7,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { pi, currentModel, refresh, createPlan, recalibratePlan, followStrategy, setWhere, planNowStored } from '../src/runtime.js';
+import { pi, currentModel, refresh, createPlan, recalibratePlan, followStrategy, followPath, setWhere, planNowStored } from '../src/runtime.js';
 import { K, get, set, dropOldKeys, DROPPED_KEYS } from '../src/platform/store.js';
 import { loadSavedPlan } from '../src/platform/plan-store.js';
 import { gainPerTrain, happyTerms, HAPPY_CAP, STAT_AB, effectiveStat, round4 } from '../src/core/gain.js';
-import { planWindow, daysLeft, addMonths, planProgress, makeSavedPlan, monthlyOf, planNowOf, usablePlanNow, slimResult } from '../src/core/saved-plan.js';
+import { planWindow, daysLeft, addMonths, planProgress, makeSavedPlan, monthlyOf, planNowOf, usablePlanNow, slimResult, scheduleAt } from '../src/core/saved-plan.js';
+
+const scheduleAtNow = (saved) => scheduleAt(planNowOf(saved).schedule, Date.now()).strategy;
 import { DAY, tornDayStart } from '../src/core/bars.js';
 
 const API = {
@@ -69,10 +71,16 @@ test('Create plan (12 months): every plan over the year, saved with what it saw;
     assert.equal(saved.compare.steady.daily.length, saved.days, 'day by day over the whole year');
     assert.equal(saved.monthly.length, 12, 'a line per month');
     assert.deepEqual(saved.snapshot.stats, { str: 118400, spd: 110900, def: 96200, dex: 82700 }, 'it remembers what it saw');
-    assert.equal(get(K.plan, null).strategy, saved.rec.recommended, 'the plan followed is the recommended one');
+    assert.equal(get(K.plan, null).strategy, saved.year.segments[0].strategy, 'the plan followed is the path\'s first plan');
+    // R6.5: the path re-picks every 30 days (and for events), with a band, and Torn pages get its schedule.
+    assert.ok(saved.year.segments.length >= 12, 'a segment a month at least');
+    assert.equal(saved.year.path.daily.length, saved.days, 'the path is day by day');
+    assert.ok(saved.year.band.low < saved.year.path.gained && saved.year.path.gained < saved.year.band.high, 'the year is a range');
+    assert.equal(pn.schedule.length, saved.year.segments.length);
+    assert.ok(saved.year.unlocks.length >= 1, 'the friend opens gyms over a year (Gun Shop → George\'s)');
     assert.ok(!('daily' in pn.slim.steady), 'Torn pages never get the day-by-day lines');
     assert.ok(JSON.stringify(pn).length < 6000, 'planNow stays small: ' + JSON.stringify(pn).length);
-    assert.ok(get(K.planLine, null).daily.length === saved.days, 'Progress has the plan line');
+    assert.ok(get(K.planLine, null).daily.length === saved.days, 'Progress has the plan line (the path)');
     // In node there is no IndexedDB: the whole plan went to GM instead.
     assert.equal((await loadSavedPlan()).rev, saved.rev);
 });
@@ -225,4 +233,21 @@ test('Torn pages rebuild the model only when due: 30 s old, a step\'s time come,
     assert.equal(modelDue(m2, at, at + 12e3), true, 'a step\'s time came');
     assert.equal(modelDue({ ready: true, steps: [] }, Date.parse('2026-09-30T23:59:58Z'), Date.parse('2026-10-01T00:00:03Z')), true, 'Torn midnight');
     assert.equal(modelDue(null, at, at), true);
+});
+
+test('R6.5: the model follows the saved path\'s plan for the day (a planned switch, not re-planning); your own pick wins', async () => {
+    setup('steady');
+    const saved = await createPlan({ months: 3, pause: nowPause });
+    const segs = saved.year.segments;
+    const later = segs.find((x) => x.strategy !== segs[0].strategy);
+    if (later) {
+        const m = await at(later.from + 3600e3, () => currentModel(later.from + 3600e3));
+        assert.equal(m.strategy, later.strategy, 'on that segment\'s days its plan is followed');
+    }
+    const other = Object.keys(saved.compare).find((id) => id !== saved.rec.recommended && !saved.year.segments.some((x) => x.strategy === id));
+    followStrategy(other);
+    const mine = currentModel();
+    assert.equal(mine.strategy, other, 'a plan you picked yourself is followed throughout');
+    followPath();
+    assert.equal(currentModel().strategy, scheduleAtNow(saved), 'back to the path');
 });

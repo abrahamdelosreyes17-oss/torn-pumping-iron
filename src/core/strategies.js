@@ -137,6 +137,11 @@ export const TICK_OFFSET_MIN = 5;
  * @param {number} [o.boosterCdMin] - booster cooldown already running at the start, minutes (the live one)
  * @param {object} [o.held] - {[itemId]: qty} boosters in the inventory: used first and free (candy and energy
  *   drinks as a pool, the most happy or energy first; EDVD and FHC as themselves). `used.held` counts them.
+ * @param {object[]} [o.events] - round 6 (year plans): [{from, to (minutes from the start), candyMult, canMult,
+ *   freeEnergy, freeHappy}]: candy and cans count the event's × while it runs; free energy/happy land at its start
+ * @param {object} [o.unlock] - round 6: gyms opening as energy is trained: {left: energy to the next gym,
+ *   next: () => ({gyms, left}|null)}: when the energy trained reaches `left`, the gyms switch to `next()`'s
+ *   (per stat {dots, energy}) and `left` becomes the next step; `unlocked` counts them (with the day)
  * @returns {{id, gained:number, perStat:object, cost:number, energyTrained:number, daily:number[], used:object}}
  * Refills (points or special) set energy to the maximum, never above it: anything over is wasted (O2, owner).
  */
@@ -195,6 +200,14 @@ export function simulateStrategy(id, o) {
     const eb = id === 'steadyMax' ? { id: FHC, perDay: Infinity } : id === 'steadyBoost' && o.energyBooster && ITEMS[o.energyBooster.id] ? o.energyBooster : null;
     const ebItem = eb ? ITEMS[eb.id] : null;
     const canMult = o.canMult || 1;
+    // Events (year plans): the multipliers in force now, and free energy/happy handed out once at their start.
+    const evs = Array.isArray(o.events) ? o.events.filter((e) => e && e.to > 0 && e.from < days * 1440) : [];
+    let evCandy = 1;
+    let evCan = 1;
+    const evGiven = new Set();
+    // Gyms opening as energy is trained (year plans).
+    const unlocked = [];
+    let unlockLeft = o.unlock && o.unlock.left > 0 ? o.unlock.left : Infinity;
     let ebDay = -1;
     let ebToday = 0;
     const isConsole = id === 'consoleJump' || id === 'consoleJumpToy';
@@ -220,8 +233,25 @@ export function simulateStrategy(id, o) {
             E -= g.energy;
             H = Math.max(0, H - HAPPY_LOSS_PER_ENERGY * g.energy * lossMult);
             trainedE += g.energy;
+            unlockLeft -= g.energy;
+            if (unlockLeft <= 0) openGym();
         }
     };
+    // The next gym opened: train there from now on (its fee is the caller's; `unlocked` says when).
+    function openGym() {
+        const n = o.unlock.next(S, trainedE);
+        if (!n) {
+            unlockLeft = Infinity;
+            return;
+        }
+        unlocked.push({ at: trainedE, gymId: n.gymId, cost: n.cost || 0 });
+        cost += n.cost || 0;
+        if (n.gyms) {
+            o = { ...o, gyms: n.gyms };
+            if (cands) cands.splice(0, cands.length, ...STATS.filter((k) => o.gyms[k] && o.gyms[k].dots > 0).map((k) => ({ k, dots: o.gyms[k].dots, energy: o.gyms[k].energy })));
+        }
+        unlockLeft += n.left > 0 ? n.left : Infinity;
+    }
     const buy = (item, n = 1) => {
         used[item] = (used[item] || 0) + n;
         cost += price(item) * n;
@@ -240,7 +270,7 @@ export function simulateStrategy(id, o) {
         return f;
     };
     // A candy boost of `n`: the happy it adds (held candy may give more than the pick).
-    const eatCandy = (n) => useBoosters(candyId, n).value * (o.candyMult || 1);
+    const eatCandy = (n) => useBoosters(candyId, n).value * (o.candyMult || 1) * evCandy;
     // Special refills: in a boosted session as many as keep happy above the maximum (it resets there anyway);
     // otherwise a day's share. Each train costs happy, so dumping them all at the maximum drains it for days.
     const specialPerDay = Math.ceil(Math.max(0, Math.floor(o.special || 0)) / days);
@@ -316,7 +346,7 @@ export function simulateStrategy(id, o) {
             if (ebItem.toMax) {
                 E = Math.max(E, maxE);
                 H += ebItem.happy || 0;
-            } else E += Math.round(f.value * canMult);
+            } else E += Math.round(f.value * canMult * evCan);
             addBooster(eb.id, 1, t);
             ebToday++;
             train();
@@ -346,6 +376,21 @@ export function simulateStrategy(id, o) {
     for (let t = 0; t < days * 1440; t += STEP_MIN) {
         const day = Math.floor(t / 1440);
         if (t % 1440 === 0 && t) daily.push(Math.round(totalOf(S) - start));
+        if (evs.length) {
+            evCandy = 1;
+            evCan = 1;
+            for (let i = 0; i < evs.length; i++) {
+                const ev = evs[i];
+                if (t < ev.from || t >= ev.to) continue;
+                evCandy *= ev.candyMult || 1;
+                evCan *= ev.canMult || 1;
+                if (!evGiven.has(i) && (ev.freeEnergy || ev.freeHappy)) {
+                    evGiven.add(i);
+                    E += ev.freeEnergy || 0;
+                    H = Math.min(HAPPY_CAP, H + (ev.freeHappy || 0));
+                }
+            }
+        }
         if (t % regenEvery === 0 && E < maxE) E = Math.min(maxE, E + 5);
         if (t % 15 === 0) {
             if (bliss) H = Math.min(HAPPY_CAP, H + 5);
@@ -463,7 +508,9 @@ export function simulateStrategy(id, o) {
     daily.push(Math.round(totalOf(S) - start));
     const perStat = {};
     for (const k of STATS) perStat[k] = Math.round(S[k] - o.stats[k]);
-    return { id, gained: Math.round(totalOf(S) - start), perStat, cost: Math.round(cost), energyTrained: trainedE, daily, used };
+    const out = { id, gained: Math.round(totalOf(S) - start), perStat, cost: Math.round(cost), energyTrained: trainedE, daily, used };
+    if (unlocked.length) out.unlocked = unlocked;
+    return out;
 }
 
 /** Which strategies can run at all for this player (items, cooldown caps, a book). */

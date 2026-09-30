@@ -6,7 +6,7 @@
 
 import { gmOnChange } from './platform/gm.js';
 import { K, get, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup, DATA_GROUPS, getPrices, PRICE_LISTINGS_KEPT, loadLocalPrices, localPrices, setLocalPrices } from './platform/store.js';
-import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE, beatFocus, apiFocus, createPlan, recalibratePlan, followStrategy } from './runtime.js';
+import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE, beatFocus, apiFocus, createPlan, recalibratePlan, followStrategy, followPath } from './runtime.js';
 import { forgetSavedPlan } from './platform/plan-store.js';
 import { archived, pageGet, loadArchives, drainArchives, clearArchived } from './platform/archive.js';
 import { PiApp } from './ui/app/app.js';
@@ -408,8 +408,11 @@ function getCtx() {
         },
         setPlan: (p) => {
             const { strategy, strategyPicked, ...rest } = p;
-            // Another of the saved plans: followed at once, nothing worked out again (Progress's line follows it).
-            if (strategy !== undefined && strategy !== getPlan().strategy) followStrategy(strategy);
+            // Another of the saved plans: followed at once, nothing worked out again (Progress's line follows it). The
+            // recommended one means the saved path (it switches plans on its dates).
+            const rec = pi.saved && pi.saved.rec ? pi.saved.rec.recommended : null;
+            if (strategy !== undefined && strategy === rec) followPath();
+            else if (strategy !== undefined && strategy !== getPlan().strategy) followStrategy(strategy);
             // Build, goal, the Plan rule, special refills: kept for the next Create plan or Recalibrate (a click).
             if (Object.keys(rest).length) setPlan({ ...getPlan(), ...rest });
             refresh();

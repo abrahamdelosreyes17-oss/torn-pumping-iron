@@ -96,7 +96,7 @@ const IMPORT_RE =
 const BARE_IMPORT_RE = /^[ \t]*import\s+['"]([^'"]+)['"];?[ \t]*$/gm;
 const EXPORT_RE = /^([ \t]*)export\s+(?=(?:async\s+)?(?:function|const|let|var|class)\b)/gm;
 const DECL_RE =
-    /^(?:export\s+)?(?:async\s+)?(?:function|const|let|var|class)\s+([A-Za-z0-9_$]+)/gm;
+    /^(?:export\s+)?(?:async\s+)?(?:function(?:\s*\*)?|const|let|var|class)\s+([A-Za-z0-9_$]+)/gm;
 
 /** Parse one module: its dependencies, its imported names, its exports. */
 function analyse(source, filePath) {

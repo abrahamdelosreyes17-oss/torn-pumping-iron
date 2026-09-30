@@ -193,7 +193,8 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
 {
     const { page } = await open('page=points&fixture=pmarket', { wait: 6000 });
     const labels = await text(page, '.pi-outlined .pi-label');
-    ok(labels.includes('Take 25 · $1,128,000') && labels.some((l) => /^Take 65 · /.test(l)), 'points: 25 + 65 from the two lots (' + labels.join(' | ') + ')');
+    // Steady: a refill (30 points) a day for the 3-day window = 90, less the 45 held = 45 to buy.
+    ok(labels.includes('Take 25 · $1,128,000') && labels.some((l) => /^Take 20 · /.test(l)), 'points: 25 + 20 from the two lots, the 45 held taken off (' + labels.join(' | ') + ')');
     await page.close();
 }
 

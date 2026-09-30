@@ -61,8 +61,21 @@ export const SPECIALIST_RATIO = 1.25;
 /** [calibrate] Sports Science Lab: at most this many Xanax + Ecstasy taken, ever (research-gym.md "uncertain vs 50+50"). */
 export const SSL_DRUG_LIMIT = 150;
 
-/** [calibrate] Specialist gyms open once George's is unlocked (unconfirmed; the stat rule is the hard part). */
-export const SPECIALIST_NEEDS_GYM = GEORGES;
+/**
+ * The ladder gym after which each specialist can be joined (its stat rule
+ * still applies; research-gym-unlock.md, wiki 2023): the pair gyms after
+ * Cha Cha's, Sports Science Lab after Last Round, the single-stat ones after
+ * George's.
+ */
+export const SPECIALIST_OPENS_AFTER = { 25: 20, 26: 20, 27: 24, 28: 24, 29: 24, 30: 24, 31: 22 };
+
+/** Gyms open once the ladder reaches `top`: every ladder gym up to it, and the specialists it opens. */
+export function gymsOpenAt(top) {
+    const out = [];
+    for (let i = 1; i <= Math.min(top, GEORGES); i++) out.push(i);
+    for (const [id, after] of Object.entries(SPECIALIST_OPENS_AFTER)) if (top >= after) out.push(Number(id));
+    return out.sort((a, b) => a - b);
+}
 
 /**
  * Energy (gym experience) to unlock the NEXT ladder gym, from gym 1 → 2 up to

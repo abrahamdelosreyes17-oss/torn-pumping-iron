@@ -128,7 +128,7 @@ export function itemContext(statics = {}, settings = {}, now = null) {
 }
 
 /** The simulation inputs every strategy shares. */
-function simInputs({ state, pc, shares, settings, prices, special = 0, statics = {} }) {
+function simInputs({ state, pc, shares, settings, prices, special = 0, statics = {}, events = null, unlock = null }) {
     const gyms = {};
     for (const k of STATS) if (pc.best[k]) gyms[k] = { dots: pc.best[k].dots[k], energy: pc.best[k].energy };
     const ic = itemContext(statics, settings);
@@ -166,6 +166,9 @@ function simInputs({ state, pc, shares, settings, prices, special = 0, statics =
         xanaxCdMin: xanaxCdOf(statics.xanaxCds).min,
         // Today's candy pick, kept unless another is clearly cheaper.
         candyPrefer: statics.candyPick && statics.candyPick.day === tornDayStart(state.at) ? statics.candyPick.id : null,
+        // Year plans (core/year.js): events on their dates, gyms opening as energy is trained.
+        ...(events ? { events } : {}),
+        ...(unlock ? { unlock } : {}),
     };
 }
 
@@ -225,8 +228,8 @@ export async function compareStrategiesAsync(args, { pause = () => new Promise((
 }
 
 /** The comparison, yielding after each plan (see compareStrategies / compareStrategiesAsync). */
-function* compareSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most' }) {
-    const base = simInputs({ state, pc, shares, settings, prices, special, statics });
+export function* compareSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', events = null, unlock = null }) {
+    const base = simInputs({ state, pc, shares, settings, prices, special, statics, events, unlock });
     const results = {};
     const budget = budgetOf(settings);
     for (const id of feasibleStrategies({ bliss: pc.perks.bliss, boosterCapH: base.boosterCapH, toyShop5: base.toyShop5, adultNovelties10: base.adultNovelties10 })) {
@@ -440,7 +443,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     if (ic.jobHappy) ctx.jobHappy = ic.jobHappy;
     // Torn events that change training: a heads-up, and no boosters in the day before one that needs the booster cooldown.
     const events = statics.calendar ? upcomingEvents(statics.calendar.calendar, now, { startTime: statics.calendar.startTime }) : [];
-    const hold = holdBoosterFor(events, now, plan.strategy);
+    const hold = holdBoosterFor(events, now, plan.strategy, boosterCapOf(pc, settings));
     if (hold) {
         ctx.holdBooster = hold.id;
         ctx.holdUntil = hold.start;

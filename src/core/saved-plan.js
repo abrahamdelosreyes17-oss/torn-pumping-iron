@@ -140,8 +140,10 @@ export function snapshotOf({ state, pc, statics = {}, plan = {}, prices = {}, in
  * @param {object|null} [o.whatIf] - the Bliss what-if
  * @param {object[]} [o.jobWhatIf] - company what-ifs
  * @param {object|null} [o.prev] - the plan this one recalibrates (its start, end, history are kept)
+ * @param {object|null} [o.year] - core/year.js yearSteps' value: the path followed (a plan per segment, re-picked
+ *   every 30 days and for each event), gyms opening, the events, the band
  */
-export function makeSavedPlan({ compare, rec, snapshot, start, end, months, days, budget, whatIf = null, jobWhatIf = [], prev = null, now }) {
+export function makeSavedPlan({ compare, rec, snapshot, start, end, months, days, budget, whatIf = null, jobWhatIf = [], prev = null, year = null, now }) {
     const from = prev ? tornDayStart(now) : start;
     const best = compare && rec && rec.recommended ? compare[rec.recommended] : null;
     const history = prev ? (prev.history || []).slice(-(HISTORY_KEEP - 1)) : [];
@@ -171,9 +173,17 @@ export function makeSavedPlan({ compare, rec, snapshot, start, end, months, days
         rec,
         whatIf,
         jobWhatIf: jobWhatIf || [],
-        monthly: best ? monthlyOf(best, { start: from, days, stats: snapshot.stats }) : [],
+        // The months of the path you follow (the year's path when there is one).
+        monthly: year && year.result ? monthlyOf(year.result, { start: from, days, stats: snapshot.stats }) : best ? monthlyOf(best, { start: from, days, stats: snapshot.stats }) : [],
+        year: year ? { path: year.result, segments: year.segments, band: year.band, unlocks: year.unlocks, events: (year.events || []).map((e) => ({ id: e.id, name: e.name, start: e.start, end: e.end, expected: Boolean(e.expected) })) } : null,
         history,
     };
+}
+
+/** The plan to follow on a day: its segment of the path (null without one). */
+export function scheduleAt(schedule, now) {
+    if (!Array.isArray(schedule) || !schedule.length) return null;
+    return schedule.find((s) => now >= s.from && now < s.to) || (now < schedule[0].from ? schedule[0] : schedule[schedule.length - 1]);
 }
 
 /**
@@ -201,6 +211,8 @@ export function planNowOf(saved, warn = {}) {
         pickBy: saved.rec ? saved.rec.pickBy : null,
         warn,
         slim,
+        // Which plan the path follows when (a switch on its date is following the saved plan, not re-planning).
+        schedule: saved.year ? saved.year.segments.map((s) => ({ from: s.from, to: s.to, strategy: s.strategy, candy: s.candy || null })) : null,
     };
 }
 

@@ -52,8 +52,11 @@ export const TRAINING_EVENTS = [
         id: 'anniversary',
         match: /^torn anniversary/i,
         name: 'Torn Anniversary',
-        effect: 'The R in the TORN logo gives +500 happy (once per 15 min, 10 times).',
-        advice: 'One click fits a jump window: +500 happy.',
+        // Round 6 (research-year-events.md): the T gives energy too (+50 each, 10 uses).
+        freeEnergy: 500,
+        freeHappy: 500,
+        effect: 'The R in the TORN logo gives +500 happy and the T +50 energy (each once per 15 min, 10 times).',
+        advice: 'One R click fits a jump window: +500 happy; the ten T clicks are 500 free energy.',
     },
     {
         id: 'ead',
@@ -121,10 +124,77 @@ export const EVENT_PLANS = {
 
 /**
  * Should the plan keep the booster cooldown free now: an event that uses it
- * starts within a day, and this plan uses what the event boosts.
+ * starts within one booster cap (24 h; 48 h with faction Voracity), and this
+ * plan uses what the event boosts.
  */
-export function holdBoosterFor(events, now, strategy = null) {
-    return (events || []).find((e) => e.usesBooster && !e.active && e.start - now <= EVENT_BOOSTER_HOLD_MS && (!strategy || (EVENT_PLANS[e.id] || []).includes(strategy))) || null;
+export function holdBoosterFor(events, now, strategy = null, capH = 24) {
+    const hold = Math.max(EVENT_BOOSTER_HOLD_MS, (Number(capH) || 24) * HOUR);
+    return (events || []).find((e) => e.usesBooster && !e.active && e.start - now <= hold && (!strategy || (EVENT_PLANS[e.id] || []).includes(strategy))) || null;
+}
+
+/** Easter Sunday (UTC midnight) of a year (the Gregorian computus). */
+export function easterSunday(year) {
+    const a = year % 19;
+    const b = Math.floor(year / 100);
+    const c = year % 100;
+    const d = Math.floor(b / 4);
+    const e = b % 4;
+    const f = Math.floor((b + 8) / 25);
+    const g = Math.floor((b - f + 1) / 3);
+    const h = (19 * a + b - d - g + 15) % 30;
+    const i = Math.floor(c / 4);
+    const k = c % 4;
+    const l = (32 + 2 * e + 2 * i - h - k) % 7;
+    const m = Math.floor((a + 11 * h + 22 * l) / 451);
+    const month = Math.floor((h + l - 7 * m + 114) / 31);
+    const day = ((h + l - 7 * m + 114) % 31) + 1;
+    return Date.UTC(year, month - 1, day);
+}
+
+/**
+ * Next year's dates (research-year-events.md §1a): fixed days, and Easter
+ * Sunday −3 to +3. Marked `expected` until the API lists them.
+ */
+export function ruleEvents(year) {
+    const day = (m, d) => Math.floor(Date.UTC(year, m - 1, d) / 1000);
+    const easter = Math.floor(easterSunday(year) / 1000);
+    return [
+        { title: 'CaffeineCon ' + year, start: day(10, 15), end: day(10, 15) + 86399, expected: true },
+        { title: 'World Diabetes Day', start: day(11, 14), end: day(11, 14) + 86399, expected: true },
+        { title: 'Torn Anniversary', start: day(11, 15), end: day(11, 15) + 86399, fixed_start_time: true, expected: true },
+        { title: 'Easter Egg Hunt', start: easter - 3 * 86400, end: easter + 4 * 86400 - 1, expected: true },
+    ];
+}
+
+/**
+ * Every training event between two times (a year plan): this year's from
+ * `/torn/calendar` (a fixed event already past comes back with `start` in
+ * next year and `end` in this one: read as this year's), the rest from the
+ * date rules. Soonest first, with the player's window.
+ */
+export function eventsBetween(calendar, from, to, { startTime = null } = {}) {
+    const slot = slotMinutes(startTime);
+    const api = (calendar && Array.isArray(calendar.events) ? calendar.events : []).map((ev) => (ev && Number(ev.start) > Number(ev.end) ? { ...ev, start: Number(ev.start) - 365 * 86400 } : ev));
+    const out = [];
+    const seen = new Set();
+    const add = (ev) => {
+        const title = String((ev && ev.title) || '');
+        const def = TRAINING_EVENTS.find((d) => d.match.test(title));
+        if (!def) return;
+        const w = eventWindow(ev, slot);
+        if (!w || w.end <= from || w.start >= to) return;
+        const key = def.id + ':' + new Date(w.start + 2 * DAY).getUTCFullYear();
+        if (seen.has(key)) return;
+        seen.add(key);
+        const { match, ...rest } = def;
+        void match;
+        out.push({ ...rest, title, start: w.start, end: w.end, exact: w.exact, expected: Boolean(ev.expected) });
+    };
+    for (const ev of api) add(ev);
+    const y0 = new Date(from).getUTCFullYear();
+    const y1 = new Date(to).getUTCFullYear();
+    for (let y = y0; y <= y1; y++) for (const ev of ruleEvents(y)) add(ev);
+    return out.sort((a, b) => a.start - b.start);
 }
 
 /** While an event runs: × on can energy and candy happy (on top of perks). */
