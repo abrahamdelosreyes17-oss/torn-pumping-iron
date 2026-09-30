@@ -235,6 +235,11 @@ async function warmStore(page) {
     await p.goto(BASE + 'pi=app&' + PAGES[page]);
     await p.waitForTimeout(3000);
     const made = await p.evaluate(async () => (window.__pi && window.__pi.createPlan ? Boolean(await window.__pi.createPlan({ months: 12 })) : null));
+    await p.waitForTimeout(6000);
+    // ...then a Torn page for 12 s (its reads: the watch list, the feed), as 1.2.3's warm-up did.
+    const appGm = await p.evaluate(() => JSON.stringify(_store));
+    await p.addInitScript({ content: 'window.__piSeedRaw = ' + JSON.stringify(appGm) + ';' });
+    await p.goto(BASE + PAGES[page]);
     await p.waitForTimeout(12000);
     const gm = await p.evaluate(() => ({ ..._store }));
     const idb = await dumpIdb(p);
@@ -298,6 +303,7 @@ async function runCase(name) {
             setChars: window.__tm.setChars,
             setKeys: window.__tm.setKeys,
             lastError,
+            calls: Object.entries((window.__calls || []).reduce((a, c) => ((a[c.replace(/\/\d{4,}/g, '/N')] = (a[c.replace(/\/\d{4,}/g, '/N')] || 0) + 1), a), {})).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k, n]) => k + ' ' + n),
         };
     }, { LOAD_S, STEADY_FROM_S, STEADY_S, P });
     await ctx.close();
@@ -321,6 +327,7 @@ async function runCase(name) {
         gmWritesPer10s: Math.round(((info.sets - setsAt.sets) * 10 * 10) / STEADY_S) / 10,
         gmWriteKBPer10s: Math.round(((info.setChars - setsAt.chars) * 10) / STEADY_S / 100) / 10,
         gmTop: info.gmTop,
+        calls: info.calls,
         // Which keys this tab wrote in the steady window.
         gmWrites: Object.entries(info.setKeys || {}).map(([k, n]) => [k.replace(P, ''), n - ((setsAt.keys || {})[k] || 0)]).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]).map(([k, n]) => k + ' ' + n),
         loadTop: load.top,
@@ -345,6 +352,7 @@ for (const name of wanted) {
     console.log(`  steady: script ${row.steadyScriptPer10s} ms/10 s · busy ${row.steadyBusyPer10s} ms/10 s · long tasks ${row.steadyLongMs} ms/20 s`);
     console.log(`  GM:     ${row.gmKB} KB in ${row.gmKeys} keys · ${row.gmWritesPer10s} writes/10 s (${row.gmWriteKBPer10s} KB) · biggest ${row.gmTop.slice(0, 5).join(', ')}`);
     console.log(`  writes in 20 s: ${row.gmWrites.join(', ') || 'none'}`);
+    console.log(`  requests (whole run): ${row.calls.join(', ') || 'none'}`);
     console.log(`  load top:   ${row.loadTop.slice(0, 6).join(' · ')}`);
     console.log(`  steady top: ${row.steadyTop.slice(0, 6).join(' · ')}`);
     if (row.errors.length) console.log('  errors: ' + row.errors.join(' | '));

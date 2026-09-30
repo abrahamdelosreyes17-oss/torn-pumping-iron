@@ -56,11 +56,14 @@ export const storeApi = { get: (k, fb) => get(k, fb), set: (k, v) => set(k, v), 
  */
 export const TORN_PER_MINUTE = TORN_PER_MINUTE_ALONE;
 
+/** A burst of Torn calls writes its request window once every 2 s, not once a call (round 6; there is room: 85 of Torn's 100). */
+export const WINDOW_BATCH_MS = 2000;
+
 /** Where each tab's focus heartbeat is kept ({tabId: {focus, war, at}}), and each side's shared minute. */
 const FOCUS_KEY = 'apiFocus';
 const laneWindows = {};
 function laneWindow(side) {
-    if (!laneWindows[side]) laneWindows[side] = tabWindow('apiLane_' + side, pi.tabId, storeApi);
+    if (!laneWindows[side]) laneWindows[side] = tabWindow('apiLane_' + side, pi.tabId, storeApi, undefined, { batchMs: WINDOW_BATCH_MS });
     return laneWindows[side];
 }
 
@@ -93,7 +96,7 @@ export function beatFocus(now = Date.now()) {
 /** The one Torn client every part of this tab uses: 85/min across tabs, visible only, nothing while paused; what's open goes first. */
 export function tornClient() {
     if (pi.client) return pi.client;
-    const win = tabWindow('apiWindow', pi.tabId, storeApi);
+    const win = tabWindow('apiWindow', pi.tabId, storeApi, undefined, { batchMs: WINDOW_BATCH_MS });
     pi.client = new TornApiClient({
         maxPerMinute: TORN_PER_MINUTE,
         // A key Torn refused (2, 13, 18) is not used again, by any part of any tab, until a new one is saved.
@@ -116,7 +119,7 @@ export function tornClient() {
  */
 export function fullKeyClient() {
     if (pi.fullClient) return pi.fullClient;
-    const win = tabWindow('apiWindow', pi.tabId, storeApi);
+    const win = tabWindow('apiWindow', pi.tabId, storeApi, undefined, { batchMs: WINDOW_BATCH_MS });
     pi.fullClient = new TornApiClient({
         maxPerMinute: TORN_PER_MINUTE,
         getKey: () => ((get(K.fullKeyState, {}) || {}).dead ? '' : getKey(K.fullKey)),

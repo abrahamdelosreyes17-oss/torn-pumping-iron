@@ -22,11 +22,20 @@ export const TAB_WINDOW_STALE_MS = 2 * 60 * 1000;
  * @param {string} tabId
  * @param {object} store - {get(key, fallback), set(key, value), del(key)}
  * @param {function} [now]
+ * @param {object} [o]
+ * @param {number} [o.batchMs] - round 6: a burst's first slot is written at once, the rest together this long after
+ *   (every GM write reaches every open Torn tab; a watch-list sweep took two writes per request). 0: every slot.
  */
-export function tabWindow(name, tabId, store, now = () => Date.now()) {
+export function tabWindow(name, tabId, store, now = () => Date.now(), { batchMs = 0 } = {}) {
     const regKey = name + '.tabs';
     const ownKey = name + '.' + tabId;
     let own = [];
+    let lastWrite = -Infinity;
+    let pending = null;
+    const writeOwn = () => {
+        lastWrite = now();
+        store.set(ownKey, own.filter((x) => lastWrite - x < 60000));
+    };
 
     const registry = () => {
         const r = store.get(regKey, null);
@@ -55,7 +64,13 @@ export function tabWindow(name, tabId, store, now = () => Date.now()) {
             const t = now();
             own = own.filter((x) => t - x < 60000);
             own.push(at);
-            store.set(ownKey, own);
+            if (!batchMs || t - lastWrite >= batchMs) writeOwn();
+            else if (!pending) {
+                pending = setTimeout(() => {
+                    pending = null;
+                    writeOwn();
+                }, batchMs - (t - lastWrite));
+            }
 
             const reg = registry();
             let changed = false;

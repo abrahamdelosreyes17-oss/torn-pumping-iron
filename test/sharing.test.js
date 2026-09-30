@@ -134,3 +134,19 @@ test('a request queued in a visible tab is not sent once the tab is hidden', asy
     assert.deepEqual(await p, { fine: true }, 'sent once visible again');
     assert.equal(calls, 1);
 });
+
+test('round 6: with batchMs, a burst writes its first slot at once and the rest together', async () => {
+    const s = store();
+    const sets = [];
+    const spy = { get: s.get, set: (k, v) => { sets.push(k); s.set(k, v); }, del: s.del };
+    let t = 1_000_000;
+    const a = tabWindow('w', 'A', spy, () => t, { batchMs: 30 });
+    a.add(t);
+    for (let i = 1; i <= 5; i++) a.add(t + i);
+    assert.equal(sets.filter((k) => k === 'w.A').length, 1, 'one write for the burst so far');
+    assert.equal(a.load().length, 6, 'this tab counts all of them at once');
+    t += 40;
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(sets.filter((k) => k === 'w.A').length, 2);
+    assert.equal(s.get('w.A').length, 6, 'every slot reaches the other tabs');
+});
