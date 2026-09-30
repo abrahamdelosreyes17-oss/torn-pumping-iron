@@ -40,6 +40,13 @@ Links:
 **Next session, start here (round 6, 2026-09-30):**
 0. **Read `docs/ROUND6-PLAN.md` first.** 1.2.3 is still laggy on real Torn. The owner decided: **no more automatic** (the plan is made on a click and saved: Create plan for 1/3/6/12 months; Recalibrate keeps the end date, re-reads everything, and works any time, a day later too; everything else follows the saved plan as now). §8 of the plan is the build order. No spending, not on phones, stick to Tampermonkey (no extension); the owner's answers are in the plan's §7a.
    - **Owner, mid-build (2026-09-30):** "Torn Eye should only run when I'm on the Torn Eye tab, and it should only call the API of the person I am viewing and attacking." Built: see the newest session entry.
+   - **Owner's answers (2026-09-30, mid-build):** the beer what-if: **skip it**. The rush-the-next-gym and Music Store what-ifs: **backlog**. New: **Pumping Iron doesn't count rehab fees** (Xanax builds addiction; rehab costs money): **backlog**.
+
+**Backlog (owner, 2026-09-30):**
+- Rehab fees in the plan's cost (Xanax addiction → rehab in Switzerland): research the fee and how fast addiction builds per Xanax, then add it to every plan that takes Xanax (and to Buy/receipts).
+- Rush-the-next-gym and Music Store 3★ what-ifs (research-gym-unlock.md §5).
+- R6.6 leftovers that need real data: log-joined gym samples (P2: the gym log's DEF/SPD/DEX field names must be confirmed on one real answer), the split re-tune (P7: must win on held-out real days), the fight HP-kept learner (hpKept is never recorded).
+- GM store 55 KB vs the 30 KB target (userStatic 14K, myAttacks 10K, prices 5K, eyeWatch 4K, calibration 4K).
 1. Read this file (§2 how the owner works, §3 settled decisions), then **`docs/ROUND4-PLAN.md`** (§0 is the owner's round-4 decisions) and the two newest session entries below.
 2. **Live state (2026-09-29, end of session):**
    - The owner is logged in with Discord. The bot DMs work: test ping, a jump ping and "Energy is full" auto-closing all seen in the `sent` table.
