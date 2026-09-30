@@ -17,6 +17,7 @@ import { tornDayStart, DAY } from '../../core/bars.js';
 import { lineChart, planBars } from '../charts.js';
 import { clock, sectionHead, meta, gainsCard, STAT_COLOR, MONTH_NAMES, DAY_NAMES } from './common.js';
 import { sessionsOf } from '../../core/gains.js';
+import { logSessions, mergeSessions } from '../../core/gymlog.js';
 import { summarizeReceipts, spentOverDays, itemsWords, receiptDays, readReceipts, whatIfPeriod, whatIfLines, runWhatIf } from '../../core/receipts.js';
 
 const dayLabel = (d) => new Date(d).getUTCDate() + ' ' + MONTH_NAMES[new Date(d).getUTCMonth()];
@@ -132,33 +133,40 @@ function dayBars(m, ctx) {
 }
 
 function lastTrains(m, ctx) {
-    // One row a session (owner: "my 15 trains = +305,123 showed as three rows"), its reads added up.
-    const sessions = sessionsOf((ctx.calibration && ctx.calibration.samples) || []).slice(0, 6);
+    // One row a session (owner: "my 15 trains = +305,123 showed as three rows"), its reads added up. Sessions only
+    // Torn's log saw (your phone, the laptop closed; Full key) join them, without a prediction.
+    const reads = sessionsOf((ctx.calibration && ctx.calibration.samples) || []);
+    const logged = logSessions((ctx.gymLog && ctx.gymLog.lines) || [], m.pc && m.pc.table);
+    const sessions = mergeSessions(reads, logged).slice(0, 6);
     const offOf = (p, a) => (p > 0 ? (100 * (a - p)) / p : 0);
     const rows = sessions.map((x) => {
+        const checked = x.predicted !== null && x.predicted !== undefined;
         const off = offOf(x.predicted, x.actual);
         const stats = Object.keys(x.trains);
         return h('tr', {}, [
             h('td', { class: 't', text: clock(x.at, ctx.settings) }),
             h('td', { class: stats.length === 1 ? 's-' + stats[0] : null, text: stats.map((k) => STAT_LABEL[k] + ' × ' + x.trains[k]).join(' · ') }),
-            h('td', { text: x.gyms.join(' / ') }),
-            h('td', { class: 'r', text: fmtSigned(x.predicted) }),
+            h('td', {}, [x.gyms.join(' / '), x.fromLog ? h('span', { class: 'muted', title: 'Seen only in Torn’s log (trained while Pumping Iron wasn’t open): no plan figure to check it against', text: ' · Torn log' }) : null]),
+            h('td', { class: 'r', text: checked ? fmtSigned(x.predicted) : '—' }),
             h('td', { class: 'r', text: fmtSigned(x.actual) }),
-            h('td', { class: 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn'), text: fmtPct(off, 1) }),
+            h('td', { class: checked ? 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn') : 'r muted', text: checked ? fmtPct(off, 1) : '—' }),
         ]);
     });
     if (rows.length > 1) {
-        const p = sessions.reduce((a, x) => a + x.predicted, 0);
+        // Off by: over the checked sessions only (the log's have no prediction).
+        const checked = sessions.filter((x) => x.predicted !== null && x.predicted !== undefined);
+        const p = checked.reduce((a, x) => a + x.predicted, 0);
+        const pa = checked.reduce((s, x) => s + x.actual, 0);
         const a = sessions.reduce((s, x) => s + x.actual, 0);
-        const off = offOf(p, a);
-        rows.push(h('tr', { class: 'total' }, [h('td'), h('td', {}, [h('b', { text: 'Total' })]), h('td'), h('td', { class: 'r', text: fmtSigned(p) }), h('td', { class: 'r' }, [h('b', { text: fmtSigned(a) })]), h('td', { class: 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn'), text: fmtPct(off, 1) })]));
+        const off = offOf(p, pa);
+        rows.push(h('tr', { class: 'total' }, [h('td'), h('td', {}, [h('b', { text: 'Total' })]), h('td'), h('td', { class: 'r', text: checked.length ? fmtSigned(p) : '—' }), h('td', { class: 'r' }, [h('b', { text: fmtSigned(a) })]), h('td', { class: checked.length ? 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn') : 'r muted', text: checked.length ? fmtPct(off, 1) : '—' })]));
     }
     return h('div', {}, [
         sectionHead('Last trains', meta(['what the plan said, what Torn showed']), null, 'h3'),
         rows.length
             ? h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Session' }), h('th', { text: 'Gym' }), h('th', { class: 'r', text: 'Plan said' }), h('th', { class: 'r', text: 'You got' }), h('th', { class: 'r', style: 'width:80px', text: 'Off by' })])]), h('tbody', {}, rows)])
             : null,
-        h('p', { class: 'muted', style: rows.length ? 'margin:6px 0 0;font-size:12px' : 'margin:0', text: 'Only the reads with one stat trained and nothing taken in between (no drug, booster or refill): they check the gain maths, so a session’s total here can be less than what you really gained. Your real gains are under “Your gains”.' }),
+        h('p', { class: 'muted', style: rows.length ? 'margin:6px 0 0;font-size:12px' : 'margin:0', text: 'Only the reads with one stat trained and nothing taken in between (no drug, booster or refill): they check the gain maths, so a session’s total here can be less than what you really gained. Your real gains are under “Your gains”.' + (ctx.gymLog ? ' Sessions marked “Torn log” are from Torn’s own log (your Full key): trains while Pumping Iron wasn’t open, e.g. on your phone.' : ' With a Full key (Settings), trains on your phone show here too, from Torn’s log.') }),
     ]);
 }
 

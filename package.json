@@ -1,6 +1,6 @@
 {
   "name": "torn-pumping-iron",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "private": true,
   "type": "module",
   "description": "Gym planner and fight scout for Torn (Tampermonkey userscript).",

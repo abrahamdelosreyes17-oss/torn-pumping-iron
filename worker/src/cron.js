@@ -96,7 +96,7 @@ export async function sendAlerts(env, f, db, user, alerts, nowS) {
     for (const group of chunks(sorted, PER_MESSAGE)) {
         // Room for: the rows, a DM channel save, a watch mark each, the user's minute.
         if (typeof db.left === 'function' && db.left() < group.length * 2 + 2) throw new BudgetError();
-        const rows = group.map((a) => ({ user: user.id, alert: a.id, at: nowS, state: 'sent', until: null, body: { title: a.title, text: a.text, kind: a.kind, link: a.link || null, step: a.step && a.skip !== false ? { at: a.step.at, kind: a.step.kind, label: a.step.label } : null, ...(a.attack ? { attack: a.attack } : {}), ...(a.event ? { event: a.event } : {}), ...(a.fullAt ? { fullAt: a.fullAt } : {}) } }));
+        const rows = group.map((a) => ({ user: user.id, alert: a.id, at: nowS, state: 'sent', until: null, body: { title: a.title, text: a.text, kind: a.kind, link: a.link || null, step: a.step && a.skip !== false ? { at: a.step.at, kind: a.step.kind, label: a.step.label } : null, ...(a.attack ? { attack: a.attack } : {}), ...(a.event ? { event: a.event } : {}), ...(a.fullAt ? { fullAt: a.fullAt } : {}), ...(a.readyAt ? { readyAt: a.readyAt } : {}) } }));
         const d = await deliver(env, f, db, user, rows, nowS);
         // Discord refused the message itself (400): record it as failed instead of retrying it every minute.
         if (!d.ok && d.bad) {

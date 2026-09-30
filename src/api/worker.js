@@ -45,8 +45,12 @@ export function newSecret(rng = null) {
     return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-/** The plan's steps as the Worker needs them (seconds, words only). */
-export function stepsForWorker(steps, limit = 24) {
+/**
+ * The plan's steps as the Worker needs them (seconds, words only). Up to 48:
+ * the next 48 h even on a busy plan, so the bot can follow them while the
+ * laptop is closed (the Worker uses them for up to 48 h after a sync).
+ */
+export function stepsForWorker(steps, limit = 48) {
     return (steps || []).slice(0, limit).map((s) => ({
         at: Math.round(s.at / 1000),
         kind: s.kind,

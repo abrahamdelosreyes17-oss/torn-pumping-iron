@@ -149,10 +149,12 @@ test('energy: pinged ahead when Torn says it fills within 90 s; the full read af
     const f = world({ torn: tornState({ drug: 3600, energy: 148 }) });
     await runCron(env, T0 + 60, f);
     const post = discordCalls(f).find((c) => (c.init.method || 'GET') === 'POST' && /messages$/.test(c.url));
-    assert.equal(post.body.content, 'Energy full in 72 s (' + new Date((T0 + 132) * 1000).toISOString().slice(11, 19) + ' TCT)');
-    const key = id + '|energy:' + Math.floor((T0 + 132) / 3600);
+    // Torn fills on its 5-minute ticks: 72 s from 10:49:00 is the 10:50:00 tick.
+    const tick = Math.round((T0 + 132) / 300) * 300;
+    assert.equal(post.body.content, 'Energy full in ' + (tick - T0 - 60) + ' s (' + new Date(tick * 1000).toISOString().slice(11, 19) + ' TCT)');
+    const key = id + '|energy:' + Math.floor(tick / 3600);
     assert.ok(env.DB.sent.has(key));
-    assert.equal(JSON.parse(env.DB.sent.get(key).body).fullAt, T0 + 132);
+    assert.equal(JSON.parse(env.DB.sent.get(key).body).fullAt, tick);
     // Still filling at the next run (149/150, 36 s left): not "Seen in Torn", no second ping.
     const g = world({ torn: tornState({ drug: 3600, energy: 149 }) });
     await runCron(env, T0 + 96, g);

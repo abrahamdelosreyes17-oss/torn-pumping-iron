@@ -75,14 +75,33 @@ export function effectiveStat(S, mode = dampingMode) {
 export function gainPerTrain(stat, S, H, dots, E, perks = 1, mode = dampingMode) {
     const ab = STAT_AB[stat];
     if (!ab || !(dots > 0) || !(E > 0)) return 0;
-    const h = Math.min(HAPPY_CAP, Math.max(0, H || 0));
+    const t = happyTerms(H);
     const [A, B] = ab;
-    const inner =
-        effectiveStat(S, mode) * round4(1 + 0.07 * round4(Math.log(1 + h / 250))) +
-        8 * Math.pow(h, 1.05) +
-        (1 - Math.pow(h / HAPPY_CAP, 2)) * A +
-        B;
+    const inner = effectiveStat(S, mode) * t.f + t.p + t.q * A + B;
     return Math.max(0, (inner / 200000) * dots * E * perks);
+}
+
+/** Slots of happyTerms' cache: a simulated train asks for the happy now (twice) and the split's reference happy. */
+const TERMS_SLOTS = 4;
+const termsKey = new Array(TERMS_SLOTS).fill(NaN);
+const termsVal = new Array(TERMS_SLOTS).fill(null);
+let termsNext = 0;
+
+/**
+ * The happy-only parts of the formula, for one happy: f (the stat's
+ * multiplier), p and q. The same numbers gainPerTrain always used; kept for
+ * the last few happy values, since the simulator asks for the same happy
+ * several times per train (the split's pick and the train itself), and the
+ * log and powers were most of the plan comparison's time.
+ */
+export function happyTerms(H) {
+    const h = Math.min(HAPPY_CAP, Math.max(0, H || 0));
+    for (let i = 0; i < TERMS_SLOTS; i++) if (termsKey[i] === h) return termsVal[i];
+    const v = { f: round4(1 + 0.07 * round4(Math.log(1 + h / 250))), p: 8 * Math.pow(h, 1.05), q: 1 - Math.pow(h / HAPPY_CAP, 2) };
+    termsKey[termsNext] = h;
+    termsVal[termsNext] = v;
+    termsNext = (termsNext + 1) % TERMS_SLOTS;
+    return v;
 }
 
 /**
@@ -118,5 +137,9 @@ export function trainsToReach({ stat, S, target, H, dots, energyPerTrain, perks 
 
 /** Sum of the four stats. */
 export function totalOf(stats) {
-    return STATS.reduce((a, k) => a + (Number(stats && stats[k]) || 0), 0);
+    // A plain loop, same order and sum as a reduce: the split asks for it on every simulated train.
+    let a = 0;
+    if (!stats) return a;
+    for (let i = 0; i < STATS.length; i++) a += Number(stats[STATS[i]]) || 0;
+    return a;
 }

@@ -19,8 +19,14 @@ export const KIND_DEFAULTS = { drug: true, drugready: true, booster: true, energ
  */
 export const DEFAULT_SETTINGS = { delivery: 'dm', quiet: null, perHour: 10, perDay: 60, warPerHour: 30, warLead: 3, kinds: {}, mute: {} };
 
-/** A synced plan older than this is "out of date": only state pings go out. */
+/**
+ * A synced plan older than this is "out of date" (only state pings go out),
+ * unless it still has steps ahead: Pumping Iron sends the next 48 h, so with
+ * the laptop closed the bot keeps following them (owner, 2026-09-30), up to
+ * PLAN_MAX_S after the sync.
+ */
 export const PLAN_STALE_S = 12 * 3600;
+export const PLAN_MAX_S = 48 * 3600;
 
 export function settingsOf(row) {
     const s = parse(row && row.settings, {});
@@ -67,5 +73,10 @@ export function planAge(row, nowS) {
 
 export function planStale(row, nowS) {
     const age = planAge(row, nowS);
-    return age !== null && age > PLAN_STALE_S;
+    if (age === null || age <= PLAN_STALE_S) return false;
+    if (age > PLAN_MAX_S) return true;
+    // Between 12 and 48 h: still in use while a synced step is ahead.
+    const plan = parse(row && row.plan, null);
+    const steps = plan && Array.isArray(plan.steps) ? plan.steps : [];
+    return !steps.some((s) => s && Number(s.at) > nowS);
 }

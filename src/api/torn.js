@@ -282,6 +282,27 @@ export async function fetchMoneyLog(client, { from, categories, perCategory = 10
     return out;
 }
 
+/**
+ * Your gym trains from Torn's log since a time (Full key only): the four
+ * train types in one call, newest first, 100 a page. A full page means more
+ * are older: walk back with `to` (pages overlap at the edge second, so the
+ * caller dedupes by id), at most `pages` calls. Raw v2 lines.
+ */
+export async function fetchGymLog(client, { from, pages = 3, limit = 100 }) {
+    const out = [];
+    let to = null;
+    for (let i = 0; i < pages; i++) {
+        const d = await client.get('v2/user/log', { log: '5300,5301,5302,5303', from, limit, ...(to ? { to } : {}) });
+        const rows = (d && d.log) || [];
+        out.push(...rows);
+        if (rows.length < limit) break;
+        const oldest = Math.min(...rows.map((e) => Number(e.timestamp) || Infinity));
+        if (!Number.isFinite(oldest) || oldest <= from || oldest === to) break;
+        to = oldest;
+    }
+    return out;
+}
+
 /** The amount a log entry is about: the first money-like field it carries. */
 export function moneyOf(data) {
     if (!data || typeof data !== 'object') return 0;

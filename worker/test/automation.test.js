@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { runCron, handle } from '../src/index.js';
-import { dueAlerts, nextPrev } from '../src/alerts.js';
+import { dueAlerts, nextPrev, resolvedBy } from '../src/alerts.js';
 import { handleInteraction } from '../src/interactions.js';
 import { linkedEnv, world, tornState, T0, body, command, ctx, jsonRes, req, KEY, PLAN, DISCORD_USER, botEnv } from './helpers.js';
 
@@ -61,12 +61,43 @@ test('/timers in DRY_RUN: the follow-up goes to the outbox, Torn is still read',
 
 /* ---------- New automatic pings ---------- */
 
-test('booster cooldown over: pinged when the plan has a booster step', () => {
+test('booster cooldown: pinged 30–90 s ahead when the plan has a booster step; over, when a run missed that', () => {
     const plan = { type: 'jump', steps: [{ at: T0 + 600, kind: 'boost', label: 'EDVD × 5', train: null }] };
-    const prev = nextPrev(null, tornState({ drug: 3600, booster: 60 }), T0 - 60);
+    // Ahead: 60 s left, the last read (150 s) was outside the window.
+    let prev = nextPrev(null, tornState({ drug: 3600, booster: 150 }), T0 - 60);
+    const soon = dueAlerts(tornState({ drug: 3600, booster: 60 }), plan, T0, {}, { prev });
+    assert.deepEqual(soon.map((x) => [x.kind, x.title, x.text, x.readyAt]), [['booster', 'Booster cooldown ends in 60 s', 'EDVD × 5', T0 + 60]]);
+    // The next read inside the window, or the one that sees it over: not again.
+    prev = nextPrev(prev, tornState({ drug: 3600, booster: 60 }), T0);
+    assert.deepEqual(dueAlerts(tornState({ drug: 3600, booster: 5 }), plan, T0 + 55, {}, { prev }).filter((x) => x.kind === 'booster'), []);
+    assert.deepEqual(dueAlerts(tornState({ drug: 3600, booster: 0 }), plan, T0 + 60, {}, { prev }).filter((x) => x.kind === 'booster'), []);
+    // A missed run (the last read saw 120 s left, now it's over): pinged then.
+    prev = nextPrev(null, tornState({ drug: 3600, booster: 120 }), T0 - 120);
     const a = dueAlerts(tornState({ drug: 3600, booster: 0 }), plan, T0, {}, { prev });
     assert.deepEqual(a.map((x) => [x.kind, x.title, x.text]), [['booster', 'Booster cooldown is over', 'EDVD × 5']]);
-    assert.deepEqual(dueAlerts(tornState({ drug: 3600, booster: 0 }), PLAN, T0, {}, { prev }), [], 'no booster step: no ping');
+    assert.deepEqual(dueAlerts(tornState({ drug: 3600, booster: 0 }), PLAN, T0, {}, { prev }), [], 'a plan in use with no booster step: no ping');
+});
+
+test('booster and drug-unused pings with no plan in use (out of date, or none synced): every time, plain words', () => {
+    const prev = nextPrev(null, tornState({ drug: 3600, booster: 150 }), T0 - 60);
+    const stale = dueAlerts(tornState({ drug: 3600, booster: 60 }), PLAN, T0, {}, { prev, planStale: true, planAge: 49 * 3600, planAt: T0 - 49 * 3600, });
+    const b = stale.find((x) => x.kind === 'booster');
+    assert.equal(b.title, 'Booster cooldown ends in 60 s');
+    assert.equal(b.text, 'Room for a candy, energy drink, FHC or EDVD');
+    assert.equal(b.step, null);
+    assert.ok(dueAlerts(tornState({ drug: 3600, booster: 60 }), null, T0, {}, { prev }).some((x) => x.kind === 'booster'), 'never synced: pinged too');
+    let p = nextPrev(null, tornState({ drug: 0 }), T0 - 16 * 60);
+    p = nextPrev(p, tornState({ drug: 0 }), T0 - 60);
+    const d = dueAlerts(tornState({ drug: 0 }), PLAN, T0, {}, { prev: p, planStale: true, planAge: 49 * 3600, planAt: T0 - 49 * 3600 }).find((x) => x.kind === 'drugready');
+    assert.equal(d.title, 'Drug ready for 16 min, unused');
+    assert.match(d.text, /next Xanax/);
+    assert.deepEqual(dueAlerts(tornState({ drug: 0 }), { type: 'steady', steps: [{ at: T0 + 3 * 3600, kind: 'xanax', label: 'Xanax #3' }] }, T0, {}, { prev: p }).filter((x) => x.kind === 'drugready'), [], 'a plan in use that waits: no nudge');
+});
+
+test('an early booster ping is not closed while the cooldown still runs; a new cooldown after it closes it', () => {
+    assert.equal(resolvedBy('booster', tornState({ booster: 30 }), T0, { readyAt: T0 + 30 }), false);
+    assert.equal(resolvedBy('booster', tornState({ booster: 86000 }), T0 + 400, { readyAt: T0 + 30 }), true);
+    assert.equal(resolvedBy('booster', tornState({ booster: 0 }), T0 + 400, { readyAt: T0 + 30 }), false);
 });
 
 test('drug ready 15 minutes and unused: one nudge per ready spell', () => {

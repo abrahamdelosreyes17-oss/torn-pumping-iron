@@ -43,11 +43,11 @@ Torn's API terms ask every tool to say how it uses a key, where you enter it. Th
 
 It goes to `api.torn.com`, and to the Pumping Iron service only if you log in with Discord. FFScouter, TornStats and TornW3B never receive it.
 
-**Full key (Auto mode):** a **Full** key, used for one thing only: reading your money log, so Auto can size your gym spending to your income.
+**Full key (Auto mode):** a **Full** key, used only to read your log: the money lines, so Auto can size your gym spending to your income, and your gym trains, so trains on your phone (or with Pumping Iron closed) show in Progress.
 
 | Data storage | Data sharing | Purpose of use | Key storage & sharing | Key access level |
 |---|---|---|---|---|
-| Only locally, in this browser: the key, and a summary of your money log (titles, amounts, times; 30 days) | Nobody. Never sent to the Pumping Iron service, FFScouter, TornStats or TornW3B | Personal gain: Auto mode sizes your gym plan to your income | Stored locally / Not shared | Full (used only for user: log, the money categories) |
+| Only locally, in this browser: the key, a summary of your money log (titles, amounts, times; 30 days) and your gym trains from the log (stat, trains, energy, gym, gain; up to 120 days) | Nobody. Never sent to the Pumping Iron service, FFScouter, TornStats or TornW3B | Personal gain: Auto mode sizes your gym plan to your income; Progress shows the trains you did while Pumping Iron wasn't open | Stored locally / Not shared | Full (used only for user: log, the money categories and the gym trains) |
 
 **FFScouter (optional):** stat estimates for players you haven't fought. Sign up at [ffscouter.com](https://ffscouter.com/) (their data policy is on that page) and paste the same key. Sent only to ffscouter.com, which already has it, with the player ids you look at. Every estimate from it says "FFScouter".
 

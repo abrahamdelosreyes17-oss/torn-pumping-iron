@@ -44,8 +44,10 @@ const ok = (cond, msg) => {
     if (!cond) failures++;
 };
 
-async function open(query, { wait = 4500 } = {}) {
+async function open(query, { wait = 4500, seed = null } = {}) {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    // What an earlier page stored (the next Torn page finds it): harness-live.html starts its store from it.
+    if (seed) await page.addInitScript((s) => { window.__piSeed = s; }, seed);
     const errors = [];
     page.on('pageerror', (e) => errors.push(String(e)));
     let tornHits = 0;
@@ -106,6 +108,22 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     ok(errors.length === 0, 'gym: no page errors ' + JSON.stringify(errors));
     ok(tornHits() === 0, 'gym: nothing loaded from torn.com');
     await page.screenshot({ path: resolve(shots, 'torn-gym-friend.png'), fullPage: true });
+    await page.close();
+}
+
+/* The lag fix: the next Torn page opens on the comparison the last one kept (no run of its own, no long freeze). */
+{
+    const first = await open('page=gym&fixture=gym-friend&energy=275&build=balanced', { wait: 9000 });
+    const store = await first.page.evaluate(() => ({ ..._store }));
+    await first.page.close();
+    const kept = JSON.parse(store['pumpingIron.v1.compareCache'] || 'null');
+    ok(kept && kept.key && kept.compare && kept.compare.steady, 'lag: the first page keeps its comparison (' + (kept ? Object.keys(kept.compare).length + ' plans' : 'none') + ')');
+    const { page, errors } = await open('page=items&fixture=items&energy=275&build=balanced', { seed: store, wait: 4000 });
+    const after = await page.evaluate(() => ({ kept: JSON.parse(_store['pumpingIron.v1.compareCache'] || 'null'), busy: _store['pumpingIron.v1.compareBusy'] || null, ready: Boolean(window.__pi && window.__pi.model() && window.__pi.model().compare) }));
+    ok(after.ready, 'lag: the next page has the plans at once');
+    ok(after.kept && after.kept.at === kept.at && after.kept.tab === kept.tab, 'lag: the next page did not work the comparison out again');
+    ok(!after.busy, 'lag: and never took the turn to');
+    ok(errors.length === 0, 'lag: no page errors ' + JSON.stringify(errors));
     await page.close();
 }
 

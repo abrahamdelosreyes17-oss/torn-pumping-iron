@@ -178,8 +178,14 @@ function eventComparisonFor(event, state, pc, shares, settings, budgetPerDay, st
     const days = Math.max(1, Math.round((event.end - event.start) / (24 * 3600e3)));
     const key = [event.id, event.start, pi.compareKey, days, Math.round(budgetPerDay || 0)].join('|');
     if (pi.eventCompare && pi.eventCompare.key === key) return pi.eventCompare;
-    // Two more full comparisons: never inside a redraw. The last answer stands until the new one is ready.
-    if (pi.eventWanted !== key) {
+    // Kept between pages like the plan comparison (another page or tab worked it out).
+    const kept = getShared(K.eventCompareCache, null);
+    if (kept && kept.v === BUILD && kept.key === key) {
+        pi.eventCompare = kept;
+        return kept;
+    }
+    // Two more full comparisons: never inside a redraw, and only in a tab you can see. The last answer stands until the new one is ready.
+    if (pi.eventWanted !== key && isVisible()) {
         pi.eventWanted = key;
         setTimeout(async () => {
             if (pi.eventWanted !== key) return;
@@ -198,7 +204,10 @@ async function runEventComparison(key, event, state, pc, shares, settings, budge
     // Same inputs as the plan's own comparison (shops, console held, job), with the event's multiplier on one side.
     const eventCompare = await compareStrategiesAsync({ state, pc: boosted, shares, settings: es, prices, special, statics, pickBy: 'most' });
     const normalCompare = await compareStrategiesAsync({ state, pc, shares, settings: es, prices, special, statics, pickBy: 'most' });
-    if (pi.eventWanted === key) pi.eventCompare = { key, eventCompare, normalCompare };
+    if (pi.eventWanted === key) {
+        pi.eventCompare = { v: BUILD, key, eventCompare, normalCompare };
+        set(K.eventCompareCache, pi.eventCompare);
+    }
     return pi.eventCompare;
 }
 
@@ -206,7 +215,39 @@ async function runEventComparison(key, event, state, pc, shares, settings, budge
 export const COMPARE_CLICK_DELAY_MS = 80;
 export const COMPARE_PRICE_DELAY_MS = 5000;
 
-/** Re-run the strategy comparison at most once per Torn hour or when inputs change. */
+/** This build's version: a comparison kept by another version is never used (its results may have another shape). */
+const BUILD = typeof PI_BUILD_VERSION !== 'undefined' ? PI_BUILD_VERSION : 'dev';
+
+/** A tab working out the comparison holds the turn this long; other tabs take its result instead of running their own. */
+export const COMPARE_BUSY_MS = 30000;
+
+/** The comparison kept between pages (K.compareCache), if this build wrote it. */
+export function storedCompare() {
+    const c = getShared(K.compareCache, null);
+    return c && c.v === BUILD && c.key && c.compare ? c : null;
+}
+
+/** Use a kept comparison. `exact`: it is for the inputs now, so nothing is waiting. */
+function adoptCompare(c, exact) {
+    pi.compare = c.compare;
+    pi.whatIf = c.whatIf || null;
+    pi.jobWhatIf = c.jobWhatIf || [];
+    pi.compareKey = c.key;
+    pi.compareKeyNoPrice = c.keyNoPrice;
+    if (exact) {
+        pi.compareWanted = c.key;
+        pi.compareScheduled = '';
+    }
+}
+
+/**
+ * Re-run the strategy comparison at most once per Torn hour or when inputs
+ * change, in one tab, and keep it between pages: Torn loads a new page on
+ * nearly every click, and each one used to work the whole comparison out
+ * again in one go (owner's friend, 2026-09-30: "masyadong laggy"; ~1 s a
+ * page on a slow machine). A page opens on the kept one; when the inputs
+ * moved, the last one shows while the new one is worked out in slices.
+ */
 function comparisonFor(state, statics, plan, settings) {
     const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult });
     const shares = targetShares(plan, pc.stats, buildOf(plan.build).shares);
@@ -218,46 +259,87 @@ function comparisonFor(state, statics, plan, settings) {
     const perkSig = JSON.stringify([learnedNow().mode, pc.perks.mult, pc.perks.happyLossMult, pc.perks.canMult, pc.perks.candyMult, pc.perks.consoleMult, pc.perks.edvdMult, pc.perks.boosterCapExtraH]);
     // Items and job: the candy rule (Plan dropdown), shops ticked, Torn's item data, a console held, the job, specials held.
     const pickBy = plan.pickBy || 'most';
-    const itemSig = JSON.stringify([pickBy, shopsAllowed(settings), statics.itemsAt || 0, Number((statics.inventory || {})[104]) > 0, statics.job || null, statics.jobPoints || null, state.specialRefills || 0, Math.round((state.boosterCd || 0) / 3600), heldBoosters(statics.inventory), statics.candyPick || null, xanaxCdOf(statics.xanaxCds).min]);
-    const keyNoPrice = [Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, pc.unlocked.join(','), special, itemSig].join('|');
-    const key = keyNoPrice + '|' + priceSig;
-    if (key !== pi.compareKey) {
-        // The what-ifs after the plans (they're small); `compare` is the plans' results.
-        const finish = (compare) => {
-            pi.compare = compare;
-            // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
-            pi.whatIf = pc.perks.bliss ? null : blissWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy });
-            // Company what-ifs: hired where a jump variant would beat the recommended plan.
-            const rec = recommend(pi.compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy });
-            pi.jobWhatIf = companyWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy, compare: pi.compare, recommended: rec.recommended });
-            pi.compareKey = key;
-            pi.compareKeyNoPrice = keyNoPrice;
-            // Today's candy stays named unless another is clearly cheaper (owner: it flipped on every price load).
-            const mine = compare && compare[plan.strategy] && compare[plan.strategy].candy;
-            const kept = get(K.candyPick, null);
-            const day = tornDayStart(Date.now());
-            if (mine && !(kept && kept.day === day && kept.id === mine.id)) set(K.candyPick, { day, id: mine.id });
-        };
-        const run = () => finish(compareStrategies({ state, pc, shares, settings, prices, special, statics, pickBy }));
-        if (!pi.compare) run();
-        else if (pi.compareWanted !== key) {
-            // A click (build, budget, days, a shop tick) redraws at once and the plan runs follow once the page has
-            // painted. New prices alone (they arrive in batches while Buy loads) are gathered: one run 5 s later.
-            const priceOnly = pi.compareKeyNoPrice === keyNoPrice;
-            pi.compareWanted = key;
-            clearTimeout(pi.compareTimer);
-            pi.compareTimer = setTimeout(async () => {
-                if (pi.compareWanted !== key) return;
-                // One plan at a time, with the page free in between; a newer change drops this run.
-                const compare = await compareStrategiesAsync({ state, pc, shares, settings, prices, special, statics, pickBy });
-                if (pi.compareWanted !== key) return;
-                finish(compare);
-                refresh();
-            }, priceOnly ? COMPARE_PRICE_DELAY_MS : COMPARE_CLICK_DELAY_MS);
+    const keysFor = (candyPick) => {
+        const itemSig = JSON.stringify([pickBy, shopsAllowed(settings), statics.itemsAt || 0, Number((statics.inventory || {})[104]) > 0, statics.job || null, statics.jobPoints || null, state.specialRefills || 0, Math.round((state.boosterCd || 0) / 3600), heldBoosters(statics.inventory), candyPick || null, xanaxCdOf(statics.xanaxCds).min]);
+        const keyNoPrice = [BUILD, Math.floor(Date.now() / 3600e3), plan.build, plan.goal ? JSON.stringify(plan.goal) : '', settings.horizonDays, settings.budget, settings.boosterCapH || 24, state.gymId, state.happy.maximum, state.energy.maximum, pc.perks.bliss, perkSig, statsSig, pc.unlocked.join(','), special, itemSig].join('|');
+        return { keyNoPrice, key: keyNoPrice + '|' + priceSig };
+    };
+    const { keyNoPrice, key } = keysFor(statics.candyPick);
+    if (key === pi.compareKey) return { compare: pi.compare, pc };
+    const stored = storedCompare();
+    // Worked out already, on another page or in another tab.
+    if (stored && stored.key === key) {
+        adoptCompare(stored, true);
+        return { compare: pi.compare, pc };
+    }
+    // A new page: the last one shows while the new one is worked out.
+    if (!pi.compare && stored) adoptCompare(stored, false);
+    pi.compareWanted = key;
+    const whatIfs = (compare) => {
+        // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
+        const whatIf = pc.perks.bliss ? null : blissWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy });
+        // Company what-ifs: hired where a jump variant would beat the recommended plan.
+        const rec = recommend(compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy });
+        return { whatIf, jobWhatIf: companyWhatIf({ state, pc, shares, settings, prices, special, statics, pickBy, compare, recommended: rec.recommended }) };
+    };
+    const finish = (compare, { whatIf, jobWhatIf }) => {
+        let keys = { key, keyNoPrice };
+        // Today's candy stays named unless another is clearly cheaper (owner: it flipped on every price load). Keeping
+        // it is one of the comparison's own inputs: the key it's kept under says so, so it doesn't run a second time.
+        const mine = compare && compare[plan.strategy] && compare[plan.strategy].candy;
+        const kept = get(K.candyPick, null);
+        const day = tornDayStart(Date.now());
+        if (mine && !(kept && kept.day === day && kept.id === mine.id)) {
+            const pick = { day, id: mine.id };
+            set(K.candyPick, pick);
+            keys = keysFor(pick);
         }
+        const c = { v: BUILD, key: keys.key, keyNoPrice: keys.keyNoPrice, at: Date.now(), tab: pi.tabId, compare, whatIf, jobWhatIf };
+        set(K.compareCache, c);
+        adoptCompare(c, true);
+        del(K.compareBusy);
+    };
+    const args = { state, pc, shares, settings, prices, special, statics, pickBy };
+    if (!pi.compare) {
+        // Nothing kept yet (the first page after an install or an update): once, in one go.
+        const compare = compareStrategies(args);
+        finish(compare, whatIfs(compare));
+    } else if (pi.compareScheduled !== key && isVisible()) {
+        // A click (build, budget, days, a shop tick) redraws at once and the plan runs follow once the page has
+        // painted. New prices alone (they arrive in batches while Buy loads) are gathered: one run 5 s later.
+        const priceOnly = pi.compareKeyNoPrice === keyNoPrice;
+        pi.compareScheduled = key;
+        clearTimeout(pi.compareTimer);
+        pi.compareTimer = setTimeout(async () => {
+            if (pi.compareWanted !== key) return;
+            // Another tab may have it by now, or be working it out: take its result at the next redraw.
+            const again = storedCompare();
+            if (again && again.key === key) {
+                adoptCompare(again, true);
+                refresh();
+                return;
+            }
+            const busy = get(K.compareBusy, null);
+            if (busy && busy.key === key && busy.tab !== pi.tabId && Date.now() - (busy.at || 0) < COMPARE_BUSY_MS) {
+                pi.compareScheduled = '';
+                return;
+            }
+            set(K.compareBusy, { key, tab: pi.tabId, at: Date.now() });
+            // One plan at a time, with the page free in between; a newer change drops this run.
+            const compare = await compareStrategiesAsync(args);
+            if (pi.compareWanted !== key) return;
+            await pauseForPage();
+            const w = whatIfs(compare);
+            if (pi.compareWanted !== key) return;
+            finish(compare, w);
+            refresh();
+        }, priceOnly ? COMPARE_PRICE_DELAY_MS : COMPARE_CLICK_DELAY_MS);
     }
     return { compare: pi.compare, pc };
 }
+
+/** A break for the page between two pieces of work. */
+const pauseForPage = () => new Promise((r) => setTimeout(r, 0));
 
 /** The model every surface renders from. */
 export function currentModel(now = Date.now()) {
@@ -377,6 +459,13 @@ export function maybeLearn(now = Date.now(), force = false) {
 }
 
 export function refresh() {
+    // A tab you can't see works nothing out (same-site tabs often share one thread with the tab you're on, so its work
+    // was your lag): it's worked out again when the tab is shown.
+    if (!isVisible()) {
+        pi.stale = true;
+        return;
+    }
+    pi.stale = false;
     try {
         maybeLearn();
         pi.model = currentModel();
@@ -435,6 +524,8 @@ export function startFeed() {
     // Coming back to a tab: take the lead and read at once, not at the next heartbeat.
     document.addEventListener('visibilitychange', () => {
         if (!isVisible()) return;
+        // What changed while it was hidden, shown at once (the read that follows may take a moment).
+        if (pi.stale) refresh();
         tick();
         setTimeout(tick, 500);
     });

@@ -3,7 +3,7 @@
  * energy split toward one. Pure; ENGINE-SPEC §7, research-builds-gympage.md.
  */
 
-import { STATS, gainPerTrain, HAPPY_LOSS_PER_ENERGY, HAPPY_CAP, STAT_AB, effectiveStat, round4, totalOf } from './gain.js';
+import { STATS, gainPerTrain, HAPPY_LOSS_PER_ENERGY, STAT_AB, effectiveStat, totalOf, happyTerms } from './gain.js';
 import { gymAccess, gymById, bestGymFor, GYMS, BALBOAS, FRONTLINE, GYM_3000, ISOYAMAS, ELITES, TOTAL_REBOUND, GEORGES } from './gyms.js';
 
 /** Share of the total, per stat. The first listed gyms are the ones the build relies on. */
@@ -176,11 +176,8 @@ export const SPLIT_HAPPY_WEIGHT = 6;
 /** [calibrate] The happy later trains happen at: steady training runs it down to about 0 (the simulator). */
 export const SPLIT_HAPPY_REF = 0;
 
-/** The happy-only parts of gain.js's formula (gainPerTrain), for one happy. */
-function happyTerms(H) {
-    const h = Math.min(HAPPY_CAP, Math.max(0, H || 0));
-    return { f: round4(1 + 0.07 * round4(Math.log(1 + h / 250))), p: 8 * Math.pow(h, 1.05), q: 1 - Math.pow(h / HAPPY_CAP, 2) };
-}
+/** pickStat's two passes: stats more than the on-build band under their share, then any under it. */
+const CUTS = [ON_BUILD_PP / 100, 0];
 
 /** gainPerTrain's bracket (before × dots × energy × perks ÷ 200,000): what a train gains per energy, up to that factor. */
 function innerGain(stat, eff, t) {
@@ -214,14 +211,13 @@ function innerGain(stat, eff, t) {
 export function pickStat(cands, s, shares, happy, perks = null, rule = SPLIT_RULE, happyRef = SPLIT_HAPPY_REF, happyMax = null) {
     const total = totalOf(s);
     if (rule !== 'deficit') {
-        const band = ON_BUILD_PP / 100;
         const hNow = happyMax !== null && happy > happyMax ? happyMax : happy;
         const weigh = SPLIT_HAPPY_WEIGHT > 0 && hNow !== happyRef;
         // The happy parts of the formula are the same for every stat: once per pick (this runs for every simulated train).
         const tNow = happyTerms(happy);
         const tAt = hNow === happy ? tNow : happyTerms(hNow);
         const tRef = weigh ? happyTerms(happyRef) : null;
-        for (const cut of [band, 0]) {
+        for (const cut of CUTS) {
             let pick = null;
             let best = 0;
             for (const c of cands) {

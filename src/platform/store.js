@@ -49,6 +49,12 @@ export const K = {
     // Your real Xanax cooldowns (core/drugcd.js) and the candy picked today (kept steady: core/candy.js).
     xanaxCds: 'xanaxCds',
     candyPick: 'candyPick',
+    // The plan comparison kept between pages (runtime.js), the event comparison, and which tab is working one out.
+    compareCache: 'compareCache',
+    eventCompareCache: 'eventCompareCache',
+    compareBusy: 'compareBusy',
+    // Your trains from Torn's log (Full key): the sessions no read of ours saw (core/gymlog.js).
+    gymLog: 'gymLog',
 };
 
 /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */
@@ -159,8 +165,8 @@ export function del(name) {
 /** What "Your data" in Settings can clear, by group. */
 export const DATA_GROUPS = {
     keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker, K.fullKey, K.fullKeyState, K.moneyLog],
-    plan: [K.plan, K.recheck, K.gymSession],
-    progress: [K.statsHistory, K.dayLog, K.dayTotals, K.planLine, K.receipts],
+    plan: [K.plan, K.recheck, K.gymSession, K.compareCache, K.eventCompareCache, K.compareBusy],
+    progress: [K.statsHistory, K.dayLog, K.dayTotals, K.planLine, K.receipts, K.gymLog],
     learning: ['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions],
     prices: [K.priceHistory, K.prices],
     eye: ['eyeTargets', 'myAttacks'],

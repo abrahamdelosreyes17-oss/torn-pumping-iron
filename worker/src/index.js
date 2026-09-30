@@ -29,7 +29,7 @@ import { sealKey, openKey, isSealed } from './keys.js';
 import { cleanTargets, cleanWarList, cleanWatch } from './cmd-torn.js';
 import { loginStart, loginStatus, loginCancel, loginGo, loginCallback } from './login.js';
 
-/** A 24-step plan + 50 targets + 500 bands + a 100-member war list + 25 watched players is under 40 kB. */
+/** A 48-step plan + 50 targets + 500 bands + a 100-member war list + 25 watched players is under 40 kB. */
 export const MAX_BODY = 64000;
 
 /** People one Worker serves (a leaked invite can't fill it); MAX_USERS in wrangler.toml [vars] changes it. */

@@ -57,16 +57,23 @@ test('/next: the next step with its Torn time and an Open in Torn link', async (
     assert.equal(b.data.components[0].components[0].style, 5, 'a link, not an action');
 });
 
-test('/plan: today’s steps in Torn time; a plan older than 12 h says so', async () => {
+test('/plan: today’s steps in Torn time; out of date once its steps run out (12 h) or after 48 h', async () => {
     const { env, user } = await linkedEnv();
     let b = await body(handleInteraction(command('plan'), env, noFetch, ctx(), T0));
     assert.match(b.data.content, /`10:51` Xanax #2 → DEX × 27/);
     assert.match(b.data.content, /`10:56` Refill · 30 points/);
     assert.match(b.data.content, /`15:48` Natural energy/);
     assert.doesNotMatch(b.data.content, /out of date/);
+    // 13 h old, the 15:48 step still ahead: in use.
     user().plan_at = T0 - 13 * 3600;
     b = await body(handleInteraction(command('plan'), env, noFetch, ctx(), T0));
-    assert.match(b.data.content, /out of date \(last synced 13 h ago\)/);
+    assert.doesNotMatch(b.data.content, /out of date/);
+    // 13 h old and every step past: out of date.
+    b = await body(handleInteraction(command('plan'), env, noFetch, ctx(), T0 + 6 * 3600));
+    assert.match(b.data.content, /out of date \(last synced 19 h ago\)/);
+    user().plan_at = T0 - 49 * 3600;
+    b = await body(handleInteraction(command('plan'), env, noFetch, ctx(), T0));
+    assert.match(b.data.content, /out of date \(last synced 49 h ago\)/);
 });
 
 test('/status: key, plan sync, pings, and the test mode note', async () => {

@@ -24,6 +24,7 @@
  *   &hidden=1     the tab reports itself hidden (nothing may be asked)
  *   &trading=MS   a stand-in Torn Trading panel (#ttv2-host) appears after MS ms: Pumping Iron pauses
  *   &ffs=1        save an FFScouter key (canned estimates for the fixture players)
+ *   window.__piSeed  {storeKey: raw} set before load (Playwright addInitScript): the store an earlier page left
  */
 const Q = new URLSearchParams(location.search);
 if (Q.get('at')) {
@@ -31,7 +32,8 @@ if (Q.get('at')) {
   const shift = Date.parse(Q.get('at')) - realNow();
   Date.now = () => realNow() + shift;
 }
-const _store = {};
+// window.__piSeed (set by a check before the page loads): what an earlier page stored, as the next Torn page would find it.
+const _store = Object.assign({}, window.__piSeed || {});
 const _listeners = {};
 window.GM_getValue = (k, d) => (k in _store ? _store[k] : d);
 window.GM_setValue = (k, v) => { const old = _store[k]; _store[k] = v; (_listeners[k] || []).forEach((f) => f(k, old, v, false)); };
@@ -100,7 +102,12 @@ CANNED['/v2/user/personalstats'] = (u) => {
   return { personalstats: [{ name: 'networth', value: nw }, { name: 'networthwallet', value: 881e6 }, { name: 'networthvault', value: 0 }, { name: 'networthbank', value: 0 }, { name: 'networthcayman', value: 0 }] };
 };
 CANNED['/v2/torn/logcategories'] = () => ({ logcategories: [{ id: 17, title: 'Bazaars' }, { id: 18, title: 'Item market' }, { id: 5, title: 'Gym' }] });
-CANNED['/v2/user/log'] = (u) => ({ log: u.searchParams.get('cat') === '17' ? [{ id: 'a', timestamp: NOW_S - 2 * 86400, details: { id: 1225, title: 'Bazaar sell', category: 'Bazaars' }, data: { money: 150e6 }, params: {} }] : [] });
+// The gym log (Full key): one phone session 3 h ago that no read of ours saw (docs/research-gym-log.md's shape).
+const GYM_LOG = [
+  { id: 'g2', timestamp: NOW_S - 3 * 3600 + 40, details: { id: 5303, title: 'Gym train dexterity', category: 'Gym' }, data: { trains: 12, energy_used: 120, dexterity_before: '82000.00', dexterity_after: 82700.4, dexterity_increased: 700.4, happy_used: 60, gym: 18 }, params: {} },
+  { id: 'g1', timestamp: NOW_S - 3 * 3600, details: { id: 5303, title: 'Gym train dexterity', category: 'Gym' }, data: { trains: 3, energy_used: 30, dexterity_before: '81830.10', dexterity_after: 82000, dexterity_increased: 169.9, happy_used: 15, gym: 18 }, params: {} },
+];
+CANNED['/v2/user/log'] = (u) => ({ log: u.searchParams.get('cat') === '17' ? [{ id: 'a', timestamp: NOW_S - 2 * 86400, details: { id: 1225, title: 'Bazaar sell', category: 'Bazaars' }, data: { money: 150e6 }, params: {} }] : (u.searchParams.get('log') || '').includes('5303') ? GYM_LOG : [] });
 CANNED['/v2/user/equipment'] = () => ({ equipment: [{ type: 'Weapon', sub_type: 'Primary', name: 'Minigun', stats: { damage: 71.2, accuracy: 51 }, bonuses: [] }], clothing: [] });
 const profileOf = (id) => ({ profile: { id: Number(id), name: 'P' + id, level: 60, rank: 'Supreme Hitman', life: { current: 7300, maximum: 7300 }, status: { state: 'Okay', description: 'Okay' } } });
 

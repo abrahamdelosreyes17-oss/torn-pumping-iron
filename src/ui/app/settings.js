@@ -44,13 +44,13 @@ export const TOS_TS = [
     ['Key access level', 'The key on your TornStats account; we only read spies'],
 ];
 
-/** Auto mode's Full key: only in this browser, only for the money log. */
+/** Auto mode's Full key: only in this browser, only for your log (money and gym trains). */
 export const TOS_FULL = [
-    ['Data storage', 'Only locally, in this browser: the key, and a summary of your money log (titles, amounts, times; 30 days)'],
+    ['Data storage', 'Only locally, in this browser: the key, a summary of your money log (titles, amounts, times; 30 days) and your gym trains from the log (stat, trains, energy, gym, gain; up to 120 days)'],
     ['Data sharing', 'Nobody. Never sent to the Pumping Iron service, FFScouter, TornStats or TornW3B'],
-    ['Purpose of use', 'Personal gain: Auto mode sizes your gym plan to your income'],
+    ['Purpose of use', 'Personal gain: Auto mode sizes your gym plan to your income; Progress shows the trains you did while Pumping Iron wasn’t open (e.g. on your phone)'],
     ['Key storage & sharing', 'Stored locally / Not shared'],
-    ['Key access level', 'Full (used only for user: log, the money categories; nothing else is read with it)'],
+    ['Key access level', 'Full (used only for user: log, the money categories and the gym trains; nothing else is read with it)'],
 ];
 
 /** Your own service (Advanced): the key you give it, stored on your own Cloudflare Worker. */
@@ -362,12 +362,12 @@ export function renderSettings(m, ctx) {
 
     const discordSec = discordSection(ctx);
 
-    // Auto mode's Full key: only for the money log.
+    // Auto mode's Full key: only for your log (money, gym trains).
     const fk = ctx.fullKey || {};
     const full = keyRow({ label: 'Full key', placeholder: fk.has ? 'Saved · paste a new one to replace it' : 'Paste a Full access key', saveText: 'Check and save', onSave: ctx.saveFullKey, onReveal: () => ctx.revealKey(K.fullKey) });
     const fullState = !fk.has ? stateTag('off', ctx.plan && ctx.plan.pickBy === 'auto' ? 'Auto mode needs it' : 'Optional') : fk.ok ? stateTag('ok', 'Connected · Full') : stateTag('bad', fk.error || 'Not a Full key');
     const fullSec = settingsSection('Full key (Auto mode)', fullState, [
-        h('p', { text: 'Auto mode, the default plan, sizes your gym spending to your income. It needs a Full key, used for one thing only: reading your money log to see where your income comes from. It never leaves this browser.' }),
+        h('p', { text: 'Auto mode, the default plan, sizes your gym spending to your income. It needs a Full key, used only to read your log: the money lines, to see where your income comes from, and your gym trains, so trains on your phone show in Progress. It never leaves this browser.' }),
         full.row,
         ctx.ui.fullKeyMsg ? h('span', { class: 'msg ' + (ctx.ui.fullKeyMsg.ok ? 'ok' : 'bad'), text: ctx.ui.fullKeyMsg.text }) : full.msg,
         fk.has ? h('div', { class: 'row' }, [fk.logAt ? h('span', { class: 'muted num', text: 'Money log read ' + new Date(fk.logAt).toISOString().slice(11, 16) + ' UTC' + (fk.logLines ? ' · ' + fk.logLines + ' lines' : '') }) : h('span', { class: 'muted', text: 'Money log not read yet' }), confirmButton(ctx, 'full-forget', 'Forget the Full key', () => { ctx.forgetFullKey(); ctx.rerender(); })]) : null,

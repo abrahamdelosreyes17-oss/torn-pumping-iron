@@ -64,7 +64,7 @@ test('PUT /plan clears up to 50 acks with one DELETE', async () => {
 
 test('booster and landed ids come from the event, so a replayed transition pings once', async () => {
     const plan = { type: 'jump', steps: [{ at: T0 + 600, kind: 'boost', label: 'EDVD × 5' }] };
-    const prev = nextPrev(null, tornState({ drug: 3600, booster: 45, travel: 30 }), T0 - 60);
+    const prev = nextPrev(null, tornState({ drug: 3600, booster: 120, travel: 30 }), T0 - 120);
     const a = dueAlerts(tornState({ drug: 3600, booster: 0, travel: 0 }), plan, T0, {}, { prev });
     const b = dueAlerts(tornState({ drug: 3600, booster: 0, travel: 0 }), plan, T0 + 60, {}, { prev });
     assert.deepEqual(a.map((x) => x.id), b.map((x) => x.id));
@@ -74,7 +74,7 @@ test('booster and landed ids come from the event, so a replayed transition pings
 test('cron: a run whose saved state was lost doesn’t ping the booster again', async () => {
     const plan = { type: 'jump', steps: [{ at: T0 + 600, kind: 'boost', label: 'EDVD × 5' }] };
     const { env, user } = await linkedEnv({}, { plan });
-    user().prev = JSON.stringify(nextPrev(null, tornState({ drug: 3600, booster: 45 }), T0 - 60));
+    user().prev = JSON.stringify(nextPrev(null, tornState({ drug: 3600, booster: 120 }), T0 - 120));
     const old = user().prev;
     let f = world({ torn: tornState({ drug: 3600, booster: 0 }) });
     await runCron(env, T0, f);
@@ -114,9 +114,14 @@ test('a stale plan still pings strict jump steps ahead; "plan out of date" once 
     const again = dueAlerts(tornState({ drug: 3600 }), plan, T0 + 86400, {}, { planStale: true, planAge: 37 * 3600, planAt: T0 - 13 * 3600, prev: { staleFor: T0 - 13 * 3600 } });
     assert.deepEqual(again.filter((x) => x.kind === 'stale'), []);
     const { env, user } = await linkedEnv({}, { plan });
+    // 13 h old with a step still ahead: in use (the laptop closed; the bot follows the synced 48 h).
     user().plan_at = T0 - 13 * 3600;
     await runCron(env, T0, world({ torn: tornState({ drug: 3600 }) }));
-    assert.equal(JSON.parse(user().prev).staleFor, T0 - 13 * 3600);
+    assert.equal(JSON.parse(user().prev).staleFor || null, null, 'not out of date while a synced step is ahead');
+    // Past 48 h: out of date, once.
+    user().plan_at = T0 - 49 * 3600;
+    await runCron(env, T0 + 60, world({ torn: tornState({ drug: 3600 }) }));
+    assert.equal(JSON.parse(user().prev).staleFor, T0 - 49 * 3600);
     const f = world({ torn: tornState({ drug: 3600 }) });
     await runCron(env, T0 + 3 * 86400, f);
     assert.equal(posts(f).length, 0, 'not again after the sent row is cleared');

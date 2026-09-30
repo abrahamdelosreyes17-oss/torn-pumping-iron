@@ -6,8 +6,9 @@
  */
 
 import { K, get, set, del, getKey, setKey, getPlan } from './platform/store.js';
-import { fetchKeyInfo, fetchLogCategories, fetchMoneyLog, ACCESS_FULL } from './api/torn.js';
+import { fetchKeyInfo, fetchLogCategories, fetchMoneyLog, fetchGymLog, ACCESS_FULL } from './api/torn.js';
 import { MONEY_LOG_CATEGORY } from './core/auto.js';
+import { parseGymLog, mergeGymLog, gymLogFrom, GYM_LOG_EVERY_MS } from './core/gymlog.js';
 import { fullKeyClient, tornClient, pi } from './runtime.js';
 import { isPaused } from './turns.js';
 
@@ -46,6 +47,32 @@ export function forgetFullKey() {
     del(K.fullKeyState);
     del(K.moneyLog);
     pi.fullClient = null;
+}
+
+/**
+ * Your trains from Torn's log (Full key), at most every 15 minutes, in the
+ * leader tab (visible), never while Torn Trading runs: what's new since the
+ * newest line kept, a week back the first time. Trains on your phone, or
+ * with the laptop closed, show in Progress' "Last trains".
+ */
+export async function refreshGymLog({ force = false, now = Date.now() } = {}) {
+    const st = get(K.fullKeyState, {}) || {};
+    if (!getKey(K.fullKey) || !st.ok || st.dead || isPaused()) return null;
+    const kept = get(K.gymLog, null);
+    if (!force && kept && now - (kept.at || 0) < GYM_LOG_EVERY_MS) return null;
+    // Asked before a slow answer came back: one read at a time.
+    set(K.gymLog, { ...(kept || { lines: [], newest: null }), at: now });
+    const lines = parseGymLog(await fetchGymLog(fullKeyClient(), { from: gymLogFrom(kept, now) }));
+    const next = mergeGymLog(get(K.gymLog, null), lines, now);
+    set(K.gymLog, next);
+    return next;
+}
+
+/** The leader tab's gym-log clock (main.js calls it every minute). */
+export function gymLogTick() {
+    const lead = get(K.leader, null);
+    if (!lead || lead.id !== pi.tabId || typeof document === 'undefined' || document.visibilityState === 'hidden') return;
+    refreshGymLog().catch((error) => set(K.lastError, { at: Date.now(), where: 'gym log', code: error && error.code, message: String((error && error.message) || error) }));
 }
 
 /**

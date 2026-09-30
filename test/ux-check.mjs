@@ -296,6 +296,15 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     await o.page.locator('#pi-app button', { hasText: 'Advanced: your own service' }).click();
     await o.page.waitForTimeout(300);
     ok(/Service address/i.test((await measure(o.page)).text), 'discord: Advanced opens the own-service form');
+    // Trains on the phone (the gym log, Full key): read by the leader ~20 s after the page opens, shown in Last trains.
+    await o.page.waitForFunction(() => Boolean(_store['pumpingIron.v1.gymLog'] && JSON.parse(_store['pumpingIron.v1.gymLog']).lines.length), null, { timeout: 30000 }).catch(() => {});
+    await o.page.evaluate(() => (location.hash = 'progress'));
+    await o.page.waitForTimeout(800);
+    const pr = await measure(o.page);
+    const row = (pr.text.match(/DEX × 15[^\n]*/) || [''])[0];
+    ok(/DEX × 15/.test(pr.text) && /Torn log/.test(pr.text), 'gym log: the phone session shows in Last trains, marked Torn log (' + row.slice(0, 90) + ')');
+    ok(/\+870/.test(pr.text), 'gym log: what Torn logged it gained (+870)');
+    ok(o.errors.length === 0, 'gym log: no page errors ' + JSON.stringify(o.errors.slice(0, 2)));
     await o.page.close();
 }
 

@@ -360,6 +360,7 @@ function getCtx() {
         dayTotals: get(K.dayTotals, {}) || {},
         gymProgress: get(K.gymProgress, null),
         calibration: get('calibration', null),
+        gymLog: get(K.gymLog, null),
         planProjection: get(K.planLine, null),
         receipts: get(K.receipts, null),
         priceHistory: get(K.priceHistory, null),
@@ -431,7 +432,7 @@ function getCtx() {
             setupUrl: WORKER_SETUP_URL,
         },
         dev: {
-            data: () => ({ samples: ((get('calibration', null) || {}).samples) || [], fights: joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []), learned: get(K.learned, null), version: PI_BUILD_VERSION }),
+            data: () => ({ samples: ((get('calibration', null) || {}).samples) || [], gymLog: ((get(K.gymLog, null) || {}).lines) || [], fights: joinFights(get(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], get(K.eyePredictions, []) || []), learned: get(K.learned, null), version: PI_BUILD_VERSION }),
             unlocked: () => Boolean(get(K.devUnlocked, false)),
             setUnlocked: (v) => (v ? set(K.devUnlocked, true) : del(K.devUnlocked)),
             log: () => get(K.learnLog, []) || [],
