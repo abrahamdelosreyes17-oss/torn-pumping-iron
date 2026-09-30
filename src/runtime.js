@@ -22,7 +22,7 @@ import { archived, pageGet, pageSet } from './platform/archive.js';
 import { summarizeReceipts } from './core/receipts.js';
 import { livePrices } from './core/market.js';
 import { TORN_PER_MINUTE_ALONE } from './core/turns.js';
-import { isPaused } from './turns.js';
+import { isPaused, onPauseChange } from './turns.js';
 import { useDampingMode } from './core/gain.js';
 import { joinFights, runLearning, learnedModel } from './core/learndata.js';
 import { applyGymModel } from './core/learn.js';
@@ -525,6 +525,12 @@ export function startFeed() {
     setInterval(() => {
         if (isVisible() && (pi.where === 'app' || modelDue(pi.model, pi.modelAt, Date.now()))) refresh();
     }, 5000);
+    // Taking turns with Torn Trading: the page follows a pause (or its end) at once, not at the next due model.
+    let pausedWas = null;
+    onPauseChange((p) => {
+        if (pausedWas !== null && p !== pausedWas) refresh();
+        pausedWas = p;
+    });
     // The first model once Torn's page has settled (idle), not inside the page's own start-up.
     whenIdle(refresh);
 }
