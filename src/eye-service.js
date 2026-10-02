@@ -22,6 +22,7 @@ import { bandOf, chipFigures } from './core/eye/bands.js';
 import { gearSummary, myGear } from './core/eye/gear.js';
 import { lifeFromLevel, targetParams, targetQueries, listIgnoresFf, mergeTargetLists, inFfRange, selectTargets, listRowAsFfs, TARGETS_PER_MINUTE } from './core/eye/targets.js';
 import { trackFlights } from './core/eye/war.js';
+import { makePause } from './core/slices.js';
 import { watchOf, addWatch, removeWatch, tagWatch, dismissOffer, isWatched, dueForRead, readEvents, watchOffers, EVENT_KEEP_MS } from './core/eye/watch.js';
 
 
@@ -37,7 +38,7 @@ export const WATCH_KEY = 'eyeWatch';
 export const WATCH_STATE_KEY = 'eyeWatchState';
 export const FLIGHTS_KEY = 'eyeFlights';
 
-const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(), timer: null, listeners: [], mem: new Map(), fc: new Map(), flushing: null, again: false };
+const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(), timer: null, listeners: [], mem: new Map(), fc: new Map(), flushing: null, again: false, todo: new Map(), working: false, idling: false, side: null };
 
 /** The one FFScouter client in this tab (Torn Eye and Settings share it, and its dead-key mark). */
 export function sharedFfsClient() {
@@ -296,11 +297,49 @@ async function flushOnce() {
 }
 
 /**
+ * Your side of every fight, the same for each row of one draw: read and worked out once per draw, not once per row
+ * (round 7: 300 rows read the settings, your gear and your attacks 300 times). Forgotten when the draw's task ends.
+ */
+function yourSide(m) {
+    if (eye.side && eye.side.m === m) return eye.side;
+    // Your stats as they fight: merits and passives (Torn's battlestats modifier) included.
+    const mods = m.state.statMods || {};
+    const meStats = Object.fromEntries(Object.entries(m.pc.stats).map(([k, v]) => [k, v * (1 + (mods[k] || 0) / 100)]));
+    const statics = getShared(K.userStatic, {}) || {};
+    const attacksBy = new Map();
+    for (const a of (getShared('myAttacks', null) || {}).list || []) {
+        const def = Number(a.def);
+        if (!attacksBy.has(def)) attacksBy.set(def, []);
+        attacksBy.get(def).push(a);
+    }
+    for (const l of attacksBy.values()) l.sort((a, b) => b.ended - a.ended);
+    eye.side = {
+        m,
+        meStats,
+        statics,
+        gMe: statics.equipment ? myGear(statics.equipment) : DEFAULT_GEAR,
+        myLife: (m.state.life && m.state.life.maximum) || 7500,
+        // Your stats in ~1% steps (round 6): every train moved them, and every chip's Monte Carlo ran again (~50 ms for 100).
+        meKey: Object.values(meStats).map((v) => Math.round(Math.log1p(v) * 100)),
+        fm: learnedModel(getShared(K.learned, null)).fight,
+        bands: getSettings().bands,
+        attacksBy,
+    };
+    Promise.resolve().then(() => {
+        eye.side = null;
+    });
+    return eye.side;
+}
+
+/**
  * Everything the chip and card show for one player, from cached data (sync
  * once the cache is loaded). `extra` gives what the page itself shows
  * (level, life, name), which fills gaps without a request.
+ * `later` (the Torn Eye tab's target list, round 7): a fight not worked out yet is not simulated inside the draw
+ * (300 targets froze the click for 0.4 s, 1.9 s on a slow PC: docs/sims/round7/startup.mjs). The view comes back
+ * `pending`, the fight is queued and worked out a few ms at a time, and one redraw follows.
  */
-export function eyeView(id, extra = {}, { war = false } = {}) {
+export function eyeView(id, extra = {}, { war = false, later = false } = {}) {
     const m = pi.model;
     const c = eye.cache;
     if (!m || !m.ready || !c) return null;
@@ -308,42 +347,41 @@ export function eyeView(id, extra = {}, { war = false } = {}) {
     const prof = r.profile || {};
     const level = prof.level || extra.level || null;
     const life = prof.life || extra.life || lifeFromLevel(level);
-    // Your stats as they fight: merits and passives (Torn's battlestats modifier) included.
-    const mods = m.state.statMods || {};
-    const meStats = Object.fromEntries(Object.entries(m.pc.stats).map(([k, v]) => [k, v * (1 + (mods[k] || 0) / 100)]));
-    const attacks = (getShared('myAttacks', null) || {}).list || [];
-    const fights = attacks.filter((a) => Number(a.def) === Number(id)).sort((a, b) => b.ended - a.ended);
+    const { meStats, statics, gMe, myLife, meKey, fm, bands, attacksBy } = yourSide(m);
+    const fights = attacksBy.get(Number(id)) || [];
     const pub = r.pub && (prof.rank || extra.rank) ? { rank: prof.rank || extra.rank, level, crimes: r.pub.crimes, networth: r.pub.networth } : null;
     const est = estimatePlayer({ me: meStats, spy: r.spy || null, fights, ffs: r.ffs || null, pub, now: Date.now() });
     const gearRec = c.gear[id];
     const gThem = gearRec ? gearSummary(gearRec.items) : null;
-    const statics = getShared(K.userStatic, {}) || {};
-    const gMe = statics.equipment ? myGear(statics.equipment) : DEFAULT_GEAR;
-    const myLife = (m.state.life && m.state.life.maximum) || 7500;
     let f = null;
     let fGear = null;
+    let pending = false;
     if (est) {
         // The fight Monte Carlo runs again only when something it reads changed (a war page redraws every 10 s).
-        // Your stats in ~1% steps (round 6): every train moved them, and every chip's Monte Carlo ran again (~50 ms for 100).
-        const meKey = Object.values(meStats).map((v) => Math.round(Math.log1p(v) * 100));
-        const key = JSON.stringify([est.bss, est.stats, life, myLife, meKey, gearRec ? gearRec.seenAt : 0, statics.equipmentAt || 0]);
-        const memo = eye.fc.get(id);
-        if (memo && memo.key === key) {
+        // Kept per player and per what the fight read (round 7): one player shown by two lists with different facts (a
+        // war row knows their life, the target list doesn't) used to be simulated again by each list on every draw.
+        const key = id + '|' + JSON.stringify([est.bss, est.stats, life, myLife, meKey, gearRec ? gearRec.seenAt : 0, statics.equipmentAt || 0]);
+        const memo = eye.fc.get(key);
+        if (memo) {
             f = memo.f;
             fGear = memo.fGear;
+        } else if (later) {
+            pending = true;
+            eye.todo.set(id, { extra, war });
+            if (later === 'idle') fightsWhenIdle();
+            else fightsSoon();
         } else {
             const target = { id, life, bss: est.bss, stats: est.stats };
             f = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe });
             if (gThem) fGear = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe, gearThem: gThem });
-            if (eye.fc.size > 2000) eye.fc.clear();
-            eye.fc.set(id, { key, f, fGear });
+            if (eye.fc.size > 4000) eye.fc.clear();
+            eye.fc.set(key, { f, fGear });
         }
     }
     let main = fGear || f;
     // What the fight learner kept from your own fights (only when it predicted your newest fights better).
-    const fm = learnedModel(getShared(K.learned, null)).fight;
     if (main && fm) main = { ...main, ...applyFightModel(fm, { pWin: main.pWin, keep: main.keep }), learned: true };
-    const band = bandOf(main, getSettings().bands);
+    const band = bandOf(main, bands);
     const ff = est ? fairFight(est.bss, bssOf(meStats)) : null;
     const respect = est && level ? respectFor(level, ff, { war }) : null;
     return {
@@ -362,7 +400,67 @@ export function eyeView(id, extra = {}, { war = false } = {}) {
         figures: chipFigures(main, est, respect),
         source: est ? est.sourceText : null,
         status: prof.status || null,
+        pending,
     };
+}
+
+/** Work between two breaks while queued fights are worked out: a click or a scroll never waits longer. */
+export const FIGHT_SLICE_MS = 8;
+
+/** Fights queued by a list are still being worked out (their bands aren't known yet). */
+export function fightsPending() {
+    return eye.todo.size > 0;
+}
+
+function nextFight() {
+    const [id, a] = eye.todo.entries().next().value;
+    eye.todo.delete(id);
+    eyeView(id, a.extra, { war: a.war });
+}
+
+/** The queued fights, a few ms at a time with a break for the page in between, then one redraw. */
+function fightsSoon() {
+    if (eye.working) return;
+    eye.working = true;
+    const pause = makePause({ everyMs: FIGHT_SLICE_MS });
+    (async () => {
+        try {
+            // A hidden tab works nothing out: what's left is queued again by the next draw.
+            while (eye.todo.size && isVisible()) {
+                nextFight();
+                await pause();
+            }
+        } finally {
+            eye.working = false;
+            pause.stop();
+        }
+        if (!eye.todo.size) notify();
+    })().catch(() => {});
+}
+
+/**
+ * The fights for these stored targets, worked out while the page has nothing else to do (the owner's idea: Torn Eye
+ * gets ready quietly, never slowing the page). Local numbers only: no request, no redraw. Opening the tab meanwhile
+ * takes over what is left (fightsSoon).
+ * @param {{id: number, extra: object}[]} rows
+ */
+export function warmFights(rows) {
+    if (!eye.cache || !(pi.model && pi.model.ready)) return false;
+    for (const r of rows) if (!eye.todo.has(r.id)) eyeView(r.id, r.extra, { later: 'idle' });
+    return true;
+}
+
+function fightsWhenIdle() {
+    if (eye.idling || eye.working || typeof requestIdleCallback !== 'function') return;
+    eye.idling = true;
+    requestIdleCallback((deadline) => {
+        eye.idling = false;
+        if (eye.working) return;
+        // A little per idle moment (an idle moment can be 50 ms long: that much work would be a freeze of its own).
+        const t0 = performance.now();
+        while (eye.todo.size && isVisible() && deadline.timeRemaining() > 2 && performance.now() - t0 < FIGHT_SLICE_MS) nextFight();
+        if (eye.todo.size) fightsWhenIdle();
+    });
 }
 
 export function eyeReady() {

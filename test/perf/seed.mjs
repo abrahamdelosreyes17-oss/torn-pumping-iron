@@ -11,6 +11,7 @@
 import { readFileSync } from 'node:fs';
 import { ITEMS, CANDY_IDS } from '../../src/core/items.js';
 import { GYMS } from '../../src/core/gyms.js';
+import { targetParams } from '../../src/core/eye/targets.js';
 
 export function realisticStore({ receiptsDays = 120 } = {}) {
 const base = JSON.parse(readFileSync(new URL('./base-store.json', import.meta.url), 'utf8'));
@@ -147,7 +148,9 @@ put('xanaxCds', Array.from({ length: 30 }, (_, i) => ({ at: T0 - (30 - i) * 8 * 
 
 // Torn Eye GM keys: myAttacks (100 attacks), eyeTargets (~300), eyeWatch (50), eyeWatchState (50), eyeFlights (400), eyeWarAuto.
 put('myAttacks', { at: T0 - 1800e3, list: Array.from({ length: 100 }, (_, i) => ({ def: ri(100000, 3999999), ended: Math.floor(T0 / 1000) - i * 3000, ff: 1 + Math.round(rnd() * 200) / 100, result: pick(['Attacked', 'Mugged', 'Hospitalized', 'Lost', 'Stalemate']), respect: Math.round(rnd() * 800) / 100, level: ri(10, 100) })), incoming: Array.from({ length: 10 }, (_, i) => ({ att: ri(100000, 3999999), name: pick(names), level: ri(10, 100), ended: Math.floor(T0 / 1000) - i * 3000, result: 'Attacked' })) });
-put('eyeTargets', { at: T0 - 86400e3, params: { minLevel: 1, maxLevel: 100, inactiveOnly: true, factionless: false }, list: Array.from({ length: 300 }, () => ({ playerId: ri(100000, 3999999), name: pick(names) + ri(1, 999), level: ri(10, 100), fairFight: 1 + Math.round(rnd() * 200) / 100, bsEstimate: ri(1e6, 2e9), lastAction: Math.floor(T0 / 1000) - ri(1, 90) * 86400, hospitalUntil: null, band: pick(['stomp', 'good', 'tough']), win: Math.round(rnd() * 1000) / 1000, keep: Math.round(rnd() * 1000) / 1000, respect: Math.round(rnd() * 800) / 100, ours: false, source: 'ffs', ageDays: ri(0, 60) })), dropped: 120, asked: 12, found: 420, ffIgnored: false });
+// Round 7: the stored targets are players the eye cache below holds an estimate for (only players you beat are
+// stored), asked the current way: a list without `params.v` is asked again when the tab opens and the stored one never shows.
+put('eyeTargets', { at: T0 - 86400e3, params: targetParams({ minLevel: 1, maxLevel: 100, inactiveOnly: 1, factionless: null }), list: Array.from({ length: 300 }, (_, i) => ({ playerId: 100000 + i * 7, name: pick(names) + ri(1, 999), level: ri(10, 100), fairFight: 1 + Math.round(rnd() * 200) / 100, bsEstimate: Math.round(5e6 + (i / 300) * 330e6), lastAction: Math.floor(T0 / 1000) - ri(1, 90) * 86400, hospitalUntil: null, band: pick(['stomp', 'good', 'tough']), win: Math.round(rnd() * 1000) / 1000, keep: Math.round(rnd() * 1000) / 1000, respect: Math.round(rnd() * 800) / 100, ours: false, source: 'ffs', ageDays: ri(0, 60) })), dropped: 120, asked: 12, found: 420, ffIgnored: false });
 const watchList = Array.from({ length: 50 }, (_, i) => ({ id: 400000 + i, name: pick(names) + i, level: ri(10, 100), tag: pick([null, 'bounty', 'war', 'revenge']), addedAt: T0 - i * 86400e3 }));
 put('eyeWatch', { list: watchList, dismissed: Object.fromEntries(Array.from({ length: 20 }, (_, i) => [500000 + i, T0 - i * 3600e3])) });
 put('eyeWatchState', { at: T0 - 30e3, players: Object.fromEntries(watchList.map((w) => [w.id, { id: w.id, name: w.name, level: w.level, status: { state: pick(['Okay', 'Hospital', 'Traveling']), until: Math.floor(T0 / 1000) + ri(0, 3600), description: 'In hospital for 12 mins' }, lastAction: { status: 'Offline', timestamp: Math.floor(T0 / 1000) - ri(60, 86400) }, life: { current: 7000, maximum: 7500 }, readAt: T0 - ri(10, 300) * 1000, events: [] }])) });
@@ -174,7 +177,7 @@ delete out[P + 'eventCompareCache'];
 const players = {};
 for (let i = 0; i < 3000; i++) {
     const id = 100000 + i * 7;
-    players[id] = { ffs: { playerId: id, bsEstimate: ri(1e6, 3e9), bssPublic: null, fairFight: 1 + Math.round(rnd() * 200) / 100, updatedAt: T0 - ri(1, 90) * DAY, source: 'bss', distribution: null }, ffsAt: T0 - ri(1, 5) * DAY, seen: T0 - ri(1, 90) * DAY, ...(i % 3 === 0 ? { profile: { level: ri(1, 100), rank: 'Supreme Hitman', life: 7300, status: { state: 'Okay', description: 'Okay' }, name: 'P' + id, faction: ri(1, 50000) }, profileAt: T0 - ri(1, 5) * DAY } : {}) };
+    players[id] = { ffs: { playerId: id, bsEstimate: i < 300 ? Math.round(5e6 + (i / 300) * 330e6) : ri(1e6, 3e9), bssPublic: null, fairFight: 1 + Math.round(rnd() * 200) / 100, updatedAt: T0 - ri(1, 90) * DAY, source: 'bss', distribution: null }, ffsAt: T0 - ri(1, 5) * DAY, seen: T0 - ri(1, 90) * DAY, ...(i % 3 === 0 ? { profile: { level: ri(1, 100), rank: 'Supreme Hitman', life: 7300, status: { state: 'Okay', description: 'Okay' }, name: 'P' + id, faction: ri(1, 50000) }, profileAt: T0 - ri(1, 5) * DAY } : {}) };
 }
 const gear = {};
 for (let i = 0; i < 300; i++) gear[100000 + i * 7] = { items: [{ id: 1, name: 'Minigun', damage: 71.2, accuracy: 51, bonuses: [] }, { id: 2, name: 'Riot Helmet', armor: 40 }], seenAt: T0 - ri(1, 30) * DAY };
@@ -185,5 +188,6 @@ if (receiptsDays < 120) {
     r.days = Object.fromEntries(ks.slice(-receiptsDays).map((k) => [k, r.days[k]]));
     out[P + 'receipts'] = JSON.stringify(r);
 }
-return { gm: out, eye: { players, gear, savedAt: T0 - 60e3 } };
+// ffsEst: what FFScouter answers for the stored targets (the harness's window.__ffsEst).
+return { gm: out, eye: { players, gear, savedAt: T0 - 60e3 }, ffsEst: Object.fromEntries(Array.from({ length: 300 }, (_, i) => [100000 + i * 7, Math.round(5e6 + (i / 300) * 330e6)])) };
 }

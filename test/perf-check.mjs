@@ -13,7 +13,8 @@
  *   npm run build
  *   PWPATH=<dir>/node_modules/playwright-core node test/perf-check.mjs [case ...]
  *
- * Cases: gym, plain, profile, plan (default: these four), friend, noscript (Torn's page alone).
+ * Cases: gym, plain, profile, plan, startup (default: these five), friend, noscript (Torn's page alone).
+ * startup (round 7): opening the webpage on what an earlier visit left, then a click on its Torn Eye tab, at 1× and 4×.
  * plan (round 7): Create plan and Re-plan for 12 months on the webpage, at 1× and at 4× whatever CPU says.
  * CPU=1 runs without the slowdown. PERF_OUT=<file> appends each result as a JSON line.
  * Exits 1 when a target is missed (REPORT_ONLY=1: always 0).
@@ -47,6 +48,19 @@ export const PLAN_TARGETS = {
     1: { wallMs: 2000, worstMs: 50 },
     4: { wallMs: 8000, worstMs: 200 },
     liveMB: 30,
+};
+
+/**
+ * Round 7: opening the webpage (a returning player: the realistic store, a saved 12-month plan, 300 stored targets)
+ * and its Torn Eye tab. Measured before the fix (docs/sims/round7/startup.mjs): usable in 0.16–0.21 s (0.58–0.65 s at
+ * 4×) in 1.3.0 and round 7 alike; the Torn Eye click froze the page 0.37–0.43 s (1.9 s at 4×) while every stored
+ * target's fight was simulated inside the draw. After: 0.05 s (0.27 s at 4×).
+ *   usableMs: open → the first page with your numbers · planMs: → the whole saved plan read
+ *   eyeRowsMs: the click on Torn Eye → its rows · eyeWorstMs: the longest freeze in the 3 s after the click
+ */
+export const STARTUP_TARGETS = {
+    1: { usableMs: 500, planMs: 700, eyeRowsMs: 150, eyeWorstMs: 150 },
+    4: { usableMs: 1200, planMs: 1800, eyeRowsMs: 500, eyeWorstMs: 400 },
 };
 
 const P = 'pumpingIron.v1.';
@@ -424,7 +438,91 @@ async function runPlan() {
     return { case: 'plan', at: new Date().toISOString(), runs, idleMB: mb(idle), liveMB: mb(peak) };
 }
 
-const wanted = process.argv.slice(2).length ? process.argv.slice(2) : ['gym', 'plain', 'profile', 'plan'];
+/** In the page before anything else (the startup case): when the page first showed what, in ms since it opened. */
+function startupInit() {
+    const T = (window.__st = { marks: {}, long: [] });
+    const mark = (k) => {
+        if (T.marks[k] === undefined) T.marks[k] = Math.round(performance.now());
+    };
+    try {
+        new PerformanceObserver((l) => {
+            for (const e of l.getEntries()) T.long.push({ at: Math.round(e.startTime), ms: Math.round(e.duration) });
+        }).observe({ type: 'longtask', buffered: true });
+    } catch {}
+    const frame = () => {
+        const host = document.getElementById('pi-app');
+        const r = host && host.shadowRoot ? host.shadowRoot.querySelector('.pi-root') : null;
+        if (r) {
+            const main = r.querySelector('.body .main');
+            if (main && main.childNodes.length && !r.querySelector('.empty')) mark('usable');
+            const m = window.__pi && window.__pi.model && window.__pi.model();
+            if (m && m.ready && m.saved && m.saved.whole) mark('plan');
+            if (T.eyeAt && r.querySelectorAll('table.tbl tbody tr').length > 3) mark('eyeRows');
+        }
+        requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+}
+
+async function runStartup() {
+    // What an earlier visit left: the realistic store, a 12-month plan made on the webpage.
+    const seedScript = (gmRaw) => ({ content: 'window.__ffsEst = ' + JSON.stringify(store.ffsEst) + ';window.__piSeedRaw = ' + JSON.stringify(gmRaw) + ';' });
+    const wctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    await wctx.route(/torn\.com|googleapis|gstatic/, (r) => r.abort());
+    await seedIdb(wctx);
+    await wctx.addInitScript(seedScript(JSON.stringify(store.gm)));
+    const w = await wctx.newPage();
+    await w.goto(BASE + 'pi=app&' + PAGES.plain + '&gm=tm');
+    await w.waitForFunction(() => window.__pi && window.__pi.model() && window.__pi.model().ready, null, { timeout: 30000 });
+    await w.waitForTimeout(2000);
+    await w.evaluate(async () => {
+        await window.__pi.createPlan({ months: 12 });
+        if (window.__pi.extras) await window.__pi.extras();
+    });
+    await w.waitForTimeout(4000);
+    const gm = await w.evaluate(() => ({ ..._store }));
+    const idb = await dumpIdb(w);
+    await wctx.close();
+    for (const k of ['leader', 'compareBusy', 'lastError', 'lastBoot']) delete gm[P + k];
+    const runs = [];
+    for (const cpu of [1, 4]) {
+        const tries = [];
+        for (let i = 0; i < 3; i++) {
+            const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+            await ctx.route(/torn\.com|googleapis|gstatic/, (r) => r.abort());
+            await restoreIdb(ctx, idb);
+            await ctx.addInitScript(seedScript(JSON.stringify(gm)));
+            await ctx.addInitScript(startupInit);
+            const p = await ctx.newPage();
+            const errors = [];
+            p.on('pageerror', (e) => errors.push(String(e)));
+            const cdp = await ctx.newCDPSession(p);
+            if (cpu > 1) await cdp.send('Emulation.setCPUThrottlingRate', { rate: cpu });
+            // Four hours after the visit before (the stored state is old: the page shows it, then reads).
+            await p.goto(BASE.replace('10:48:00Z', '14:48:00Z') + 'pi=app&' + PAGES.plain + '&gm=tm');
+            await p.waitForTimeout(6000);
+            await p.evaluate(() => {
+                const T = window.__st;
+                const tab = [...document.getElementById('pi-app').shadowRoot.querySelectorAll('a.tab')].find((a) => a.textContent.includes('Torn Eye'));
+                T.eyeAt = performance.now();
+                tab.click();
+            });
+            await p.waitForTimeout(3300);
+            const r = await p.evaluate(() => {
+                const T = window.__st;
+                const after = T.long.filter((x) => x.at + x.ms >= T.eyeAt && x.at < T.eyeAt + 3000);
+                return { usableMs: T.marks.usable ?? null, planMs: T.marks.plan ?? null, eyeRowsMs: T.marks.eyeRows === undefined ? null : Math.round(T.marks.eyeRows - T.eyeAt), eyeWorstMs: after.reduce((a, x) => Math.max(a, x.ms), 0), rows: document.getElementById('pi-app').shadowRoot.querySelectorAll('table.tbl tbody tr').length };
+            });
+            await ctx.close();
+            tries.push({ ...r, errors });
+        }
+        const med = (k) => (tries.some((t) => t[k] === null) ? null : median(tries.map((t) => t[k])));
+        runs.push({ cpu, usableMs: med('usableMs'), planMs: med('planMs'), eyeRowsMs: med('eyeRowsMs'), eyeWorstMs: med('eyeWorstMs'), rows: tries[0].rows, errors: tries.flatMap((t) => t.errors) });
+    }
+    return { case: 'startup', at: new Date().toISOString(), runs };
+}
+
+const wanted = process.argv.slice(2).length ? process.argv.slice(2) : ['gym', 'plain', 'profile', 'plan', 'startup'];
 // RUNS=3: each case three times, the median of each number (one run varies by ±80 ms at 4×).
 const RUNS = Math.max(1, Number(process.env.RUNS || 1));
 const median = (xs) => xs.slice().sort((a, b) => a - b)[Math.floor(xs.length / 2)];
@@ -440,7 +538,15 @@ async function runMedian(name) {
 }
 const rows = [];
 let planRow = null;
+let startupRow = null;
 for (const name of wanted) {
+    if (name === 'startup') {
+        startupRow = await runStartup();
+        if (process.env.PERF_OUT) await appendFile(process.env.PERF_OUT, JSON.stringify(startupRow) + '\n');
+        console.log('\nstartup (the webpage, realistic store, a saved 12-month plan, 300 stored targets; median of 3)');
+        for (const r of startupRow.runs) console.log(`  ${r.cpu}× usable ${r.usableMs} ms · whole plan ${r.planMs} ms · Torn Eye click → rows ${r.eyeRowsMs} ms (${r.rows} rows), longest freeze after it ${r.eyeWorstMs} ms`);
+        continue;
+    }
     if (name === 'plan') {
         planRow = await runPlan();
         if (process.env.PERF_OUT) await appendFile(process.env.PERF_OUT, JSON.stringify(planRow) + '\n');
@@ -508,6 +614,20 @@ if (planRow) {
         if (r.errors.length) check(false, `${r.cpu}× errors: ${r.errors.join(' | ')}`);
     }
     check(planRow.liveMB <= PLAN_TARGETS.liveMB, `memory alive ${planRow.liveMB} MB (target ≤ ${PLAN_TARGETS.liveMB})`);
+}
+if (startupRow) {
+    console.log('\nTargets for startup (the webpage and its Torn Eye tab):');
+    for (const r of startupRow.runs) {
+        for (const [k, limit] of Object.entries(STARTUP_TARGETS[r.cpu])) {
+            const ok = r[k] !== null && r[k] <= limit;
+            if (!ok) missed++;
+            console.log(`  ${ok ? 'PASS' : 'MISS'} startup ${r.cpu}× ${k} ${r[k]} (target ≤ ${limit})`);
+        }
+        if (r.errors.length) {
+            missed++;
+            console.log(`  MISS startup ${r.cpu}× errors: ${[...new Set(r.errors)].join(' | ')}`);
+        }
+    }
 }
 console.log(missed ? `\n${missed} target(s) missed` : '\nALL TARGETS MET');
 process.exit(missed && !process.env.REPORT_ONLY ? 1 : 0);

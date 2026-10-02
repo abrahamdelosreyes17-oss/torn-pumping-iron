@@ -8,7 +8,7 @@ import { gmOnChange } from './platform/gm.js';
 import { K, get, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup, DATA_GROUPS, getPrices, PRICE_LISTINGS_KEPT, loadLocalPrices, localPrices, setLocalPrices, clearLocalPrices } from './platform/store.js';
 import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE, beatFocus, apiFocus, createPlan, recalibratePlan, followStrategy, followPath, cancelPlan, onPlanProgress } from './runtime.js';
 import { forgetSavedPlan } from './platform/plan-store.js';
-import { archived, pageGet, loadArchives, drainArchives, clearArchived } from './platform/archive.js';
+import { archived, pageGet, loadArchives, drainArchives, clearArchived, archivesReady } from './platform/archive.js';
 import { PiApp } from './ui/app/app.js';
 import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, fetchFactionMembers, fetchFactionWars, keyIsEnough } from './api/torn.js';
 import { outEarly, enemiesFromWars } from './core/eye/war.js';
@@ -17,7 +17,7 @@ import { isWatched } from './core/eye/watch.js';
 import { W3bClient, fetchW3bListings } from './api/w3b.js';
 import { checkFfsKey } from './api/ffscouter.js';
 import { renderEye } from './ui/app/eye-tab.js';
-import { wantPlayers, eyeView, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient, importTargets, TARGETS_KEY, rememberFlights, flightsSeen, getWatch, watchStates, toggleWatch, setWatchTag, dismissWatchOffer, watchOffersNow, pollWatch } from './eye-service.js';
+import { wantPlayers, eyeView, warmFights, fightsPending, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient, importTargets, TARGETS_KEY, rememberFlights, flightsSeen, getWatch, watchStates, toggleWatch, setWatchTag, dismissWatchOffer, watchOffersNow, pollWatch } from './eye-service.js';
 import { discordState, discordRaw, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId, linkDiscord, setTargetsForSync, setEyeForSync, loginDiscord, cancelLogin, resumeLogin } from './discord.js';
 import { saveFullKey, forgetFullKey, refreshMoneyLog } from './income.js';
 import { WORKER_SETUP_URL } from './api/worker.js';
@@ -327,12 +327,26 @@ function warName(fid) {
     return e && e.name ? e.name : null;
 }
 
+/** The watch list as stored, read once per draw (a list's 300 stars each asked for a copy of it). */
+let watchMemo = null;
+function watchNow() {
+    if (!watchMemo) {
+        watchMemo = getWatch();
+        Promise.resolve().then(() => {
+            watchMemo = null;
+        });
+    }
+    return watchMemo;
+}
+
 /** Stored targets, judged again now: only players you still beat show (your stats or colours may have changed). */
 function eyeRows() {
     const stored = pageGet(TARGETS_KEY, null);
     if (!stored || !Array.isArray(stored.list)) return [];
     const rows = stored.list.map((x) => {
-        const v = eyeView(x.playerId, { level: x.level, name: x.name });
+        // A fight not worked out yet isn't simulated inside the draw: the row shows what the list stored until it is.
+        const live = eyeView(x.playerId, { level: x.level, name: x.name }, { later: true });
+        const v = live && !live.pending ? live : null;
         const base = v || { id: x.playerId, band: x.band || 'none', forecast: Number.isFinite(x.win) ? { pWin: x.win / 100, keep: Number.isFinite(x.keep) ? x.keep / 100 : null } : null, respect: x.respect || null };
         return { ...base, name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId, stored: x };
     });
@@ -346,6 +360,8 @@ export const EYE_SYNC_EVERY_MS = 30 * 1000;
 function syncEye(force = false) {
     if (!discordState() || !isVisible()) return;
     if (!force && Date.now() - eyeSyncAt < EYE_SYNC_EVERY_MS) return;
+    // Fights still being worked out: the bot gets the bands once they are known (asked again in 2 s).
+    if (fightsPending()) return;
     eyeSyncAt = Date.now();
     const row = (id, name, level, v, extra = {}) => ({ id, name: name || (v && v.name) || null, level: level || (v && v.level) || null, band: v ? v.band : 'none', win: v && v.forecast ? Math.round(v.forecast.pWin * 100) : null, keep: v && v.forecast && v.forecast.keep !== null && v.forecast.keep !== undefined ? Math.round(v.forecast.keep * 100) : null, ...extra });
     const rows = eyeRows();
@@ -366,7 +382,7 @@ function syncEye(force = false) {
 }
 
 /** Settings the report carries: the switches and limits, never a key, a faction or a player id. */
-const REPORT_SETTINGS = ['timeFormat', 'pill', 'gymMarks', 'marketMarks', 'eyeChips', 'budget', 'horizonDays', 'buyWindow', 'w3b', 'warReserve', 'boosterCapH', 'npcShops', 'npcShopsOff'];
+const REPORT_SETTINGS = ['timeFormat', 'pill', 'gymMarks', 'marketMarks', 'eyeChips', 'motion', 'budget', 'horizonDays', 'buyWindow', 'w3b', 'warReserve', 'boosterCapH', 'npcShops', 'npcShopsOff'];
 
 /**
  * What Settings › Report a problem puts in its zip (core/report.js), read
@@ -604,8 +620,11 @@ function getCtx() {
             },
             watch: {
                 state: () => ({ list: getWatch().list, states: watchStates().players, flights: flightsSeen(), offers: watchOffersNow() }),
-                isWatched: (id) => isWatched(getWatch(), id),
-                toggle: (p) => toggleWatch({ id: Number(p.id), name: p.name || null, level: p.level || null, tag: p.tag }),
+                isWatched: (id) => isWatched(watchNow(), id),
+                toggle: (p) => {
+                    watchMemo = null;
+                    return toggleWatch({ id: Number(p.id), name: p.name || null, level: p.level || null, tag: p.tag });
+                },
                 tag: (id, tag) => setWatchTag(id, tag),
                 remove: (id) => (isWatched(getWatch(), id) ? toggleWatch({ id }) : null),
                 dismiss: (id) => dismissWatchOffer(id),
@@ -632,12 +651,25 @@ export function bootAppPage({ renderers = {} } = {}) {
         const open = page.app.tab === 'eye';
         if (open && !eyeOpen) {
             const stored = pageGet(TARGETS_KEY, null);
-            if (stored && Array.isArray(stored.list)) setTimeout(() => wantPlayers(stored.list.map((x) => x.playerId)), 500);
+            if (stored && Array.isArray(stored.list)) wantPlayers(stored.list.map((x) => x.playerId));
         }
         eyeOpen = open;
     };
     window.addEventListener('hashchange', eyeTab);
+    // A click on the tab starts its reads at once (the tab bar changes no hash event; the 2 s check below was the only start).
+    page.app.onTab = eyeTab;
     loadArchives().then(eyeTab).catch(() => {});
+    // Torn Eye gets ready quietly (the owner, round 7): once the stored targets, the eye cache and your stats are in,
+    // their fights are worked out while the page is idle. Local numbers only: nothing is asked unless the tab is open.
+    let warmed = false;
+    const warm = () => {
+        if (warmed || page.app.tab === 'eye') return;
+        const stored = pageGet(TARGETS_KEY, null);
+        if (!archivesReady() || !stored || !Array.isArray(stored.list)) return;
+        warmed = warmFights(stored.list.map((x) => ({ id: x.playerId, extra: { level: x.level, name: x.name } })));
+    };
+    Promise.all([loadArchives(), gearCount()]).then(() => setTimeout(warm, 1500)).catch(() => {});
+    onModel(() => warm());
     onModel(() => page.app.render());
     // A plan being worked out: its card's bar and words follow the run without a redraw.
     onPlanProgress((busy) => page.app.planProgress(busy));

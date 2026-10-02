@@ -212,14 +212,17 @@ function starBtn(ctx, p) {
     });
 }
 
+/** Rows of a long list drawn with the click; the rest follow in the next moments, this many at a time. */
+export const ROWS_FIRST = 60;
+
 function targetsTable(rows, { now, chain = false, ctx }) {
     const head = chain
         ? ['Band', 'Player', 'Lvl', 'Respect', 'Win', 'HP kept', 'Status', 'Active', '', '']
         : ['Band', 'Player', 'Lvl', 'Win', 'HP kept', 'Respect', 'Status', 'Active', 'Estimate from', '', ''];
     const right = [2, 3, 4, 5, 7];
     const open = ctx.ui.eyeOpen;
-    const body = [];
-    rows.forEach((r, i) => {
+    const rowOf = (r, i) => {
+        const body = [];
         const win = h('td', { class: 'r', text: r.forecast ? pct(r.forecast.pWin) : '—' });
         const keep = h('td', { class: 'r', text: r.forecast && r.forecast.keep !== null ? (r.est && r.est.confidence === 'exact' ? '' : '~') + pct(r.forecast.keep) : '—' });
         const resp = h('td', { class: 'r' }, [chain ? h('b', { class: 'white', text: r.respect ? r.respect.toFixed(2) : '—' }) : r.respect ? r.respect.toFixed(2) : '—']);
@@ -234,10 +237,24 @@ function targetsTable(rows, { now, chain = false, ctx }) {
         const isOpen = open === r.id;
         body.push(h('tr', { class: 'click' + (isOpen ? ' sel' : ''), tabindex: '0', title: d, 'aria-expanded': String(isOpen), onclick: () => { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); }, onkeydown: (ev) => { if (ev.key === 'Enter') { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); } } }, cells));
         if (isOpen) body.push(h('tr', { class: 'sub' }, [h('td', { colspan: String(head.length), class: 'muted', style: 'font-size:12px' }, [d])]));
-    });
+        return body;
+    };
+    // The rows on screen now, the rest right after the page has drawn (round 7: 300 rows in one go held the click up).
+    const later = typeof requestAnimationFrame === 'function' && rows.length > ROWS_FIRST;
+    const tbody = h('tbody', {}, (later ? rows.slice(0, ROWS_FIRST) : rows).flatMap(rowOf));
+    if (later) {
+        let at = ROWS_FIRST;
+        const more = () => {
+            if (!tbody.isConnected) return;
+            for (const tr of rows.slice(at, at + ROWS_FIRST).flatMap((r, j) => rowOf(r, at + j))) tbody.appendChild(tr);
+            at += ROWS_FIRST;
+            if (at < rows.length) setTimeout(more, 0);
+        };
+        requestAnimationFrame(() => setTimeout(more, 0));
+    }
     return h('table', { class: 'tbl num' }, [
         h('thead', {}, [h('tr', {}, head.map((x, i) => h('th', { class: right.includes(i) ? 'r' : null, style: i === 0 ? 'width:110px' : null, text: x })))]),
-        h('tbody', {}, body),
+        tbody,
     ]);
 }
 

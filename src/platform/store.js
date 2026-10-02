@@ -75,6 +75,8 @@ export const DEFAULT_SETTINGS = {
     gymMarks: true,
     marketMarks: true,
     eyeChips: true,
+    // Animations (round 7: the Re-plan bar's light, the action of the moment); off = the still version.
+    motion: true,
     budget: 150000000,
     horizonDays: 30,
     buyWindow: 'three',

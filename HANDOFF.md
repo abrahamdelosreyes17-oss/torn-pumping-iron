@@ -320,6 +320,37 @@ Done on the owner's yes. For later releases, the same steps minus the one-time r
 
 ## What each session did (newest first)
 
+### 2026-10-02 (session 4): slow startup measured and the Torn Eye tab fixed; the animation picked; the rest of round 7 started
+The owner's batch prompt: job 1 the slow startup (cause first), job 2 R7.4 to R7.11 with side agents, job 3 a bug pass then push to `round7`. Local commits only so far; nothing pushed.
+
+**Job 1, the slow startup (done; one unknown left).** Probe: `docs/sims/round7/startup.mjs` (harness, the realistic store, a saved 12-month plan, 300 stored targets with estimates, the page opened 4 h after the visit before, each request 300 ms, real Chrome; 1.3.0 from `main` and round7 side by side, median of 3).
+
+| | 1.3.0, 1× | round7 before, 1× | round7 now, 1× | 1.3.0, 4× | round7 before, 4× | round7 now, 4× |
+|---|---|---|---|---|---|---|
+| Open → the first usable page | 0.21 s | 0.16 s | 0.17–0.23 s | 0.65 s | 0.58 s | 0.60–0.67 s |
+| Open → the whole saved plan read | 0.26 s | 0.20 s | 0.22–0.30 s | 0.94 s | 0.87 s | 0.88–0.96 s |
+| Click Torn Eye → rows (the page frozen that long) | 0.37 s | 0.43 s | **0.05 s** | 1.90 s | 1.96 s | **0.27 s** |
+| FFScouter asked after the click | 2.55 s | 2.53 s | **0.17 s** | 2.63 s | 2.71 s | 0.33 s |
+
+- **Opening the page is not slow on the harness, in either build** (script parse 13–17 ms, 87 ms at 4×; GM 67 KB; IndexedDB open 30–36 ms and 31–34 reads done by 0.25–0.31 s; "Reading your state…" shows for about 0.1 s before the stored state is drawn; requests start at 0.6 s and never hold the page). Round7 did not change it. **Not known:** how long the real page takes before our script starts (GitHub Pages plus Tampermonkey at `document-idle`). The owner will say "open a tab" later: read `performance.getEntriesByType('resource')` for the font stylesheet (its start is the moment our script booted), the number of stored targets, and his page's IndexedDB sizes. No clicks.
+- **The Torn Eye tab was slow, cause proven:** the click's draw simulated the fight for every stored target (`eyeRows` → `eyeView` → `forecast`: 1,500 fights a player, 450,000 for 300 players) and nothing was kept between page opens; the tab's reads only started from the 2 s check plus a 500 ms timer, and FFScouter's answer then redrew the whole table (a second freeze of 0.13 s, 0.73 s at 4×). The old handoff guess (everything starts when the tab opens) was right about the start and wrong about the cost: the cost is the simulation inside the draw.
+- **The fix (the owner's idea, built):** `eyeView(id, extra, {later})`: a list's fight that isn't worked out yet comes back `pending` (the row shows what the list stored), is queued, and is worked out 8 ms at a time with a break for the page (`core/slices.js`), then one redraw. While the page is idle after opening, the stored targets' fights are worked out quietly (`warmFights`, `requestIdleCallback`, 8 ms a turn; local numbers only, no request, no redraw), so the click finds them done. The click starts the tab's reads at once (`PiApp.onTab`). The table draws 60 rows with the click and the rest right after (`ROWS_FIRST`). What every row read again (settings, your gear, your attacks, the watch list) is read once per draw (`yourSide`, `watchNow`). The bot's sync waits while fights are pending.
+- **A loop found by ux-check and fixed:** one result was kept per player, so a player in both the war list (it knows their life) and the target list was simulated again by each list on every draw (wasted before; with `later` it redrew for ever). Results are now kept per player and per what the fight read (`eye.fc` keyed `id|inputs`). Test: `test/r7-eye-later.test.js` (5).
+- **The cost:** the idle work adds about 0.26 s of script (1.3 s at 4×) in the first seconds after opening, in turns of 8 ms; the longest freeze while opening is unchanged (0 → 58 ms at 1×, 234 → 246 ms at 4×).
+- **`test/perf-check.mjs` has a `startup` case** (default now: gym, plain, profile, plan, startup): targets at 1× usable ≤ 500 ms, whole plan ≤ 700, Torn Eye click → rows ≤ 150, longest freeze after the click ≤ 150; at 4× 1,200 / 1,800 / 500 / 400. 1.3.0 misses both Torn Eye targets; now 213 / 260 / 47 / 0 and 876 / 1,207 / 270 / 272. `test/perf/seed.mjs`'s stored targets now point at players the eye cache has (before, the list had no `params.v`, so the tab asked FFScouter again and the stored list never showed: the perf check had never drawn the Torn Eye rows); `harness-live.html` answers FFScouter for them (`window.__ffsEst`).
+- War and Watched rows still simulate inside their draw (about 100 members: 80 ms at 1×). Not changed: left for R7.9.
+
+**The owner's Torn Eye card "Can't win · keep ~88%" (Win 54%, 3.50 respect, about 19 turns).** From the code: "Can't win" is the band for any win chance under 60% (`core/eye/bands.js:22`); "keep" and "turns" are counted over the fights won only (`core/eye/fight.js:131`); a fight that reaches 25 turns counts as not won. So the card likely says "he barely hurts you, half the time you don't finish him in 25 turns". **Not reproduced** with stand-in stats (`scratchpad cantwin2.mjs`: no input gave 54% / 88% / 19): needs that player's id (the owner will send it) and his stored row. Goes to R7.9 with the new bands.
+
+**The owner's answers (2026-10-02):** "open a tab" later; the player's id later; personal stats (rehabs, rehab cost, Xanax and Ecstasy taken, overdoses) are to be **read by the app with his Full key**, not asked; he runs only our scripts (the war row with other scripts on can only come from the friend's report); the round7 report zip after he installs it.
+
+**Animation picked (mockup `mockups/round7/animation-options.html`, made by a side agent, mockup-check 4 of 4): 1D plate ring for the action of the moment, 2A light sweep for Re-plan.**
+- **2A is built:** a light crosses the Plan card's run bar (`.planrun .dayline::after`, transform only, 1.8 s); still under the PC's "reduce motion" and with the new **Settings › Animations** switch (`settings.motion`, the root gets `.still`). Checked on the harness (animation `pi-sweep` running mid-plan, `none` with the switch off).
+- **1D is not built:** it marks the current sub-step, whose look (steps and panel) is still to be mocked up and picked (R7.6/R7.7). Use the mockup's `.o1d` rules and `pi-ring` / `pi-ring-in`, and the same `.still` switch.
+- The mockup's bar words ("Comparing plans 3 of 7") differ from the app's ("Comparing plans: steady (3)"): the owner picked the motion only.
+
+- Checks: `npm run check` 719 tests, 714 pass, 5 todo, 0 fail; ux-check ALL PASSED; torn-check ALL PASSED; baseline untouched (no engine change).
+
 ### 2026-10-03: round 7 build, session 2 (R7.0 onward; nothing committed: the owner said "go, don't commit")
 Each step below ends with `npm run check` green. Nothing is committed (local or GitHub) until the owner says so; the before/after tables live here and in `test/baseline/`.
 
@@ -446,6 +477,7 @@ Each step below ends with `npm run check` green. Nothing is committed (local or 
 - Tests: `npm run check` 714 tests, 709 pass, 5 todo, 0 fail. `torn-check.mjs` ALL PASSED (79). `ux-check.mjs` ALL PASSED. Baseline untouched (no engine change).
 - **The owner asked "will this also fix the startup slowness?"**: no. Nothing in R7.3b touches startup; where it is slow (the webpage or a Torn page, which browser) is not known and not measured. Ask him, then measure before changing anything.
 - **Next:** his answer on 1.3.1; the startup question; then the rest of round 7 as he batched it (main track R7.4 → R7.5 → R7.8, never in parallel; side agents for R7.9 Torn Eye and the animation mockup, from this commit). New Torn Eye asks are in `docs/ROUND7-PLAN.md` section I item 6.
+- **Trap for side agents:** `docs/` is git-ignored, so the plan, the review and `docs/sims` are not in e47c9f1 and a worktree made from it has none of them. Give each agent the absolute path `D:\torn\gym\docs\ROUND7-PLAN.md` (read only) and have it write docs back under `D:\torn\gym\docs`, not in its worktree.
 - Not started: the mockups (animation options first, then Plan page, steps and panel, gym page, war row).
 - **Still owed from the round 7 plan after R7.3b (none of it started):** R7.4 engine rules (the owner's "cost per stat for everything, item and stat specific"; three todo tests wait here), R7.5 money as books (the ledger; one todo test; only the money log's field names are stored so far), and R7.6 to R7.11 as listed in `docs/ROUND7-PLAN.md` §6 (R7.8 is perks, one todo test). The owner asked to stop after R7.3b for the release question; the rest of the plan follows on his go, in §6 order.
 - Owner's feedback at the stop (2026-10-03): the session was "spiralling and forcing instead of stopping and diagnosing first", and a long context costs him limits. When a check fails: stop, write one probe that shows the cause, and say what was found before changing code. Keep sessions short; hand off through this file.

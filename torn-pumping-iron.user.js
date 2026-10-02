@@ -49,7 +49,7 @@
     'use strict';
 
     const PI_BUILD_VERSION = '1.3.0';
-    const PI_BUILD_HASH = '9b4aa14767ea';
+    const PI_BUILD_HASH = 'df7a5791b37a';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -1638,6 +1638,8 @@
         gymMarks: true,
         marketMarks: true,
         eyeChips: true,
+        // Animations (round 7: the Re-plan bar's light, the action of the moment); off = the still version.
+        motion: true,
         budget: 150000000,
         horizonDays: 30,
         buyWindow: 'three',
@@ -12576,7 +12578,13 @@
     ol.steps-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
     /* A plan being worked out (the Plan card): the card's own day line, filling */
     .planrun { margin-top: 10px; }
-    .planrun .dayline i { transition: none; }
+    .planrun .dayline i { transition: none; opacity: .72; }
+    /* Re-plan running (the owner's pick, 2A in mockups/round7/animation-options.html): a light crosses the whole bar, so it
+       shows even at 2%. Transform only. Still under the PC's "reduce motion" and with Settings › Animations off. */
+    .planrun .dayline::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, rgba(255,255,255,0) 38%, rgba(255,255,255,.7) 50%, rgba(255,255,255,0) 62%); transform: translateX(-100%); animation: pi-sweep 1.8s linear infinite; }
+    @keyframes pi-sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+    @media (prefers-reduced-motion: reduce) { .planrun .dayline::after { animation: none; opacity: 0; } }
+    .pi-root.still .planrun .dayline::after { animation: none; opacity: 0; }
     /* Report a problem */
     ul.incl { margin: 4px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
     .shots { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -17238,7 +17246,7 @@
         const overlaySec = settingsSection('On Torn’s pages', null, [
             h('div', { class: 'opts' }, [settingsCheck('Panel on every page', s.pill, (v) => ctx.setSettings({ pill: v })), settingsCheck('Marks on the gym page', s.gymMarks, (v) => ctx.setSettings({ gymMarks: v })), settingsCheck('Marks on items and markets', s.marketMarks, (v) => ctx.setSettings({ marketMarks: v })), settingsCheck('Torn Eye chips', s.eyeChips, (v) => ctx.setSettings({ eyeChips: v }))]),
             h('p', { class: 'num' }, ['Expand or collapse the panel: ', h('b', { class: 'white', text: 'Alt+`' }), ' · drag it by its bar; it stays in the empty margin beside Torn’s page, left of it first, so NPC Arbitrage keeps the right.']),
-            h('div', { class: 'opts' }, [settingsCheck('Bazaar prices from TornW3B', s.w3b !== false, (v) => ctx.setSettings({ w3b: v }))]),
+            h('div', { class: 'opts' }, [settingsCheck('Bazaar prices from TornW3B', s.w3b !== false, (v) => ctx.setSettings({ w3b: v })), settingsCheck('Animations', s.motion !== false, (v) => ctx.setSettings({ motion: v }))]),
             h('p', {}, ['Bazaar prices come from ', h('a', { href: W3B_SITE_URL, target: '_blank', rel: 'noopener', text: 'TornW3B' }), ' (item ids only, never a key; ', h('a', { href: W3B_TERMS_URL, target: '_blank', rel: 'noopener', text: 'their terms' }), '). Off: Item Market and points market only.']),
             h('p', {}, [h('b', { class: 'white', text: 'Pumping Iron pauses while Torn Trading (NPC Arbitrage / Torn Bids) runs' }), ': the two never share Torn’s API limit or mark the same pages. While paused it asks Torn nothing, draws nothing on Torn’s pages and shows a warning sign; it starts again by itself within a minute of Torn Trading being turned off.']),
         ]);
@@ -17350,6 +17358,8 @@
             this.tab = tab;
             if (push && location.hash !== '#' + tab) history.replaceState(null, '', '#' + tab);
             this.render(true);
+            // The page's wiring hears a tab change at once (Torn Eye starts its reads on the click).
+            if (this.onTab) this.onTab(tab);
             this.host.scrollTop = 0;
         }
 
@@ -17415,6 +17425,8 @@
             if (!force && (sig === this.sig || this.typing())) return;
             this.sig = sig;
             const s = ctx.settings;
+            // Settings › Animations off: the still version of everything that moves.
+            this.root.className = 'pi-root' + (s && s.motion === false ? ' still' : '');
             const app = h('div', { class: 'app' });
             app.appendChild(this.topBar(ctx, m));
             // Taking turns with Torn Trading: say so on top; the plan below keeps moving on the clock from the last read.
@@ -18402,14 +18414,17 @@
         });
     }
 
+    /** Rows of a long list drawn with the click; the rest follow in the next moments, this many at a time. */
+    const ROWS_FIRST = 60;
+
     function targetsTable(rows, { now, chain = false, ctx }) {
         const head = chain
             ? ['Band', 'Player', 'Lvl', 'Respect', 'Win', 'HP kept', 'Status', 'Active', '', '']
             : ['Band', 'Player', 'Lvl', 'Win', 'HP kept', 'Respect', 'Status', 'Active', 'Estimate from', '', ''];
         const right = [2, 3, 4, 5, 7];
         const open = ctx.ui.eyeOpen;
-        const body = [];
-        rows.forEach((r, i) => {
+        const rowOf = (r, i) => {
+            const body = [];
             const win = h('td', { class: 'r', text: r.forecast ? pct(r.forecast.pWin) : '—' });
             const keep = h('td', { class: 'r', text: r.forecast && r.forecast.keep !== null ? (r.est && r.est.confidence === 'exact' ? '' : '~') + pct(r.forecast.keep) : '—' });
             const resp = h('td', { class: 'r' }, [chain ? h('b', { class: 'white', text: r.respect ? r.respect.toFixed(2) : '—' }) : r.respect ? r.respect.toFixed(2) : '—']);
@@ -18424,10 +18439,24 @@
             const isOpen = open === r.id;
             body.push(h('tr', { class: 'click' + (isOpen ? ' sel' : ''), tabindex: '0', title: d, 'aria-expanded': String(isOpen), onclick: () => { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); }, onkeydown: (ev) => { if (ev.key === 'Enter') { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); } } }, cells));
             if (isOpen) body.push(h('tr', { class: 'sub' }, [h('td', { colspan: String(head.length), class: 'muted', style: 'font-size:12px' }, [d])]));
-        });
+            return body;
+        };
+        // The rows on screen now, the rest right after the page has drawn (round 7: 300 rows in one go held the click up).
+        const later = typeof requestAnimationFrame === 'function' && rows.length > ROWS_FIRST;
+        const tbody = h('tbody', {}, (later ? rows.slice(0, ROWS_FIRST) : rows).flatMap(rowOf));
+        if (later) {
+            let at = ROWS_FIRST;
+            const more = () => {
+                if (!tbody.isConnected) return;
+                for (const tr of rows.slice(at, at + ROWS_FIRST).flatMap((r, j) => rowOf(r, at + j))) tbody.appendChild(tr);
+                at += ROWS_FIRST;
+                if (at < rows.length) setTimeout(more, 0);
+            };
+            requestAnimationFrame(() => setTimeout(more, 0));
+        }
         return h('table', { class: 'tbl num' }, [
             h('thead', {}, [h('tr', {}, head.map((x, i) => h('th', { class: right.includes(i) ? 'r' : null, style: i === 0 ? 'width:110px' : null, text: x })))]),
-            h('tbody', {}, body),
+            tbody,
         ]);
     }
 
@@ -18873,6 +18902,7 @@
 
 
 
+
     const PROFILE_FRESH_MS = 10 * 60 * 1000;
     const PUBLIC_FRESH_MS = 24 * 60 * 60 * 1000;
     const SPY_FRESH_MS = 60 * 60 * 1000;
@@ -18885,7 +18915,7 @@
     const WATCH_STATE_KEY = 'eyeWatchState';
     const FLIGHTS_KEY = 'eyeFlights';
 
-    const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(), timer: null, listeners: [], mem: new Map(), fc: new Map(), flushing: null, again: false };
+    const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(), timer: null, listeners: [], mem: new Map(), fc: new Map(), flushing: null, again: false, todo: new Map(), working: false, idling: false, side: null };
 
     /** The one FFScouter client in this tab (Torn Eye and Settings share it, and its dead-key mark). */
     function sharedFfsClient() {
@@ -19144,11 +19174,49 @@
     }
 
     /**
+     * Your side of every fight, the same for each row of one draw: read and worked out once per draw, not once per row
+     * (round 7: 300 rows read the settings, your gear and your attacks 300 times). Forgotten when the draw's task ends.
+     */
+    function yourSide(m) {
+        if (eye.side && eye.side.m === m) return eye.side;
+        // Your stats as they fight: merits and passives (Torn's battlestats modifier) included.
+        const mods = m.state.statMods || {};
+        const meStats = Object.fromEntries(Object.entries(m.pc.stats).map(([k, v]) => [k, v * (1 + (mods[k] || 0) / 100)]));
+        const statics = getShared(K.userStatic, {}) || {};
+        const attacksBy = new Map();
+        for (const a of (getShared('myAttacks', null) || {}).list || []) {
+            const def = Number(a.def);
+            if (!attacksBy.has(def)) attacksBy.set(def, []);
+            attacksBy.get(def).push(a);
+        }
+        for (const l of attacksBy.values()) l.sort((a, b) => b.ended - a.ended);
+        eye.side = {
+            m,
+            meStats,
+            statics,
+            gMe: statics.equipment ? myGear(statics.equipment) : DEFAULT_GEAR,
+            myLife: (m.state.life && m.state.life.maximum) || 7500,
+            // Your stats in ~1% steps (round 6): every train moved them, and every chip's Monte Carlo ran again (~50 ms for 100).
+            meKey: Object.values(meStats).map((v) => Math.round(Math.log1p(v) * 100)),
+            fm: learnedModel(getShared(K.learned, null)).fight,
+            bands: getSettings().bands,
+            attacksBy,
+        };
+        Promise.resolve().then(() => {
+            eye.side = null;
+        });
+        return eye.side;
+    }
+
+    /**
      * Everything the chip and card show for one player, from cached data (sync
      * once the cache is loaded). `extra` gives what the page itself shows
      * (level, life, name), which fills gaps without a request.
+     * `later` (the Torn Eye tab's target list, round 7): a fight not worked out yet is not simulated inside the draw
+     * (300 targets froze the click for 0.4 s, 1.9 s on a slow PC: docs/sims/round7/startup.mjs). The view comes back
+     * `pending`, the fight is queued and worked out a few ms at a time, and one redraw follows.
      */
-    function eyeView(id, extra = {}, { war = false } = {}) {
+    function eyeView(id, extra = {}, { war = false, later = false } = {}) {
         const m = pi.model;
         const c = eye.cache;
         if (!m || !m.ready || !c) return null;
@@ -19156,42 +19224,41 @@
         const prof = r.profile || {};
         const level = prof.level || extra.level || null;
         const life = prof.life || extra.life || lifeFromLevel(level);
-        // Your stats as they fight: merits and passives (Torn's battlestats modifier) included.
-        const mods = m.state.statMods || {};
-        const meStats = Object.fromEntries(Object.entries(m.pc.stats).map(([k, v]) => [k, v * (1 + (mods[k] || 0) / 100)]));
-        const attacks = (getShared('myAttacks', null) || {}).list || [];
-        const fights = attacks.filter((a) => Number(a.def) === Number(id)).sort((a, b) => b.ended - a.ended);
+        const { meStats, statics, gMe, myLife, meKey, fm, bands, attacksBy } = yourSide(m);
+        const fights = attacksBy.get(Number(id)) || [];
         const pub = r.pub && (prof.rank || extra.rank) ? { rank: prof.rank || extra.rank, level, crimes: r.pub.crimes, networth: r.pub.networth } : null;
         const est = estimatePlayer({ me: meStats, spy: r.spy || null, fights, ffs: r.ffs || null, pub, now: Date.now() });
         const gearRec = c.gear[id];
         const gThem = gearRec ? gearSummary(gearRec.items) : null;
-        const statics = getShared(K.userStatic, {}) || {};
-        const gMe = statics.equipment ? myGear(statics.equipment) : DEFAULT_GEAR;
-        const myLife = (m.state.life && m.state.life.maximum) || 7500;
         let f = null;
         let fGear = null;
+        let pending = false;
         if (est) {
             // The fight Monte Carlo runs again only when something it reads changed (a war page redraws every 10 s).
-            // Your stats in ~1% steps (round 6): every train moved them, and every chip's Monte Carlo ran again (~50 ms for 100).
-            const meKey = Object.values(meStats).map((v) => Math.round(Math.log1p(v) * 100));
-            const key = JSON.stringify([est.bss, est.stats, life, myLife, meKey, gearRec ? gearRec.seenAt : 0, statics.equipmentAt || 0]);
-            const memo = eye.fc.get(id);
-            if (memo && memo.key === key) {
+            // Kept per player and per what the fight read (round 7): one player shown by two lists with different facts (a
+            // war row knows their life, the target list doesn't) used to be simulated again by each list on every draw.
+            const key = id + '|' + JSON.stringify([est.bss, est.stats, life, myLife, meKey, gearRec ? gearRec.seenAt : 0, statics.equipmentAt || 0]);
+            const memo = eye.fc.get(key);
+            if (memo) {
                 f = memo.f;
                 fGear = memo.fGear;
+            } else if (later) {
+                pending = true;
+                eye.todo.set(id, { extra, war });
+                if (later === 'idle') fightsWhenIdle();
+                else fightsSoon();
             } else {
                 const target = { id, life, bss: est.bss, stats: est.stats };
                 f = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe });
                 if (gThem) fGear = forecast({ me: { ...meStats, life: myLife }, target, gearMe: gMe, gearThem: gThem });
-                if (eye.fc.size > 2000) eye.fc.clear();
-                eye.fc.set(id, { key, f, fGear });
+                if (eye.fc.size > 4000) eye.fc.clear();
+                eye.fc.set(key, { f, fGear });
             }
         }
         let main = fGear || f;
         // What the fight learner kept from your own fights (only when it predicted your newest fights better).
-        const fm = learnedModel(getShared(K.learned, null)).fight;
         if (main && fm) main = { ...main, ...applyFightModel(fm, { pWin: main.pWin, keep: main.keep }), learned: true };
-        const band = bandOf(main, getSettings().bands);
+        const band = bandOf(main, bands);
         const ff = est ? fairFight(est.bss, bssOf(meStats)) : null;
         const respect = est && level ? respectFor(level, ff, { war }) : null;
         return {
@@ -19210,7 +19277,67 @@
             figures: chipFigures(main, est, respect),
             source: est ? est.sourceText : null,
             status: prof.status || null,
+            pending,
         };
+    }
+
+    /** Work between two breaks while queued fights are worked out: a click or a scroll never waits longer. */
+    const FIGHT_SLICE_MS = 8;
+
+    /** Fights queued by a list are still being worked out (their bands aren't known yet). */
+    function fightsPending() {
+        return eye.todo.size > 0;
+    }
+
+    function nextFight() {
+        const [id, a] = eye.todo.entries().next().value;
+        eye.todo.delete(id);
+        eyeView(id, a.extra, { war: a.war });
+    }
+
+    /** The queued fights, a few ms at a time with a break for the page in between, then one redraw. */
+    function fightsSoon() {
+        if (eye.working) return;
+        eye.working = true;
+        const pause = makePause({ everyMs: FIGHT_SLICE_MS });
+        (async () => {
+            try {
+                // A hidden tab works nothing out: what's left is queued again by the next draw.
+                while (eye.todo.size && isVisible()) {
+                    nextFight();
+                    await pause();
+                }
+            } finally {
+                eye.working = false;
+                pause.stop();
+            }
+            if (!eye.todo.size) notify();
+        })().catch(() => {});
+    }
+
+    /**
+     * The fights for these stored targets, worked out while the page has nothing else to do (the owner's idea: Torn Eye
+     * gets ready quietly, never slowing the page). Local numbers only: no request, no redraw. Opening the tab meanwhile
+     * takes over what is left (fightsSoon).
+     * @param {{id: number, extra: object}[]} rows
+     */
+    function warmFights(rows) {
+        if (!eye.cache || !(pi.model && pi.model.ready)) return false;
+        for (const r of rows) if (!eye.todo.has(r.id)) eyeView(r.id, r.extra, { later: 'idle' });
+        return true;
+    }
+
+    function fightsWhenIdle() {
+        if (eye.idling || eye.working || typeof requestIdleCallback !== 'function') return;
+        eye.idling = true;
+        requestIdleCallback((deadline) => {
+            eye.idling = false;
+            if (eye.working) return;
+            // A little per idle moment (an idle moment can be 50 ms long: that much work would be a freeze of its own).
+            const t0 = performance.now();
+            while (eye.todo.size && isVisible() && deadline.timeRemaining() > 2 && performance.now() - t0 < FIGHT_SLICE_MS) nextFight();
+            if (eye.todo.size) fightsWhenIdle();
+        });
     }
 
     function eyeReady() {
@@ -19959,12 +20086,26 @@
         return e && e.name ? e.name : null;
     }
 
+    /** The watch list as stored, read once per draw (a list's 300 stars each asked for a copy of it). */
+    let watchMemo = null;
+    function watchNow() {
+        if (!watchMemo) {
+            watchMemo = getWatch();
+            Promise.resolve().then(() => {
+                watchMemo = null;
+            });
+        }
+        return watchMemo;
+    }
+
     /** Stored targets, judged again now: only players you still beat show (your stats or colours may have changed). */
     function eyeRows() {
         const stored = pageGet(TARGETS_KEY, null);
         if (!stored || !Array.isArray(stored.list)) return [];
         const rows = stored.list.map((x) => {
-            const v = eyeView(x.playerId, { level: x.level, name: x.name });
+            // A fight not worked out yet isn't simulated inside the draw: the row shows what the list stored until it is.
+            const live = eyeView(x.playerId, { level: x.level, name: x.name }, { later: true });
+            const v = live && !live.pending ? live : null;
             const base = v || { id: x.playerId, band: x.band || 'none', forecast: Number.isFinite(x.win) ? { pWin: x.win / 100, keep: Number.isFinite(x.keep) ? x.keep / 100 : null } : null, respect: x.respect || null };
             return { ...base, name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId, stored: x };
         });
@@ -19978,6 +20119,8 @@
     function syncEye(force = false) {
         if (!discordState() || !isVisible()) return;
         if (!force && Date.now() - eyeSyncAt < EYE_SYNC_EVERY_MS) return;
+        // Fights still being worked out: the bot gets the bands once they are known (asked again in 2 s).
+        if (fightsPending()) return;
         eyeSyncAt = Date.now();
         const row = (id, name, level, v, extra = {}) => ({ id, name: name || (v && v.name) || null, level: level || (v && v.level) || null, band: v ? v.band : 'none', win: v && v.forecast ? Math.round(v.forecast.pWin * 100) : null, keep: v && v.forecast && v.forecast.keep !== null && v.forecast.keep !== undefined ? Math.round(v.forecast.keep * 100) : null, ...extra });
         const rows = eyeRows();
@@ -19998,7 +20141,7 @@
     }
 
     /** Settings the report carries: the switches and limits, never a key, a faction or a player id. */
-    const REPORT_SETTINGS = ['timeFormat', 'pill', 'gymMarks', 'marketMarks', 'eyeChips', 'budget', 'horizonDays', 'buyWindow', 'w3b', 'warReserve', 'boosterCapH', 'npcShops', 'npcShopsOff'];
+    const REPORT_SETTINGS = ['timeFormat', 'pill', 'gymMarks', 'marketMarks', 'eyeChips', 'motion', 'budget', 'horizonDays', 'buyWindow', 'w3b', 'warReserve', 'boosterCapH', 'npcShops', 'npcShopsOff'];
 
     /**
      * What Settings › Report a problem puts in its zip (core/report.js), read
@@ -20236,8 +20379,11 @@
                 },
                 watch: {
                     state: () => ({ list: getWatch().list, states: watchStates().players, flights: flightsSeen(), offers: watchOffersNow() }),
-                    isWatched: (id) => isWatched(getWatch(), id),
-                    toggle: (p) => toggleWatch({ id: Number(p.id), name: p.name || null, level: p.level || null, tag: p.tag }),
+                    isWatched: (id) => isWatched(watchNow(), id),
+                    toggle: (p) => {
+                        watchMemo = null;
+                        return toggleWatch({ id: Number(p.id), name: p.name || null, level: p.level || null, tag: p.tag });
+                    },
                     tag: (id, tag) => setWatchTag(id, tag),
                     remove: (id) => (isWatched(getWatch(), id) ? toggleWatch({ id }) : null),
                     dismiss: (id) => dismissWatchOffer(id),
@@ -20264,12 +20410,25 @@
             const open = page.app.tab === 'eye';
             if (open && !eyeOpen) {
                 const stored = pageGet(TARGETS_KEY, null);
-                if (stored && Array.isArray(stored.list)) setTimeout(() => wantPlayers(stored.list.map((x) => x.playerId)), 500);
+                if (stored && Array.isArray(stored.list)) wantPlayers(stored.list.map((x) => x.playerId));
             }
             eyeOpen = open;
         };
         window.addEventListener('hashchange', eyeTab);
+        // A click on the tab starts its reads at once (the tab bar changes no hash event; the 2 s check below was the only start).
+        page.app.onTab = eyeTab;
         loadArchives().then(eyeTab).catch(() => {});
+        // Torn Eye gets ready quietly (the owner, round 7): once the stored targets, the eye cache and your stats are in,
+        // their fights are worked out while the page is idle. Local numbers only: nothing is asked unless the tab is open.
+        let warmed = false;
+        const warm = () => {
+            if (warmed || page.app.tab === 'eye') return;
+            const stored = pageGet(TARGETS_KEY, null);
+            if (!archivesReady() || !stored || !Array.isArray(stored.list)) return;
+            warmed = warmFights(stored.list.map((x) => ({ id: x.playerId, extra: { level: x.level, name: x.name } })));
+        };
+        Promise.all([loadArchives(), gearCount()]).then(() => setTimeout(warm, 1500)).catch(() => {});
+        onModel(() => warm());
         onModel(() => page.app.render());
         // A plan being worked out: its card's bar and words follow the run without a redraw.
         onPlanProgress((busy) => page.app.planProgress(busy));

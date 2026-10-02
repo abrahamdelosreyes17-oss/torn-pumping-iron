@@ -78,6 +78,8 @@ export class PiApp {
         this.tab = tab;
         if (push && location.hash !== '#' + tab) history.replaceState(null, '', '#' + tab);
         this.render(true);
+        // The page's wiring hears a tab change at once (Torn Eye starts its reads on the click).
+        if (this.onTab) this.onTab(tab);
         this.host.scrollTop = 0;
     }
 
@@ -143,6 +145,8 @@ export class PiApp {
         if (!force && (sig === this.sig || this.typing())) return;
         this.sig = sig;
         const s = ctx.settings;
+        // Settings › Animations off: the still version of everything that moves.
+        this.root.className = 'pi-root' + (s && s.motion === false ? ' still' : '');
         const app = h('div', { class: 'app' });
         app.appendChild(this.topBar(ctx, m));
         // Taking turns with Torn Trading: say so on top; the plan below keeps moving on the clock from the last read.

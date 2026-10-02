@@ -195,7 +195,13 @@ textarea.inp.ta { height: auto; padding: 8px 10px; line-height: 1.4; resize: ver
 ol.steps-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
 /* A plan being worked out (the Plan card): the card's own day line, filling */
 .planrun { margin-top: 10px; }
-.planrun .dayline i { transition: none; }
+.planrun .dayline i { transition: none; opacity: .72; }
+/* Re-plan running (the owner's pick, 2A in mockups/round7/animation-options.html): a light crosses the whole bar, so it
+   shows even at 2%. Transform only. Still under the PC's "reduce motion" and with Settings › Animations off. */
+.planrun .dayline::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, rgba(255,255,255,0) 38%, rgba(255,255,255,.7) 50%, rgba(255,255,255,0) 62%); transform: translateX(-100%); animation: pi-sweep 1.8s linear infinite; }
+@keyframes pi-sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+@media (prefers-reduced-motion: reduce) { .planrun .dayline::after { animation: none; opacity: 0; } }
+.pi-root.still .planrun .dayline::after { animation: none; opacity: 0; }
 /* Report a problem */
 ul.incl { margin: 4px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
 .shots { display: flex; flex-wrap: wrap; gap: 8px; }

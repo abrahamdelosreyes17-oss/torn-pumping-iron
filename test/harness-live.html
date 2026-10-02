@@ -141,7 +141,9 @@ const CANNED = {
 // Torn Eye: canned estimates (total stats) and profiles for the fixture players.
 const FFS_TOTALS = { 605123: 150e6, 424242: 600e6, 515151: 2.6e9, 3886744: 780e6, 1111: 1e8, 777001: 640e6, 777002: 140e6 };
 const NOW_S = Math.floor(Date.now() / 1000);
-CANNED['/api/v1/get-stats'] = (u) => (u.searchParams.get('targets') || '').split(',').map((id) => FFS_TOTALS[id] ? { player_id: Number(id), bs_estimate: FFS_TOTALS[id], bs_estimate_human: '', bss_public: null, fair_fight: null, last_updated: NOW_S - 3 * 86400, source: 'bss' } : { player_id: Number(id), bs_estimate: null, last_updated: null });
+// window.__ffsEst = {id: total} (set by a check before load): estimates for the stored targets of a realistic store.
+const ffsTotal = (id) => FFS_TOTALS[id] || (window.__ffsEst && window.__ffsEst[id]) || 0;
+CANNED['/api/v1/get-stats'] = (u) => (u.searchParams.get('targets') || '').split(',').map((id) => ffsTotal(id) ? { player_id: Number(id), bs_estimate: ffsTotal(id), bs_estimate_human: '', bss_public: null, fair_fight: null, last_updated: NOW_S - 3 * 86400, source: 'bss' } : { player_id: Number(id), bs_estimate: null, last_updated: null });
 CANNED['/api/v1/check-key'] = () => ({ is_registered: true, is_premium: false, policy_update_required: false });
 CANNED['/api/v1/get-targets'] = () => ({ parameters: {}, targets: Object.entries(FFS_TOTALS).map(([id, t], i) => ({ player_id: Number(id), name: 'Target' + i, level: 50 + i * 3, bs_estimate: t, fair_fight: 2, last_action: NOW_S - (10 + i) * 86400 })) });
 CANNED['/v2/faction/7777/members'] = () => ({ members: [
