@@ -259,7 +259,10 @@ test('review: a mark from the future (clock moved back) is replaced, so the paus
 
 test('review: a can above the maximum is not a stacked or held Xanax', () => {
     const jump = buildModel({ state: friend({ energy: 175, drug: 0 }), statics: STATICS, plan: { ...PLAN, strategy: 'edvdJump' }, settings: SETTINGS, now: T0 });
-    assert.equal(jump.steps[0].label, 'Xanax #1 of 4 · don\'t train');
+    // Round 7: the bar is trained before Xanax #1 (energy stops at 1,000), then the stack starts at #1.
+    assert.equal(jump.steps[0].kind, 'natural');
+    assert.equal(jump.steps[0].energy, 170);
+    assert.equal(jump.steps.find((s) => s.kind === 'stack').label, 'Xanax #1 of 4 · don\'t train');
     const choco = buildModel({ state: friend({ energy: 175, drug: 3600 }), statics: STATICS, plan: { ...PLAN, strategy: 'dailyChoco' }, settings: SETTINGS, now: T0 });
     assert.notEqual(choco.steps[0].kind, 'boost');
 });

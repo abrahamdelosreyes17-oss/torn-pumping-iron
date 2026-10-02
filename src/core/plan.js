@@ -12,9 +12,9 @@ import { STATS, totalOf, trainsToReach } from './gain.js';
 import { splitSession } from './builds.js';
 import { energyAt, happyAt, drugFreeAt, boosterFreeAt, refillAvailable, tornDayStart, nextQuarterTick, DAY, MIN, HOUR } from './bars.js';
 import { XANAX, ECSTASY, EDVD, FHC, CANDY_KISSES, POINTS, REFILL_POINTS, ITEMS, XANAX_CD_MIN, ECSTASY_CD_MIN, BOOSTER_CAP_H, boostersThatFit, itemName, boosterHours } from './items.js';
-import { STRATEGIES, JUMP_STACK, SPECIAL, CONSOLE_STACK, CONSOLE_USES, CONSOLE_ENERGY_EACH, CONSOLE_HAPPY_EACH, CONSOLE_ITEM } from './strategies.js';
+import { STRATEGIES, JUMP_STACK, SPECIAL, CONSOLE_STACK, CONSOLE_USES, CONSOLE_ENERGY_EACH, CONSOLE_HAPPY_EACH, CONSOLE_ITEM, stackRoom } from './strategies.js';
 import { spendJobPoints, jobHappyWords } from './jobs.js';
-import { HAPPY_CAP, HAPPY_LOSS_PER_ENERGY } from './gain.js';
+import { HAPPY_CAP, ENERGY_CAP, HAPPY_LOSS_PER_ENERGY } from './gain.js';
 import { catchUpLabel } from './turns.js';
 import { fillFromPool, takeFromHeld, fillWords, heldWords, tierWords } from './candy.js';
 
@@ -219,14 +219,15 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         else if (H < (bliss ? HAPPY_CAP : happyMax)) H = Math.min(bliss ? HAPPY_CAP : happyMax, H + 5 * Math.floor((t2 - t) / (15 * MIN)));
         t = t2;
     };
-    const train = (at, kind, label, items, extra = {}) => {
-        // A faction war (Settings › Keep for war days): never train below the energy kept for it.
-        const keep = Math.max(0, Math.min(E, ctx.keepEnergy || 0));
+    const train = (at, kind, label, items, extra = {}, leave = 0) => {
+        // A faction war (Settings › Keep for war days): never train below the energy kept for it. `leave`: energy
+        // that stays in the bar for the stack (round 7: what fits under the 1,000 cap with the Xanax to come).
+        const keep = Math.max(0, Math.min(E, Math.max(ctx.keepEnergy || 0, leave)));
         const split = sessionGain(ctx, stats, E - keep, H, happyMax);
         stats = split.statsAfter;
         const step = { id: kind + '-' + ++n, at, kind, label, items, trains: trainsOf(split), gyms: gymsOf(split), parts: partsOf(split), gain: Math.round(split.gain), energy: split.energyUsed, strict: false, warnAt: null, ...extra };
         if (step.note === undefined) delete step.note;
-        if (keep > 0) step.note = (step.note ? step.note + ' · ' : '') + 'keeps ' + keep + ' energy for the war';
+        if (keep > 0 && keep > leave) step.note = (step.note ? step.note + ' · ' : '') + 'keeps ' + keep + ' energy for the war';
         E = split.energyLeft + keep;
         H = split.happyAfter;
         steps.push(step);
@@ -378,7 +379,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         if (drugDue || drugSoon) {
             if (drugSoon) advance(at);
             if (s === 'candyXanax') {
-                E += ITEMS[XANAX].energy;
+                E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
                 H = Math.min(HAPPY_CAP, H + ITEMS[XANAX].happy);
             } else H = Math.min(HAPPY_CAP, H * ITEMS[ECSTASY].happyMult);
         }
@@ -403,6 +404,8 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
 
     if (isJump) {
         const stackTo = isConsole ? CONSOLE_STACK : JUMP_STACK;
+        // Energy stops at 1,000 (round 7, B.1): what may stay in the bar under the stack (4 Xanax: nothing).
+        const stackKeep = stackRoom(stackTo);
         // After a jump finished from the middle (above), the next stack starts from nothing.
         let stacked = midDone ? 0 : Math.min(stackTo, ctx.stackedSoFar || 0);
         for (let jumps = 0; jumps < 20; jumps++) {
@@ -412,7 +415,13 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
                 if (jumps > 0 && drugAt >= end) return steps.sort((a, b) => a.at - b.at);
                 rollDay(drugAt);
                 advance(drugAt);
-                E += ITEMS[XANAX].energy;
+                // The stack's first Xanax: what the cap has no room for is trained first, at normal happy (the
+                // simulator does the same: strategies.js). Before, the bar went into the stack: 1,150 at jump happy.
+                if (stacked === 0 && E - stackKeep >= minTrain) {
+                    const st = train(drugAt, 'natural', 'Train what’s in the bar', [], { note: 'before Xanax #1: energy stops at ' + ENERGY_CAP.toLocaleString('en-US') + ', so ' + stackTo + ' Xanax need an empty bar' }, stackKeep);
+                    if (!st.energy) steps.pop();
+                }
+                E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
                 H += ITEMS[XANAX].happy;
                 stacked++;
                 steps.push({ id: 'stack-' + ++n, at: drugAt, kind: 'stack', label: 'Xanax #' + stacked + ' of ' + stackTo + ' · don\'t train', items: [{ id: XANAX, qty: 1 }], trains: {}, gyms: {}, gain: 0, energy: 0, strict: false, warnAt: null });
@@ -552,7 +561,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
                     refill(drugAt);
                     refillLeft = false;
                 }
-                E += ITEMS[XANAX].energy;
+                E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
                 H += ITEMS[XANAX].happy;
                 steps.push({ id: 'hold-' + ++n, at: drugAt, kind: 'hold', label: 'Xanax #' + xanN++ + ' · keep the energy for the boost', items: [{ id: XANAX, qty: 1 }], trains: {}, gyms: {}, gain: 0, energy: 0, strict: false, warnAt: null, note: 'no boosters until the boost' });
                 holding = true;
@@ -570,7 +579,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
                 // The tick can fall after midnight: the boost (and its refill) then belong to the new Torn day.
                 rollDay(at);
                 advance(at);
-                E += ITEMS[XANAX].energy;
+                E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
                 H += ITEMS[XANAX].happy;
                 const qty = Math.min(candyQty(), fits);
                 const c = candyBoost(qty);
@@ -590,7 +599,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             }
             waitNote = 'No candy with this one: ' + candyRoomWords();
         }
-        E += ITEMS[XANAX].energy;
+        E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
         H += ITEMS[XANAX].happy;
         const items = [{ id: XANAX, qty: 1 }];
         let label = 'Xanax #' + xanN++;
@@ -642,7 +651,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
                 } else {
                     // Cans as a pool: the ones you hold first (the most energy first).
                     const f = fillPool(qty, eb.id);
-                    E += Math.round(f.value * (ctx.canMult || 1));
+                    E = Math.min(ENERGY_CAP, E + Math.round(f.value * (ctx.canMult || 1)));
                     const words = f.held ? fillWords(f, eb.id) : itemNameShort(eb.id) + ' × ' + qty;
                     train(at, 'booster', words + ', train after each', f.alloc.map((a) => ({ id: a.id, qty: a.qty })), f.held ? { note: heldWords(f) } : {});
                 }

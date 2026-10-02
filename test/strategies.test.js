@@ -1,7 +1,8 @@
 /*
  * The strategy simulator against docs/sims/sim30.mjs (sample prices, STR
  * only, donator, 30 days): within 2%, and in fact exact, since the model is
- * the same.
+ * the same. Round 7 (R7.4, the 1,000 energy cap): the two jumps no longer match
+ * sim30, which stacks 1,150 and 1,120; their numbers here are the capped ones.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,8 +16,9 @@ function run(id, S0, dots, happyMax, extra = {}) {
     return simulateStrategy(id, { stats: { str: S0, spd: 0, def: 0, dex: 0 }, target: 'str', gyms: { str: { dots, energy: 10 } }, happyMax, prices: SAMPLE_PRICES, candyCount: 48, ...extra });
 }
 
-test('friend at 118k, 1,500 happy: steady +603k/$126M, daily +596k/$160M, choco +410k/$140M, EDVD +936k/$513M', () => {
-    const want = { steady: [603092, 126.0], dailyChoco: [595527, 159.6], chocoJump: [410068, 140.2], edvdJump: [936335, 513.4] };
+test('friend at 118k, 1,500 happy: steady +603k/$126M, daily +596k/$160M, choco +396k/$140M, EDVD +868k/$513M', () => {
+    // The jumps before the 1,000 cap (round 7): choco +410k, EDVD +936k.
+    const want = { steady: [603092, 126.0], dailyChoco: [595527, 159.6], chocoJump: [396360, 140.2], edvdJump: [867799, 513.4] };
     for (const [id, [g, c]] of Object.entries(want)) {
         const r = run(id, 118400, 6.5, 1500);
         within(r.gained, g, 2, id);
@@ -24,14 +26,15 @@ test('friend at 118k, 1,500 happy: steady +603k/$126M, daily +596k/$160M, choco 
     }
 });
 
-test('friend with the Private Island (5,025): steady +994k, daily +864k, choco +592k, EDVD +1,125k', () => {
-    const want = { steady: 994142, dailyChoco: 863700, chocoJump: 591932, edvdJump: 1124595 };
+test('friend with the Private Island (5,025): steady +994k, daily +864k, choco +571k, EDVD +1,050k', () => {
+    // The jumps before the 1,000 cap (round 7): choco +592k, EDVD +1,125k.
+    const want = { steady: 994142, dailyChoco: 863700, chocoJump: 571172, edvdJump: 1049907 };
     for (const [id, g] of Object.entries(want)) within(run(id, 118400, 6.5, 5025).gained, g, 2, id);
 });
 
-test('owner at 250M (George\'s, 5,025): steady +119M, EDVD jumps only +74M', () => {
+test('owner at 250M (George\'s, 5,025): steady +119M, EDVD jumps only +73M', () => {
     within(run('steady', 250e6, 7.3, 5025).gained, 119410643, 2);
-    within(run('edvdJump', 250e6, 7.3, 5025).gained, 73562841, 2);
+    within(run('edvdJump', 250e6, 7.3, 5025).gained, 73117086, 2);
 });
 
 test('the friend should NOT choco jump: steady beats it by about 40%', () => {

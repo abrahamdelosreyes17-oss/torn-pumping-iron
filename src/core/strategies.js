@@ -8,7 +8,7 @@
  * build's shares), so strategies compare like for like.
  */
 
-import { STATS, STAT_LABEL, gainPerTrain, HAPPY_CAP, HAPPY_LOSS_PER_ENERGY, totalOf } from './gain.js';
+import { STATS, STAT_LABEL, gainPerTrain, HAPPY_CAP, ENERGY_CAP, HAPPY_LOSS_PER_ENERGY, totalOf } from './gain.js';
 import { XANAX, ECSTASY, EDVD, FHC, CANDY_KISSES, POINTS, REFILL_POINTS, XANAX_CD_MIN, ECSTASY_CD_MIN, ITEMS, boostersThatFit, boosterHours, BOOSTER_CAP_H, GAME_CONSOLE } from './items.js';
 import { candyWords, fillFromPool, takeFromHeld } from './candy.js';
 import { pickStat } from './builds.js';
@@ -100,6 +100,16 @@ export const STAT_LINE_DAILY_DAYS = 92;
 
 /** Xanax stacked before a jump (ffscouter guide's 4-Xan jumps). */
 export const JUMP_STACK = 4;
+
+/**
+ * Round 7 (B.1): energy stops at 1,000 (gain.js ENERGY_CAP), so a stack only keeps what fits under it. Energy that may
+ * stay in the bar when a stack of `stackTo` Xanax starts: 4 Xanax fill the 1,000, so the bar is trained to empty first
+ * (at normal happy); 3 Xanax (the console jump: a full bar + 3 = 900) leave room for the bar. The day plan (plan.js)
+ * uses the same number.
+ */
+export function stackRoom(stackTo) {
+    return Math.max(0, ENERGY_CAP - stackTo * ITEMS[XANAX].energy);
+}
 
 /** Minutes after a quarter tick the boost lands (the reset has just passed). */
 export const TICK_OFFSET_MIN = 5;
@@ -255,6 +265,7 @@ export function* simulateSteps(id, o) {
     let ebToday = 0;
     const isConsole = id === 'consoleJump' || id === 'consoleJumpToy';
     const stackTo = isConsole ? CONSOLE_STACK : JUMP_STACK;
+    const stackKeep = stackRoom(stackTo);
     // Energy already above the maximum at the start is Xanax stacked (a jump) or held (daily choco), as the day plan reads it.
     if (st && E > maxE + 50) {
         if (id === 'dailyChoco') phase = 'hold';
@@ -440,7 +451,7 @@ export function* simulateSteps(id, o) {
             if (ebItem.toMax) {
                 E = Math.max(E, maxE);
                 H += ebItem.happy || 0;
-            } else E += Math.round(f.value * canMult * evCan);
+            } else E = Math.min(ENERGY_CAP, E + Math.round(f.value * canMult * evCan));
             addBooster(eb.id, 1, t);
             ebToday++;
             train();
@@ -461,7 +472,8 @@ export function* simulateSteps(id, o) {
         buy(POINTS, REFILL_POINTS);
     };
     const xanax = (t) => {
-        E += ITEMS[XANAX].energy;
+        // Never above 1,000: what doesn't fit is lost (900 + a Xanax = 1,000).
+        E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
         H += ITEMS[XANAX].happy;
         buy(XANAX);
         drugFree = t + xanCD;
@@ -491,7 +503,7 @@ export function* simulateSteps(id, o) {
                 evCan *= ev.canMult || 1;
                 if (!evGiven.has(i) && (ev.freeEnergy || ev.freeHappy)) {
                     evGiven.add(i);
-                    E += ev.freeEnergy || 0;
+                    E = Math.min(ENERGY_CAP, E + (ev.freeEnergy || 0));
                     H = Math.min(HAPPY_CAP, H + (ev.freeHappy || 0));
                 }
             }
@@ -578,6 +590,9 @@ export function* simulateSteps(id, o) {
         } else {
             // Jumps: stack Xanax without training, then boost just after a tick and train it all.
             if (phase === 'stack' && t >= drugFree) {
+                // The stack's first Xanax: what the cap has no room for is trained first, at normal happy (4 Xanax
+                // fill the 1,000 from an empty bar). Before, the bar went into the stack: 1,150 and 1,120 at jump happy.
+                if (stacked === 0) train(stackKeep);
                 xanax(t);
                 stacked++;
                 if (stacked === stackTo) phase = 'wait';

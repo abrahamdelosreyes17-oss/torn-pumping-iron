@@ -22,6 +22,12 @@ export const STAT_AB = {
 export const HAPPY_CAP = 99999;
 
 /**
+ * Torn's hard cap on energy (docs/research-addiction-rehab.md §7, confirmed): Xanax, cans and the like stack up to
+ * 1,000 and no further. 900 + a Xanax = 1,000, the other 150 are lost.
+ */
+export const ENERGY_CAP = 1000;
+
+/**
  * [calibrate] How a stat above 50M is damped. Disputed in the community
  * (research-gym.md "Post-50M"): 'log10' (likely), 'ln', or 'power' (Gym
  * Gains Calculator+'s 50M + 0.057406·(S−50M)^0.928996). Calibrate against

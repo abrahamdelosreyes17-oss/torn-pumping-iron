@@ -49,7 +49,7 @@
     'use strict';
 
     const PI_BUILD_VERSION = '1.3.0';
-    const PI_BUILD_HASH = 'df7a5791b37a';
+    const PI_BUILD_HASH = '4551beb5070f';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -920,6 +920,12 @@
     };
 
     const HAPPY_CAP = 99999;
+
+    /**
+     * Torn's hard cap on energy (docs/research-addiction-rehab.md §7, confirmed): Xanax, cans and the like stack up to
+     * 1,000 and no further. 900 + a Xanax = 1,000, the other 150 are lost.
+     */
+    const ENERGY_CAP = 1000;
 
     /**
      * [calibrate] How a stat above 50M is damped. Disputed in the community
@@ -3444,6 +3450,16 @@
     /** Xanax stacked before a jump (ffscouter guide's 4-Xan jumps). */
     const JUMP_STACK = 4;
 
+    /**
+     * Round 7 (B.1): energy stops at 1,000 (gain.js ENERGY_CAP), so a stack only keeps what fits under it. Energy that may
+     * stay in the bar when a stack of `stackTo` Xanax starts: 4 Xanax fill the 1,000, so the bar is trained to empty first
+     * (at normal happy); 3 Xanax (the console jump: a full bar + 3 = 900) leave room for the bar. The day plan (plan.js)
+     * uses the same number.
+     */
+    function stackRoom(stackTo) {
+        return Math.max(0, ENERGY_CAP - stackTo * ITEMS[XANAX].energy);
+    }
+
     /** Minutes after a quarter tick the boost lands (the reset has just passed). */
     const TICK_OFFSET_MIN = 5;
 
@@ -3598,6 +3614,7 @@
         let ebToday = 0;
         const isConsole = id === 'consoleJump' || id === 'consoleJumpToy';
         const stackTo = isConsole ? CONSOLE_STACK : JUMP_STACK;
+        const stackKeep = stackRoom(stackTo);
         // Energy already above the maximum at the start is Xanax stacked (a jump) or held (daily choco), as the day plan reads it.
         if (st && E > maxE + 50) {
             if (id === 'dailyChoco') phase = 'hold';
@@ -3783,7 +3800,7 @@
                 if (ebItem.toMax) {
                     E = Math.max(E, maxE);
                     H += ebItem.happy || 0;
-                } else E += Math.round(f.value * canMult * evCan);
+                } else E = Math.min(ENERGY_CAP, E + Math.round(f.value * canMult * evCan));
                 addBooster(eb.id, 1, t);
                 ebToday++;
                 train();
@@ -3804,7 +3821,8 @@
             buy(POINTS, REFILL_POINTS);
         };
         const xanax = (t) => {
-            E += ITEMS[XANAX].energy;
+            // Never above 1,000: what doesn't fit is lost (900 + a Xanax = 1,000).
+            E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
             H += ITEMS[XANAX].happy;
             buy(XANAX);
             drugFree = t + xanCD;
@@ -3834,7 +3852,7 @@
                     evCan *= ev.canMult || 1;
                     if (!evGiven.has(i) && (ev.freeEnergy || ev.freeHappy)) {
                         evGiven.add(i);
-                        E += ev.freeEnergy || 0;
+                        E = Math.min(ENERGY_CAP, E + (ev.freeEnergy || 0));
                         H = Math.min(HAPPY_CAP, H + (ev.freeHappy || 0));
                     }
                 }
@@ -3921,6 +3939,9 @@
             } else {
                 // Jumps: stack Xanax without training, then boost just after a tick and train it all.
                 if (phase === 'stack' && t >= drugFree) {
+                    // The stack's first Xanax: what the cap has no room for is trained first, at normal happy (4 Xanax
+                    // fill the 1,000 from an empty bar). Before, the bar went into the stack: 1,150 and 1,120 at jump happy.
+                    if (stacked === 0) train(stackKeep);
                     xanax(t);
                     stacked++;
                     if (stacked === stackTo) phase = 'wait';
@@ -4455,14 +4476,15 @@
             else if (H < (bliss ? HAPPY_CAP : happyMax)) H = Math.min(bliss ? HAPPY_CAP : happyMax, H + 5 * Math.floor((t2 - t) / (15 * MIN)));
             t = t2;
         };
-        const train = (at, kind, label, items, extra = {}) => {
-            // A faction war (Settings › Keep for war days): never train below the energy kept for it.
-            const keep = Math.max(0, Math.min(E, ctx.keepEnergy || 0));
+        const train = (at, kind, label, items, extra = {}, leave = 0) => {
+            // A faction war (Settings › Keep for war days): never train below the energy kept for it. `leave`: energy
+            // that stays in the bar for the stack (round 7: what fits under the 1,000 cap with the Xanax to come).
+            const keep = Math.max(0, Math.min(E, Math.max(ctx.keepEnergy || 0, leave)));
             const split = sessionGain(ctx, stats, E - keep, H, happyMax);
             stats = split.statsAfter;
             const step = { id: kind + '-' + ++n, at, kind, label, items, trains: trainsOf(split), gyms: gymsOf(split), parts: partsOf(split), gain: Math.round(split.gain), energy: split.energyUsed, strict: false, warnAt: null, ...extra };
             if (step.note === undefined) delete step.note;
-            if (keep > 0) step.note = (step.note ? step.note + ' · ' : '') + 'keeps ' + keep + ' energy for the war';
+            if (keep > 0 && keep > leave) step.note = (step.note ? step.note + ' · ' : '') + 'keeps ' + keep + ' energy for the war';
             E = split.energyLeft + keep;
             H = split.happyAfter;
             steps.push(step);
@@ -4614,7 +4636,7 @@
             if (drugDue || drugSoon) {
                 if (drugSoon) advance(at);
                 if (s === 'candyXanax') {
-                    E += ITEMS[XANAX].energy;
+                    E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
                     H = Math.min(HAPPY_CAP, H + ITEMS[XANAX].happy);
                 } else H = Math.min(HAPPY_CAP, H * ITEMS[ECSTASY].happyMult);
             }
@@ -4639,6 +4661,8 @@
 
         if (isJump) {
             const stackTo = isConsole ? CONSOLE_STACK : JUMP_STACK;
+            // Energy stops at 1,000 (round 7, B.1): what may stay in the bar under the stack (4 Xanax: nothing).
+            const stackKeep = stackRoom(stackTo);
             // After a jump finished from the middle (above), the next stack starts from nothing.
             let stacked = midDone ? 0 : Math.min(stackTo, ctx.stackedSoFar || 0);
             for (let jumps = 0; jumps < 20; jumps++) {
@@ -4648,7 +4672,13 @@
                     if (jumps > 0 && drugAt >= end) return steps.sort((a, b) => a.at - b.at);
                     rollDay(drugAt);
                     advance(drugAt);
-                    E += ITEMS[XANAX].energy;
+                    // The stack's first Xanax: what the cap has no room for is trained first, at normal happy (the
+                    // simulator does the same: strategies.js). Before, the bar went into the stack: 1,150 at jump happy.
+                    if (stacked === 0 && E - stackKeep >= minTrain) {
+                        const st = train(drugAt, 'natural', 'Train what’s in the bar', [], { note: 'before Xanax #1: energy stops at ' + ENERGY_CAP.toLocaleString('en-US') + ', so ' + stackTo + ' Xanax need an empty bar' }, stackKeep);
+                        if (!st.energy) steps.pop();
+                    }
+                    E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
                     H += ITEMS[XANAX].happy;
                     stacked++;
                     steps.push({ id: 'stack-' + ++n, at: drugAt, kind: 'stack', label: 'Xanax #' + stacked + ' of ' + stackTo + ' · don\'t train', items: [{ id: XANAX, qty: 1 }], trains: {}, gyms: {}, gain: 0, energy: 0, strict: false, warnAt: null });
@@ -4788,7 +4818,7 @@
                         refill(drugAt);
                         refillLeft = false;
                     }
-                    E += ITEMS[XANAX].energy;
+                    E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
                     H += ITEMS[XANAX].happy;
                     steps.push({ id: 'hold-' + ++n, at: drugAt, kind: 'hold', label: 'Xanax #' + xanN++ + ' · keep the energy for the boost', items: [{ id: XANAX, qty: 1 }], trains: {}, gyms: {}, gain: 0, energy: 0, strict: false, warnAt: null, note: 'no boosters until the boost' });
                     holding = true;
@@ -4806,7 +4836,7 @@
                     // The tick can fall after midnight: the boost (and its refill) then belong to the new Torn day.
                     rollDay(at);
                     advance(at);
-                    E += ITEMS[XANAX].energy;
+                    E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
                     H += ITEMS[XANAX].happy;
                     const qty = Math.min(candyQty(), fits);
                     const c = candyBoost(qty);
@@ -4826,7 +4856,7 @@
                 }
                 waitNote = 'No candy with this one: ' + candyRoomWords();
             }
-            E += ITEMS[XANAX].energy;
+            E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
             H += ITEMS[XANAX].happy;
             const items = [{ id: XANAX, qty: 1 }];
             let label = 'Xanax #' + xanN++;
@@ -4878,7 +4908,7 @@
                     } else {
                         // Cans as a pool: the ones you hold first (the most energy first).
                         const f = fillPool(qty, eb.id);
-                        E += Math.round(f.value * (ctx.canMult || 1));
+                        E = Math.min(ENERGY_CAP, E + Math.round(f.value * (ctx.canMult || 1)));
                         const words = f.held ? fillWords(f, eb.id) : itemNameShort(eb.id) + ' × ' + qty;
                         train(at, 'booster', words + ', train after each', f.alloc.map((a) => ({ id: a.id, qty: a.qty })), f.held ? { note: heldWords(f) } : {});
                     }

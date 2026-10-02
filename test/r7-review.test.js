@@ -129,10 +129,26 @@ test('review 1.5 · candy: a stronger candy is taken only at an equal or better 
 
 /* ------------------------------------------------------- 2. the simulator */
 
-test('review 2.2 · the energy cap: a jump trains at most 1,000 energy at jump happy (plus the refill)', TODO('R7.4'), () => {
-    const { sim, day } = firstBoost(friend, 'edvdJump');
-    assert.ok(sim.energy <= 1000 + 150, 'simulator: ' + sim.energy + ' E in the first jump');
-    assert.ok(day.energy <= 1000 + 150, 'day plan: ' + day.energy + ' E in the first jump');
+test('review 2.2 · the energy cap: a jump trains at most 1,000 energy at jump happy (plus the refill)', () => {
+    for (const id of ['edvdJump', 'chocoJump', 'consoleJump']) {
+        const { sim, day } = firstBoost(friend, id);
+        assert.ok(sim.energy <= 1000 + 150, id + ' · simulator: ' + sim.energy + ' E in the first jump');
+        assert.ok(day.energy <= 1000 + 150, id + ' · day plan: ' + day.energy + ' E in the first jump');
+    }
+    // Every jump of the month, not only the first: never more than 1,000 in the bar (it was 1,150, then 1,120).
+    const p = friend;
+    const state = normalizeState(apiOf(p), T0);
+    const pc = playerContext(state, {}, { unlockedKnown: Array.from({ length: p.gym }, (_, i) => i + 1) });
+    const shares = targetShares({ strategy: 'edvdJump', build: p.build, goal: null }, pc.stats, buildOf(p.build).shares);
+    const rows = [];
+    simulateStrategy('edvdJump', { ...simInputs({ state, pc, shares, settings: { horizonDays: 31, budget: Infinity }, prices: {}, special: 0, statics: {} }), trace: (x) => rows.push(x) });
+    assert.ok(rows.every((x) => x.E <= 1000), 'the most energy in the bar at a train: ' + Math.max(...rows.map((x) => x.E)));
+    const sessions = sessionsOfTrace(rows);
+    const jumps = sessions.filter((s) => s.H0 > p.happyMax * 1.5);
+    assert.ok(jumps.length > 20 && jumps.every((s) => s.E0 === 1000), 'energy at each jump: ' + jumps.map((s) => s.E0).join(', '));
+    // What was in the bar is trained before the stack, at normal happy.
+    const first = sessions[0];
+    assert.ok(first.t === 0 && first.energy === 150 && first.H0 <= p.happyMax, 'the full bar is trained before Xanax #1: ' + JSON.stringify(first));
 });
 
 test('review 2.3 · the second jump is the same in the simulator and the day plan (the jump cycle)', TODO('R7.4'), () => {
@@ -279,13 +295,16 @@ test('review 4.4 · Progress: a player who follows the plan exactly reads 100% o
     }
 });
 
-test('review 4.4 · Progress: a jump plan reads 100% after each jump, and says nothing while the stack is being built', async () => {
+test('review 4.4 · Progress: a jump plan reads 100% after each jump, and never "behind" while the stack is being built', async () => {
     const f = await follower('edvdJump', 12);
-    assert.equal(f.at(f.start + 20 * HOUR).pct, null, 'stacking: the plan has planned nothing yet, so no "behind"');
-    for (const [label, ms] of [['an hour after the first jump', f.start + 29 * HOUR + 5 * MIN], ['end of day 2', f.day0 + 2 * DAY - MIN], ['day 5, 12:00', f.day0 + 4 * DAY + 12 * HOUR]]) {
-        const r = f.at(ms);
-        assert.ok(r.pct !== null && Math.abs(r.pct - 100) <= 1, label + ': ' + (r.pct === null ? 'no figure' : r.pct + '% of plan'));
-    }
+    // Round 7 (the 1,000 cap): the bar is trained before Xanax #1, so the stack day has that small gain planned (it had none).
+    const stacking = f.at(f.start + 20 * HOUR).pct;
+    assert.ok(stacking === null || Math.abs(stacking - 100) <= 12, 'stacking: only the bar before Xanax #1 is planned, and it is done: ' + stacking + '% of plan');
+    // Within 2% (it was 1%): the plan's line is a step at the jump that holds the whole day's gain, and since round 7
+    // that day also has the bar trained before the next stack (120 E at normal happy: 1.6% of the day's gain).
+    const read = [['an hour after the first jump', f.start + 29 * HOUR + 5 * MIN], ['end of day 2', f.day0 + 2 * DAY - MIN], ['day 5, 12:00', f.day0 + 4 * DAY + 12 * HOUR]].map(([label, ms]) => [label, f.at(ms).pct]);
+    const said = read.map(([label, pct]) => label + ': ' + (pct === null ? 'no figure' : pct + '% of plan')).join(' · ');
+    assert.ok(read.every(([, pct]) => pct !== null && Math.abs(pct - 100) <= 2), said);
 });
 
 test('review 4.5 · Progress: "+X gained" at the end of day 1 is what was really gained, not +0', async () => {
