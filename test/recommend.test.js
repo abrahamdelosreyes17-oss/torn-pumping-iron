@@ -20,9 +20,10 @@ test('the friend on $150M: steady training is recommended (EDVD gains more but i
     assert.equal(r.recommended, 'steady');
     const edvd = r.alternatives.find((a) => a.id === 'edvdJump');
     assert.equal(edvd.verdict, 'overBudget');
-    // 6% since energy stops at 1,000 (round 7: a jump trains 1,000 at jump happy, not 1,150 and 1,120); it was 14%.
-    assert.ok(Math.round(edvd.deltaStatsPct) === 6);
-    assert.ok(Math.abs(edvd.deltaCost - 387.45e6) < 1e6);
+    // 14% before round 7; 6% once energy stops at 1,000 (a jump trains 1,000 at jump happy, not 1,150 and 1,120); 11%
+    // with the refill used before the stack on a day with no jump (30 refills in the 30 days, it was 22).
+    assert.ok(Math.round(edvd.deltaStatsPct) === 11);
+    assert.ok(Math.abs(edvd.deltaCost - 398.25e6) < 1e6);
     assert.ok(r.reasons.some((x) => /budget/.test(x)));
 });
 
@@ -30,11 +31,11 @@ test('with no budget limit, the most stats wins', () => {
     assert.equal(recommend(FRIEND).recommended, 'edvdJump');
 });
 
-test('alternatives carry the Plan table\'s deltas: daily −13%, choco −42%', () => {
+test('alternatives carry the Plan table\'s deltas: daily −13%, choco −39%', () => {
     const r = recommend(FRIEND, { budget: 150e6 });
     const d = Object.fromEntries(r.alternatives.map((a) => [a.id, Math.round(a.deltaStatsPct)]));
     assert.equal(d.dailyChoco, -13);
-    assert.equal(d.chocoJump, -42);
+    assert.equal(d.chocoJump, -39);
     assert.equal(r.alternatives.find((a) => a.id === 'chocoJump').verdict, 'worse');
 });
 
@@ -42,7 +43,7 @@ test('picking the choco jump warns, with its reasons', () => {
     const w = pickWarning(FRIEND.steady, FRIEND.chocoJump);
     assert.equal(w.warn, true);
     assert.equal(w.title, "A choco jump isn't worth it for you");
-    assert.equal(w.text, '30 days: about +571k stats, against +989k on steady, and $14.2M more.');
+    assert.equal(w.text, '30 days: about +603k stats, against +989k on steady, and $25M more.');
     assert.ok(w.reasons.includes('Holding four Xanax stops natural energy.'));
     assert.ok(w.reasons.includes('The Ecstasy uses a drug cooldown a Xanax would have filled.'));
     assert.ok(w.reasons.includes('Worth it only if you read Ignorance Is Bliss.'));

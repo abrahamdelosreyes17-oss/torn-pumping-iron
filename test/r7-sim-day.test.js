@@ -55,7 +55,11 @@ for (const [pid, p] of Object.entries(PLAYERS)) {
 
 // The whole cycle over 25 days (15 for the console jump: 14 jumps), for a plan made at six hours of the Torn day: the
 // refills used, the jumps and the energy trained are the same both ways, and every jump lands in the same tick window.
-// (A day with no jump leaves its refill unused in both: that refill is a rule of its own, not this one.)
+// A day with no jump: its refill goes in before the stack's first Xanax when the stack starts that day (trained at
+// normal happy; the console jump keeps it in the bar). A day spent stacked above the maximum has no use for a refill,
+// so how many are used depends on the hour: the EDVD and choco jumps (18 jumps in 25 days) use all 25 refills when a
+// stack starts at 00:00 on the fourth day of each three jumps, and 19 when that day is spent stacked.
+const REFILLS = { edvdJump: { 0: 25, 4: 19, 8: 25, 12: 19, 16: 25, 20: 19 }, chocoJump: { 0: 25, 4: 19, 8: 25, 12: 19, 16: 25, 20: 19 }, consoleJump: { 0: 15, 4: 15, 8: 15, 12: 15, 16: 16, 20: 16 } };
 for (const [id, days] of [['edvdJump', 25], ['chocoJump', 25], ['consoleJump', 15]]) {
     for (const hour of [0, 4, 8, 12, 16, 20]) {
         test('simulator = day plan · friend · ' + id + ' made at ' + String(hour).padStart(2, '0') + ':00: ' + days + ' days of jumps', () => {
@@ -63,6 +67,7 @@ for (const [id, days] of [['edvdJump', 25], ['chocoJump', 25], ['consoleJump', 1
             assert.ok(sim.jumps.length >= 10, 'jumps: ' + sim.jumps.length);
             assert.equal(day.jumps.length, sim.jumps.length, 'jumps');
             assert.equal(day.refills, sim.refills, 'refills used');
+            assert.equal(sim.refills, REFILLS[id][hour], 'refills used (before this rule: one for each jump, ' + sim.jumps.length + ')');
             assert.equal(day.energy, sim.energy, 'energy trained');
             sim.jumps.forEach((j, i) => {
                 assert.ok(Math.abs(day.jumps[i].at - j.at) <= MINUTES_APART, 'jump ' + (i + 1) + ': day plan at ' + day.jumps[i].at + ' min, simulator at ' + j.at + ' min');

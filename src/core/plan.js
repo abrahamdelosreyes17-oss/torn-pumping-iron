@@ -236,7 +236,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     const fullAt = () => (E >= maxE ? t : t + Math.ceil((maxE - E) / inc) * interval);
     // A refill (points or special) or an FHC sets energy to the maximum, never above it (O2): `qty` of them are
     // used one at a time, each once the last is trained, and shown as one step.
-    const trainEach = (at, kind, label, items, qty, extra = {}, happyEach = 0) => {
+    const trainEach = (at, kind, label, items, qty, extra = {}, happyEach = 0, leave = 0) => {
         const keep = Math.max(0, ctx.keepEnergy || 0);
         // Energy kept for a war fills the bar on its own: a refill or FHC then adds nothing, so none is planned (or bought).
         if (keep >= maxE && E >= maxE) return null;
@@ -246,7 +246,8 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         for (let i = 0; i < qty; i++) {
             E = Math.max(E, maxE);
             H += happyEach;
-            train(at, kind, label, items, extra);
+            // `leave`: the refill before a stack that has room for the bar (the console jump) stays in the bar.
+            train(at, kind, label, items, extra, leave);
         }
         const parts = steps.splice(first);
         if (!parts.length) return null;
@@ -283,17 +284,19 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         heldLeft = Math.max(0, heldLeft - qty);
     };
     // The day's refill: a special while any are held (never both on one day), else 30 points.
-    const refill = (at, extra = {}) => {
+    const refill = (at, extra = {}, leave = 0) => {
         if (Math.max(0, ctx.keepEnergy || 0) >= maxE && E >= maxE) return null;
         if (heldLeft > 0) {
             heldLeft--;
             specialLeft = Math.min(specialLeft, heldLeft);
-            return trainEach(at, 'refill', 'Special refill (instead of the points refill)', [{ id: SPECIAL, qty: 1 }], 1, { ...extra, note: 'Torn lets you use the points refill only once your special refills are spent [1 source]' });
+            return trainEach(at, 'refill', 'Special refill (instead of the points refill)', [{ id: SPECIAL, qty: 1 }], 1, { ...extra, note: 'Torn lets you use the points refill only once your special refills are spent [1 source]' }, 0, leave);
         }
         // Not worth its price under the Plan rule (the comparison decided): the points refill is left out.
         if (ctx.noRefill) return null;
-        return trainEach(at, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }], 1, extra);
+        return trainEach(at, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }], 1, extra, 0, leave);
     };
+    // Would the day's refill add energy (a special held, or the points refill when the plan keeps it)?
+    const refillGives = () => heldLeft > 0 || !ctx.noRefill;
     const candyMult = ctx.candyMult || 1;
     const candyId = ctx.candyId && ITEMS[ctx.candyId] ? ctx.candyId : CANDY_KISSES;
     const candyQty = () => ctx.candyCount || boostersThatFit(candyId, capH, 0, cdMult);
@@ -411,6 +414,11 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         for (let jumps = 0; jumps < 20; jumps++) {
             // Today's plan always shows the next jump in full; the look-ahead runs on to its end.
             if (jumps > 0 && (drugAt >= end || !lookAhead)) break;
+            // The boost: its item and how many (the whole load, or the jump waits for room under the booster cap).
+            const candyJump = s === 'chocoJump' || isConsole;
+            const boostItem = candyJump ? candyId : EDVD;
+            const want = candyJump ? candyQty() : ctx.edvdCount || (s === 'happy99k' ? boostersThatFit(EDVD, capH) : 5);
+            const qty = Math.min(want, boostersThatFit(boostItem, capH, 0, cdMult));
             while (stacked < stackTo) {
                 if (jumps > 0 && drugAt >= end) return steps.sort((a, b) => a.at - b.at);
                 // Between a jump and the next stack (round 7, B.2; the simulator does the same: strategies.js):
@@ -430,9 +438,21 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
                 }
                 rollDay(drugAt);
                 advance(drugAt);
-                if (stacked === 0 && E - stackKeep >= minTrain) {
-                    const st = train(drugAt, 'natural', 'Train what’s in the bar', [], { note: 'before Xanax #1: energy stops at ' + ENERGY_CAP.toLocaleString('en-US') + ', so ' + stackTo + ' Xanax need an empty bar' }, stackKeep);
-                    if (!st.energy) steps.pop();
+                if (stacked === 0) {
+                    // No jump can land today and today's refill is unused: it goes in now, before the stack (once
+                    // energy is stacked above the maximum a refill adds nothing). The bar is trained first, so the
+                    // refill fills all of it. The simulator does the same (strategies.js).
+                    const jumpFrom = Math.max(drugAt + stackTo * xanCD, ctx.holdBooster ? ctx.holdUntil || 0 : 0, roomFor(boostItem, qty));
+                    const refillNow = refillLeft && jumpFrom >= curDay + DAY && refillGives();
+                    const leave = refillNow ? 0 : stackKeep;
+                    if (E - leave >= minTrain) {
+                        const st = train(drugAt, 'natural', 'Train what’s in the bar', [], { note: 'before Xanax #1: energy stops at ' + ENERGY_CAP.toLocaleString('en-US') + (stackKeep ? '' : ', so ' + stackTo + ' Xanax need an empty bar') }, leave);
+                        if (!st.energy) steps.pop();
+                    }
+                    if (refillNow) {
+                        refill(drugAt, { note: 'before Xanax #1: no jump today, and a refill adds nothing once you stack' + (stackKeep ? ' · don’t train it: it stays in the bar for the jump' : '') }, stackKeep);
+                        refillLeft = false;
+                    }
                 }
                 E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
                 H += ITEMS[XANAX].happy;
@@ -443,10 +463,6 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             // The boost lands just after a quarter tick, once the drug cooldown allows the Ecstasy and the booster
             // cooldown has room for the whole boost (a jump is worth its full load). An event that boosts this
             // plan's items starts soon: the boost waits for it.
-            const candyJump = s === 'chocoJump' || isConsole;
-            const boostItem = candyJump ? candyId : EDVD;
-            const want = candyJump ? candyQty() : ctx.edvdCount || (s === 'happy99k' ? boostersThatFit(EDVD, capH) : 5);
-            const qty = Math.min(want, boostersThatFit(boostItem, capH, 0, cdMult));
             const room = roomFor(boostItem, qty);
             // Ready within a few minutes after a tick (the Ecstasy's cooldown from the last jump ends then): the
             // boost goes at once, with ten minutes left of that tick's window (the simulator's rule: TICK_OFFSET_MIN).

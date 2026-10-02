@@ -141,14 +141,14 @@ test('review 2.2 · the energy cap: a jump trains at most 1,000 energy at jump h
     const pc = playerContext(state, {}, { unlockedKnown: Array.from({ length: p.gym }, (_, i) => i + 1) });
     const shares = targetShares({ strategy: 'edvdJump', build: p.build, goal: null }, pc.stats, buildOf(p.build).shares);
     const rows = [];
-    simulateStrategy('edvdJump', { ...simInputs({ state, pc, shares, settings: { horizonDays: 31, budget: Infinity }, prices: {}, special: 0, statics: {} }), trace: (x) => rows.push(x) });
+    simulateStrategy('edvdJump', { ...simInputs({ state, pc, shares, settings: { horizonDays: 31, budget: Infinity }, prices: {}, special: 0, statics: {}, live: true }), trace: (x) => rows.push(x) });
     assert.ok(rows.every((x) => x.E <= 1000), 'the most energy in the bar at a train: ' + Math.max(...rows.map((x) => x.E)));
     const sessions = sessionsOfTrace(rows);
     const jumps = sessions.filter((s) => s.H0 > p.happyMax * 1.5);
     assert.ok(jumps.length > 20 && jumps.every((s) => s.E0 === 1000), 'energy at each jump: ' + jumps.map((s) => s.E0).join(', '));
-    // What was in the bar is trained before the stack, at normal happy.
+    // What was in the bar is trained before the stack, at normal happy; and, with no jump today, today's refill after it.
     const first = sessions[0];
-    assert.ok(first.t === 0 && first.energy === 150 && first.H0 <= p.happyMax, 'the full bar is trained before Xanax #1: ' + JSON.stringify(first));
+    assert.ok(first.t === 0 && first.energy === 300 && first.H0 <= p.happyMax, 'the full bar and the day’s refill are trained before Xanax #1: ' + JSON.stringify(first));
 });
 
 test('review 2.3 · the second jump is the same in the simulator and the day plan (the jump cycle)', () => {
@@ -159,7 +159,7 @@ test('review 2.3 · the second jump is the same in the simulator and the day pla
     const plan = { strategy: 'edvdJump', build: p.build, goal: null };
     const shares = targetShares(plan, pc.stats, buildOf(p.build).shares);
     const rows = [];
-    simulateStrategy('edvdJump', { ...simInputs({ state, pc, shares, settings: { horizonDays: 31, budget: Infinity }, prices: {}, special: 0, statics: {} }), trace: (x) => rows.push(x) });
+    simulateStrategy('edvdJump', { ...simInputs({ state, pc, shares, settings: { horizonDays: 31, budget: Infinity }, prices: {}, special: 0, statics: {}, live: true }), trace: (x) => rows.push(x) });
     const jumps = sessionsOfTrace(rows).filter((s) => s.H0 > p.happyMax * 1.5);
     // The day plan right after the first jump, as the player would see it (energy 0, the Ecstasy's cooldown, the boosters').
     const t1 = T0 + jumps[0].t * MIN + 10 * MIN;

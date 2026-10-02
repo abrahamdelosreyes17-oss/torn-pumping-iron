@@ -16,9 +16,10 @@ function run(id, S0, dots, happyMax, extra = {}) {
     return simulateStrategy(id, { stats: { str: S0, spd: 0, def: 0, dex: 0 }, target: 'str', gyms: { str: { dots, energy: 10 } }, happyMax, prices: SAMPLE_PRICES, candyCount: 48, ...extra });
 }
 
-test('friend at 118k, 1,500 happy: steady +603k/$126M, daily +596k/$160M, choco +396k/$140M, EDVD +868k/$513M', () => {
-    // The jumps before the 1,000 cap (round 7): choco +410k, EDVD +936k.
-    const want = { steady: [603092, 126.0], dailyChoco: [595527, 159.6], chocoJump: [396360, 140.2], edvdJump: [867799, 513.4] };
+test('friend at 118k, 1,500 happy: steady +603k/$126M, daily +596k/$160M, choco +418k/$151M, EDVD +902k/$524M', () => {
+    // The jumps before the 1,000 cap (round 7): choco +410k, EDVD +936k; with the cap: +396k, +868k; with the refill
+    // used before the stack on a day with no jump (30 refills in the 30 days, it was 22): +418k, +902k.
+    const want = { steady: [603092, 126.0], dailyChoco: [595527, 159.6], chocoJump: [418234, 151.0], edvdJump: [902338, 524.2] };
     for (const [id, [g, c]] of Object.entries(want)) {
         const r = run(id, 118400, 6.5, 1500);
         within(r.gained, g, 2, id);
@@ -26,15 +27,16 @@ test('friend at 118k, 1,500 happy: steady +603k/$126M, daily +596k/$160M, choco 
     }
 });
 
-test('friend with the Private Island (5,025): steady +994k, daily +864k, choco +571k, EDVD +1,050k', () => {
-    // The jumps before the 1,000 cap (round 7): choco +592k, EDVD +1,125k.
-    const want = { steady: 994142, dailyChoco: 863700, chocoJump: 571172, edvdJump: 1049907 };
+test('friend with the Private Island (5,025): steady +994k, daily +864k, choco +603k, EDVD +1,096k', () => {
+    // The jumps before the 1,000 cap (round 7): choco +592k, EDVD +1,125k; with the cap: +571k, +1,050k; with the
+    // refill before the stack on a day with no jump: +603k, +1,096k.
+    const want = { steady: 994142, dailyChoco: 863700, chocoJump: 603101, edvdJump: 1095514 };
     for (const [id, g] of Object.entries(want)) within(run(id, 118400, 6.5, 5025).gained, g, 2, id);
 });
 
-test('owner at 250M (George\'s, 5,025): steady +119M, EDVD jumps only +73M', () => {
+test('owner at 250M (George\'s, 5,025): steady +119M, EDVD jumps only +76M', () => {
     within(run('steady', 250e6, 7.3, 5025).gained, 119410643, 2);
-    within(run('edvdJump', 250e6, 7.3, 5025).gained, 73117086, 2);
+    within(run('edvdJump', 250e6, 7.3, 5025).gained, 75973209, 2);
 });
 
 test('the friend should NOT choco jump: steady beats it by about 40%', () => {

@@ -481,6 +481,8 @@ export function* simulateSteps(id, o) {
         E = Math.max(E, maxE);
         buy(POINTS, REFILL_POINTS);
     };
+    // Would the day's refill add energy (a special held, or the points refill when the plan keeps it)?
+    const refillGives = (day) => (heldRule && specialOk(day)) || !o.noRefill;
     const xanax = (t) => {
         // Never above 1,000: what doesn't fit is lost (900 + a Xanax = 1,000).
         E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
@@ -604,15 +606,27 @@ export function* simulateSteps(id, o) {
             // Between a jump and the next stack (round 7, B.2; the day plan does the same: plan.js): natural energy
             // is trained as it comes, at normal happy, down to what fits under the 1,000 cap with the stack (4 Xanax:
             // to empty). Before round 7 the bar went into the stack: 1,150 and 1,120 at jump happy.
-            if (phase === 'stack' && stacked === 0) train(stackKeep);
+            // The boost waits until the whole of it fits under the booster cap (a jump is worth its full load).
+            const boostItem = id === 'chocoJump' || isConsole ? candyId : EDVD;
+            const boostN = Math.min(boostItem === EDVD ? edvdN : candyN, boostersThatFit(boostItem, capH, 0, cdMult));
+            if (phase === 'stack' && stacked === 0) {
+                // The stack's first Xanax on a Torn day no jump can land in, with that day's refill unused: the
+                // refill goes in now, before the stack (once energy is stacked above the maximum a refill adds
+                // nothing). The bar is trained first, so the refill fills all of it. The day plan does the same.
+                if (t >= drugFree && day !== refillDay && refillGives(day)) {
+                    const jumpFrom = Math.max(t + stackTo * xanCD, boosterFree - capH * 60 + (boostN - 1) * boosterHours(boostItem, cdMult) * 60);
+                    if (jumpFrom >= (day + 1) * 1440 - dayMin) {
+                        train();
+                        refill(day);
+                    }
+                }
+                train(stackKeep);
+            }
             if (phase === 'stack' && t >= drugFree) {
                 xanax(t);
                 stacked++;
                 if (stacked === stackTo) phase = 'wait';
             }
-            // The boost waits until the whole of it fits under the booster cap (a jump is worth its full load).
-            const boostItem = id === 'chocoJump' || isConsole ? candyId : EDVD;
-            const boostN = Math.min(boostItem === EDVD ? edvdN : candyN, boostersThatFit(boostItem, capH, 0, cdMult));
             if (phase === 'wait' && t >= drugFree && t % 15 === TICK_OFFSET_MIN && fitsAt(boostItem, t) >= boostN) {
                 const jp = jobHappy(day);
                 if (isConsole) {

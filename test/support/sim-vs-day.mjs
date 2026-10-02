@@ -29,7 +29,7 @@ export function firstBoost(p, strategy, { now = T0, days = 31 } = {}) {
     const settings = { horizonDays: days, budget: Infinity };
     // The simulator, with the inputs Create plan gives it.
     const rows = [];
-    simulateStrategy(strategy, { ...simInputs({ state, pc, shares, settings, prices: {}, special: 0, statics: {} }), trace: (x) => rows.push(x) });
+    simulateStrategy(strategy, { ...simInputs({ state, pc, shares, settings, prices: {}, special: 0, statics: {}, live: true }), trace: (x) => rows.push(x) });
     // Its first session above the maximum happy: the boost, and the refill trained right after it.
     const s = sessionsOfTrace(rows).find((x) => x.H0 > p.happyMax + 100);
     const sim = s ? { at: s.t, energy: s.energy, gain: s.gain, trains: { ...s.trains } } : null;
@@ -68,7 +68,7 @@ export function secondJump(p, strategy, { now = T0, days = 31 } = {}) {
     const shares = targetShares(plan, pc.stats, buildOf(p.build).shares);
     const settings = { horizonDays: days, budget: Infinity };
     const rows = [];
-    simulateStrategy(strategy, { ...simInputs({ state, pc, shares, settings, prices: {}, special: 0, statics: {} }), trace: (x) => rows.push(x) });
+    simulateStrategy(strategy, { ...simInputs({ state, pc, shares, settings, prices: {}, special: 0, statics: {}, live: true }), trace: (x) => rows.push(x) });
     const jumps = sessionsOfTrace(rows).filter((x) => x.H0 > p.happyMax + 100);
     const [first, s] = jumps;
     const sim = s ? { at: s.t, bar: s.E0, energy: s.energy, gain: s.gain, trains: { ...s.trains } } : null;
@@ -141,7 +141,7 @@ export function liteDay(p, xanaxPerDay, { refill = true } = {}) {
     const plan = { strategy: 'steadyLite', build: p.build, goal: null };
     const shares = targetShares(plan, pc.stats, buildOf(p.build).shares);
     const rows = [];
-    const base = simInputs({ state, pc, shares, settings: { horizonDays: 31, budget: Infinity }, prices: {}, special: 0, statics: {} });
+    const base = simInputs({ state, pc, shares, settings: { horizonDays: 31, budget: Infinity }, prices: {}, special: 0, statics: {}, live: true });
     const r = simulateStrategy('steadyLite', { ...base, xanaxPerDay, noRefill: !refill, days: 1, trace: (x) => rows.push(x) });
     const sim = { xanax: r.used[XANAX] || 0, energy: rows.reduce((a, x) => a + x.e, 0), gain: rows.reduce((a, x) => a + x.gain, 0) };
     // The day plan follows the comparison's row (its Xanax a day, its refill).
