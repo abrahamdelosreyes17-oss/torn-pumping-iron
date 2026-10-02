@@ -118,7 +118,8 @@ export function manyDays(p, strategy, { hour = 12, days = 25, bars = {}, xanaxPe
     const sim = { refills: (r.used.points || 0) / 30, xanax: r.used[XANAX] || 0, boosts: r.used.candyBoosts || 0, energy: r.energyTrained, jumps: sessionsOfTrace(rows).filter((x) => x.H0 > p.happyMax + 100).map((x) => ({ at: x.t, bar: x.E0 })) };
     // The day plan's context as buildModel sets it for a player with nothing held and no perks.
     const ctx = { shares, unlocked: pc.unlocked, perks: pc.perks.mult, keep: [], active: state.gymId, table: pc.table, bliss: false, happyLossMult: pc.perks.happyLossMult, drugsToday: 0, stackedSoFar: 0, boosterCapH: BOOSTER_CAP_H, cdMult: 1, specialHeld: 0, held: {}, ...lite };
-    const end = now + days * 86400e3;
+    // The plan's end: Torn's midnight after its last day (today is the first), where the simulator's run ends too.
+    const end = tornDayStart(now) + days * 86400e3;
     const steps = dayTimeline({ state, now, strategy, ctx, until: end }).filter((x) => x.at < end);
     const xanaxIn = (x) => (x.items || []).reduce((a, it) => a + (it.id === XANAX ? it.qty || 0 : 0), 0);
     const day = { refills: steps.filter((x) => x.kind === 'refill').length, xanax: steps.reduce((a, x) => a + xanaxIn(x), 0), boosts: steps.filter((x) => x.kind === 'boost').length, energy: steps.reduce((a, x) => a + (x.energy || 0), 0), jumps: steps.filter((x) => x.kind === 'jump').map((x) => ({ at: Math.round((x.at - now) / 60e3), bar: x.energy })) };

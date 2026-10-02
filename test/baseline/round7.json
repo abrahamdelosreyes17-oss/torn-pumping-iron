@@ -3,141 +3,141 @@
     "friend": {
       "month": {
         "max": { "days": 31, "recommended": "edvdJump", "plans": {
-          "steady": {"gained":76350,"cost":138010000,"energy":53740,"used":{"206":107,"points":960},"gyms":[13,14,15]},
-          "dailyChoco": {"gained":137919,"cost":171680000,"energy":42540,"used":{"197":32,"206":88,"527":1490,"points":960},"candy":"527x49","gyms":[13,14,15]},
-          "chocoJump": {"gained":148598,"cost":150749000,"energy":29510,"used":{"197":23,"206":94,"527":1127,"points":720},"candy":"527x49","gyms":[13,14]},
-          "edvdJump": {"gained":368771,"cost":540185000,"energy":29510,"used":{"197":23,"206":94,"366":115,"points":720},"gyms":[13,14]},
-          "steadyMax": {"gained":191159,"cost":1730210000,"energy":72940,"used":{"206":107,"367":128,"points":960},"gyms":[13,14,15,16]},
-          "candyXanax": {"gained":135490,"cost":183706000,"energy":54010,"used":{"206":107,"527":1428,"points":960},"candy":"527x49","gyms":[13,14,15]},
-          "consoleJump": {"gained":206350,"cost":164617170,"energy":21210,"used":{"104":1,"197":29,"206":90,"527":1421,"points":930},"candy":"527x49","gyms":[13]}
+          "steady": {"gained":75316,"cost":135000000,"energy":52740,"used":{"206":105,"points":930},"gyms":[13,14,15]},
+          "dailyChoco": {"gained":134903,"cost":167877000,"energy":41990,"used":{"197":31,"206":87,"527":1441,"points":930},"candy":"527x49","gyms":[13,14,15]},
+          "chocoJump": {"gained":141018,"cost":146116000,"energy":28240,"used":{"197":22,"206":92,"527":1078,"points":690},"candy":"527x49","gyms":[13,14]},
+          "edvdJump": {"gained":349823,"cost":518620000,"energy":28240,"used":{"197":22,"206":92,"366":110,"points":690},"gyms":[13,14]},
+          "steadyMax": {"gained":186257,"cost":1702400000,"energy":71640,"used":{"206":105,"367":126,"points":930},"gyms":[13,14,15,16]},
+          "candyXanax": {"gained":132122,"cost":179352000,"energy":53000,"used":{"206":105,"527":1386,"points":930},"candy":"527x49","gyms":[13,14,15]},
+          "consoleJump": {"gained":206350,"cost":162957170,"energy":21210,"used":{"104":1,"197":29,"206":88,"527":1421,"points":930},"candy":"527x49","gyms":[13]}
         } },
         "most": { "days": 31, "recommended": "consoleJump", "plans": {
-          "steady": {"gained":76350,"cost":138010000,"energy":53740,"used":{"206":107,"points":960},"gyms":[13,14,15]},
-          "dailyChoco": {"gained":107563,"cost":125480000,"energy":37740,"used":{"197":32,"206":88,"527":1490},"candy":"527x49","refill":false,"gyms":[13,14]},
-          "chocoJump": {"gained":148598,"cost":150749000,"energy":29510,"used":{"197":23,"206":94,"527":1127,"points":720},"candy":"527x49","gyms":[13,14]},
-          "edvdJump": {"gained":368771,"cost":540185000,"energy":29510,"used":{"197":23,"206":94,"366":115,"points":720},"gyms":[13,14]},
-          "steadyMax": {"gained":191159,"cost":1730210000,"energy":72940,"used":{"206":107,"367":128,"points":960},"gyms":[13,14,15,16]},
-          "candyXanax": {"gained":116953,"cost":140506000,"energy":49210,"used":{"206":107,"527":1428},"candy":"527x49","refill":false,"gyms":[13,14,15]},
-          "consoleJump": {"gained":159338,"cost":122767170,"energy":16560,"used":{"104":1,"197":29,"206":90,"527":1421},"candy":"527x49","refill":false,"gyms":[13]}
+          "steady": {"gained":75316,"cost":135000000,"energy":52740,"used":{"206":105,"points":930},"gyms":[13,14,15]},
+          "dailyChoco": {"gained":105647,"cost":123027000,"energy":37340,"used":{"197":31,"206":87,"527":1441},"candy":"527x49","refill":false,"gyms":[13,14]},
+          "chocoJump": {"gained":141018,"cost":146116000,"energy":28240,"used":{"197":22,"206":92,"527":1078,"points":690},"candy":"527x49","gyms":[13,14]},
+          "edvdJump": {"gained":349823,"cost":518620000,"energy":28240,"used":{"197":22,"206":92,"366":110,"points":690},"gyms":[13,14]},
+          "steadyMax": {"gained":186257,"cost":1702400000,"energy":71640,"used":{"206":105,"367":126,"points":930},"gyms":[13,14,15,16]},
+          "candyXanax": {"gained":114290,"cost":137502000,"energy":48350,"used":{"206":105,"527":1386},"candy":"527x49","refill":false,"gyms":[13,14,15]},
+          "consoleJump": {"gained":159338,"cost":121107170,"energy":16560,"used":{"104":1,"197":29,"206":88,"527":1421},"candy":"527x49","refill":false,"gyms":[13]}
         } },
         "small": { "days": 31, "recommended": "steadyLite", "plans": {
-          "steady": {"gained":76350,"cost":138010000,"energy":53740,"used":{"206":107,"points":960},"gyms":[13,14,15]},
-          "dailyChoco": {"gained":137919,"cost":171680000,"energy":42540,"used":{"197":32,"206":88,"527":1490,"points":960},"candy":"527x49","gyms":[13,14,15]},
-          "chocoJump": {"gained":148598,"cost":150749000,"energy":29510,"used":{"197":23,"206":94,"527":1127,"points":720},"candy":"527x49","gyms":[13,14]},
-          "edvdJump": {"gained":368771,"cost":540185000,"energy":29510,"used":{"197":23,"206":94,"366":115,"points":720},"gyms":[13,14]},
-          "steadyMax": {"gained":191159,"cost":1730210000,"energy":72940,"used":{"206":107,"367":128,"points":960},"gyms":[13,14,15,16]},
-          "candyXanax": {"gained":135490,"cost":183706000,"energy":54010,"used":{"206":107,"527":1428,"points":960},"candy":"527x49","gyms":[13,14,15]},
-          "consoleJump": {"gained":206350,"cost":164617170,"energy":21210,"used":{"104":1,"197":29,"206":90,"527":1421,"points":930},"candy":"527x49","gyms":[13]},
-          "steadyLite": {"gained":80188,"cost":56120000,"energy":38460,"used":{"206":64},"refill":false,"gyms":[13,14]}
+          "steady": {"gained":75316,"cost":135000000,"energy":52740,"used":{"206":105,"points":930},"gyms":[13,14,15]},
+          "dailyChoco": {"gained":134903,"cost":167877000,"energy":41990,"used":{"197":31,"206":87,"527":1441,"points":930},"candy":"527x49","gyms":[13,14,15]},
+          "chocoJump": {"gained":141018,"cost":146116000,"energy":28240,"used":{"197":22,"206":92,"527":1078,"points":690},"candy":"527x49","gyms":[13,14]},
+          "edvdJump": {"gained":349823,"cost":518620000,"energy":28240,"used":{"197":22,"206":92,"366":110,"points":690},"gyms":[13,14]},
+          "steadyMax": {"gained":186257,"cost":1702400000,"energy":71640,"used":{"206":105,"367":126,"points":930},"gyms":[13,14,15,16]},
+          "candyXanax": {"gained":132122,"cost":179352000,"energy":53000,"used":{"206":105,"527":1386,"points":930},"candy":"527x49","gyms":[13,14,15]},
+          "consoleJump": {"gained":206350,"cost":162957170,"energy":21210,"used":{"104":1,"197":29,"206":88,"527":1421,"points":930},"candy":"527x49","gyms":[13]},
+          "steadyLite": {"gained":78038,"cost":54460000,"energy":37600,"used":{"206":62},"refill":false,"gyms":[13,14]}
         } },
         "candy": { "days": 31, "recommended": "edvdJump", "plans": {
-          "steady": {"gained":76350,"cost":138010000,"energy":53740,"used":{"206":107,"points":960},"gyms":[13,14,15]},
-          "dailyChoco": {"gained":124971,"cost":124473820,"energy":42540,"used":{"35":1490,"197":32,"206":88,"points":960},"candy":"35x49","gyms":[13,14,15]},
-          "chocoJump": {"gained":122641,"cost":115043386,"energy":29510,"used":{"35":1127,"197":23,"206":94,"points":720},"candy":"35x49","gyms":[13,14]},
-          "edvdJump": {"gained":368771,"cost":540185000,"energy":29510,"used":{"197":23,"206":94,"366":115,"points":720},"gyms":[13,14]},
-          "steadyMax": {"gained":191159,"cost":1730210000,"energy":72940,"used":{"206":107,"367":128,"points":960},"gyms":[13,14,15,16]},
-          "candyXanax": {"gained":129008,"cost":138464104,"energy":54010,"used":{"35":1428,"206":107,"points":960},"candy":"35x49","gyms":[13,14,15]},
-          "consoleJump": {"gained":186139,"cost":119597048,"energy":21210,"used":{"35":1421,"104":1,"197":29,"206":90,"points":930},"candy":"35x49","gyms":[13]}
+          "steady": {"gained":75316,"cost":135000000,"energy":52740,"used":{"206":105,"points":930},"gyms":[13,14,15]},
+          "dailyChoco": {"gained":122391,"cost":122223238,"energy":41990,"used":{"35":1441,"197":31,"206":87,"points":930},"candy":"35x49","gyms":[13,14,15]},
+          "chocoJump": {"gained":116403,"cost":111962804,"energy":28240,"used":{"35":1078,"197":22,"206":92,"points":690},"candy":"35x49","gyms":[13,14]},
+          "edvdJump": {"gained":349823,"cost":518620000,"energy":28240,"used":{"197":22,"206":92,"366":110,"points":690},"gyms":[13,14]},
+          "steadyMax": {"gained":186257,"cost":1702400000,"energy":71640,"used":{"206":105,"367":126,"points":930},"gyms":[13,14,15,16]},
+          "candyXanax": {"gained":125861,"cost":135440748,"energy":53000,"used":{"35":1386,"206":105,"points":930},"candy":"35x49","gyms":[13,14,15]},
+          "consoleJump": {"gained":186139,"cost":117937048,"energy":21210,"used":{"35":1421,"104":1,"197":29,"206":88,"points":930},"candy":"35x49","gyms":[13]}
         } }
       },
       "path": {
-        "1": {"days":31,"gained":373290,"cost":546935000,"energy":30540,"low":351791,"high":394997,"plans":"edvdJump:12 edvdJump:3 edvdJump:16"},
-        "3": {"days":92,"gained":2041037,"cost":3618835000,"energy":158800,"low":1829744,"high":2271107,"plans":"edvdJump:12 edvdJump:3 edvdJump:15 edvdJump:13 steadyMax:2 steadyMax:1 steadyMax:14 steadyMax:32"},
-        "12": {"days":365,"gained":720367657,"cost":19326925000,"energy":799670,"low":626600182,"high":814204897,"plans":"edvdJump:12 edvdJump:3 edvdJump:15 edvdJump:13 steadyMax:2 steadyMax:1 steadyMax:14 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:23 steadyMax:7 steadyMax:2 steadyMax:28 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:5"}
+        "1": {"days":31,"gained":354230,"cost":526200000,"energy":29280,"low":334005,"high":374762,"plans":"edvdJump:12 edvdJump:3 edvdJump:16"},
+        "3": {"days":92,"gained":1974494,"cost":3598100000,"energy":157540,"low":1771252,"high":2195994,"plans":"edvdJump:12 edvdJump:3 edvdJump:15 edvdJump:13 steadyMax:2 steadyMax:1 steadyMax:14 steadyMax:32"},
+        "12": {"days":365,"gained":713853323,"cost":19306190000,"energy":798480,"low":620280504,"high":807612699,"plans":"edvdJump:12 edvdJump:3 edvdJump:15 edvdJump:13 steadyMax:2 steadyMax:1 steadyMax:14 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:23 steadyMax:7 steadyMax:2 steadyMax:28 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:5"}
       }
     },
     "mid": {
       "month": {
         "max": { "days": 31, "recommended": "steadyMax", "plans": {
-          "steady": {"gained":3774473,"cost":132010000,"energy":53740,"used":{"206":107,"points":960}},
-          "dailyChoco": {"gained":3111510,"cost":165680000,"energy":42540,"used":{"197":32,"206":88,"527":1490,"points":960},"candy":"527x49"},
-          "chocoJump": {"gained":2146835,"cost":147749000,"energy":29510,"used":{"197":23,"206":94,"527":1127,"points":720},"candy":"527x49"},
-          "edvdJump": {"gained":2594192,"cost":537185000,"energy":29510,"used":{"197":23,"206":94,"366":115,"points":720}},
-          "steadyMax": {"gained":6226095,"cost":1719210000,"energy":72940,"used":{"206":107,"367":128,"points":960}},
-          "candyXanax": {"gained":4108743,"cost":177706000,"energy":54010,"used":{"206":107,"527":1428,"points":960},"candy":"527x49"},
-          "consoleJump": {"gained":1668084,"cost":163617170,"energy":21210,"used":{"104":1,"197":29,"206":90,"527":1421,"points":930},"blocked":true}
+          "steady": {"gained":3687584,"cost":129000000,"energy":52740,"used":{"206":105,"points":930}},
+          "dailyChoco": {"gained":3057269,"cost":161877000,"energy":41990,"used":{"197":31,"206":87,"527":1441,"points":930},"candy":"527x49"},
+          "chocoJump": {"gained":2034374,"cost":143116000,"energy":28240,"used":{"197":22,"206":92,"527":1078,"points":690},"candy":"527x49"},
+          "edvdJump": {"gained":2458274,"cost":515620000,"energy":28240,"used":{"197":22,"206":92,"366":110,"points":690}},
+          "steadyMax": {"gained":6063941,"cost":1691400000,"energy":71640,"used":{"206":105,"367":126,"points":930}},
+          "candyXanax": {"gained":4004485,"cost":173352000,"energy":53000,"used":{"206":105,"527":1386,"points":930},"candy":"527x49"},
+          "consoleJump": {"gained":1668084,"cost":161957170,"energy":21210,"used":{"104":1,"197":29,"206":88,"527":1421,"points":930},"blocked":true}
         } },
         "most": { "days": 31, "recommended": "steady", "plans": {
-          "steady": {"gained":3774473,"cost":132010000,"energy":53740,"used":{"206":107,"points":960}},
-          "dailyChoco": {"gained":2633796,"cost":122480000,"energy":37740,"used":{"197":32,"206":88,"527":1490},"candy":"527x49","refill":false},
-          "chocoJump": {"gained":2146835,"cost":147749000,"energy":29510,"used":{"197":23,"206":94,"527":1127,"points":720},"candy":"527x49"},
-          "edvdJump": {"gained":2594192,"cost":537185000,"energy":29510,"used":{"197":23,"206":94,"366":115,"points":720}},
-          "steadyMax": {"gained":6226095,"cost":1719210000,"energy":72940,"used":{"206":107,"367":128,"points":960}},
-          "candyXanax": {"gained":3614116,"cost":134506000,"energy":49210,"used":{"206":107,"527":1428},"candy":"527x49","refill":false},
-          "consoleJump": {"gained":1668084,"cost":163617170,"energy":21210,"used":{"104":1,"197":29,"206":90,"527":1421,"points":930},"blocked":true}
+          "steady": {"gained":3687584,"cost":129000000,"energy":52740,"used":{"206":105,"points":930}},
+          "dailyChoco": {"gained":2596979,"cost":120027000,"energy":37340,"used":{"197":31,"206":87,"527":1441},"candy":"527x49","refill":false},
+          "chocoJump": {"gained":2034374,"cost":143116000,"energy":28240,"used":{"197":22,"206":92,"527":1078,"points":690},"candy":"527x49"},
+          "edvdJump": {"gained":2458274,"cost":515620000,"energy":28240,"used":{"197":22,"206":92,"366":110,"points":690}},
+          "steadyMax": {"gained":6063941,"cost":1691400000,"energy":71640,"used":{"206":105,"367":126,"points":930}},
+          "candyXanax": {"gained":3530536,"cost":131502000,"energy":48350,"used":{"206":105,"527":1386},"candy":"527x49","refill":false},
+          "consoleJump": {"gained":1668084,"cost":161957170,"energy":21210,"used":{"104":1,"197":29,"206":88,"527":1421,"points":930},"blocked":true}
         } },
         "small": { "days": 31, "recommended": "steadyLite", "plans": {
-          "steady": {"gained":3774473,"cost":132010000,"energy":53740,"used":{"206":107,"points":960}},
-          "dailyChoco": {"gained":3111510,"cost":165680000,"energy":42540,"used":{"197":32,"206":88,"527":1490,"points":960},"candy":"527x49"},
-          "chocoJump": {"gained":2146835,"cost":147749000,"energy":29510,"used":{"197":23,"206":94,"527":1127,"points":720},"candy":"527x49"},
-          "edvdJump": {"gained":2594192,"cost":537185000,"energy":29510,"used":{"197":23,"206":94,"366":115,"points":720}},
-          "steadyMax": {"gained":6226095,"cost":1719210000,"energy":72940,"used":{"206":107,"367":128,"points":960}},
-          "candyXanax": {"gained":4108743,"cost":177706000,"energy":54010,"used":{"206":107,"527":1428,"points":960},"candy":"527x49"},
-          "consoleJump": {"gained":1668084,"cost":163617170,"energy":21210,"used":{"104":1,"197":29,"206":90,"527":1421,"points":930},"blocked":true},
-          "steadyLite": {"gained":2604719,"cost":53120000,"energy":38460,"used":{"206":64},"refill":false}
+          "steady": {"gained":3687584,"cost":129000000,"energy":52740,"used":{"206":105,"points":930}},
+          "dailyChoco": {"gained":3057269,"cost":161877000,"energy":41990,"used":{"197":31,"206":87,"527":1441,"points":930},"candy":"527x49"},
+          "chocoJump": {"gained":2034374,"cost":143116000,"energy":28240,"used":{"197":22,"206":92,"527":1078,"points":690},"candy":"527x49"},
+          "edvdJump": {"gained":2458274,"cost":515620000,"energy":28240,"used":{"197":22,"206":92,"366":110,"points":690}},
+          "steadyMax": {"gained":6063941,"cost":1691400000,"energy":71640,"used":{"206":105,"367":126,"points":930}},
+          "candyXanax": {"gained":4004485,"cost":173352000,"energy":53000,"used":{"206":105,"527":1386,"points":930},"candy":"527x49"},
+          "consoleJump": {"gained":1668084,"cost":161957170,"energy":21210,"used":{"104":1,"197":29,"206":88,"527":1421,"points":930},"blocked":true},
+          "steadyLite": {"gained":2531092,"cost":51460000,"energy":37600,"used":{"206":62},"refill":false}
         } },
         "candy": { "days": 31, "recommended": "steadyMax", "plans": {
-          "steady": {"gained":3774473,"cost":132010000,"energy":53740,"used":{"206":107,"points":960}},
-          "dailyChoco": {"gained":3079324,"cost":118473820,"energy":42540,"used":{"35":1490,"197":32,"206":88,"points":960},"candy":"35x49"},
-          "chocoJump": {"gained":2083701,"cost":112043386,"energy":29510,"used":{"35":1127,"197":23,"206":94,"points":720},"candy":"35x49"},
-          "edvdJump": {"gained":2594192,"cost":537185000,"energy":29510,"used":{"197":23,"206":94,"366":115,"points":720}},
-          "steadyMax": {"gained":6226095,"cost":1719210000,"energy":72940,"used":{"206":107,"367":128,"points":960}},
-          "candyXanax": {"gained":4085770,"cost":132464104,"energy":54010,"used":{"35":1428,"206":107,"points":960},"candy":"35x49"},
-          "consoleJump": {"gained":1668084,"cost":163367074,"energy":21210,"used":{"104":1,"197":29,"206":90,"527":1421,"points":930},"blocked":true}
+          "steady": {"gained":3687584,"cost":129000000,"energy":52740,"used":{"206":105,"points":930}},
+          "dailyChoco": {"gained":3026158,"cost":116223238,"energy":41990,"used":{"35":1441,"197":31,"206":87,"points":930},"candy":"35x49"},
+          "chocoJump": {"gained":1974455,"cost":108962804,"energy":28240,"used":{"35":1078,"197":22,"206":92,"points":690},"candy":"35x49"},
+          "edvdJump": {"gained":2458274,"cost":515620000,"energy":28240,"used":{"197":22,"206":92,"366":110,"points":690}},
+          "steadyMax": {"gained":6063941,"cost":1691400000,"energy":71640,"used":{"206":105,"367":126,"points":930}},
+          "candyXanax": {"gained":3982351,"cost":129440748,"energy":53000,"used":{"35":1386,"206":105,"points":930},"candy":"35x49"},
+          "consoleJump": {"gained":1668084,"cost":161707074,"energy":21210,"used":{"104":1,"197":29,"206":88,"527":1421,"points":930},"blocked":true}
         } }
       },
       "path": {
-        "1": {"days":31,"gained":6674602,"cost":1969240000,"energy":74535,"low":6178721,"high":7089931,"plans":"steadyMax:12 steadyMax:3 steadyMax:16"},
-        "3": {"days":92,"gained":56456612,"cost":5500320000,"energy":220340,"low":49573898,"high":64586975,"plans":"steadyMax:12 steadyMax:3 steadyMax:15 steadyMax:13 steadyMax:2 steadyMax:1 steadyMax:14 steadyMax:32"},
-        "12": {"days":365,"gained":1473754878,"cost":20783410000,"energy":861765,"low":1368607135,"high":1581698954,"plans":"steadyMax:12 steadyMax:3 steadyMax:15 steadyMax:13 steadyMax:2 steadyMax:1 steadyMax:14 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:23 steadyMax:7 steadyMax:2 steadyMax:28 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:5"}
+        "1": {"days":31,"gained":6487299,"cost":1941430000,"energy":73235,"low":6021751,"high":7004036,"plans":"steadyMax:12 steadyMax:3 steadyMax:16"},
+        "3": {"days":92,"gained":55488177,"cost":5472510000,"energy":218950,"low":48815900,"high":64017383,"plans":"steadyMax:12 steadyMax:3 steadyMax:15 steadyMax:13 steadyMax:2 steadyMax:1 steadyMax:14 steadyMax:32"},
+        "12": {"days":365,"gained":1470598155,"cost":20755600000,"energy":860480,"low":1365397163,"high":1579220950,"plans":"steadyMax:12 steadyMax:3 steadyMax:15 steadyMax:13 steadyMax:2 steadyMax:1 steadyMax:14 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:23 steadyMax:7 steadyMax:2 steadyMax:28 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:5"}
       }
     },
     "owner": {
       "month": {
         "max": { "days": 31, "recommended": "steadyMax", "plans": {
-          "steady": {"gained":36226879,"cost":132010000,"energy":53740,"used":{"206":107,"points":960}},
-          "dailyChoco": {"gained":23714722,"cost":165680000,"energy":42540,"used":{"197":32,"206":88,"527":1490,"points":960},"candy":"527x49"},
-          "chocoJump": {"gained":12266277,"cost":147749000,"energy":29510,"used":{"197":23,"206":94,"527":1127,"points":720},"candy":"527x49"},
-          "edvdJump": {"gained":13819783,"cost":537185000,"energy":29510,"used":{"197":23,"206":94,"366":115,"points":720}},
-          "steadyMax": {"gained":79267765,"cost":1719210000,"energy":72940,"used":{"206":107,"367":128,"points":960}},
-          "candyXanax": {"gained":40200182,"cost":177706000,"energy":54010,"used":{"206":107,"527":1428,"points":960},"candy":"527x49"},
-          "consoleJump": {"gained":7645699,"cost":163617170,"energy":21210,"used":{"104":1,"197":29,"206":90,"527":1421,"points":930},"blocked":true}
+          "steady": {"gained":34706556,"cost":129000000,"energy":52740,"used":{"206":105,"points":930}},
+          "dailyChoco": {"gained":23015682,"cost":161877000,"energy":41990,"used":{"197":31,"206":87,"527":1441,"points":930},"candy":"527x49"},
+          "chocoJump": {"gained":11321729,"cost":143116000,"energy":28240,"used":{"197":22,"206":92,"527":1078,"points":690},"candy":"527x49"},
+          "edvdJump": {"gained":12732373,"cost":515620000,"energy":28240,"used":{"197":22,"206":92,"366":110,"points":690}},
+          "steadyMax": {"gained":76376097,"cost":1691400000,"energy":71640,"used":{"206":105,"367":126,"points":930}},
+          "candyXanax": {"gained":38433132,"cost":173352000,"energy":53000,"used":{"206":105,"527":1386,"points":930},"candy":"527x49"},
+          "consoleJump": {"gained":7645699,"cost":161957170,"energy":21210,"used":{"104":1,"197":29,"206":88,"527":1421,"points":930},"blocked":true}
         } },
         "most": { "days": 31, "recommended": "steady", "plans": {
-          "steady": {"gained":36226879,"cost":132010000,"energy":53740,"used":{"206":107,"points":960}},
-          "dailyChoco": {"gained":18070654,"cost":122480000,"energy":37740,"used":{"197":32,"206":88,"527":1490},"candy":"527x49","refill":false},
-          "chocoJump": {"gained":12266277,"cost":147749000,"energy":29510,"used":{"197":23,"206":94,"527":1127,"points":720},"candy":"527x49"},
-          "edvdJump": {"gained":13819783,"cost":537185000,"energy":29510,"used":{"197":23,"206":94,"366":115,"points":720}},
-          "steadyMax": {"gained":79267765,"cost":1719210000,"energy":72940,"used":{"206":107,"367":128,"points":960}},
-          "candyXanax": {"gained":32044281,"cost":134506000,"energy":49210,"used":{"206":107,"527":1428},"candy":"527x49","refill":false},
-          "consoleJump": {"gained":7645699,"cost":163617170,"energy":21210,"used":{"104":1,"197":29,"206":90,"527":1421,"points":930},"blocked":true}
+          "steady": {"gained":34706556,"cost":129000000,"energy":52740,"used":{"206":105,"points":930}},
+          "dailyChoco": {"gained":17666460,"cost":120027000,"energy":37340,"used":{"197":31,"206":87,"527":1441},"candy":"527x49","refill":false},
+          "chocoJump": {"gained":11321729,"cost":143116000,"energy":28240,"used":{"197":22,"206":92,"527":1078,"points":690},"candy":"527x49"},
+          "edvdJump": {"gained":12732373,"cost":515620000,"energy":28240,"used":{"197":22,"206":92,"366":110,"points":690}},
+          "steadyMax": {"gained":76376097,"cost":1691400000,"energy":71640,"used":{"206":105,"367":126,"points":930}},
+          "candyXanax": {"gained":30695393,"cost":131502000,"energy":48350,"used":{"206":105,"527":1386},"candy":"527x49","refill":false},
+          "consoleJump": {"gained":7645699,"cost":161957170,"energy":21210,"used":{"104":1,"197":29,"206":88,"527":1421,"points":930},"blocked":true}
         } },
         "small": { "days": 31, "recommended": "steadyLite", "plans": {
-          "steady": {"gained":36226879,"cost":132010000,"energy":53740,"used":{"206":107,"points":960}},
-          "dailyChoco": {"gained":23714722,"cost":165680000,"energy":42540,"used":{"197":32,"206":88,"527":1490,"points":960},"candy":"527x49"},
-          "chocoJump": {"gained":12266277,"cost":147749000,"energy":29510,"used":{"197":23,"206":94,"527":1127,"points":720},"candy":"527x49"},
-          "edvdJump": {"gained":13819783,"cost":537185000,"energy":29510,"used":{"197":23,"206":94,"366":115,"points":720}},
-          "steadyMax": {"gained":79267765,"cost":1719210000,"energy":72940,"used":{"206":107,"367":128,"points":960}},
-          "candyXanax": {"gained":40200182,"cost":177706000,"energy":54010,"used":{"206":107,"527":1428,"points":960},"candy":"527x49"},
-          "consoleJump": {"gained":7645699,"cost":163617170,"energy":21210,"used":{"104":1,"197":29,"206":90,"527":1421,"points":930},"blocked":true},
-          "steadyLite": {"gained":18191090,"cost":53120000,"energy":38460,"used":{"206":64},"refill":false}
+          "steady": {"gained":34706556,"cost":129000000,"energy":52740,"used":{"206":105,"points":930}},
+          "dailyChoco": {"gained":23015682,"cost":161877000,"energy":41990,"used":{"197":31,"206":87,"527":1441,"points":930},"candy":"527x49"},
+          "chocoJump": {"gained":11321729,"cost":143116000,"energy":28240,"used":{"197":22,"206":92,"527":1078,"points":690},"candy":"527x49"},
+          "edvdJump": {"gained":12732373,"cost":515620000,"energy":28240,"used":{"197":22,"206":92,"366":110,"points":690}},
+          "steadyMax": {"gained":76376097,"cost":1691400000,"energy":71640,"used":{"206":105,"367":126,"points":930}},
+          "candyXanax": {"gained":38433132,"cost":173352000,"energy":53000,"used":{"206":105,"527":1386,"points":930},"candy":"527x49"},
+          "consoleJump": {"gained":7645699,"cost":161957170,"energy":21210,"used":{"104":1,"197":29,"206":88,"527":1421,"points":930},"blocked":true},
+          "steadyLite": {"gained":17360030,"cost":51460000,"energy":37600,"used":{"206":62},"refill":false}
         } },
         "candy": { "days": 31, "recommended": "steadyMax", "plans": {
-          "steady": {"gained":36226879,"cost":132010000,"energy":53740,"used":{"206":107,"points":960}},
-          "dailyChoco": {"gained":23514340,"cost":118473820,"energy":42540,"used":{"35":1490,"197":32,"206":88,"points":960},"candy":"35x49"},
-          "chocoJump": {"gained":12004357,"cost":112043386,"energy":29510,"used":{"35":1127,"197":23,"206":94,"points":720},"candy":"35x49"},
-          "edvdJump": {"gained":13819783,"cost":537185000,"energy":29510,"used":{"197":23,"206":94,"366":115,"points":720}},
-          "steadyMax": {"gained":79267765,"cost":1719210000,"energy":72940,"used":{"206":107,"367":128,"points":960}},
-          "candyXanax": {"gained":39962478,"cost":132464104,"energy":54010,"used":{"35":1428,"206":107,"points":960},"candy":"35x49"},
-          "consoleJump": {"gained":7645699,"cost":163367074,"energy":21210,"used":{"104":1,"197":29,"206":90,"527":1421,"points":930},"blocked":true}
+          "steady": {"gained":34706556,"cost":129000000,"energy":52740,"used":{"206":105,"points":930}},
+          "dailyChoco": {"gained":22825660,"cost":116223238,"energy":41990,"used":{"35":1441,"197":31,"206":87,"points":930},"candy":"35x49"},
+          "chocoJump": {"gained":11084189,"cost":108962804,"energy":28240,"used":{"35":1078,"197":22,"206":92,"points":690},"candy":"35x49"},
+          "edvdJump": {"gained":12732373,"cost":515620000,"energy":28240,"used":{"197":22,"206":92,"366":110,"points":690}},
+          "steadyMax": {"gained":76376097,"cost":1691400000,"energy":71640,"used":{"206":105,"367":126,"points":930}},
+          "candyXanax": {"gained":38207032,"cost":129440748,"energy":53000,"used":{"35":1386,"206":105,"points":930},"candy":"35x49"},
+          "consoleJump": {"gained":7645699,"cost":161707074,"energy":21210,"used":{"104":1,"197":29,"206":88,"527":1421,"points":930},"blocked":true}
         } }
       },
       "path": {
-        "1": {"days":31,"gained":83206646,"cost":1969240000,"energy":74690,"low":74874176,"high":90085498,"plans":"steadyMax:12 steadyMax:3 steadyMax:16"},
-        "3": {"days":92,"gained":402500737,"cost":5550320000,"energy":220600,"low":376265188,"high":428227873,"plans":"steadyMax:12 steadyMax:3 steadyMax:15 steadyMax:13 steadyMax:2 steadyMax:1 steadyMax:14 steadyMax:32"},
-        "12": {"days":365,"gained":1969661606,"cost":20833410000,"energy":861805,"low":1858118068,"high":2080322112,"plans":"steadyMax:12 steadyMax:3 steadyMax:15 steadyMax:13 steadyMax:2 steadyMax:1 steadyMax:14 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:23 steadyMax:7 steadyMax:2 steadyMax:28 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:5"}
+        "1": {"days":31,"gained":80313486,"cost":1941430000,"energy":73390,"low":72129315,"high":87702832,"plans":"steadyMax:12 steadyMax:3 steadyMax:16"},
+        "3": {"days":92,"gained":399398340,"cost":5522510000,"energy":219280,"low":373840457,"high":424953665,"plans":"steadyMax:12 steadyMax:3 steadyMax:15 steadyMax:13 steadyMax:2 steadyMax:1 steadyMax:14 steadyMax:32"},
+        "12": {"days":365,"gained":1965717559,"cost":20805600000,"energy":860285,"low":1855007618,"high":2077406769,"plans":"steadyMax:12 steadyMax:3 steadyMax:15 steadyMax:13 steadyMax:2 steadyMax:1 steadyMax:14 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:23 steadyMax:7 steadyMax:2 steadyMax:28 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:30 steadyMax:5"}
       }
     }
   },
-  "time": {"friend":{"1":86,"3":238,"12":1065},"mid":{"1":84,"3":211,"12":824},"owner":{"1":74,"3":209,"12":768}}
+  "time": {"friend":{"1":92,"3":270,"12":1100},"mid":{"1":83,"3":210,"12":796},"owner":{"1":72,"3":199,"12":786}}
 }

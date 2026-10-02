@@ -8,56 +8,56 @@ Max gains, no budget · 31 days · recommended: EDVD jump
 
 | Plan | Stats | Cost | Energy | Gyms opened | Items |
 |---|---|---|---|---|---|
-| EDVD jump | +368,771 | $540.2M | 29,510 | Racing Fitness, Complete Cardio | Ecstasy × 23, Xanax × 94, EDVD × 115, Points × 720 |
-| Console jump | +206,350 | $164.6M | 21,210 | Racing Fitness | Game Console × 1, Ecstasy × 29, Xanax × 90, Candy Kisses × 1,421, Points × 930 |
-| Steady + FHC max | +191,159 | $1.73B | 72,940 | Racing Fitness, Complete Cardio, Legs, Bums and Tums, Deep Burn | Xanax × 107, FHC × 128, Points × 960 |
-| Choco jump | +148,598 | $150.7M | 29,510 | Racing Fitness, Complete Cardio | Ecstasy × 23, Xanax × 94, Candy Kisses × 1,127, Points × 720 |
-| Daily choco | +137,919 | $171.7M | 42,540 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Ecstasy × 32, Xanax × 88, Candy Kisses × 1,490, Points × 960 |
-| Candy + Xanax | +135,490 | $183.7M | 54,010 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Xanax × 107, Candy Kisses × 1,428, Points × 960 |
-| Steady | +76,350 | $138.0M | 53,740 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Xanax × 107, Points × 960 |
+| EDVD jump | +349,823 | $518.6M | 28,240 | Racing Fitness, Complete Cardio | Ecstasy × 22, Xanax × 92, EDVD × 110, Points × 690 |
+| Console jump | +206,350 | $163.0M | 21,210 | Racing Fitness | Game Console × 1, Ecstasy × 29, Xanax × 88, Candy Kisses × 1,421, Points × 930 |
+| Steady + FHC max | +186,257 | $1.70B | 71,640 | Racing Fitness, Complete Cardio, Legs, Bums and Tums, Deep Burn | Xanax × 105, FHC × 126, Points × 930 |
+| Choco jump | +141,018 | $146.1M | 28,240 | Racing Fitness, Complete Cardio | Ecstasy × 22, Xanax × 92, Candy Kisses × 1,078, Points × 690 |
+| Daily choco | +134,903 | $167.9M | 41,990 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Ecstasy × 31, Xanax × 87, Candy Kisses × 1,441, Points × 930 |
+| Candy + Xanax | +132,122 | $179.4M | 53,000 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Xanax × 105, Candy Kisses × 1,386, Points × 930 |
+| Steady | +75,316 | $135.0M | 52,740 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Xanax × 105, Points × 930 |
 
 Most stats in $5M a day · 31 days · recommended: Console jump
 
 | Plan | Stats | Cost | Energy | Gyms opened | Items |
 |---|---|---|---|---|---|
-| EDVD jump | +368,771 | $540.2M | 29,510 | Racing Fitness, Complete Cardio | Ecstasy × 23, Xanax × 94, EDVD × 115, Points × 720 |
-| Steady + FHC max | +191,159 | $1.73B | 72,940 | Racing Fitness, Complete Cardio, Legs, Bums and Tums, Deep Burn | Xanax × 107, FHC × 128, Points × 960 |
-| Console jump | +159,338 | $122.8M | 16,560 | Racing Fitness | Game Console × 1, Ecstasy × 29, Xanax × 90, Candy Kisses × 1,421 · no refill |
-| Choco jump | +148,598 | $150.7M | 29,510 | Racing Fitness, Complete Cardio | Ecstasy × 23, Xanax × 94, Candy Kisses × 1,127, Points × 720 |
-| Candy + Xanax | +116,953 | $140.5M | 49,210 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Xanax × 107, Candy Kisses × 1,428 · no refill |
-| Daily choco | +107,563 | $125.5M | 37,740 | Racing Fitness, Complete Cardio | Ecstasy × 32, Xanax × 88, Candy Kisses × 1,490 · no refill |
-| Steady | +76,350 | $138.0M | 53,740 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Xanax × 107, Points × 960 |
+| EDVD jump | +349,823 | $518.6M | 28,240 | Racing Fitness, Complete Cardio | Ecstasy × 22, Xanax × 92, EDVD × 110, Points × 690 |
+| Steady + FHC max | +186,257 | $1.70B | 71,640 | Racing Fitness, Complete Cardio, Legs, Bums and Tums, Deep Burn | Xanax × 105, FHC × 126, Points × 930 |
+| Console jump | +159,338 | $121.1M | 16,560 | Racing Fitness | Game Console × 1, Ecstasy × 29, Xanax × 88, Candy Kisses × 1,421 · no refill |
+| Choco jump | +141,018 | $146.1M | 28,240 | Racing Fitness, Complete Cardio | Ecstasy × 22, Xanax × 92, Candy Kisses × 1,078, Points × 690 |
+| Candy + Xanax | +114,290 | $137.5M | 48,350 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Xanax × 105, Candy Kisses × 1,386 · no refill |
+| Daily choco | +105,647 | $123.0M | 37,340 | Racing Fitness, Complete Cardio | Ecstasy × 31, Xanax × 87, Candy Kisses × 1,441 · no refill |
+| Steady | +75,316 | $135.0M | 52,740 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Xanax × 105, Points × 930 |
 
 Most stats in $2M a day · 31 days · recommended: Steady, fewer Xanax
 
 | Plan | Stats | Cost | Energy | Gyms opened | Items |
 |---|---|---|---|---|---|
-| EDVD jump | +368,771 | $540.2M | 29,510 | Racing Fitness, Complete Cardio | Ecstasy × 23, Xanax × 94, EDVD × 115, Points × 720 |
-| Console jump | +206,350 | $164.6M | 21,210 | Racing Fitness | Game Console × 1, Ecstasy × 29, Xanax × 90, Candy Kisses × 1,421, Points × 930 |
-| Steady + FHC max | +191,159 | $1.73B | 72,940 | Racing Fitness, Complete Cardio, Legs, Bums and Tums, Deep Burn | Xanax × 107, FHC × 128, Points × 960 |
-| Choco jump | +148,598 | $150.7M | 29,510 | Racing Fitness, Complete Cardio | Ecstasy × 23, Xanax × 94, Candy Kisses × 1,127, Points × 720 |
-| Daily choco | +137,919 | $171.7M | 42,540 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Ecstasy × 32, Xanax × 88, Candy Kisses × 1,490, Points × 960 |
-| Candy + Xanax | +135,490 | $183.7M | 54,010 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Xanax × 107, Candy Kisses × 1,428, Points × 960 |
-| Steady, fewer Xanax | +80,188 | $56.1M | 38,460 | Racing Fitness, Complete Cardio | Xanax × 64 · no refill |
-| Steady | +76,350 | $138.0M | 53,740 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Xanax × 107, Points × 960 |
+| EDVD jump | +349,823 | $518.6M | 28,240 | Racing Fitness, Complete Cardio | Ecstasy × 22, Xanax × 92, EDVD × 110, Points × 690 |
+| Console jump | +206,350 | $163.0M | 21,210 | Racing Fitness | Game Console × 1, Ecstasy × 29, Xanax × 88, Candy Kisses × 1,421, Points × 930 |
+| Steady + FHC max | +186,257 | $1.70B | 71,640 | Racing Fitness, Complete Cardio, Legs, Bums and Tums, Deep Burn | Xanax × 105, FHC × 126, Points × 930 |
+| Choco jump | +141,018 | $146.1M | 28,240 | Racing Fitness, Complete Cardio | Ecstasy × 22, Xanax × 92, Candy Kisses × 1,078, Points × 690 |
+| Daily choco | +134,903 | $167.9M | 41,990 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Ecstasy × 31, Xanax × 87, Candy Kisses × 1,441, Points × 930 |
+| Candy + Xanax | +132,122 | $179.4M | 53,000 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Xanax × 105, Candy Kisses × 1,386, Points × 930 |
+| Steady, fewer Xanax | +78,038 | $54.5M | 37,600 | Racing Fitness, Complete Cardio | Xanax × 62 · no refill |
+| Steady | +75,316 | $135.0M | 52,740 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Xanax × 105, Points × 930 |
 
 Max gains, every candy priced (2024 dump) · 31 days · recommended: EDVD jump
 
 | Plan | Stats | Cost | Energy | Gyms opened | Items |
 |---|---|---|---|---|---|
-| EDVD jump | +368,771 | $540.2M | 29,510 | Racing Fitness, Complete Cardio | Ecstasy × 23, Xanax × 94, EDVD × 115, Points × 720 |
-| Steady + FHC max | +191,159 | $1.73B | 72,940 | Racing Fitness, Complete Cardio, Legs, Bums and Tums, Deep Burn | Xanax × 107, FHC × 128, Points × 960 |
-| Console jump | +186,139 | $119.6M | 21,210 | Racing Fitness | Box of Chocolate Bars × 1,421, Game Console × 1, Ecstasy × 29, Xanax × 90, Points × 930 |
-| Candy + Xanax | +129,008 | $138.5M | 54,010 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Box of Chocolate Bars × 1,428, Xanax × 107, Points × 960 |
-| Daily choco | +124,971 | $124.5M | 42,540 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Box of Chocolate Bars × 1,490, Ecstasy × 32, Xanax × 88, Points × 960 |
-| Choco jump | +122,641 | $115.0M | 29,510 | Racing Fitness, Complete Cardio | Box of Chocolate Bars × 1,127, Ecstasy × 23, Xanax × 94, Points × 720 |
-| Steady | +76,350 | $138.0M | 53,740 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Xanax × 107, Points × 960 |
+| EDVD jump | +349,823 | $518.6M | 28,240 | Racing Fitness, Complete Cardio | Ecstasy × 22, Xanax × 92, EDVD × 110, Points × 690 |
+| Steady + FHC max | +186,257 | $1.70B | 71,640 | Racing Fitness, Complete Cardio, Legs, Bums and Tums, Deep Burn | Xanax × 105, FHC × 126, Points × 930 |
+| Console jump | +186,139 | $117.9M | 21,210 | Racing Fitness | Box of Chocolate Bars × 1,421, Game Console × 1, Ecstasy × 29, Xanax × 88, Points × 930 |
+| Candy + Xanax | +125,861 | $135.4M | 53,000 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Box of Chocolate Bars × 1,386, Xanax × 105, Points × 930 |
+| Daily choco | +122,391 | $122.2M | 41,990 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Box of Chocolate Bars × 1,441, Ecstasy × 31, Xanax × 87, Points × 930 |
+| Choco jump | +116,403 | $112.0M | 28,240 | Racing Fitness, Complete Cardio | Box of Chocolate Bars × 1,078, Ecstasy × 22, Xanax × 92, Points × 690 |
+| Steady | +75,316 | $135.0M | 52,740 | Racing Fitness, Complete Cardio, Legs, Bums and Tums | Xanax × 105, Points × 930 |
 
 | Length | Path | Stats | Cost | Range | Time (ms) |
 |---|---|---|---|---|---|
-| 1 mo (31 d) | EDVD jump 31 d | +373,290 | $546.9M | +351,791 to +394,997 | 86 |
-| 3 mo (92 d) | EDVD jump 43 d → Steady + FHC max 49 d | +2,041,037 | $3.62B | +1,829,744 to +2,271,107 | 238 |
-| 12 mo (365 d) | EDVD jump 43 d → Steady + FHC max 322 d | +720,367,657 | $19.33B | +626,600,182 to +814,204,897 | 1,065 |
+| 1 mo (31 d) | EDVD jump 31 d | +354,230 | $526.2M | +334,005 to +374,762 | 92 |
+| 3 mo (92 d) | EDVD jump 43 d → Steady + FHC max 49 d | +1,974,494 | $3.60B | +1,771,252 to +2,195,994 | 270 |
+| 12 mo (365 d) | EDVD jump 43 d → Steady + FHC max 322 d | +713,853,323 | $19.31B | +620,280,504 to +807,612,699 | 1,100 |
 
 **Mid · 5M**
 
@@ -65,56 +65,56 @@ Max gains, no budget · 31 days · recommended: Steady + FHC max
 
 | Plan | Stats | Cost | Energy | Gyms opened | Items |
 |---|---|---|---|---|---|
-| Steady + FHC max | +6,226,095 | $1.72B | 72,940 | — | Xanax × 107, FHC × 128, Points × 960 |
-| Candy + Xanax | +4,108,743 | $177.7M | 54,010 | — | Xanax × 107, Candy Kisses × 1,428, Points × 960 |
-| Steady | +3,774,473 | $132.0M | 53,740 | — | Xanax × 107, Points × 960 |
-| Daily choco | +3,111,510 | $165.7M | 42,540 | — | Ecstasy × 32, Xanax × 88, Candy Kisses × 1,490, Points × 960 |
-| EDVD jump | +2,594,192 | $537.2M | 29,510 | — | Ecstasy × 23, Xanax × 94, EDVD × 115, Points × 720 |
-| Choco jump | +2,146,835 | $147.7M | 29,510 | — | Ecstasy × 23, Xanax × 94, Candy Kisses × 1,127, Points × 720 |
-| Console jump (doesn’t fit) | +1,668,084 | $163.6M | 21,210 | — | Game Console × 1, Ecstasy × 29, Xanax × 90, Candy Kisses × 1,421, Points × 930 |
+| Steady + FHC max | +6,063,941 | $1.69B | 71,640 | — | Xanax × 105, FHC × 126, Points × 930 |
+| Candy + Xanax | +4,004,485 | $173.4M | 53,000 | — | Xanax × 105, Candy Kisses × 1,386, Points × 930 |
+| Steady | +3,687,584 | $129.0M | 52,740 | — | Xanax × 105, Points × 930 |
+| Daily choco | +3,057,269 | $161.9M | 41,990 | — | Ecstasy × 31, Xanax × 87, Candy Kisses × 1,441, Points × 930 |
+| EDVD jump | +2,458,274 | $515.6M | 28,240 | — | Ecstasy × 22, Xanax × 92, EDVD × 110, Points × 690 |
+| Choco jump | +2,034,374 | $143.1M | 28,240 | — | Ecstasy × 22, Xanax × 92, Candy Kisses × 1,078, Points × 690 |
+| Console jump (doesn’t fit) | +1,668,084 | $162.0M | 21,210 | — | Game Console × 1, Ecstasy × 29, Xanax × 88, Candy Kisses × 1,421, Points × 930 |
 
 Most stats in $5M a day · 31 days · recommended: Steady
 
 | Plan | Stats | Cost | Energy | Gyms opened | Items |
 |---|---|---|---|---|---|
-| Steady + FHC max | +6,226,095 | $1.72B | 72,940 | — | Xanax × 107, FHC × 128, Points × 960 |
-| Steady | +3,774,473 | $132.0M | 53,740 | — | Xanax × 107, Points × 960 |
-| Candy + Xanax | +3,614,116 | $134.5M | 49,210 | — | Xanax × 107, Candy Kisses × 1,428 · no refill |
-| Daily choco | +2,633,796 | $122.5M | 37,740 | — | Ecstasy × 32, Xanax × 88, Candy Kisses × 1,490 · no refill |
-| EDVD jump | +2,594,192 | $537.2M | 29,510 | — | Ecstasy × 23, Xanax × 94, EDVD × 115, Points × 720 |
-| Choco jump | +2,146,835 | $147.7M | 29,510 | — | Ecstasy × 23, Xanax × 94, Candy Kisses × 1,127, Points × 720 |
-| Console jump (doesn’t fit) | +1,668,084 | $163.6M | 21,210 | — | Game Console × 1, Ecstasy × 29, Xanax × 90, Candy Kisses × 1,421, Points × 930 |
+| Steady + FHC max | +6,063,941 | $1.69B | 71,640 | — | Xanax × 105, FHC × 126, Points × 930 |
+| Steady | +3,687,584 | $129.0M | 52,740 | — | Xanax × 105, Points × 930 |
+| Candy + Xanax | +3,530,536 | $131.5M | 48,350 | — | Xanax × 105, Candy Kisses × 1,386 · no refill |
+| Daily choco | +2,596,979 | $120.0M | 37,340 | — | Ecstasy × 31, Xanax × 87, Candy Kisses × 1,441 · no refill |
+| EDVD jump | +2,458,274 | $515.6M | 28,240 | — | Ecstasy × 22, Xanax × 92, EDVD × 110, Points × 690 |
+| Choco jump | +2,034,374 | $143.1M | 28,240 | — | Ecstasy × 22, Xanax × 92, Candy Kisses × 1,078, Points × 690 |
+| Console jump (doesn’t fit) | +1,668,084 | $162.0M | 21,210 | — | Game Console × 1, Ecstasy × 29, Xanax × 88, Candy Kisses × 1,421, Points × 930 |
 
 Most stats in $2M a day · 31 days · recommended: Steady, fewer Xanax
 
 | Plan | Stats | Cost | Energy | Gyms opened | Items |
 |---|---|---|---|---|---|
-| Steady + FHC max | +6,226,095 | $1.72B | 72,940 | — | Xanax × 107, FHC × 128, Points × 960 |
-| Candy + Xanax | +4,108,743 | $177.7M | 54,010 | — | Xanax × 107, Candy Kisses × 1,428, Points × 960 |
-| Steady | +3,774,473 | $132.0M | 53,740 | — | Xanax × 107, Points × 960 |
-| Daily choco | +3,111,510 | $165.7M | 42,540 | — | Ecstasy × 32, Xanax × 88, Candy Kisses × 1,490, Points × 960 |
-| Steady, fewer Xanax | +2,604,719 | $53.1M | 38,460 | — | Xanax × 64 · no refill |
-| EDVD jump | +2,594,192 | $537.2M | 29,510 | — | Ecstasy × 23, Xanax × 94, EDVD × 115, Points × 720 |
-| Choco jump | +2,146,835 | $147.7M | 29,510 | — | Ecstasy × 23, Xanax × 94, Candy Kisses × 1,127, Points × 720 |
-| Console jump (doesn’t fit) | +1,668,084 | $163.6M | 21,210 | — | Game Console × 1, Ecstasy × 29, Xanax × 90, Candy Kisses × 1,421, Points × 930 |
+| Steady + FHC max | +6,063,941 | $1.69B | 71,640 | — | Xanax × 105, FHC × 126, Points × 930 |
+| Candy + Xanax | +4,004,485 | $173.4M | 53,000 | — | Xanax × 105, Candy Kisses × 1,386, Points × 930 |
+| Steady | +3,687,584 | $129.0M | 52,740 | — | Xanax × 105, Points × 930 |
+| Daily choco | +3,057,269 | $161.9M | 41,990 | — | Ecstasy × 31, Xanax × 87, Candy Kisses × 1,441, Points × 930 |
+| Steady, fewer Xanax | +2,531,092 | $51.5M | 37,600 | — | Xanax × 62 · no refill |
+| EDVD jump | +2,458,274 | $515.6M | 28,240 | — | Ecstasy × 22, Xanax × 92, EDVD × 110, Points × 690 |
+| Choco jump | +2,034,374 | $143.1M | 28,240 | — | Ecstasy × 22, Xanax × 92, Candy Kisses × 1,078, Points × 690 |
+| Console jump (doesn’t fit) | +1,668,084 | $162.0M | 21,210 | — | Game Console × 1, Ecstasy × 29, Xanax × 88, Candy Kisses × 1,421, Points × 930 |
 
 Max gains, every candy priced (2024 dump) · 31 days · recommended: Steady + FHC max
 
 | Plan | Stats | Cost | Energy | Gyms opened | Items |
 |---|---|---|---|---|---|
-| Steady + FHC max | +6,226,095 | $1.72B | 72,940 | — | Xanax × 107, FHC × 128, Points × 960 |
-| Candy + Xanax | +4,085,770 | $132.5M | 54,010 | — | Box of Chocolate Bars × 1,428, Xanax × 107, Points × 960 |
-| Steady | +3,774,473 | $132.0M | 53,740 | — | Xanax × 107, Points × 960 |
-| Daily choco | +3,079,324 | $118.5M | 42,540 | — | Box of Chocolate Bars × 1,490, Ecstasy × 32, Xanax × 88, Points × 960 |
-| EDVD jump | +2,594,192 | $537.2M | 29,510 | — | Ecstasy × 23, Xanax × 94, EDVD × 115, Points × 720 |
-| Choco jump | +2,083,701 | $112.0M | 29,510 | — | Box of Chocolate Bars × 1,127, Ecstasy × 23, Xanax × 94, Points × 720 |
-| Console jump (doesn’t fit) | +1,668,084 | $163.4M | 21,210 | — | Game Console × 1, Ecstasy × 29, Xanax × 90, Candy Kisses × 1,421, Points × 930 |
+| Steady + FHC max | +6,063,941 | $1.69B | 71,640 | — | Xanax × 105, FHC × 126, Points × 930 |
+| Candy + Xanax | +3,982,351 | $129.4M | 53,000 | — | Box of Chocolate Bars × 1,386, Xanax × 105, Points × 930 |
+| Steady | +3,687,584 | $129.0M | 52,740 | — | Xanax × 105, Points × 930 |
+| Daily choco | +3,026,158 | $116.2M | 41,990 | — | Box of Chocolate Bars × 1,441, Ecstasy × 31, Xanax × 87, Points × 930 |
+| EDVD jump | +2,458,274 | $515.6M | 28,240 | — | Ecstasy × 22, Xanax × 92, EDVD × 110, Points × 690 |
+| Choco jump | +1,974,455 | $109.0M | 28,240 | — | Box of Chocolate Bars × 1,078, Ecstasy × 22, Xanax × 92, Points × 690 |
+| Console jump (doesn’t fit) | +1,668,084 | $161.7M | 21,210 | — | Game Console × 1, Ecstasy × 29, Xanax × 88, Candy Kisses × 1,421, Points × 930 |
 
 | Length | Path | Stats | Cost | Range | Time (ms) |
 |---|---|---|---|---|---|
-| 1 mo (31 d) | Steady + FHC max 31 d | +6,674,602 | $1.97B | +6,178,721 to +7,089,931 | 84 |
-| 3 mo (92 d) | Steady + FHC max 92 d | +56,456,612 | $5.50B | +49,573,898 to +64,586,975 | 211 |
-| 12 mo (365 d) | Steady + FHC max 365 d | +1,473,754,878 | $20.78B | +1,368,607,135 to +1,581,698,954 | 824 |
+| 1 mo (31 d) | Steady + FHC max 31 d | +6,487,299 | $1.94B | +6,021,751 to +7,004,036 | 83 |
+| 3 mo (92 d) | Steady + FHC max 92 d | +55,488,177 | $5.47B | +48,815,900 to +64,017,383 | 210 |
+| 12 mo (365 d) | Steady + FHC max 365 d | +1,470,598,155 | $20.76B | +1,365,397,163 to +1,579,220,950 | 796 |
 
 **Owner · 142M**
 
@@ -122,54 +122,54 @@ Max gains, no budget · 31 days · recommended: Steady + FHC max
 
 | Plan | Stats | Cost | Energy | Gyms opened | Items |
 |---|---|---|---|---|---|
-| Steady + FHC max | +79,267,765 | $1.72B | 72,940 | — | Xanax × 107, FHC × 128, Points × 960 |
-| Candy + Xanax | +40,200,182 | $177.7M | 54,010 | — | Xanax × 107, Candy Kisses × 1,428, Points × 960 |
-| Steady | +36,226,879 | $132.0M | 53,740 | — | Xanax × 107, Points × 960 |
-| Daily choco | +23,714,722 | $165.7M | 42,540 | — | Ecstasy × 32, Xanax × 88, Candy Kisses × 1,490, Points × 960 |
-| EDVD jump | +13,819,783 | $537.2M | 29,510 | — | Ecstasy × 23, Xanax × 94, EDVD × 115, Points × 720 |
-| Choco jump | +12,266,277 | $147.7M | 29,510 | — | Ecstasy × 23, Xanax × 94, Candy Kisses × 1,127, Points × 720 |
-| Console jump (doesn’t fit) | +7,645,699 | $163.6M | 21,210 | — | Game Console × 1, Ecstasy × 29, Xanax × 90, Candy Kisses × 1,421, Points × 930 |
+| Steady + FHC max | +76,376,097 | $1.69B | 71,640 | — | Xanax × 105, FHC × 126, Points × 930 |
+| Candy + Xanax | +38,433,132 | $173.4M | 53,000 | — | Xanax × 105, Candy Kisses × 1,386, Points × 930 |
+| Steady | +34,706,556 | $129.0M | 52,740 | — | Xanax × 105, Points × 930 |
+| Daily choco | +23,015,682 | $161.9M | 41,990 | — | Ecstasy × 31, Xanax × 87, Candy Kisses × 1,441, Points × 930 |
+| EDVD jump | +12,732,373 | $515.6M | 28,240 | — | Ecstasy × 22, Xanax × 92, EDVD × 110, Points × 690 |
+| Choco jump | +11,321,729 | $143.1M | 28,240 | — | Ecstasy × 22, Xanax × 92, Candy Kisses × 1,078, Points × 690 |
+| Console jump (doesn’t fit) | +7,645,699 | $162.0M | 21,210 | — | Game Console × 1, Ecstasy × 29, Xanax × 88, Candy Kisses × 1,421, Points × 930 |
 
 Most stats in $5M a day · 31 days · recommended: Steady
 
 | Plan | Stats | Cost | Energy | Gyms opened | Items |
 |---|---|---|---|---|---|
-| Steady + FHC max | +79,267,765 | $1.72B | 72,940 | — | Xanax × 107, FHC × 128, Points × 960 |
-| Steady | +36,226,879 | $132.0M | 53,740 | — | Xanax × 107, Points × 960 |
-| Candy + Xanax | +32,044,281 | $134.5M | 49,210 | — | Xanax × 107, Candy Kisses × 1,428 · no refill |
-| Daily choco | +18,070,654 | $122.5M | 37,740 | — | Ecstasy × 32, Xanax × 88, Candy Kisses × 1,490 · no refill |
-| EDVD jump | +13,819,783 | $537.2M | 29,510 | — | Ecstasy × 23, Xanax × 94, EDVD × 115, Points × 720 |
-| Choco jump | +12,266,277 | $147.7M | 29,510 | — | Ecstasy × 23, Xanax × 94, Candy Kisses × 1,127, Points × 720 |
-| Console jump (doesn’t fit) | +7,645,699 | $163.6M | 21,210 | — | Game Console × 1, Ecstasy × 29, Xanax × 90, Candy Kisses × 1,421, Points × 930 |
+| Steady + FHC max | +76,376,097 | $1.69B | 71,640 | — | Xanax × 105, FHC × 126, Points × 930 |
+| Steady | +34,706,556 | $129.0M | 52,740 | — | Xanax × 105, Points × 930 |
+| Candy + Xanax | +30,695,393 | $131.5M | 48,350 | — | Xanax × 105, Candy Kisses × 1,386 · no refill |
+| Daily choco | +17,666,460 | $120.0M | 37,340 | — | Ecstasy × 31, Xanax × 87, Candy Kisses × 1,441 · no refill |
+| EDVD jump | +12,732,373 | $515.6M | 28,240 | — | Ecstasy × 22, Xanax × 92, EDVD × 110, Points × 690 |
+| Choco jump | +11,321,729 | $143.1M | 28,240 | — | Ecstasy × 22, Xanax × 92, Candy Kisses × 1,078, Points × 690 |
+| Console jump (doesn’t fit) | +7,645,699 | $162.0M | 21,210 | — | Game Console × 1, Ecstasy × 29, Xanax × 88, Candy Kisses × 1,421, Points × 930 |
 
 Most stats in $2M a day · 31 days · recommended: Steady, fewer Xanax
 
 | Plan | Stats | Cost | Energy | Gyms opened | Items |
 |---|---|---|---|---|---|
-| Steady + FHC max | +79,267,765 | $1.72B | 72,940 | — | Xanax × 107, FHC × 128, Points × 960 |
-| Candy + Xanax | +40,200,182 | $177.7M | 54,010 | — | Xanax × 107, Candy Kisses × 1,428, Points × 960 |
-| Steady | +36,226,879 | $132.0M | 53,740 | — | Xanax × 107, Points × 960 |
-| Daily choco | +23,714,722 | $165.7M | 42,540 | — | Ecstasy × 32, Xanax × 88, Candy Kisses × 1,490, Points × 960 |
-| Steady, fewer Xanax | +18,191,090 | $53.1M | 38,460 | — | Xanax × 64 · no refill |
-| EDVD jump | +13,819,783 | $537.2M | 29,510 | — | Ecstasy × 23, Xanax × 94, EDVD × 115, Points × 720 |
-| Choco jump | +12,266,277 | $147.7M | 29,510 | — | Ecstasy × 23, Xanax × 94, Candy Kisses × 1,127, Points × 720 |
-| Console jump (doesn’t fit) | +7,645,699 | $163.6M | 21,210 | — | Game Console × 1, Ecstasy × 29, Xanax × 90, Candy Kisses × 1,421, Points × 930 |
+| Steady + FHC max | +76,376,097 | $1.69B | 71,640 | — | Xanax × 105, FHC × 126, Points × 930 |
+| Candy + Xanax | +38,433,132 | $173.4M | 53,000 | — | Xanax × 105, Candy Kisses × 1,386, Points × 930 |
+| Steady | +34,706,556 | $129.0M | 52,740 | — | Xanax × 105, Points × 930 |
+| Daily choco | +23,015,682 | $161.9M | 41,990 | — | Ecstasy × 31, Xanax × 87, Candy Kisses × 1,441, Points × 930 |
+| Steady, fewer Xanax | +17,360,030 | $51.5M | 37,600 | — | Xanax × 62 · no refill |
+| EDVD jump | +12,732,373 | $515.6M | 28,240 | — | Ecstasy × 22, Xanax × 92, EDVD × 110, Points × 690 |
+| Choco jump | +11,321,729 | $143.1M | 28,240 | — | Ecstasy × 22, Xanax × 92, Candy Kisses × 1,078, Points × 690 |
+| Console jump (doesn’t fit) | +7,645,699 | $162.0M | 21,210 | — | Game Console × 1, Ecstasy × 29, Xanax × 88, Candy Kisses × 1,421, Points × 930 |
 
 Max gains, every candy priced (2024 dump) · 31 days · recommended: Steady + FHC max
 
 | Plan | Stats | Cost | Energy | Gyms opened | Items |
 |---|---|---|---|---|---|
-| Steady + FHC max | +79,267,765 | $1.72B | 72,940 | — | Xanax × 107, FHC × 128, Points × 960 |
-| Candy + Xanax | +39,962,478 | $132.5M | 54,010 | — | Box of Chocolate Bars × 1,428, Xanax × 107, Points × 960 |
-| Steady | +36,226,879 | $132.0M | 53,740 | — | Xanax × 107, Points × 960 |
-| Daily choco | +23,514,340 | $118.5M | 42,540 | — | Box of Chocolate Bars × 1,490, Ecstasy × 32, Xanax × 88, Points × 960 |
-| EDVD jump | +13,819,783 | $537.2M | 29,510 | — | Ecstasy × 23, Xanax × 94, EDVD × 115, Points × 720 |
-| Choco jump | +12,004,357 | $112.0M | 29,510 | — | Box of Chocolate Bars × 1,127, Ecstasy × 23, Xanax × 94, Points × 720 |
-| Console jump (doesn’t fit) | +7,645,699 | $163.4M | 21,210 | — | Game Console × 1, Ecstasy × 29, Xanax × 90, Candy Kisses × 1,421, Points × 930 |
+| Steady + FHC max | +76,376,097 | $1.69B | 71,640 | — | Xanax × 105, FHC × 126, Points × 930 |
+| Candy + Xanax | +38,207,032 | $129.4M | 53,000 | — | Box of Chocolate Bars × 1,386, Xanax × 105, Points × 930 |
+| Steady | +34,706,556 | $129.0M | 52,740 | — | Xanax × 105, Points × 930 |
+| Daily choco | +22,825,660 | $116.2M | 41,990 | — | Box of Chocolate Bars × 1,441, Ecstasy × 31, Xanax × 87, Points × 930 |
+| EDVD jump | +12,732,373 | $515.6M | 28,240 | — | Ecstasy × 22, Xanax × 92, EDVD × 110, Points × 690 |
+| Choco jump | +11,084,189 | $109.0M | 28,240 | — | Box of Chocolate Bars × 1,078, Ecstasy × 22, Xanax × 92, Points × 690 |
+| Console jump (doesn’t fit) | +7,645,699 | $161.7M | 21,210 | — | Game Console × 1, Ecstasy × 29, Xanax × 88, Candy Kisses × 1,421, Points × 930 |
 
 | Length | Path | Stats | Cost | Range | Time (ms) |
 |---|---|---|---|---|---|
-| 1 mo (31 d) | Steady + FHC max 31 d | +83,206,646 | $1.97B | +74,874,176 to +90,085,498 | 74 |
-| 3 mo (92 d) | Steady + FHC max 92 d | +402,500,737 | $5.55B | +376,265,188 to +428,227,873 | 209 |
-| 12 mo (365 d) | Steady + FHC max 365 d | +1,969,661,606 | $20.83B | +1,858,118,068 to +2,080,322,112 | 768 |
+| 1 mo (31 d) | Steady + FHC max 31 d | +80,313,486 | $1.94B | +72,129,315 to +87,702,832 | 72 |
+| 3 mo (92 d) | Steady + FHC max 92 d | +399,398,340 | $5.52B | +373,840,457 to +424,953,665 | 199 |
+| 12 mo (365 d) | Steady + FHC max 365 d | +1,965,717,559 | $20.81B | +1,855,007,618 to +2,077,406,769 | 786 |
 

@@ -22,7 +22,7 @@ import { STATS, totalOf } from './gain.js';
 import { DAY } from './bars.js';
 import { GEORGES, SSL, gymsOpenAt, bestGymFor, gymById, unlockEnergyAfter } from './gyms.js';
 import { simulateStrategy, STAT_LINE_DAILY_DAYS } from './strategies.js';
-import { statCurveAt, statLineFrom } from './planline.js';
+import { statCurveAt, statLineFrom, dayEndMs } from './planline.js';
 import { recommend } from './recommend.js';
 import { budgetOf } from './auto.js';
 
@@ -196,6 +196,7 @@ export function* yearSteps({ compare, inputs = null, args, start, end, budgetPer
     const unlocks = [];
     let cost = 0;
     let energy = 0;
+    let firstDayMin = 0;
     let cur = args;
     const startTotal = totalOf(stats);
     for (const seg of segs) {
@@ -223,7 +224,9 @@ export function* yearSteps({ compare, inputs = null, args, start, end, budgetPer
         for (const v of r.daily) daily.push(Math.round(base + v));
         if (r.quart) quart.push(...r.quart);
         else for (let d = 0; d < r.daily.length; d++) quart.push(360, 720, 1080);
-        for (const k of STATS) for (let d = 1; d <= r.daily.length; d++) statDaily[k].push(Math.round(perStat[k] + statCurveAt(r.statLine, k, d * DAY)));
+        for (const k of STATS) for (let d = 1; d <= r.daily.length; d++) statDaily[k].push(Math.round(perStat[k] + statCurveAt(r.statLine, k, dayEndMs(r.dayMin, d))));
+        // The path's day grid is its first stretch's (that one may start partway through a Torn day; the rest start at midnight).
+        if (!out.length) firstDayMin = Number(r.dayMin) || 0;
         for (const k of STATS) {
             stats[k] += r.perStat[k] || 0;
             perStat[k] += r.perStat[k] || 0;
@@ -238,7 +241,7 @@ export function* yearSteps({ compare, inputs = null, args, start, end, budgetPer
         out.push({ from: seg.from, to: seg.to, days: seg.days, event: seg.event ? segEvents(events, seg).map((e) => e.id) : null, strategy: rec.recommended, gained: r.gained, cost: r.cost + fees, energy: r.energyTrained || 0, statsEnd: { ...stats }, candy: r.candy || null, refill: r.refill, booster: r.booster || null, ...(Number.isFinite(r.xanaxPerDay) ? { xanaxPerDay: r.xanaxPerDay } : {}), alternatives: rec.alternatives.slice(0, 3).map((a) => ({ id: a.id, deltaStatsPct: a.deltaStatsPct })) });
         cur = carryOver(cur, r);
     }
-    const result = { id: 'year', gained: Math.round(totalOf(stats) - startTotal), perStat: Object.fromEntries(STATS.map((k) => [k, Math.round(perStat[k])])), cost: Math.round(cost), energyTrained: energy, daily, used, unlocks, quart, statLine: statLineFrom(statDaily, daily.length > STAT_LINE_DAILY_DAYS ? 7 : 1) };
+    const result = { id: 'year', gained: Math.round(totalOf(stats) - startTotal), perStat: Object.fromEntries(STATS.map((k) => [k, Math.round(perStat[k])])), cost: Math.round(cost), energyTrained: energy, daily, used, unlocks, quart, statLine: { ...statLineFrom(statDaily, daily.length > STAT_LINE_DAILY_DAYS ? 7 : 1), dayMin: firstDayMin }, dayMin: firstDayMin };
     const band = inputs ? yield* yearBandSteps(out, args, { inputs, events, gymExpMult, knownSpecialists, table, active, top0, toNext0, centre }) : null;
     return { segments: out, result, band, unlocks, events };
 }

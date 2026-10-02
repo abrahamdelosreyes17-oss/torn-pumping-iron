@@ -21,7 +21,7 @@
 
 import { DAY, tornDayStart } from './bars.js';
 import { STATS } from './gain.js';
-import { statCurveAt } from './planline.js';
+import { statCurveAt, dayEndMs } from './planline.js';
 
 /** The lengths Create plan offers, in months (owner: 1 / 3 / 6 / 12). */
 export const PLAN_MONTHS = [1, 3, 6, 12];
@@ -96,7 +96,7 @@ export function monthlyOf(r, { start, days, stats, anchor = start }) {
         const share = total > 0 ? gainedAt(d1) / total : d1 / days;
         const planned = {};
         // Each stat from its own line (round 7); results from before it: the stat's share of the whole gain.
-        for (const k of STATS) planned[k] = Math.round((stats[k] || 0) + (r.statLine ? statCurveAt(r.statLine, k, d1 * DAY) : statTotal > 0 ? ((r.perStat[k] || 0) / statTotal) * total * share : 0));
+        for (const k of STATS) planned[k] = Math.round((stats[k] || 0) + (r.statLine ? statCurveAt(r.statLine, k, dayEndMs(r.statLine.dayMin, d1)) : statTotal > 0 ? ((r.perStat[k] || 0) / statTotal) * total * share : 0));
         const used = {};
         for (const [id, n] of Object.entries(r.used || {})) if (n > 0) used[id] = Math.round(((n * (d1 - d0)) / days) * 10) / 10;
         out.push({ month: i, from, to, days: d1 - d0, gained: Math.round(gained), cost: Math.round(perDayCost * (d1 - d0)), stats: planned, used });

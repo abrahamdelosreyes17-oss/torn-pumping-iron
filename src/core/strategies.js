@@ -172,7 +172,8 @@ export const TICK_OFFSET_MIN = 5;
  * @param {function} [o.trace] - round 7: called for every train with {t (minutes from the start), k (stat), e (its
  *   energy), E and H (energy and happy before it), gain}. For tests and the baseline; it changes nothing.
  * @returns {{id, gained:number, perStat:object, cost:number, energyTrained:number, daily:number[], used:object, quart:number[], statLine:object}}
- *   daily: the total gained by the end of each 24 h from the start. Round 7 (Progress): `quart` says when in each of
+ *   daily: the total gained by the end of each day (Torn days: the first from the start to Torn's midnight, see `dayMin`;
+ *   the result's `dayMin` says where they fall). Round 7 (Progress): `quart` says when in each of
  *   those days the gain lands (three minutes a day: a quarter, half and three quarters of the day's gain reached), so a jump
  *   reads as a step and steady training as a slope; `statLine` is each stat's own line ({step (days), days, str: [],
  *   spd, def, dex}: the gain by the end of every `step` days, the last entry at `days`).
@@ -234,6 +235,13 @@ export function* simulateSteps(id, o) {
     // the minute of the Torn day the run starts at. Before, a "day" was 24 hours from the moment the plan was made:
     // a plan made at noon lost the refill of its last half day, and a refill used today blocked 24 hours.
     const dayMin = Number.isFinite(o.dayMin) ? ((Math.floor(o.dayMin) % 1440) + 1440) % 1440 : 0;
+    // The run's days are Torn days, today the first (round 7, the plan's span): it ends at the Torn midnight that ends
+    // the last one, the plan's own end. A plan made at noon has half its first day left; before, the run went on
+    // `days` × 24 h from the moment it was made, past the plan's end. `daily`, `quart` and `statLine` mark the
+    // ends of those days (the first: the start to Torn's midnight).
+    const endMin = Math.max(STEP_MIN, days * 1440 - dayMin);
+    const dayOf = (t) => Math.floor((t + dayMin) / 1440);
+    const dayStartT = (d) => (d <= 0 ? 0 : d * 1440 - dayMin);
     // A daily candy boost still to come today: the next Xanax (before midnight) will find room under the cap.
     const boostLaterToday = (t, day) => t + xanCD < (day + 1) * 1440 - dayMin && boosterFree - (t + xanCD) < capH * 60;
     // Today's refill already used: none until Torn's midnight.
@@ -262,7 +270,7 @@ export function* simulateSteps(id, o) {
     const ebItem = eb ? ITEMS[eb.id] : null;
     const canMult = o.canMult || 1;
     // Events (year plans): the multipliers in force now, and free energy/happy handed out once at their start.
-    const evs = Array.isArray(o.events) ? o.events.filter((e) => e && e.to > 0 && e.from < days * 1440) : [];
+    const evs = Array.isArray(o.events) ? o.events.filter((e) => e && e.to > 0 && e.from < endMin) : [];
     let evCandy = 1;
     let evCan = 1;
     const evGiven = new Set();
@@ -315,7 +323,7 @@ export function* simulateSteps(id, o) {
         dayMarks = [];
     };
     const statStep = days > STAT_LINE_DAILY_DAYS ? 7 : 1;
-    const statLine = { step: statStep, days, str: [], spd: [], def: [], dex: [] };
+    const statLine = { step: statStep, days, dayMin, str: [], spd: [], def: [], dex: [] };
     const statMark = () => {
         for (const k of STATS) statLine[k].push(Math.round(S[k] - o.stats[k]));
     };
@@ -491,21 +499,22 @@ export function* simulateSteps(id, o) {
         drugFree = t + xanCD;
     };
 
-    for (let t = 0; t < days * 1440; t += STEP_MIN) {
+    let lastDay = 0;
+    for (let t = 0; t < endMin; t += STEP_MIN) {
         if (sliceMin && t && t % sliceMin === 0) yield t;
-        // The Torn day this minute is in (0: the day the run starts in). The result's `daily` and `quart` stay by 24 h
-        // from the start (the plan's line is read by time).
-        const day = Math.floor((t + dayMin) / 1440);
+        // The Torn day this minute is in (0: the day the run starts in, from the start to Torn's midnight).
+        const day = dayOf(t);
         curT = t;
         if (gainSum !== gainSeen) {
-            // What the last step trained, at that step's minute of its day.
-            dayMarks.push((t - STEP_MIN) % 1440, gainSum - dayBase);
+            // What the last step trained, at that step's minute of its day (the first day's minutes count from the start).
+            dayMarks.push(t - STEP_MIN - dayStartT(dayOf(t - STEP_MIN)), gainSum - dayBase);
             gainSeen = gainSum;
         }
-        if (t % 1440 === 0 && t) {
+        if (day !== lastDay) {
+            lastDay = day;
             daily.push(Math.round(totalOf(S) - start));
             closeDay();
-            if ((t / 1440) % statStep === 0) statMark();
+            if (day % statStep === 0) statMark();
         }
         if (evs.length) {
             evCandy = 1;
@@ -660,12 +669,16 @@ export function* simulateSteps(id, o) {
         }
     }
     daily.push(Math.round(totalOf(S) - start));
-    if (gainSum !== gainSeen) dayMarks.push(1435, gainSum - dayBase);
+    if (gainSum !== gainSeen) {
+        const lastT = Math.ceil(endMin / STEP_MIN) * STEP_MIN - STEP_MIN;
+        dayMarks.push(lastT - dayStartT(dayOf(lastT)), gainSum - dayBase);
+    }
     closeDay();
     statMark();
     const perStat = {};
     for (const k of STATS) perStat[k] = Math.round(S[k] - o.stats[k]);
-    const out = { id, gained: Math.round(totalOf(S) - start), perStat, cost: Math.round(cost), energyTrained: trainedE, daily, used, quart, statLine };
+    // `dayMin`: the plan line (planline.js) reads `daily`, `quart` and `statLine` on this day grid.
+    const out = { id, gained: Math.round(totalOf(S) - start), perStat, cost: Math.round(cost), energyTrained: trainedE, daily, used, quart, statLine, dayMin };
     if (unlocked.length) out.unlocked = unlocked;
     return out;
 }

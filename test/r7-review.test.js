@@ -280,14 +280,16 @@ async function follower(strategy, hour) {
 test('review 4.4 · Progress: a player who follows the plan exactly reads 100% of plan, whatever the hour the plan was made', async () => {
     for (const hour of [0, 12]) {
         const f = await follower('steady', hour);
-        // At each full day of the plan (a minute before, so a session on the mark itself isn't counted early): exact.
+        // At the end of each of the plan's days (Torn's midnight; a minute before, so a session on the mark itself isn't
+        // counted early): exact. Since round 7 (the plan's span) the plan's days are Torn days, the first from the
+        // moment it was made; before, they were 24 h from that moment.
         for (const n of [1, 2, 5]) {
-            const r = f.at(f.start + n * DAY - MIN);
-            assert.ok(r.pct !== null && Math.abs(r.pct - 100) <= 2, 'plan made at ' + hour + ':00, ' + n + ' full days in: ' + (r.pct === null ? 'no figure' : r.pct + '% of plan') + ' (1.3.0 read 151%, 181%, 114%)');
+            const r = f.at(f.day0 + n * DAY - MIN);
+            assert.ok(r.pct !== null && Math.abs(r.pct - 100) <= 2, 'plan made at ' + hour + ':00, the end of day ' + n + ': ' + (r.pct === null ? 'no figure' : r.pct + '% of plan') + ' (1.3.0 read 151%, 181%, 114%)');
         }
         // In between, the line follows the plan's own shape of the day; a session a little before or after the read is
         // most of what is left (the plan trains energy as it comes, a bar at a time shows in steps).
-        for (const [label, ms] of [['12 hours in', f.start + 12 * HOUR], ['36 hours in', f.start + 36 * HOUR], ['4.5 days in', f.start + 4.5 * DAY]]) {
+        for (const [label, ms] of [['9 hours in', f.start + 9 * HOUR], ['24 hours in', f.start + DAY - MIN], ['36 hours in', f.start + 36 * HOUR], ['4.5 days in', f.start + 4.5 * DAY]]) {
             const r = f.at(ms);
             assert.ok(r.pct !== null && Math.abs(r.pct - 100) <= 12, 'plan made at ' + hour + ':00, ' + label + ': ' + (r.pct === null ? 'no figure' : r.pct + '% of plan'));
         }

@@ -59,7 +59,7 @@ for (const [pid, p] of Object.entries(PLAYERS)) {
 // normal happy; the console jump keeps it in the bar). A day spent stacked above the maximum has no use for a refill,
 // so how many are used depends on the hour: the EDVD and choco jumps (18 jumps in 25 days) use all 25 refills when a
 // stack starts at 00:00 on the fourth day of each three jumps, and 19 when that day is spent stacked.
-const REFILLS = { edvdJump: { 0: 25, 4: 19, 8: 25, 12: 19, 16: 25, 20: 19 }, chocoJump: { 0: 25, 4: 19, 8: 25, 12: 19, 16: 25, 20: 19 }, consoleJump: { 0: 15, 4: 15, 8: 15, 12: 15, 16: 16, 20: 16 } };
+const REFILLS = { edvdJump: { 0: 25, 4: 19, 8: 25, 12: 19, 16: 25, 20: 19 }, chocoJump: { 0: 25, 4: 19, 8: 25, 12: 19, 16: 25, 20: 19 }, consoleJump: { 0: 15, 4: 15, 8: 15, 12: 15, 16: 15, 20: 15 } };
 for (const [id, days] of [['edvdJump', 25], ['chocoJump', 25], ['consoleJump', 15]]) {
     for (const hour of [0, 4, 8, 12, 16, 20]) {
         test('simulator = day plan · friend · ' + id + ' made at ' + String(hour).padStart(2, '0') + ':00: ' + days + ' days of jumps', () => {
