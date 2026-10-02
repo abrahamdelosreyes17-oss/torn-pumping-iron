@@ -188,7 +188,8 @@ export function simInputs({ state, pc, shares, settings, prices, special = 0, st
         xanaxCdMin: xanaxCdOf(statics.xanaxCds).min,
         // Today's candy pick, kept unless another is clearly cheaper.
         candyPrefer: statics.candyPick && statics.candyPick.day === tornDayStart(state.at) ? statics.candyPick.id : null,
-        ...(live ? { start: { energy: state.energy.current, happy: state.happy.current, drugCdMin: Math.max(0, Number(state.drugCd) || 0) / 60, refillUsed: state.refillUsed === true } } : {}),
+        // With them, the minute of the Torn day it is (the refill and the other once-a-day counts go by Torn's day).
+        ...(live ? { start: { energy: state.energy.current, happy: state.happy.current, drugCdMin: Math.max(0, Number(state.drugCd) || 0) / 60, refillUsed: state.refillUsed === true }, dayMin: Math.floor((state.at - tornDayStart(state.at)) / 60000) } : {}),
         // Year plans (core/year.js): events on their dates, gyms opening as energy is trained.
         ...(events ? { events } : {}),
         ...(unlock ? { unlock } : {}),

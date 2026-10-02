@@ -102,25 +102,31 @@ export function secondJump(p, strategy, { now = T0, days = 31 } = {}) {
 }
 
 /**
- * A jump plan over many days, both ways, from a plan made at `hour` (Torn time): the refills used, every jump (its
- * minute and the energy in the bar), and the energy trained. The simulator steps in 5 minutes; the day plan's steps
- * are dayTimeline's with the look-ahead run on to the last day.
+ * A plan over many days, both ways, from a plan made at `hour` (Torn time) with these bars: the refills and Xanax
+ * used, the boosts, every jump (its minute and the energy in the bar), and the energy trained. The simulator steps in
+ * 5 minutes; the day plan's steps are dayTimeline's with the look-ahead run on to the last day.
+ * `byDay`: the refills used in each 24 h from the start, both ways.
  */
-export function jumpCycle(p, strategy, { hour = 12, days = 25 } = {}) {
+export function manyDays(p, strategy, { hour = 12, days = 25, bars = {}, xanaxPerDay = undefined } = {}) {
     const now = tornDayStart(T0) + hour * 3600e3;
-    const state = normalizeState(apiOf(p), now);
+    const state = normalizeState(apiOf(p, bars), now);
     const pc = playerContext(state, {}, { unlockedKnown: Array.from({ length: p.gym }, (_, i) => i + 1) });
     const shares = targetShares({ strategy, build: p.build, goal: null }, pc.stats, buildOf(p.build).shares);
     const rows = [];
-    const r = simulateStrategy(strategy, { ...simInputs({ state, pc, shares, settings: { horizonDays: days, budget: Infinity }, prices: {}, special: 0, statics: {} }), trace: (x) => rows.push(x) });
-    const sim = { refills: (r.used.points || 0) / 30, energy: r.energyTrained, jumps: sessionsOfTrace(rows).filter((x) => x.H0 > p.happyMax + 100).map((x) => ({ at: x.t, bar: x.E0 })) };
+    const lite = Number.isFinite(xanaxPerDay) ? { xanaxPerDay } : {};
+    const r = simulateStrategy(strategy, { ...simInputs({ state, pc, shares, settings: { horizonDays: days, budget: Infinity }, prices: {}, special: 0, statics: {}, live: true }), ...lite, trace: (x) => rows.push(x) });
+    const sim = { refills: (r.used.points || 0) / 30, xanax: r.used[XANAX] || 0, boosts: r.used.candyBoosts || 0, energy: r.energyTrained, jumps: sessionsOfTrace(rows).filter((x) => x.H0 > p.happyMax + 100).map((x) => ({ at: x.t, bar: x.E0 })) };
     // The day plan's context as buildModel sets it for a player with nothing held and no perks.
-    const ctx = { shares, unlocked: pc.unlocked, perks: pc.perks.mult, keep: [], active: state.gymId, table: pc.table, bliss: false, happyLossMult: pc.perks.happyLossMult, drugsToday: 0, stackedSoFar: 0, boosterCapH: BOOSTER_CAP_H, cdMult: 1, specialHeld: 0, held: {} };
+    const ctx = { shares, unlocked: pc.unlocked, perks: pc.perks.mult, keep: [], active: state.gymId, table: pc.table, bliss: false, happyLossMult: pc.perks.happyLossMult, drugsToday: 0, stackedSoFar: 0, boosterCapH: BOOSTER_CAP_H, cdMult: 1, specialHeld: 0, held: {}, ...lite };
     const end = now + days * 86400e3;
     const steps = dayTimeline({ state, now, strategy, ctx, until: end }).filter((x) => x.at < end);
-    const day = { refills: steps.filter((x) => x.kind === 'refill').length, energy: steps.reduce((a, x) => a + (x.energy || 0), 0), jumps: steps.filter((x) => x.kind === 'jump').map((x) => ({ at: Math.round((x.at - now) / 60e3), bar: x.energy })) };
-    return { sim, day };
+    const xanaxIn = (x) => (x.items || []).reduce((a, it) => a + (it.id === XANAX ? it.qty || 0 : 0), 0);
+    const day = { refills: steps.filter((x) => x.kind === 'refill').length, xanax: steps.reduce((a, x) => a + xanaxIn(x), 0), boosts: steps.filter((x) => x.kind === 'boost').length, energy: steps.reduce((a, x) => a + (x.energy || 0), 0), jumps: steps.filter((x) => x.kind === 'jump').map((x) => ({ at: Math.round((x.at - now) / 60e3), bar: x.energy })) };
+    return { sim, day, barE: state.energy.maximum };
 }
+
+/** A jump plan's cycle over many days (see manyDays). */
+export const jumpCycle = (p, strategy, o) => manyDays(p, strategy, o);
 
 /**
  * The small-budget plan ("Steady, fewer Xanax") on its first Torn day, both ways: the Xanax taken, the energy

@@ -10,7 +10,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { PLAYERS } from './support/ref.mjs';
-import { firstBoost, secondJump, jumpCycle, liteDay, firstDayFrom, BOOSTED } from './support/sim-vs-day.mjs';
+import { firstBoost, secondJump, jumpCycle, manyDays, liteDay, firstDayFrom, BOOSTED } from './support/sim-vs-day.mjs';
 import { STATS } from '../src/core/gain.js';
 import { STRATEGIES } from '../src/core/strategies.js';
 
@@ -68,6 +68,29 @@ for (const [id, days] of [['edvdJump', 25], ['chocoJump', 25], ['consoleJump', 1
                 assert.ok(Math.abs(day.jumps[i].at - j.at) <= MINUTES_APART, 'jump ' + (i + 1) + ': day plan at ' + day.jumps[i].at + ' min, simulator at ' + j.at + ' min');
                 assert.equal(day.jumps[i].bar, j.bar, 'jump ' + (i + 1) + ': energy in the bar');
             });
+        });
+    }
+}
+
+// Round 7 (the Torn day): what is counted once a day (the refill, the small plan's Xanax a day) goes by Torn's day in
+// the simulator too. Before, its day was 24 hours from the moment the plan was made: for a plan made at any hour but
+// 00:00 the day plan used 11 refills in ten days and the simulator counted 10, and "2 Xanax a day" took 21 or 22
+// against 20; a refill already used today blocked the simulator for 24 hours instead of until Torn's midnight.
+const TORN_DAY = [
+    ['steady', {}, 'full bars'],
+    ['steady', { refillUsed: true }, 'today’s refill used'],
+    ['steadyMax', {}, 'full bars'],
+    ['steadyLite', {}, '2 Xanax a day', 2],
+    ['edvdJump', { refillUsed: true }, 'today’s refill used'],
+];
+for (const [id, bars, words, xanaxPerDay] of TORN_DAY) {
+    for (const hour of [0, 4, 8, 12, 16, 20]) {
+        test('simulator = day plan · friend · ' + id + ' (' + words + ') made at ' + String(hour).padStart(2, '0') + ':00: ten days of refills and Xanax', () => {
+            const { sim, day, barE } = manyDays(PLAYERS.friend, id, { hour, days: 10, bars, xanaxPerDay });
+            assert.equal(sim.refills, day.refills, 'refills used: simulator ' + sim.refills + ', day plan ' + day.refills);
+            assert.equal(sim.xanax, day.xanax, 'Xanax taken: simulator ' + sim.xanax + ', day plan ' + day.xanax);
+            // Plain steady: the day plan may hold up to one bar at the end that the simulator has already trained.
+            if (id === 'steady') assert.ok(sim.energy - day.energy >= 0 && sim.energy - day.energy <= barE, 'energy: day plan ' + day.energy + ', simulator ' + sim.energy);
         });
     }
 }

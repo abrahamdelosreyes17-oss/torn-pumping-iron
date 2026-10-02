@@ -165,6 +165,8 @@ export const TICK_OFFSET_MIN = 5;
  *   cooldown left, minutes), refillUsed (today's refill is gone)}. The day plan (plan.js) always started from the live
  *   bars; the simulator started from a full bar with no cooldown, so day one of a plan promised more than its own
  *   steps could do. Unset: a full bar, happy at its maximum, no cooldown (stretches of a plan that start later)
+ * @param {number} [o.dayMin] - round 7: the minute of the Torn day the run starts at (0–1439; unset: Torn midnight).
+ *   The refill, the day's boost and every other once-a-day count go by the Torn day, as in the day plan
  * @param {number} [o.xanaxPerDay] - round 7 (the small-budget plan): at most this many Xanax a day in a steady plan
  *   (0: natural energy only); unset: one on every cooldown
  * @param {function} [o.trace] - round 7: called for every train with {t (minutes from the start), k (stat), e (its
@@ -227,9 +229,14 @@ export function* simulateSteps(id, o) {
     const addBooster = (itemId, n, t) => {
         boosterFree = Math.max(boosterFree, t) + n * boosterHours(itemId, cdMult) * 60;
     };
+    // The Torn day (round 7): what is counted once a day (the refill, the day's boost, the Xanax a day of the small
+    // plan, boosters a day, job points) is counted by Torn's day, as the day plan (plan.js) always did. `dayMin` is
+    // the minute of the Torn day the run starts at. Before, a "day" was 24 hours from the moment the plan was made:
+    // a plan made at noon lost the refill of its last half day, and a refill used today blocked 24 hours.
+    const dayMin = Number.isFinite(o.dayMin) ? ((Math.floor(o.dayMin) % 1440) + 1440) % 1440 : 0;
     // A daily candy boost still to come today: the next Xanax (before midnight) will find room under the cap.
-    const boostLaterToday = (t, day) => t + xanCD < (day + 1) * 1440 && boosterFree - (t + xanCD) < capH * 60;
-    // Today's refill already used: the first of the simulator's days has none.
+    const boostLaterToday = (t, day) => t + xanCD < (day + 1) * 1440 - dayMin && boosterFree - (t + xanCD) < capH * 60;
+    // Today's refill already used: none until Torn's midnight.
     let refillDay = st && st.refillUsed ? 0 : -1;
     // The small-budget plan: at most this many Xanax a day (steady plans); the day plan (plan.js) keeps the same count.
     const xanCap = Number.isFinite(o.xanaxPerDay) ? Math.max(0, Math.floor(o.xanaxPerDay)) : Infinity;
@@ -484,7 +491,9 @@ export function* simulateSteps(id, o) {
 
     for (let t = 0; t < days * 1440; t += STEP_MIN) {
         if (sliceMin && t && t % sliceMin === 0) yield t;
-        const day = Math.floor(t / 1440);
+        // The Torn day this minute is in (0: the day the run starts in). The result's `daily` and `quart` stay by 24 h
+        // from the start (the plan's line is read by time).
+        const day = Math.floor((t + dayMin) / 1440);
         curT = t;
         if (gainSum !== gainSeen) {
             // What the last step trained, at that step's minute of its day.

@@ -243,7 +243,8 @@ async function follower(strategy, hour) {
     const shares = targetShares(getPlan(), pc.stats, buildOf(friend.build).shares);
     const rows = [];
     const r = saved.compare[strategy];
-    simulateStrategy(strategy, { ...simInputs({ state, pc, shares, settings: { horizonDays: saved.days, budget: Infinity }, prices: {}, special: 0, statics: {} }), ...(r.candy ? { candyId: r.candy.id, candyCount: r.candy.count } : {}), trace: (x) => rows.push(x) });
+    // `live`, as Create plan runs it: from the bars as they are, at this minute of the Torn day.
+    simulateStrategy(strategy, { ...simInputs({ state, pc, shares, settings: { horizonDays: saved.days, budget: Infinity }, prices: {}, special: 0, statics: {}, live: true }), ...(r.candy ? { candyId: r.candy.id, candyCount: r.candy.count } : {}), trace: (x) => rows.push(x) });
     const statsAt = (ms) => {
         const o = { ...base };
         for (const x of rows) if (start + x.t * MIN <= ms) o[x.k] += x.gain;
