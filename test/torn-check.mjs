@@ -293,7 +293,12 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     await page.close();
 }
 {
-    const { page, errors } = await open('page=faction&ID=7777&fixture=faction&ffs=1&who=owner', { wait: 6500 });
+    // Round 7 (I.1): the rows show what is already known and ask nothing. Known here: Rival, whose profile was opened
+    // first (this site's own stored estimate), and Flyer, whom the Torn Eye tab's war mode judged (the shared table).
+    const warBands = { at: Date.parse('2026-09-29T10:40:00Z'), fid: 7777, p: { 515151: ['cant', 3, null], 605123: ['stomp', 100, 97] } };
+    const { page, errors } = await open('page=profile&XID=424242&fixture=profile&ffs=1&who=owner', { wait: 8000, seed: { 'pumpingIron.v1.eyeWarBands': JSON.stringify(warBands) } });
+    await page.goto('http://127.0.0.1:8783/test/harness-live.html?key=1&at=2026-09-29T10:48:00Z&wait=100000&plan=1&follow=steady&page=faction&ID=7777&fixture=faction&ffs=1&who=owner');
+    await page.waitForTimeout(6500);
     // Shown order (CSS order on Torn's rows; the DOM itself is untouched).
     const order = await page.evaluate(() => [...document.querySelectorAll('#faction_war_list_id li.enemy')].sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top).map((li) => li.querySelector('.member a[href*="XID"]').getAttribute('aria-label').replace('View profile of ', '')));
     const domOrder = await page.evaluate(() => [...document.querySelectorAll('#faction_war_list_id li.enemy .member a[href*="XID"]')].map((a) => a.getAttribute('aria-label').replace('View profile of ', '')));
@@ -301,12 +306,23 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     ok(order[0] === 'Rival' && order[3] === 'Flyer', 'war: Okay first, Traveling last, from what the page shows (' + order + ')');
     const sum = (await text(page, '.pi-warsum'))[0] || '';
     ok(/1 attackable now/.test(sum) && /1 traveling/.test(sum) && /live war mode on Pumping Iron’s Torn Eye tab/.test(sum), 'war: summary line (' + sum + ')');
-    const chips = await page.evaluate(() => document.querySelectorAll('#faction_war_list_id li.enemy .pi-chip').length);
-    ok(chips === 4, 'war: a chip on every enemy row (' + chips + ')');
+    const chips = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll('#faction_war_list_id li.enemy')].map((li) => [li.querySelector('.member a[href*="XID"]').getAttribute('aria-label').replace('View profile of ', ''), (li.querySelector('.pi-chip') || { textContent: '' }).textContent.replace(/\s+/g, ' ').trim()])));
+    ok(/^(Stomp|Good|Tough|Can't win)/.test(chips.Rival), 'war: the estimate stored by an earlier page shows on its row (' + chips.Rival + ')');
+    ok(/^Can't win/.test(chips.Flyer), 'war: a player only war mode judged shows its band (' + chips.Flyer + ')');
+    ok(chips.Mira_Vex === '' && chips.Brix === '', 'war: no chip where nothing is known, never "No data" (' + JSON.stringify(chips) + ')');
+    const flyerChip = page.locator('#faction_war_list_id li.enemy .pi-chip[data-pi-player="515151"]');
+    await flyerChip.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(200);
+    const flyer = await flyerChip.boundingBox();
+    await page.mouse.move(flyer.x + 10, flyer.y + 8);
+    await page.waitForTimeout(200);
+    const warCard = (await text(page, '.pi-eyecard'))[0] || '';
+    ok(/Win 3%/.test(warCard) && /From war mode on Pumping Iron’s Torn Eye tab, 8 min ago/.test(warCard), 'war: its card says where the band came from (' + warCard + ')');
+    await page.mouse.move(5, 5);
     const yours = await page.evaluate(() => document.querySelectorAll('#faction_war_list_id li.your .pi-chip').length);
     ok(yours === 0, 'war: your own side is left alone');
     const memberChips = await page.evaluate(() => document.querySelectorAll('.members-list .table-body .pi-chip').length);
-    ok(memberChips === 2, 'faction list: chips on members, not the fallen one (' + memberChips + ')');
+    ok(memberChips === 1, 'faction list: a chip on the member something is known about, none on the others or the fallen one (' + memberChips + ')');
     // Round 6 (owner): no Torn Eye reads for faction or war lists on Torn's pages (the Torn Eye tab does war mode).
     const calls = await page.evaluate(() => window.__calls.filter((c) => /faction|\/profile|get-stats/.test(c)).length);
     ok(calls === 0, 'war: nothing asked on a faction page (' + calls + ')');

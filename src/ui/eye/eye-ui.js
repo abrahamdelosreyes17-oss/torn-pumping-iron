@@ -113,6 +113,8 @@ export function cardEl(v) {
             const pct = Math.round((r.keep || 0) * 100);
             kids.push(h('div', { class: 'pi-kept' }, [h('span', { text: BUILD_WORDS[k] || k }), h('div', { class: 'pi-bar' }, [h('i', { style: 'width:' + pct + '%;background:' + BAND_COLORS[band] })]), h('span', { text: r.pWin < 0.05 ? 'lose' : pct + '%' })]));
         }
+    } else if (f && v.shared) {
+        kids.push(h('span', { text: 'Win ' + Math.round(f.pWin * 100) + '%' + (f.keep === null || f.keep === undefined ? '' : ' · keep ~' + Math.round(f.keep * 100) + '%') }));
     } else if (f) {
         kids.push(h('span', { text: 'Their exact stats (spy): win ' + Math.round(f.pWin * 100) + '% · keep ' + Math.round((f.keep || 0) * 100) + '%' }));
     }
@@ -122,7 +124,8 @@ export function cardEl(v) {
         if (v.withGear) kids.push(h('span', { class: 'pi-warnline', text: 'With their gear: win ' + Math.round(v.withGear.pWin * 100) + '% · keep ~' + Math.round((v.withGear.keep || 0) * 100) + '%' }));
     }
     const src = v.est ? v.est.source : null;
-    const foot = src === 'ffscouter' ? ['Stats: ', h('b', { text: 'FFScouter' }), ' (' + FFS_SITE_URL.replace('https://', '').replace(/\/$/, '') + '), ' + (v.est.ageDays ?? '?') + ' days old.'] : src === 'spy' ? ['Stats: a spy, ' + v.est.ageDays + ' days old.'] : src === 'fight' ? ['Stats: from your own fight with them' + (v.est.lowerBound ? ' (at least this strong)' : '') + '.'] : src === 'public' ? ['Stats: rough, from public stats (' + v.est.range + ').'] : ['No estimate yet. Connect FFScouter or fight them once.'];
+    const mins = v.shared ? Math.max(0, Math.round((Date.now() - v.shared.at) / 60000)) : 0;
+    const foot = v.shared ? ['From war mode on Pumping Iron’s Torn Eye tab, ' + (mins < 1 ? 'just now' : mins < 90 ? mins + ' min ago' : Math.round(mins / 60) + ' h ago') + '. Open their profile for the full estimate.'] : src === 'ffscouter' ? ['Stats: ', h('b', { text: 'FFScouter' }), ' (' + FFS_SITE_URL.replace('https://', '').replace(/\/$/, '') + '), ' + (v.est.ageDays ?? '?') + ' days old.'] : src === 'spy' ? ['Stats: a spy, ' + v.est.ageDays + ' days old.'] : src === 'fight' ? ['Stats: from your own fight with them' + (v.est.lowerBound ? ' (at least this strong)' : '') + '.'] : src === 'public' ? ['Stats: rough, from public stats (' + v.est.range + ').'] : ['No estimate yet. Connect FFScouter or fight them once.'];
     if (v.forecast && v.forecast.turns) foot.push(' About ' + v.forecast.turns + ' turns.');
     kids.push(h('div', { class: 'pi-foot' }, foot));
     return h('div', { class: 'pi-mark pi-eyecard' }, kids);

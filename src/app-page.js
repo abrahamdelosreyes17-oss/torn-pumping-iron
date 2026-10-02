@@ -11,13 +11,13 @@ import { forgetSavedPlan } from './platform/plan-store.js';
 import { archived, pageGet, loadArchives, drainArchives, clearArchived, archivesReady } from './platform/archive.js';
 import { PiApp } from './ui/app/app.js';
 import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, fetchFactionMembers, fetchFactionWars, keyIsEnough } from './api/torn.js';
-import { outEarly, enemiesFromWars } from './core/eye/war.js';
+import { outEarly, enemiesFromWars, warBandTable } from './core/eye/war.js';
 import { isBeatable } from './core/eye/targets.js';
 import { isWatched } from './core/eye/watch.js';
 import { W3bClient, fetchW3bListings } from './api/w3b.js';
 import { checkFfsKey } from './api/ffscouter.js';
 import { renderEye } from './ui/app/eye-tab.js';
-import { wantPlayers, eyeView, warmFights, fightsPending, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient, importTargets, TARGETS_KEY, rememberFlights, flightsSeen, getWatch, watchStates, toggleWatch, setWatchTag, dismissWatchOffer, watchOffersNow, pollWatch } from './eye-service.js';
+import { wantPlayers, eyeView, warmFights, fightsPending, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient, importTargets, TARGETS_KEY, WAR_BANDS_KEY, rememberFlights, flightsSeen, getWatch, watchStates, toggleWatch, setWatchTag, dismissWatchOffer, watchOffersNow, pollWatch } from './eye-service.js';
 import { discordState, discordRaw, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId, linkDiscord, setTargetsForSync, setEyeForSync, loginDiscord, cancelLogin, resumeLogin } from './discord.js';
 import { saveFullKey, forgetFullKey, refreshMoneyLog } from './income.js';
 import { WORKER_SETUP_URL } from './api/worker.js';
@@ -381,6 +381,29 @@ function syncEye(force = false) {
     setEyeForSync({ war: fid && warRows.length ? { factionId: fid, members: warRows } : null, watch: watchRows });
 }
 
+/*
+ * What war mode worked out, for Torn's own war page (round 7): that page asks about nobody, and this page's estimates
+ * live in this site's IndexedDB, so the enemy's bands go to shared storage as one small table. Written only when a
+ * band changed, or every 10 minutes so its age stays true.
+ */
+let warBandsSig = '';
+let warBandsAt = 0;
+export const WAR_BANDS_REWRITE_MS = 10 * 60 * 1000;
+
+function shareWarBands() {
+    const fid = warFid();
+    if (!fid || war.membersFid !== fid || !(war.members || []).length || !isVisible() || fightsPending()) return;
+    const views = war.members.map((mm) => eyeView(Number(mm.id), { level: mm.level, name: mm.name, life: mm.life || null }, { war: true, later: true }));
+    // A fight still being worked out: the table waits for it (asked again in 2 s).
+    if (views.some((v) => !v || v.pending)) return;
+    const table = warBandTable(views.map((v) => ({ id: v.id, band: v.band, win: v.forecast ? v.forecast.pWin * 100 : null, keep: v.forecast && v.forecast.keep !== null && v.forecast.keep !== undefined ? v.forecast.keep * 100 : null })), { fid });
+    const sig = fid + '|' + JSON.stringify(table.p);
+    if (sig === warBandsSig && Date.now() - warBandsAt < WAR_BANDS_REWRITE_MS) return;
+    warBandsSig = sig;
+    warBandsAt = Date.now();
+    set(WAR_BANDS_KEY, table);
+}
+
 /** Settings the report carries: the switches and limits, never a key, a faction or a player id. */
 const REPORT_SETTINGS = ['timeFormat', 'pill', 'gymMarks', 'marketMarks', 'eyeChips', 'motion', 'budget', 'horizonDays', 'buyWindow', 'w3b', 'warReserve', 'boosterCapH', 'npcShops', 'npcShopsOff'];
 
@@ -702,6 +725,7 @@ export function bootAppPage({ renderers = {} } = {}) {
         // The Watched view reads its players every 60 s while it shows (the war list just read costs nothing).
         if (page.app.ui.eyeMode === 'watched') pollWatch({ members: war.members }).catch(() => {});
         syncEye();
+        shareWarBands();
     }, 2000);
     // A Log in with Discord that was under way when the page reloaded: keep waiting for it.
     setTimeout(() => {
