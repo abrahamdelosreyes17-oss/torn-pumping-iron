@@ -10,8 +10,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { PLAYERS } from './support/ref.mjs';
-import { firstBoost, liteDay, firstDayFrom, BOOSTED } from './support/sim-vs-day.mjs';
+import { firstBoost, secondJump, jumpCycle, liteDay, firstDayFrom, BOOSTED } from './support/sim-vs-day.mjs';
 import { STATS } from '../src/core/gain.js';
+import { STRATEGIES } from '../src/core/strategies.js';
 
 /** The two step differently (5-minute steps against the minute after the tick): this much apart is the same session. */
 const MINUTES_APART = 5;
@@ -29,6 +30,44 @@ for (const [pid, p] of Object.entries(PLAYERS)) {
             for (const k of STATS) assert.ok(Math.abs((day.trains[k] || 0) - (sim.trains[k] || 0)) <= TRAINS_APART, k + ' trains: day plan ' + (day.trains[k] || 0) + ', simulator ' + (sim.trains[k] || 0));
             assert.ok(Math.abs(day.gain - sim.gain) <= GAIN_APART * sim.gain, 'gain: day plan ' + Math.round(day.gain) + ', simulator ' + Math.round(sim.gain));
             assert.ok(Math.abs(day.at - sim.at) <= MINUTES_APART, 'when: day plan at ' + day.at + ' min, simulator at ' + sim.at + ' min');
+        });
+    }
+}
+
+// Round 7 (B.2, the jump cycle): the jump after the first one, as the player sees it once the first is trained.
+// Before, the day plan waited for the next quarter tick when the Ecstasy's cooldown ended a few minutes after one, so
+// every jump sat a quarter of an hour after the simulator's.
+const JUMPS = BOOSTED.filter((id) => STRATEGIES[id].kind === 'jump');
+for (const [pid, p] of Object.entries(PLAYERS)) {
+    for (const id of JUMPS) {
+        test('simulator = day plan · ' + pid + ' · ' + id + ': the second jump', () => {
+            const { sim, day } = secondJump(p, id);
+            assert.ok(sim, 'the simulator has a second jump');
+            assert.ok(day, 'the day plan shows the next jump');
+            assert.ok(Math.abs(day.at - sim.at) <= MINUTES_APART, 'when: day plan at ' + day.at + ' min, simulator at ' + sim.at + ' min');
+            assert.equal(day.bar, sim.bar, 'energy in the bar at the jump');
+            assert.equal(day.energy, sim.energy, 'energy trained');
+            for (const k of STATS) assert.ok(Math.abs((day.trains[k] || 0) - (sim.trains[k] || 0)) <= TRAINS_APART, k + ' trains: day plan ' + (day.trains[k] || 0) + ', simulator ' + (sim.trains[k] || 0));
+            assert.ok(Math.abs(day.gain - sim.gain) <= GAIN_APART * sim.gain, 'gain: day plan ' + Math.round(day.gain) + ', simulator ' + Math.round(sim.gain));
+        });
+    }
+}
+
+// The whole cycle over 25 days (15 for the console jump: 14 jumps), for a plan made at six hours of the Torn day: the
+// refills used, the jumps and the energy trained are the same both ways, and every jump lands in the same tick window.
+// (A day with no jump leaves its refill unused in both: that refill is a rule of its own, not this one.)
+for (const [id, days] of [['edvdJump', 25], ['chocoJump', 25], ['consoleJump', 15]]) {
+    for (const hour of [0, 4, 8, 12, 16, 20]) {
+        test('simulator = day plan · friend · ' + id + ' made at ' + String(hour).padStart(2, '0') + ':00: ' + days + ' days of jumps', () => {
+            const { sim, day } = jumpCycle(PLAYERS.friend, id, { hour, days });
+            assert.ok(sim.jumps.length >= 10, 'jumps: ' + sim.jumps.length);
+            assert.equal(day.jumps.length, sim.jumps.length, 'jumps');
+            assert.equal(day.refills, sim.refills, 'refills used');
+            assert.equal(day.energy, sim.energy, 'energy trained');
+            sim.jumps.forEach((j, i) => {
+                assert.ok(Math.abs(day.jumps[i].at - j.at) <= MINUTES_APART, 'jump ' + (i + 1) + ': day plan at ' + day.jumps[i].at + ' min, simulator at ' + j.at + ' min');
+                assert.equal(day.jumps[i].bar, j.bar, 'jump ' + (i + 1) + ': energy in the bar');
+            });
         });
     }
 }

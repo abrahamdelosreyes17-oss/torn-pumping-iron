@@ -151,7 +151,7 @@ test('review 2.2 · the energy cap: a jump trains at most 1,000 energy at jump h
     assert.ok(first.t === 0 && first.energy === 150 && first.H0 <= p.happyMax, 'the full bar is trained before Xanax #1: ' + JSON.stringify(first));
 });
 
-test('review 2.3 · the second jump is the same in the simulator and the day plan (the jump cycle)', TODO('R7.4'), () => {
+test('review 2.3 · the second jump is the same in the simulator and the day plan (the jump cycle)', () => {
     const p = friend;
     const state = normalizeState(apiOf(p), T0);
     const unlockedKnown = Array.from({ length: p.gym }, (_, i) => i + 1);

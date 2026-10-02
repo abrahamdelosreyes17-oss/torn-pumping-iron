@@ -111,7 +111,10 @@ export function stackRoom(stackTo) {
     return Math.max(0, ENERGY_CAP - stackTo * ITEMS[XANAX].energy);
 }
 
-/** Minutes after a quarter tick the boost lands (the reset has just passed). */
+/**
+ * Minutes after a quarter tick the boost lands (the reset has just passed). The day plan (plan.js) counts a boost
+ * that can start within this long after a tick as "right after the tick" too: ten minutes are left to finish it.
+ */
 export const TICK_OFFSET_MIN = 5;
 
 /**
@@ -589,10 +592,11 @@ export function* simulateSteps(id, o) {
             }
         } else {
             // Jumps: stack Xanax without training, then boost just after a tick and train it all.
+            // Between a jump and the next stack (round 7, B.2; the day plan does the same: plan.js): natural energy
+            // is trained as it comes, at normal happy, down to what fits under the 1,000 cap with the stack (4 Xanax:
+            // to empty). Before round 7 the bar went into the stack: 1,150 and 1,120 at jump happy.
+            if (phase === 'stack' && stacked === 0) train(stackKeep);
             if (phase === 'stack' && t >= drugFree) {
-                // The stack's first Xanax: what the cap has no room for is trained first, at normal happy (4 Xanax
-                // fill the 1,000 from an empty bar). Before, the bar went into the stack: 1,150 and 1,120 at jump happy.
-                if (stacked === 0) train(stackKeep);
                 xanax(t);
                 stacked++;
                 if (stacked === stackTo) phase = 'wait';

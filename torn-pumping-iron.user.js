@@ -49,7 +49,7 @@
     'use strict';
 
     const PI_BUILD_VERSION = '1.3.0';
-    const PI_BUILD_HASH = '4551beb5070f';
+    const PI_BUILD_HASH = 'f341e732cceb';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -3460,7 +3460,10 @@
         return Math.max(0, ENERGY_CAP - stackTo * ITEMS[XANAX].energy);
     }
 
-    /** Minutes after a quarter tick the boost lands (the reset has just passed). */
+    /**
+     * Minutes after a quarter tick the boost lands (the reset has just passed). The day plan (plan.js) counts a boost
+     * that can start within this long after a tick as "right after the tick" too: ten minutes are left to finish it.
+     */
     const TICK_OFFSET_MIN = 5;
 
     /**
@@ -3938,10 +3941,11 @@
                 }
             } else {
                 // Jumps: stack Xanax without training, then boost just after a tick and train it all.
+                // Between a jump and the next stack (round 7, B.2; the day plan does the same: plan.js): natural energy
+                // is trained as it comes, at normal happy, down to what fits under the 1,000 cap with the stack (4 Xanax:
+                // to empty). Before round 7 the bar went into the stack: 1,150 and 1,120 at jump happy.
+                if (phase === 'stack' && stacked === 0) train(stackKeep);
                 if (phase === 'stack' && t >= drugFree) {
-                    // The stack's first Xanax: what the cap has no room for is trained first, at normal happy (4 Xanax
-                    // fill the 1,000 from an empty bar). Before, the bar went into the stack: 1,150 and 1,120 at jump happy.
-                    if (stacked === 0) train(stackKeep);
                     xanax(t);
                     stacked++;
                     if (stacked === stackTo) phase = 'wait';
@@ -4670,10 +4674,23 @@
                 if (jumps > 0 && (drugAt >= end || !lookAhead)) break;
                 while (stacked < stackTo) {
                     if (jumps > 0 && drugAt >= end) return steps.sort((a, b) => a.at - b.at);
+                    // Between a jump and the next stack (round 7, B.2; the simulator does the same: strategies.js):
+                    // natural energy is trained, at normal happy, down to what fits under the 1,000 cap with the stack
+                    // (4 Xanax: to empty). A bar that fills before the stack starts is trained then, so none is lost;
+                    // what is in the bar at the stack's first Xanax is trained just before it.
+                    if (stacked === 0 && stackKeep < maxE) {
+                        for (let f = fullAt(); f < drugAt; f = fullAt()) {
+                            rollDay(f);
+                            advance(f);
+                            const st = train(f, 'natural', 'Natural energy', [], {}, stackKeep);
+                            if (!st.energy) {
+                                steps.pop();
+                                break;
+                            }
+                        }
+                    }
                     rollDay(drugAt);
                     advance(drugAt);
-                    // The stack's first Xanax: what the cap has no room for is trained first, at normal happy (the
-                    // simulator does the same: strategies.js). Before, the bar went into the stack: 1,150 at jump happy.
                     if (stacked === 0 && E - stackKeep >= minTrain) {
                         const st = train(drugAt, 'natural', 'Train what’s in the bar', [], { note: 'before Xanax #1: energy stops at ' + ENERGY_CAP.toLocaleString('en-US') + ', so ' + stackTo + ' Xanax need an empty bar' }, stackKeep);
                         if (!st.energy) steps.pop();
@@ -4692,14 +4709,21 @@
                 const want = candyJump ? candyQty() : ctx.edvdCount || (s === 'happy99k' ? boostersThatFit(EDVD, capH) : 5);
                 const qty = Math.min(want, boostersThatFit(boostItem, capH, 0, cdMult));
                 const room = roomFor(boostItem, qty);
-                const tick = nextQuarterTick(Math.max(drugAt, ctx.holdBooster ? ctx.holdUntil || 0 : 0, room) - 1);
-                const at = tick + MIN;
+                // Ready within a few minutes after a tick (the Ecstasy's cooldown from the last jump ends then): the
+                // boost goes at once, with ten minutes left of that tick's window (the simulator's rule: TICK_OFFSET_MIN).
+                // Before, it waited for the next tick, so each jump drifted a quarter of an hour from the simulator's.
+                const ready = Math.max(drugAt, ctx.holdBooster ? ctx.holdUntil || 0 : 0, room);
+                const nextTick = nextQuarterTick(ready - 1);
+                const lastTick = nextTick - 15 * MIN;
+                const inWindow = nextTick !== ready && ready - lastTick <= TICK_OFFSET_MIN * MIN;
+                const tick = inWindow ? lastTick : nextTick;
+                const at = Math.max(ready, tick + MIN);
                 if (jumps > 0 && at >= end) break;
                 rollDay(at);
                 advance(at);
                 let items;
                 let label;
-                let note = 'Right after the ' + clockOf(tick) + ' tick';
+                let note = at > tick + MIN ? 'At ' + clockOf(at) + ', in the window after the ' + clockOf(tick) + ' tick: finish before ' + clockOf(tick + 15 * MIN) : 'Right after the ' + clockOf(tick) + ' tick';
                 if (room > drugAt) note += '; it waits for room under the ' + capH + ' h booster cap';
                 note += '; no other boosters before it';
                 const jp = jobPoints();

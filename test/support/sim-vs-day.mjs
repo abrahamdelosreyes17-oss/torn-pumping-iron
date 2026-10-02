@@ -8,8 +8,8 @@
 import { simulateStrategy, STRATEGIES } from '../../src/core/strategies.js';
 import { buildModel, simInputs, playerContext, buildOf } from '../../src/core/model.js';
 import { normalizeState, tornDayStart } from '../../src/core/bars.js';
-import { XANAX } from '../../src/core/items.js';
-import { targetShares } from '../../src/core/plan.js';
+import { XANAX, ECSTASY_CD_MIN, BOOSTER_CAP_H, boosterHours } from '../../src/core/items.js';
+import { targetShares, dayTimeline } from '../../src/core/plan.js';
 import { STATS } from '../../src/core/gain.js';
 import { T0, apiOf, sessionsOfTrace } from './ref.mjs';
 
@@ -50,6 +50,75 @@ export function firstBoost(p, strategy, { now = T0, days = 31 } = {}) {
             for (const k of STATS) if (x.trains && x.trains[k]) day.trains[k] = (day.trains[k] || 0) + x.trains[k];
         }
     }
+    return { sim, day };
+}
+
+/**
+ * The jump after the first (round 7, B.2: the jump cycle): the simulator's second jump against the day plan as the
+ * player sees it once the first one is trained (the bar empty, the Ecstasy's and the boosters' cooldowns starting, the
+ * refill used, the stats the simulator has then).
+ * @returns {{sim: {at, bar, energy, gain, trains}, day: {at, bar, energy, gain, trains}}} at: minutes from the plan's
+ *   start; bar: the energy in the bar at the jump; energy, gain, trains: the jump and the refill trained with it
+ */
+export function secondJump(p, strategy, { now = T0, days = 31 } = {}) {
+    const state = normalizeState(apiOf(p), now);
+    const unlockedKnown = Array.from({ length: p.gym }, (_, i) => i + 1);
+    const pc = playerContext(state, {}, { unlockedKnown });
+    const plan = { strategy, build: p.build, goal: null };
+    const shares = targetShares(plan, pc.stats, buildOf(p.build).shares);
+    const settings = { horizonDays: days, budget: Infinity };
+    const rows = [];
+    simulateStrategy(strategy, { ...simInputs({ state, pc, shares, settings, prices: {}, special: 0, statics: {} }), trace: (x) => rows.push(x) });
+    const jumps = sessionsOfTrace(rows).filter((x) => x.H0 > p.happyMax + 100);
+    const [first, s] = jumps;
+    const sim = s ? { at: s.t, bar: s.E0, energy: s.energy, gain: s.gain, trains: { ...s.trains } } : null;
+    // The stats once the first jump is trained, and the boosters it took (from the day plan's own first jump).
+    const stats = { ...p.stats };
+    for (const x of rows) if (x.t <= first.end) stats[x.k] += x.gain;
+    const m0 = buildModel({ state, statics: {}, plan, settings, log: [], now, unlockedKnown });
+    const j0 = m0.ahead.concat(m0.lookAhead).find((x) => x.kind === 'jump');
+    const boosterH = (j0.items || []).reduce((a, it) => a + boosterHours(it.id) * (it.qty || 0), 0);
+    // The minute the first jump is trained: the cooldowns start here, and the bar's next 5 energy comes mid-way to
+    // the next ten minutes (the console jump keeps natural energy under its 3 Xanax, so the count matters).
+    const t1 = now + first.t * 60e3;
+    const api = apiOf(p, { stats, energy: 0, drug: ECSTASY_CD_MIN * 60, booster: Math.round(boosterH * 3600), refillUsed: true });
+    api.bars.energy.tick_time = 300;
+    const after = normalizeState(api, t1);
+    const m = buildModel({ state: after, statics: {}, plan, settings, log: [], now: t1, unlockedKnown });
+    const seen = new Set();
+    const steps = m.ahead.concat(m.lookAhead).sort((a, b) => a.at - b.at).filter((x) => !seen.has(x.id + x.at) && seen.add(x.id + x.at));
+    const b = steps.find((x) => x.kind === 'jump');
+    let day = null;
+    if (b) {
+        day = { at: Math.round((b.at - now) / 60e3), bar: b.energy, energy: 0, gain: 0, trains: {} };
+        for (const x of steps) {
+            if (x.at < b.at || x.at > b.at + 5 * 60e3) continue;
+            day.energy += x.energy || 0;
+            for (const part of x.parts || []) day.gain += part.gain;
+            for (const k of STATS) if (x.trains && x.trains[k]) day.trains[k] = (day.trains[k] || 0) + x.trains[k];
+        }
+    }
+    return { sim, day };
+}
+
+/**
+ * A jump plan over many days, both ways, from a plan made at `hour` (Torn time): the refills used, every jump (its
+ * minute and the energy in the bar), and the energy trained. The simulator steps in 5 minutes; the day plan's steps
+ * are dayTimeline's with the look-ahead run on to the last day.
+ */
+export function jumpCycle(p, strategy, { hour = 12, days = 25 } = {}) {
+    const now = tornDayStart(T0) + hour * 3600e3;
+    const state = normalizeState(apiOf(p), now);
+    const pc = playerContext(state, {}, { unlockedKnown: Array.from({ length: p.gym }, (_, i) => i + 1) });
+    const shares = targetShares({ strategy, build: p.build, goal: null }, pc.stats, buildOf(p.build).shares);
+    const rows = [];
+    const r = simulateStrategy(strategy, { ...simInputs({ state, pc, shares, settings: { horizonDays: days, budget: Infinity }, prices: {}, special: 0, statics: {} }), trace: (x) => rows.push(x) });
+    const sim = { refills: (r.used.points || 0) / 30, energy: r.energyTrained, jumps: sessionsOfTrace(rows).filter((x) => x.H0 > p.happyMax + 100).map((x) => ({ at: x.t, bar: x.E0 })) };
+    // The day plan's context as buildModel sets it for a player with nothing held and no perks.
+    const ctx = { shares, unlocked: pc.unlocked, perks: pc.perks.mult, keep: [], active: state.gymId, table: pc.table, bliss: false, happyLossMult: pc.perks.happyLossMult, drugsToday: 0, stackedSoFar: 0, boosterCapH: BOOSTER_CAP_H, cdMult: 1, specialHeld: 0, held: {} };
+    const end = now + days * 86400e3;
+    const steps = dayTimeline({ state, now, strategy, ctx, until: end }).filter((x) => x.at < end);
+    const day = { refills: steps.filter((x) => x.kind === 'refill').length, energy: steps.reduce((a, x) => a + (x.energy || 0), 0), jumps: steps.filter((x) => x.kind === 'jump').map((x) => ({ at: Math.round((x.at - now) / 60e3), bar: x.energy })) };
     return { sim, day };
 }
 
