@@ -5,14 +5,14 @@
  */
 
 import { gmOnChange } from './platform/gm.js';
-import { K, get, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup, DATA_GROUPS, getPrices, PRICE_LISTINGS_KEPT, loadLocalPrices, localPrices, setLocalPrices, clearLocalPrices } from './platform/store.js';
+import { K, get, getShared, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup, DATA_GROUPS, getPrices, PRICE_LISTINGS_KEPT, loadLocalPrices, localPrices, setLocalPrices, clearLocalPrices } from './platform/store.js';
 import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE, beatFocus, apiFocus, createPlan, recalibratePlan, followStrategy, followPath, cancelPlan, onPlanProgress } from './runtime.js';
 import { forgetSavedPlan } from './platform/plan-store.js';
 import { archived, pageGet, loadArchives, drainArchives, clearArchived, archivesReady } from './platform/archive.js';
 import { PiApp } from './ui/app/app.js';
 import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, fetchFactionMembers, fetchFactionWars, keyIsEnough } from './api/torn.js';
 import { outEarly, enemiesFromWars, warBandTable } from './core/eye/war.js';
-import { isBeatable } from './core/eye/targets.js';
+import { isBeatable, knownStatus, ownHits } from './core/eye/targets.js';
 import { isWatched } from './core/eye/watch.js';
 import { W3bClient, fetchW3bListings } from './api/w3b.js';
 import { checkFfsKey } from './api/ffscouter.js';
@@ -256,7 +256,7 @@ async function loadTargets(params) {
  * Its members are read every 10 s while the War view shows, and every
  * 5 min otherwise when Discord is set up (the bot's war pings need the bands).
  */
-const war = { manual: null, pick: null, members: [], membersFid: null, name: null, early: new Set(), at: 0, loading: false, error: null, enemies: [], warsAt: 0, warsLoading: false, myFaction: undefined };
+const war = { manual: null, pick: null, members: [], membersFid: null, name: null, early: new Set(), at: 0, readAt: 0, loading: false, error: null, enemies: [], warsAt: 0, warsLoading: false, myFaction: undefined };
 
 export const WAR_TAB_POLL_MS = 10000;
 export const WAR_BACKGROUND_POLL_MS = 5 * 60 * 1000;
@@ -311,6 +311,8 @@ async function pollWarTab() {
         rememberFlights(members, nowMs);
         war.members = members;
         war.membersFid = fid;
+        // When the members were last read for real (`at` also moves on a failed read).
+        war.readAt = nowMs;
         war.error = null;
         wantPlayers(members.map((m) => Number(m.id)));
     } catch (error) {
@@ -343,12 +345,24 @@ function watchNow() {
 function eyeRows() {
     const stored = pageGet(TARGETS_KEY, null);
     if (!stored || !Array.isArray(stored.list)) return [];
+    // Where each target is, from reads already made (round 7): the list itself asks Torn about nobody, so a row's
+    // status is whatever the watch list, the war list, a profile or a flight first seen left, if it is fresh.
+    const now = Date.now();
+    const watched = watchStates().players;
+    const flights = flightsSeen();
+    const fid = warFid();
+    const warBy = new Map((war.membersFid === fid ? war.members || [] : []).map((mm) => [Number(mm.id), mm]));
+    // Who you just hit: your attacks (read hourly) and the attack pages you opened since.
+    const hits = ownHits((getShared('myAttacks', null) || {}).list || [], getShared(K.eyePredictions, []) || [], now);
     const rows = stored.list.map((x) => {
         // A fight not worked out yet isn't simulated inside the draw: the row shows what the list stored until it is.
         const live = eyeView(x.playerId, { level: x.level, name: x.name }, { later: true });
         const v = live && !live.pending ? live : null;
         const base = v || { id: x.playerId, band: x.band || 'none', forecast: Number.isFinite(x.win) ? { pWin: x.win / 100, keep: Number.isFinite(x.keep) ? x.keep / 100 : null } : null, respect: x.respect || null };
-        return { ...base, name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId, stored: x };
+        const ws = watched[x.playerId];
+        const wm = warBy.get(Number(x.playerId));
+        const known = knownStatus([ws ? { status: ws.status, at: ws.readAt } : null, wm ? { status: wm.status, at: war.readAt } : null, live && live.statusAt ? { status: live.status, at: live.statusAt } : null], { flight: flights[x.playerId] || null, now });
+        return { ...base, name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId, stored: x, status: known ? known.status : null, hit: hits.get(Number(x.playerId)) || null };
     });
     return rows.filter((r) => isBeatable(r.band));
 }
@@ -711,6 +725,8 @@ export function bootAppPage({ renderers = {} } = {}) {
     for (const k of [K.prices, K.settings, K.plan, K.userStatic, K.stateError, K.apiKeyDead]) gmOnChange(k, () => page.app.render());
     // The watch list is changed from Torn's pages too (☆ on a profile or the attack page) and read there.
     gmOnChange('eyeWatch', () => page.app.tab === 'eye' && page.app.render(true));
+    // An attack page opened on Torn, or your attacks read again: the rows of the players you just hit grey at once.
+    for (const k of [K.eyePredictions, 'myAttacks']) gmOnChange(k, () => page.app.tab === 'eye' && page.app.render(true));
     onPauseChange(() => page.app.render(true));
     // War mode: a faction picked by id stays until "Back to our war"; otherwise your faction's war, found by itself.
     war.manual = getSettings().warFaction || null;

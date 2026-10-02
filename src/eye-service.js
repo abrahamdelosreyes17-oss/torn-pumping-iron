@@ -416,6 +416,8 @@ export function eyeView(id, extra = {}, { war = false, later = false } = {}) {
         figures: chipFigures(main, est, respect),
         source: est ? est.sourceText : null,
         status: prof.status || null,
+        // When that status was read (a profile read; none for one the watch list left): a list trusts only a fresh one.
+        statusAt: r.profileAt || null,
         pending,
     };
 }

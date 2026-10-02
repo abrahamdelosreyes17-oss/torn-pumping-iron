@@ -21,6 +21,7 @@
 import { estimatePlayer } from './estimate.js';
 import { forecast, respectFor, fairFight, bssOf } from './fight.js';
 import { bandOf } from './bands.js';
+import { memberState, travelOf } from './war.js';
 
 /** The full range: no respect cap (owner). Torn caps fair fight at 3. */
 export const TARGET_FF = { min: 1.0, max: 3.0 };
@@ -183,6 +184,88 @@ export function targetDetails(row, view = null) {
         old: ageDays !== null && ageDays !== undefined && ageDays > OLD_ESTIMATE_DAYS,
         source: est ? est.sourceText : row.source || null,
     };
+}
+
+/* ------------------------------------------------ round 7: where a target is, from what was already read */
+
+/** A status read is believed this long; a hospital stay until its own time, a flight until it lands. */
+export const STATUS_FRESH_MS = 15 * 60 * 1000;
+
+/**
+ * Where a player is, from reads already made, or null when nothing fresh is known. A stored target has no status of
+ * its own (FFScouter's list carries none, and the list asks Torn about nobody), so a player abroad read as "Okay".
+ * This joins what other reads left behind (the watch list, the war list, a profile, a flight first seen): the
+ * newest wins, and one too old to trust is dropped.
+ * @param {{status: object, at: number}[]} reads - Torn's {state, description, until (s)} and when it was read (ms)
+ * @param {object} [o] - {flight: {desc, at} from the flights seen, now}
+ * @returns {{status, at, state: 'okay'|'hospital'|'travel'|'jail'|'fallen'}|null}
+ */
+export function knownStatus(reads, { flight = null, now = Date.now() } = {}) {
+    const all = (reads || []).filter((r) => r && r.status && r.at > 0);
+    if (flight && flight.desc && flight.at > 0) all.push({ status: { state: /^in /i.test(flight.desc) ? 'Abroad' : 'Traveling', description: flight.desc }, at: flight.at });
+    if (!all.length) return null;
+    const r = all.reduce((a, b) => (b.at > a.at ? b : a));
+    const m = { status: r.status };
+    const st = memberState(m);
+    const fresh = now - r.at < STATUS_FRESH_MS;
+    if (st === 'hospital') {
+        const until = Number(r.status.until) > 0 ? Number(r.status.until) * 1000 : null;
+        if (until ? until <= now : !fresh) return null;
+        return { status: r.status, at: r.at, state: 'hospital' };
+    }
+    if (st === 'traveling') {
+        const tr = travelOf(m);
+        const lands = tr && tr.minutes ? r.at + tr.minutes * 60000 : null;
+        if (!fresh && !(lands && lands > now)) return null;
+        return { status: r.status, at: r.at, state: 'travel' };
+    }
+    if (!fresh) return null;
+    return { status: r.status, at: r.at, state: st === 'abroad' ? 'travel' : st };
+}
+
+/* ------------------------------------------------ round 7: a player you just hit */
+
+/** Results of your own attack that leave the other player in hospital. */
+export const HIT_RESULTS = ['Hospitalized', 'Attacked', 'Mugged'];
+
+/**
+ * [calibrate] A player you beat is greyed this long. Torn's hospital times vary with the hit and aren't in the
+ * attack row; the next list load brings the real out-time (FFScouter's `hospital_until`).
+ */
+export const OWN_HIT_MS = 60 * 60 * 1000;
+
+/** Your attacks are read hourly: until the next read, an attack page you opened this recently marks the row. */
+export const ATTACK_OPENED_MS = 10 * 60 * 1000;
+
+/**
+ * Who you hit lately, with no call: from your attacks (read hourly) and, until that read, from the attack pages you
+ * opened (Torn Eye notes each one for its fight learner).
+ * @param {object[]} attacks - myAttacks rows {def, ended (s), result}
+ * @param {object[]} predictions - {def, at (ms)}
+ * @returns {Map<number, {kind: 'hit'|'opened', at, result}>}
+ */
+export function ownHits(attacks, predictions, now = Date.now()) {
+    const out = new Map();
+    for (const p of predictions || []) {
+        const id = Number(p && p.def);
+        if (!(id > 0) || !(now - p.at < ATTACK_OPENED_MS) || p.at > now) continue;
+        if (!out.has(id) || out.get(id).at < p.at) out.set(id, { kind: 'opened', at: p.at, result: null });
+    }
+    for (const a of attacks || []) {
+        const id = Number(a && a.def);
+        const at = (Number(a && a.ended) || 0) * 1000;
+        if (!(id > 0) || !HIT_RESULTS.includes(a.result) || !(now - at < OWN_HIT_MS)) continue;
+        const cur = out.get(id);
+        if (!cur || cur.kind !== 'hit' || cur.at < at) out.set(id, { kind: 'hit', at, result: a.result });
+    }
+    return out;
+}
+
+/** "You hospitalized them 12 min ago", "Attack opened 4 min ago". */
+export function hitText(hit, now = Date.now()) {
+    const min = Math.max(1, Math.round((now - hit.at) / 60000));
+    if (hit.kind === 'opened') return 'Attack opened ' + min + ' min ago';
+    return 'You ' + (hit.result === 'Hospitalized' ? 'hospitalized' : hit.result === 'Mugged' ? 'mugged' : 'beat') + ' them ' + min + ' min ago';
 }
 
 /**
