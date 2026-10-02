@@ -12,6 +12,7 @@ import { MONEY_LOG_CATEGORY } from './core/auto.js';
 import { parseGymLog, mergeGymLog, gymLogFrom, GYM_LOG_EVERY_MS } from './core/gymlog.js';
 import { fullKeyClient, tornClient, pi } from './runtime.js';
 import { isPaused } from './turns.js';
+import { logError } from './problem-log.js';
 
 /** How often the money log is read, how far back, and how many categories at most (one call each). */
 export const MONEY_LOG_EVERY_MS = 6 * 60 * 60 * 1000;
@@ -85,7 +86,10 @@ export async function refreshGymLog({ force = false, now = Date.now() } = {}) {
  */
 export function gymLogTick() {
     if (pi.where !== 'app' || typeof document === 'undefined' || document.visibilityState === 'hidden') return;
-    refreshGymLog().catch((error) => set(K.lastError, { at: Date.now(), where: 'gym log', code: error && error.code, message: String((error && error.message) || error) }));
+    refreshGymLog().catch((error) => {
+        set(K.lastError, { at: Date.now(), where: 'gym log', code: error && error.code, message: String((error && error.message) || error) });
+        logError('Reading your gym log', error);
+    });
 }
 
 /**
@@ -103,7 +107,8 @@ export async function refreshMoneyLog({ force = false, now = Date.now() } = {}) 
     // Only the lines from when every category is complete count (a busy category's page may not reach back 30 days).
     const since = log.coveredFrom || now - MONEY_LOG_DAYS * 86400e3;
     const kept = log.filter((e) => e.at >= since);
-    const row = { at: now, days: Math.max(1, (now - since) / 86400e3), cats: cats.map((c) => c.title), log: kept.slice(0, 1500).map((e) => ({ at: e.at, title: e.title, money: e.money })) };
+    // `fields` (round 7, C.0): the log by type with its data field names, for Settings › Developer and the report zip.
+    const row = { at: now, days: Math.max(1, (now - since) / 86400e3), cats: cats.map((c) => c.title), log: kept.slice(0, 1500).map((e) => ({ at: e.at, title: e.title, money: e.money })), fields: log.fields || [] };
     pageSet(K.moneyLog, row);
     return row;
 }

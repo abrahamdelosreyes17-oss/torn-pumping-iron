@@ -7,6 +7,14 @@
 
 import { trainSession } from './gain.js';
 import { gymById } from './gyms.js';
+import { nextQuarterTick } from './bars.js';
+
+/**
+ * Round 7 (review 4.9): only two reads this close check the formula. Over a long gap several sessions at different
+ * happy become one row (+201% "off" across 8 hours); and with happy above the maximum at the first read, a quarter
+ * tick in between resets it, so the trains had less happy than the read says (-85% "off" after a jump).
+ */
+export const CALIBRATION_MAX_GAP_MS = 2 * 60 * 1000;
 
 /** Samples kept (the learner wants many; each is ~150 bytes). */
 export const CALIBRATION_KEEP = 500;
@@ -21,6 +29,8 @@ export const CALIBRATION_KEEP = 500;
 export function calibrationSample(prev, next, diff, { table, perks = null } = {}) {
     const stats = Object.keys((diff && diff.trained) || {});
     if (stats.length !== 1 || diff.drugTaken || diff.boosterUsed || diff.refillUsed) return null;
+    if (!(next.at - prev.at <= CALIBRATION_MAX_GAP_MS)) return null;
+    if (prev.happy && prev.happy.current > prev.happy.maximum && nextQuarterTick(prev.at) <= next.at) return null;
     const stat = stats[0];
     const gym = gymById(next.gymId || prev.gymId, table);
     if (!gym || !(gym.dots[stat] > 0) || !prev.stats) return null;

@@ -27,6 +27,15 @@ import { xanaxCdSample, addXanaxCd } from '../core/drugcd.js';
 
 export const STATE_POLL_MS = 30000;
 
+/**
+ * Round 7 (D.4): when Torn's own page shows that something was done (energy spent, a Xanax or a booster taken), the
+ * state is asked for this long after the last such change, instead of at the next 30 s read; never sooner than
+ * EARLY_READ_GAP_MS after the read before it. Measured on the gym fixture: the panel moved to the next step 7 to 26 s
+ * after a session; with this, about 3 s.
+ */
+export const EARLY_READ_DELAY_MS = 2000;
+export const EARLY_READ_GAP_MS = 8000;
+
 /** After a failed state call, wait this long before asking again (not every 3 s heartbeat). */
 export const STATE_RETRY_MS = 30000;
 
@@ -77,11 +86,12 @@ export class StateFeed {
      * @param {function} [o.isVisible]
      * @param {function} [o.nextStep] - () => the plan's next step (names a drug taken)
      * @param {function} [o.onState] - (state, api) => void, after each poll
+     * @param {function} [o.onStatic] - (statics) => void, after slow data (inventory, perks, gyms…) was read again
      * @param {function} [o.onError] - (error) => void
      * @param {function} [o.isPaused] - () => boolean: Torn Trading runs, ask nothing
      * @param {object} [o.keys] - store keys {state, static, log, leader, history, receipts}
      */
-    constructor({ client, store, tabId, now = () => Date.now(), isVisible = () => true, nextStep = () => null, onState = () => {}, onError = () => {}, isPaused = () => false, keys = {} }) {
+    constructor({ client, store, tabId, now = () => Date.now(), isVisible = () => true, nextStep = () => null, onState = () => {}, onStatic = () => {}, onError = () => {}, isPaused = () => false, keys = {} }) {
         this.isPaused = isPaused;
         this.client = client;
         this.store = store;
@@ -90,9 +100,17 @@ export class StateFeed {
         this.isVisible = isVisible;
         this.nextStep = nextStep;
         this.onState = onState;
+        this.onStatic = onStatic;
         this.onError = onError;
         this.keys = { state: 'userState', static: 'userStatic', log: 'dayLog', leader: 'leader', history: 'statsHistory', dead: 'apiKeyDead', stateError: 'stateError', receipts: 'receipts', xanaxCds: 'xanaxCds', ...keys };
         this.polling = false;
+        this.wantAt = null;
+    }
+
+    /** Something was done on Torn's page: read the state soon (once, after the last change). @returns the time to tick at */
+    wantSoon() {
+        this.wantAt = this.now() + EARLY_READ_DELAY_MS;
+        return this.wantAt;
     }
 
     /** Leader election: one heartbeat. Returns true when this tab may poll. */
@@ -116,10 +134,13 @@ export class StateFeed {
         if (this.isPaused()) return false;
         const last = this.store.get(this.keys.state, null);
         const t = this.now();
-        if (last && t - last.at < STATE_POLL_MS) {
+        // An early read asked for by the page (wantSoon), once its moment has come and the last read is not too fresh.
+        const early = this.wantAt !== null && t >= this.wantAt && (!last || t - last.at >= EARLY_READ_GAP_MS);
+        if (last && t - last.at < STATE_POLL_MS && !early) {
             await this.refreshStatic();
             return false;
         }
+        this.wantAt = null;
         // A refused state call: a key without access waits for a new key (saving one clears this); anything else waits 30 s.
         const failed = this.store.get(this.keys.stateError, null);
         if (failed && (failed.code === ACCESS_TOO_LOW || t - failed.at < STATE_RETRY_MS)) return false;
@@ -221,6 +242,11 @@ export class StateFeed {
         try {
             const st = await this.refreshStaticOnce();
             this.recordInventory(st);
+            // This tab's own page follows the new slow data at once (a store change only tells the other tabs).
+            if (this.staticRead) {
+                this.staticRead = false;
+                this.onStatic(st);
+            }
             return st;
         } finally {
             this.refreshing = false;
@@ -315,6 +341,7 @@ export class StateFeed {
             st[k + 'At'] = stamp;
             // Merge into what's stored now: other parts (e.g. equipment for Torn Eye) may have been saved meanwhile.
             this.store.set(this.keys.static, { ...(this.store.get(this.keys.static, {}) || {}), [k]: st[k], [k + 'At']: stamp });
+            this.staticRead = true;
         }
         return this.store.get(this.keys.static, {}) || st;
     }

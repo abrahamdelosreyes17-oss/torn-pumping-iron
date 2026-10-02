@@ -11,8 +11,8 @@ import { mergeLiveGyms, unlockedGyms, bestGymFor, gymAccess, gymById, nextGym, G
 import { buildGaps, projectBuild, resolveBuild } from './builds.js';
 import { energyAt, happyAt, drugFreeAt, boosterFreeAt, refillAvailable, tornDayStart, msToTornMidnight, DAY, countdown, tornClock } from './bars.js';
 import { dayTimeline, targetShares, drugsToday, itemsNeeded, strictWarnings, REFILL_WARN_MS } from './plan.js';
-import { simulateStrategy, feasibleStrategies, STRATEGIES, CANDY_PLANS, consoleBlocked } from './strategies.js';
-import { recommend, pickWarning } from './recommend.js';
+import { simulateStrategy, simulateSteps, SIM_SLICE_DAYS, feasibleStrategies, STRATEGIES, CANDY_PLANS, consoleBlocked } from './strategies.js';
+import { recommend, pickWarning, opensOnDay } from './recommend.js';
 import { needList, livePrices, marketPricesFrom, npcPricesFrom, shopsAllowed, allowanceLeft } from './market.js';
 import { bestCandy } from './candy.js';
 import { companyJob, jobHappyOf, freeEdvdPerDayOf, worksAt, VOYEUR_JP, JOB_LOCK_H } from './jobs.js';
@@ -25,6 +25,7 @@ import { realGains } from './gains.js';
 import { HAPPY_CAP } from './gain.js';
 import { JUMP_STACK } from './strategies.js';
 import { budgetOf, effectivePickBy, affordLine, autoWaitLine, unlockDays, unlockEnergyLeft } from './auto.js';
+import { makePause, runSliced } from './slices.js';
 
 /*
  * The 30-day build projection is the heavy part of a model (thousands of
@@ -48,7 +49,7 @@ export const STRAY_ENERGY = 50;
 
 /** Drug steps in the day log (a held Xanax and a catch-up with a drug count too): one rule everywhere. */
 export function isDrugEntry(e) {
-    return e.kind === 'xanax' || e.kind === 'stack' || e.kind === 'hold' || (e.kind === 'catchup' && e.drug);
+    return e.kind === 'xanax' || e.kind === 'stack' || e.kind === 'hold' || e.xanax === true || (e.kind === 'catchup' && e.drug);
 }
 
 export function projectionFor(args) {
@@ -83,6 +84,21 @@ export function playerContext(state, statics = {}, extra = {}) {
     const best = {};
     for (const k of STATS) best[k] = bestGymFor(k, stats, unlocked, { table, drugsTaken: extra.drugsTaken ?? null, active: state && state.gymId });
     return { table, perks, unlocked, stats, best };
+}
+
+/**
+ * The gym to unlock (Plan › Train toward › Unlock): its id and name, and with
+ * an "open it by" date the day of the run it must open by. Null once the gym
+ * is open (the goal has nothing left to do). Round 7: it never outranks stats.
+ * @param {number} from - the run's first day (ms)
+ * @param {number} days - the run's days
+ */
+export function openByOf(plan, pc, from, days) {
+    const g = plan && plan.goal && plan.goal.kind === 'unlockGym' ? plan.goal : null;
+    if (!g || !pc || (pc.unlocked || []).map(Number).includes(Number(g.gymId))) return null;
+    const gym = gymById(g.gymId, pc.table);
+    const by = Number(g.by) > 0 ? Number(g.by) : null;
+    return { gymId: Number(g.gymId), name: gym ? gym.name : null, by, days: by ? Math.ceil((by - from) / DAY) : null, horizon: days };
 }
 
 /** The booster cap: 24 h, plus faction Voracity's extra hours, or the setting if higher. */
@@ -129,8 +145,12 @@ export function itemContext(statics = {}, settings = {}, now = null) {
     };
 }
 
-/** The simulation inputs every strategy shares. */
-export function simInputs({ state, pc, shares, settings, prices, special = 0, statics = {}, events = null, unlock = null }) {
+/**
+ * The simulation inputs every strategy shares. `live` (round 7; Create plan and Re-plan): the run starts from the
+ * bars as they are (energy, happy, the drug cooldown, today's refill used), like the day plan does; without it, from
+ * a full bar with no cooldown (a stretch that starts later, a what-if over past days).
+ */
+export function simInputs({ state, pc, shares, settings, prices, special = 0, statics = {}, events = null, unlock = null, live = false }) {
     const gyms = {};
     for (const k of STATS) if (pc.best[k]) gyms[k] = { dots: pc.best[k].dots[k], energy: pc.best[k].energy };
     const ic = itemContext(statics, settings);
@@ -168,6 +188,7 @@ export function simInputs({ state, pc, shares, settings, prices, special = 0, st
         xanaxCdMin: xanaxCdOf(statics.xanaxCds).min,
         // Today's candy pick, kept unless another is clearly cheaper.
         candyPrefer: statics.candyPick && statics.candyPick.day === tornDayStart(state.at) ? statics.candyPick.id : null,
+        ...(live ? { start: { energy: state.energy.current, happy: state.happy.current, drugCdMin: Math.max(0, Number(state.drugCd) || 0) / 60, refillUsed: state.refillUsed === true } } : {}),
         // Year plans (core/year.js): events on their dates, gyms opening as energy is trained.
         ...(events ? { events } : {}),
         ...(unlock ? { unlock } : {}),
@@ -187,15 +208,34 @@ export function heldBoosters(inventory) {
  * with the most stats in the budget (or per $1M, or no budget) wins.
  * @returns {{result:object, candy:object|null}}
  */
-function withBestCandy(id, base, { budget = Infinity, pickBy = 'most' } = {}) {
+function* withBestCandySteps(id, base, { budget = Infinity, pickBy = 'most' } = {}) {
+    const ask = { prices: base.prices, npc: base.npc, capH: base.boosterCapH, cdCuts: base.cdMult, happyMult: base.candyMult, budget, pickBy, prefer: base.candyPrefer };
+    // Which candy the pick will weigh (it asks about every candidate, whatever the answers), each run in slices.
+    const asked = [];
+    bestCandy({ ...ask, evaluate: (cid, n) => (asked.push([cid, n]), { gained: 0, cost: 0 }) });
     const runs = {};
-    const evaluate = (cid, n) => (runs[cid] = runs[cid] || simulateStrategy(id, { ...base, special: 0, candyId: cid, candyCount: n }));
-    const pick = bestCandy({ prices: base.prices, npc: base.npc, capH: base.boosterCapH, cdCuts: base.cdMult, happyMult: base.candyMult, budget, pickBy, evaluate, prefer: base.candyPrefer });
-    if (!pick) return { result: withBestSpecial(id, base), candy: null };
+    for (const [cid, n] of asked) if (!runs[cid]) runs[cid] = yield* simSliced(id, { ...base, special: 0, candyId: cid, candyCount: n });
+    const pick = bestCandy({ ...ask, evaluate: (cid) => runs[cid] });
+    if (!pick) return { result: yield* withBestSpecialSteps(id, base), candy: null };
     const input = { ...base, candyId: pick.id, candyCount: pick.count };
-    const result = base.special > 0 ? withBestSpecial(id, input) : runs[pick.id];
+    const result = base.special > 0 ? yield* withBestSpecialSteps(id, input) : runs[pick.id];
     const candy = { id: pick.id, count: pick.count, unit: pick.unit, source: pick.source, shop: pick.shop, perBoost: pick.perBoost, options: pick.options.length };
     return { result: { ...result, candy }, candy };
+}
+
+/**
+ * One simulator run in slices (round 7, R7.3b): it yields every SIM_SLICE_DAYS simulated days, so whoever drives
+ * the work can give the page a break. The result is the same as simulateStrategy's.
+ */
+function* simSliced(id, o) {
+    return yield* simulateSteps(id, { ...o, sliceDays: SIM_SLICE_DAYS });
+}
+
+/** Run a generator of work to its end in one go (no breaks). */
+function drainSteps(gen) {
+    let r = gen.next();
+    while (!r.done) r = gen.next();
+    return r.value;
 }
 
 /**
@@ -219,41 +259,59 @@ export function compareStrategies(args) {
  * page in between (a comparison is 60+ thirty-day runs: in one go it froze
  * the page for a few hundred ms after a click, e.g. ticking a city shop).
  */
-export async function compareStrategiesAsync(args, { pause = () => new Promise((r) => setTimeout(r, 0)) } = {}) {
-    const steps = compareSteps(args);
-    let r = steps.next();
-    while (!r.done) {
-        await pause();
-        r = steps.next();
+export async function compareStrategiesAsync(args, { pause = null } = {}) {
+    // Without a pause of the caller's: a break that is not a timer (core/slices.js), let go at the end.
+    const own = pause ? null : makePause();
+    try {
+        return await runSliced(compareSteps(args), pause || own);
+    } finally {
+        if (own) own.stop();
     }
-    return r.value;
 }
 
-/** The comparison, yielding after each plan (see compareStrategies / compareStrategiesAsync). */
-export function* compareSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', events = null, unlock = null }) {
-    const base = simInputs({ state, pc, shares, settings, prices, special, statics, events, unlock });
+/**
+ * The comparison as a generator: it yields the id of each plan as it starts on it (progress), and a number every few
+ * simulated weeks inside a run (a chance for a break: see compareStrategies / compareStrategiesAsync, core/slices.js).
+ */
+export function* compareSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', events = null, unlock = null, live = false }) {
+    const base = simInputs({ state, pc, shares, settings, prices, special, statics, events, unlock, live });
     const results = {};
     const budget = budgetOf(settings);
     for (const id of feasibleStrategies({ bliss: pc.perks.bliss, boosterCapH: base.boosterCapH, toyShop5: base.toyShop5, adultNovelties10: base.adultNovelties10 })) {
         yield id;
         if (id === 'consoleJump' || id === 'consoleJumpToy') {
             // Low-stat players only: over 250k in a stat it trains, it's shown (behind the tick) and never picked.
-            const probe = simulateStrategy(id, { ...base, special: 0 });
+            const probe = yield* simSliced(id, { ...base, special: 0 });
             const blocked = consoleBlocked(pc.stats, probe.perStat);
             if (blocked) {
                 results[id] = { ...probe, blocked };
                 continue;
             }
         }
-        results[id] = withBestRefill(id, base, { budget, pickBy }, (b) => (CANDY_PLANS.has(id) ? withBestCandy(id, b, { budget, pickBy }).result : withBestSpecial(id, b)));
+        results[id] = yield* withBestRefillSteps(id, base, { budget, pickBy }, function* (b) {
+            return CANDY_PLANS.has(id) ? (yield* withBestCandySteps(id, b, { budget, pickBy })).result : yield* withBestSpecialSteps(id, b);
+        });
     }
     if (results.steady && Number.isFinite(budget)) {
         const choice = boosterChoice({ perDay: (budget - results.steady.cost) / base.days, maxE: base.energyMax, prices: base.prices, canMult: base.canMult, capH: base.boosterCapH });
         // Only a real middle rung: fewer than steadyMax's FHC every time.
         if (choice && !(choice.id === steadyMaxItem() && results.steadyMax && choice.perDay >= boostersPerDayMax(base))) {
             yield 'steadyBoost';
-            results.steadyBoost = { ...withBestSpecial('steadyBoost', { ...base, energyBooster: { id: choice.id, perDay: choice.perDay } }), booster: choice };
+            results.steadyBoost = { ...(yield* withBestSpecialSteps('steadyBoost', { ...base, energyBooster: { id: choice.id, perDay: choice.perDay } })), booster: choice };
         }
+    }
+    // Round 7 (A.4): steady costs more than the budget. Steady with as many Xanax a day as the money covers (3, 2, 1
+    // or none) and the refill only when it fits: more Xanax is more stats, so the first that fits is the one.
+    const limit = pickBy === 'max' ? Infinity : budget;
+    if (results.steady && Number.isFinite(limit) && results.steady.cost > limit) {
+        yield 'steadyLite';
+        let lite = null;
+        for (const n of [3, 2, 1, 0]) {
+            const r = yield* withBestRefillSteps('steadyLite', { ...base, xanaxPerDay: n }, { budget, pickBy }, (b) => withBestSpecialSteps('steadyLite', b));
+            lite = { ...r, xanaxPerDay: n };
+            if (r.cost <= limit) break;
+        }
+        results.steadyLite = lite;
     }
     return results;
 }
@@ -266,13 +324,21 @@ export function* compareSteps({ state, pc, shares, settings, prices, special = 0
  * lower the stats per $1M. The result says which (`refill`, `refillGain`,
  * `refillCost`), and the day plan follows it.
  */
-export function withBestRefill(id, base, { budget = Infinity, pickBy = 'most' } = {}, run) {
-    const withIt = run(base);
+export function withBestRefill(id, base, opts = {}, run) {
+    // eslint-disable-next-line require-yield
+    return drainSteps(withBestRefillSteps(id, base, opts, function* (b) {
+        return run(b);
+    }));
+}
+
+/** withBestRefill in slices: `run` is a generator (a plan's run, yielding for breaks). */
+function* withBestRefillSteps(id, base, { budget = Infinity, pickBy = 'most' } = {}, run) {
+    const withIt = yield* run(base);
     // Nothing to decide: no points bought for refills in this plan (special refills stand in), or no limit and "most".
     if (!(withIt.used && withIt.used[POINTS] > 0)) return withIt;
     const limit = pickBy === 'max' ? Infinity : budget;
     if (pickBy !== 'value' && withIt.cost <= limit) return { ...withIt, refill: true };
-    const without = run({ ...base, noRefill: true });
+    const without = yield* run({ ...base, noRefill: true });
     const gain = withIt.gained - without.gained;
     const cost = withIt.cost - without.cost;
     const per = (r) => (r.cost > 0 ? r.gained / r.cost : Infinity);
@@ -285,11 +351,52 @@ export function withBestRefill(id, base, { budget = Infinity, pickBy = 'most' } 
  * maximum (steady training) spending them can cost more than they add. Run
  * the plan with and without them and keep the better (`specialHelps`).
  */
-function withBestSpecial(id, base) {
-    const r = simulateStrategy(id, base);
+function* withBestSpecialSteps(id, base) {
+    const r = yield* simSliced(id, base);
     if (!(base.special > 0)) return r;
-    const without = simulateStrategy(id, { ...base, special: 0 });
+    const without = yield* simSliced(id, { ...base, special: 0 });
     return without.gained > r.gained ? { ...without, specialHelps: false } : { ...r, specialHelps: true, specialGain: r.gained - without.gained };
+}
+
+/** How many of the gyms a plan opens are weighed (the nearest ones: each is a run of the whole plan). */
+export const GYM_WORTH_MAX = 3;
+
+/**
+ * Is a gym worth opening (round 7, the friend's question)? For the first
+ * gyms a plan opens in its days, the plan is run again with the ladder
+ * stopping just before each: the difference is what that gym adds by the
+ * plan's end, against its fee. The plan keeps its own candy, booster,
+ * refill and Xanax a day (as the year's band re-runs a stretch).
+ * @param {object} r - the plan's result (with `unlocked`)
+ * @param {object} args - compareSteps' arguments
+ * @param {function} hookFor - (stopAt gym id) => an unlock hook that stops there
+ * @returns {Generator} yielding between runs; its value: [{gymId, name, day, fee, gain}]
+ */
+export function* gymWorthSteps(r, args, hookFor) {
+    const opened = r && Array.isArray(r.unlocked) ? r.unlocked.filter((u) => u.gymId <= 24).slice(0, GYM_WORTH_MAX) : [];
+    if (!opened.length) return [];
+    const base = simInputs(args);
+    const run = function* (stopAt) {
+        const out = yield* simSliced(r.id, {
+            ...base,
+            ...(r.candy ? { candyId: r.candy.id, candyCount: r.candy.count } : {}),
+            ...(r.booster ? { energyBooster: { id: r.booster.id, perDay: r.booster.perDay } } : {}),
+            ...(r.refill === false ? { noRefill: true } : {}),
+            ...(Number.isFinite(r.xanaxPerDay) ? { xanaxPerDay: r.xanaxPerDay } : {}),
+            ...(r.specialHelps === false ? { special: 0 } : {}),
+            unlock: hookFor(stopAt),
+        });
+        return out.gained;
+    };
+    // With the ladder open up to each gym in turn; the gym's worth is the step between two runs.
+    const upTo = [];
+    yield 'gyms';
+    upTo.push(yield* run(opened[0].gymId - 1));
+    for (const u of opened) {
+        yield 'gyms';
+        upTo.push(yield* run(u.gymId));
+    }
+    return opened.map((u, i) => ({ gymId: u.gymId, name: (gymById(u.gymId, args.pc.table) || {}).name || 'Gym ' + u.gymId, day: Number.isFinite(u.t) ? Math.floor(u.t / 1440) + 1 : null, fee: u.cost || 0, gain: upTo[i + 1] - upTo[i] }));
 }
 
 /** The steady plan's cost a day (Auto's income adds it back while receipts cover under 3 days: it never depends on the budget). */
@@ -310,9 +417,18 @@ function boostersPerDayMax(base) {
  * Ignorance Is Bliss, what if (Plan's Bliss card): the plans the book
  * changes most, run as if it were active. Not recommended from; shown.
  */
-export function blissWhatIf({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most' }) {
-    const base = { ...simInputs({ state, pc, shares, settings, prices, special, statics }), bliss: true };
-    return { blissSteady: { ...simulateStrategy('blissSteady', base), whatIf: true }, dailyChoco: { ...withBestCandy('dailyChoco', base, { budget: budgetOf(settings), pickBy }).result, whatIf: true } };
+export function blissWhatIf(args) {
+    return drainSteps(blissWhatIfSteps(args));
+}
+
+/** blissWhatIf in slices (a generator: yields for breaks inside each run). */
+export function* blissWhatIfSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', live = false }) {
+    const base = { ...simInputs({ state, pc, shares, settings, prices, special, statics, live }), bliss: true };
+    yield 'bliss';
+    const steady = yield* simSliced('blissSteady', base);
+    yield 'bliss';
+    const choco = (yield* withBestCandySteps('dailyChoco', base, { budget: budgetOf(settings), pickBy })).result;
+    return { blissSteady: { ...steady, whatIf: true }, dailyChoco: { ...choco, whatIf: true } };
 }
 
 /**
@@ -324,10 +440,15 @@ export function blissWhatIf({ state, pc, shares, settings, prices, special = 0, 
  * @param {object} o - as compareStrategies, plus `compare` (the real plans) and `recommended` (its id)
  * @returns {object[]} [{id, strategy, company, stars, title, result, deltaPct, note}]
  */
-export function companyWhatIf({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', compare = null, recommended = null }) {
+export function companyWhatIf(args) {
+    return drainSteps(companyWhatIfSteps(args));
+}
+
+/** companyWhatIf in slices (a generator: yields for breaks inside each run). */
+export function* companyWhatIfSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', compare = null, recommended = null, live = false }) {
     const best = compare && recommended ? compare[recommended] : null;
     if (!best) return [];
-    const base = simInputs({ state, pc, shares, settings, prices, special, statics });
+    const base = simInputs({ state, pc, shares, settings, prices, special, statics, live });
     const cj = companyJob(statics.job, statics.jobPoints);
     const limit = pickBy === 'max' ? Infinity : budgetOf(settings);
     const out = [];
@@ -338,11 +459,13 @@ export function companyWhatIf({ state, pc, shares, settings, prices, special = 0
         out.push({ id: key, strategy, company, stars, title: 'Hired at a ' + stars + '★ ' + company, result: { ...r, whatIf: true }, deltaPct, note });
     };
     if (!worksAt(cj, 'Adult Novelties', 10) && !base.adultNovelties10) {
-        add('an10', 'edvdJumpAN', 'Adult Novelties', 10, withBestSpecial('edvdJumpAN', { ...base, adultNovelties10: true, freeEdvdPerDay: 10 / VOYEUR_JP, jobHappy: null }));
+        yield 'job';
+        add('an10', 'edvdJumpAN', 'Adult Novelties', 10, yield* withBestSpecialSteps('edvdJumpAN', { ...base, adultNovelties10: true, freeEdvdPerDay: 10 / VOYEUR_JP, jobHappy: null }));
     }
     if (!base.toyShop5) {
-        const probe = simulateStrategy('consoleJumpToy', { ...base, special: 0, toyShop5: true, jobHappy: null });
-        if (!consoleBlocked(pc.stats, probe.perStat)) add('toy5', 'consoleJumpToy', 'Toy Shop or Game Shop', 5, withBestCandy('consoleJumpToy', { ...base, toyShop5: true, jobHappy: null }, { budget: budgetOf(settings), pickBy }).result);
+        yield 'job';
+        const probe = yield* simSliced('consoleJumpToy', { ...base, special: 0, toyShop5: true, jobHappy: null });
+        if (!consoleBlocked(pc.stats, probe.perStat)) add('toy5', 'consoleJumpToy', 'Toy Shop or Game Shop', 5, (yield* withBestCandySteps('consoleJumpToy', { ...base, toyShop5: true, jobHappy: null }, { budget: budgetOf(settings), pickBy })).result);
     }
     return out.sort((a, b) => b.result.gained - a.result.gained);
 }
@@ -393,6 +516,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const shares = targetShares(plan, pc.stats, build.shares);
     const keep = (build.gyms || []).filter((id) => pc.unlocked.includes(id) && gymAccess(gymById(id, pc.table), pc.stats).ok);
     const today = (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(now));
+    // Today's boost counts once it is finished (round 7: boosters eaten with the drug still to take is "boosting").
     const boostedToday = today.some((e) => e.kind === 'boost');
     // Energy above the maximum is stacked (a jump) or held (daily choco) Xanax: read from the bars, so it survives Torn midnight and reloads.
     // A can (+20–30) above the maximum isn't a Xanax; one Xanax always puts at least 100 above it.
@@ -422,6 +546,8 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         canMult: pc.perks.canMult || 1,
         // The comparison found the points refill not worth it in this plan: the day plan leaves it out.
         noRefill: Boolean(compare && compare[plan.strategy] && compare[plan.strategy].refill === false),
+        // The small-budget plan: the Xanax a day the comparison found the money covers.
+        ...(compare && compare[plan.strategy] && Number.isFinite(compare[plan.strategy].xanaxPerDay) ? { xanaxPerDay: compare[plan.strategy].xanaxPerDay } : {}),
         toyShop5: Boolean(pc.perks.toyShop5),
         adultNovelties10: Boolean(pc.perks.adultNovelties10),
     };
@@ -483,14 +609,18 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const boosterLeft = Math.max(0, boosterFreeAt(state) - now);
     const refillFree = refillAvailable(state, now);
     const refillStep = steps.find((s) => s.kind === 'refill');
-    const xanaxPlanned = today.filter(isDrugEntry).length + steps.filter((s) => (s.kind === 'xanax' || s.kind === 'stack' || s.kind === 'hold') && s.at < tornDayStart(now) + DAY).length;
+    // Xanax today: the ones taken and the ones still planned before midnight, in whatever step they come (a candy +
+    // Xanax boost carries one: round 7, "Xanax 1 of 1 today" while the next step was Xanax #2).
+    const xanaxPlanned = today.filter(isDrugEntry).length + steps.filter((s) => (s.items || []).some((it) => it.id === XANAX) && s.at < tornDayStart(now) + DAY).length;
+    // Xanax stacked for a jump: energy is above the maximum, so a refill (it only fills to the maximum) would add nothing.
+    const stackingNow = (STRATEGIES[plan.strategy] || {}).kind === 'jump' && over > 0;
     const strip = {
         energy: { current: energy, max: e.maximum, fullAt },
         happy: { current: happyAt(state, now, { bliss: pc.perks.bliss }), max: state.happy.maximum, property: statics.property && statics.property.property ? statics.property.property.name : null },
         drug: { left: drugLeft, total: drugLeft > 0 ? Math.max(drugLeft, state.drugCd * 1000) : 0, xanaxDone: ctx.drugsToday, xanaxPlanned },
         // The cooldown left, when it's back under the cap (a booster can be used again), and the plan's next booster step.
         booster: { left: boosterLeft, capH: ctx.boosterCapH, underCapIn: Math.max(0, boosterLeft - ctx.boosterCapH * 3600e3), used: steps.some(usesBooster), next: nextBoost ? { at: nextBoost.at, label: nextBoost.label, kind: nextBoost.kind } : null },
-        refill: { free: refillFree, plannedAt: refillStep ? refillStep.at : null },
+        refill: { free: refillFree, plannedAt: refillStep ? refillStep.at : null, stacking: stackingNow },
     };
 
     // Stats vs build
@@ -499,7 +629,8 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const trainedToday = {};
     for (const x of today) for (const k of STATS) trainedToday[k] = (trainedToday[k] || 0) + ((x.trained && x.trained[k]) || 0);
     const plannedToday = {};
-    for (const s of steps) for (const [k, n] of Object.entries(s.trains || {})) plannedToday[k] = (plannedToday[k] || 0) + n;
+    // Today's trains only (round 7: tomorrow's jump was counted in "trains today").
+    for (const s of steps) if (s.at < tornDayStart(now) + DAY) for (const [k, n] of Object.entries(s.trains || {})) plannedToday[k] = (plannedToday[k] || 0) + n;
     const statRows = STATS.map((k) => ({
         stat: k,
         value: pc.stats[k],
@@ -518,7 +649,11 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const plannedGain = gainedToday + steps.filter((s) => s.at < tornDayStart(now) + DAY).reduce((a, s) => a + (s.gain || 0), 0);
 
     // Build ETA and next gym
-    const energyPerDay = Math.round(((e.interval <= 600 ? 720 : 480) + 250 * Math.floor(1440 / 420) + e.maximum) / 10) * 10;
+    // Energy a day: the plan followed's own (round 7: the build date and the next gym's days were a fixed steady
+    // 1,620 a day for every plan), else steady's.
+    const planR = compare && compare[plan.strategy];
+    const planDaysN = settings.horizonDays || 30;
+    const energyPerDay = planR && planR.energyTrained > 0 ? Math.round(planR.energyTrained / planDaysN / 10) * 10 : Math.round(((e.interval <= 600 ? 720 : 480) + 250 * Math.floor(1440 / 420) + e.maximum) / 10) * 10;
     // With Ignorance Is Bliss happy doesn't fall back to the maximum: the projection trains at today's happy.
     const projHappy = pc.perks.bliss ? Math.min(HAPPY_CAP, Math.max(state.happy.current, state.happy.maximum) + 300) : state.happy.maximum + 300;
     const proj = projectionFor({ stats: pc.stats, shares, energyPerDay, happy: projHappy, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: lite ? 2 : 30, active: state.gymId, table: pc.table });
@@ -536,7 +671,8 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const heads = [];
     if (!plan.buildPicked) heads.push({ tone: 'warn', text: 'Pick your build type', sub: 'Plan › Build: the plan trains toward it', go: 'plan' });
     for (const w of strictWarnings(steps, now)) heads.push({ tone: 'warn', text: w.text });
-    if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS && !ctx.noRefill) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
+    // Not on a stack day: with energy above the maximum the refill would do nothing (round 7).
+    if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS && !ctx.noRefill && !stackingNow) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
     if (ctx.noRefill) {
         const r = compare[plan.strategy];
         heads.push({ tone: 'plain', text: 'Daily refill left out', sub: 'not worth its price in your plan' + (r && r.refillGain > 0 ? ' (+' + Math.round(r.refillGain).toLocaleString('en-US') + ' stats for $' + Math.round(r.refillCost / 1e6) + 'M over the plan)' : ''), go: 'plan' });
@@ -560,14 +696,15 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     let ladder = null;
     // Auto without its Full key (or before the income is read) runs as "most stats in my budget".
     const pickBy = effectivePickBy(PICK_BY[plan.pickBy] ? plan.pickBy : 'most', auto);
-    const goalKind = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
+    // A gym to unlock: said on every plan (when it opens), with an optional date; never a reason to pick fewer stats.
+    const openBy = openByOf(plan, pc, saved && saved.from ? saved.from : tornDayStart(now), settings.horizonDays || 30);
     if (auto && auto.needsKey) heads.unshift({ tone: 'warn', text: 'Auto mode needs a Full key', sub: 'Settings › Full key · until then a new plan uses your budget', go: 'settings' });
     // No saved plan yet (a new install, or plans from before round 6): today's steps follow the plan picked (steady by
     // default) until you create one. Nothing is worked out in the background.
     if (!saved && !compare) heads.unshift({ tone: 'warn', text: 'Create your plan', sub: 'Plan › Create plan · until then the steps follow ' + ((STRATEGIES[plan.strategy] || STRATEGIES.steady).name || 'steady training').toLowerCase(), go: 'plan' });
     if (saved && saved.progress && saved.progress.ended) heads.unshift({ tone: 'warn', text: 'Your plan has ended', sub: 'Plan › Create plan for the next one', go: 'plan' });
     if (compare) {
-        const r = recIn || recommend(compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy, goal: goalKind });
+        const r = recIn || recommend(compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy, openBy });
         rec = r;
         const mine = compare[plan.strategy];
         // Following the saved path (its plan for this stretch): that is the plan, not a pick to warn about.
@@ -584,16 +721,22 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const recRow = rec && compare ? compare[rec.recommended] : null;
     const cash = statics.inventory && Number.isFinite(statics.inventory.cash) ? statics.inventory.cash : null;
     const spend = recRow ? { perDay: recRow.cost / horizon, budgetPerDay: Number.isFinite(settings.budget) ? settings.budget / horizon : null, cash, lastsDays: cash !== null && recRow.cost > 0 ? cash / (recRow.cost / horizon) : null } : null;
-    // Unlock goal: when the gym opens on each plan (energy through the gym), and what it costs in stats against the best plan.
+    // The gym to unlock: the day each plan opens it (the simulator's own run; an estimate from its energy a day for
+    // plans saved before round 7), with its stats and cost against the recommended plan (one baseline on the page).
     let unlock = null;
-    if (goalKind && compare && !lite) {
-        const gym = gymById(plan.goal.gymId, pc.table);
-        const left = unlockEnergyLeft(pc.unlocked, plan.goal.gymId, gymProgress, pc.perks.gymExpMult);
+    if (openBy && compare && !lite) {
+        const gym = gymById(openBy.gymId, pc.table);
+        const left = unlockEnergyLeft(pc.unlocked, openBy.gymId, gymProgress, pc.perks.gymExpMult);
         if (gym && left !== null) {
-            const most = Object.values(compare).filter(Boolean).reduce((a, b) => (b.gained > a.gained ? b : a), { gained: 0 });
+            const base = (rec && compare[rec.recommended]) || null;
+            const from = saved && saved.from ? saved.from : tornDayStart(now);
             const rows = {};
-            for (const [id, r] of Object.entries(compare)) if (r) rows[id] = { days: unlockDays(r, left, horizon), statsPct: most.gained > 0 ? (100 * (r.gained - most.gained)) / most.gained : 0 };
-            unlock = { gym, energyLeft: left, rows, best: most.id || null };
+            for (const [id, r] of Object.entries(compare)) {
+                if (!r) continue;
+                const day = opensOnDay(r, openBy.gymId);
+                rows[id] = { day, at: day ? from + (day - 1) * DAY : null, days: day ? null : unlockDays(r, left, horizon), gained: r.gained, cost: r.cost, statsPct: base && base.gained > 0 ? (100 * (r.gained - base.gained)) / base.gained : 0, dCost: base ? r.cost - base.cost : 0, blocked: Boolean(r.blocked) };
+            }
+            unlock = { gym, energyLeft: left, rows, best: rec ? rec.recommended : null, by: openBy.by, byDay: openBy.days };
         }
     }
 

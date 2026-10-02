@@ -11,7 +11,7 @@
 
 import { gmMenu, gmOpenTab } from './platform/gm.js';
 import { set, dropOldKeys } from './platform/store.js';
-import { pi, startFeed, refresh, onModel, setWhere, createPlan, recalibratePlan, followStrategy } from './runtime.js';
+import { pi, startFeed, refresh, onModel, setWhere, createPlan, recalibratePlan, followStrategy, cancelPlan } from './runtime.js';
 import { maybeSyncPlan, onSkipped } from './discord.js';
 import { bootAppPage } from './app-page.js';
 import { bootTornPage } from './torn-page.js';
@@ -19,6 +19,7 @@ import { bootEyePage } from './eye-page.js';
 import { detectPage, isAppPageUrl, isTradingPageUrl, APP_PAGE_URL } from './sources/route.js';
 import { watchTrading } from './turns.js';
 import { gymLogTick } from './income.js';
+import { startProblemLog } from './problem-log.js';
 
 function menus() {
     gmMenu('Open Pumping Iron', () => gmOpenTab(APP_PAGE_URL));
@@ -42,6 +43,8 @@ export function boot() {
     dropOldKeys();
     // The webpage holds the whole saved plan; Torn's pages only follow it.
     setWhere(where === 'app' ? 'app' : 'torn');
+    // The problem log (Settings › Report a problem): script errors of ours, and on the webpage its own freezes.
+    startProblemLog({ where: where === 'app' ? 'app' : 'torn' });
     if (where === 'app') bootAppPage();
     else {
         bootTornPage();
@@ -58,5 +61,5 @@ export function boot() {
         setInterval(gymLogTick, 60000);
     }
     // Off torn.com (the harness), expose the model for checks. On torn.com the sandbox keeps it private anyway.
-    if (/^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed, createPlan, recalibratePlan, followStrategy };
+    if (/^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed, createPlan, recalibratePlan, followStrategy, cancelPlan, extras: () => pi.planExtras || Promise.resolve(null), busy: () => pi.planBusy };
 }

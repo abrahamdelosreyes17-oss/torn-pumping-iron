@@ -181,19 +181,24 @@ test('slower parts refresh on their own clocks, not every poll', async () => {
     const store = memStore();
     const f = fakeTorn((u) => staticAnswers(u, userApi));
     const client = new TornApiClient({ getKey: () => 'k'.repeat(16), fetchImpl: f, maxRetries: 0, dedupTtlMs: 0 });
-    const feed = new StateFeed({ client, store, tabId: 'A', now: () => t });
+    // Round 7, R7.3b: the tab that read the slow data is told (its own page drew before the inventory was in).
+    let told = 0;
+    const feed = new StateFeed({ client, store, tabId: 'A', now: () => t, onStatic: (st) => (told++, assert.ok(st.inventoryAt > 0)) });
     await feed.tick();
     await feed.tick();
     const perksCalls = () => f.calls.filter((c) => c.includes('/v2/user/perks')).length;
     assert.equal(perksCalls(), 1);
+    assert.equal(told, 1, 'told once, after the first read of the slow data');
     for (let i = 0; i < 5; i++) {
         t += STATE_POLL_MS;
         await feed.tick();
     }
     assert.equal(perksCalls(), 1, 'perks once an hour');
+    assert.equal(told, 1, 'nothing read again, nothing told');
     t += 3600e3;
     await feed.tick();
     assert.equal(perksCalls(), 2);
+    assert.equal(told, 2);
 });
 
 test('no key yet is not a refused key: nothing is marked dead, nothing is sent', async () => {
@@ -247,4 +252,56 @@ test('the warning names the problem instead of "Reading your state…"', () => {
     assert.equal(keyProblem({ hasKey: true, dead: false, stateError: { code: 17, message: 'Torn API 17: Backend error' } }).kind, 'retry');
     assert.equal(keyProblem({ hasKey: true, dead: false, keyInfo: { level: 3 } }), null, 'a good key while loading: no warning');
     assert.equal(keyProblem({ hasKey: false, dead: false, stateError: { code: 16 } }), null, 'no key: Settings asks for one');
+});
+
+// Round 7 (D.4): the page saw an action on Torn's own bars: one read soon after the last change, not at the next 30 s read.
+test('an early read: about 2 s after the page asks, never sooner than 8 s after the read before it, and only once', async () => {
+    const { EARLY_READ_DELAY_MS, EARLY_READ_GAP_MS } = await import('../src/feed/state.js');
+    let t = 1_790_000_000_000;
+    const store = memStore();
+    let user = userApi({ energy: 275 });
+    const f = fakeTorn((u) => staticAnswers(u, () => user));
+    const client = new TornApiClient({ getKey: () => 'k'.repeat(16), fetchImpl: f, maxRetries: 0, dedupTtlMs: 0 });
+    const feed = new StateFeed({ client, store, tabId: 'A', now: () => t });
+    const reads = () => f.calls.filter((c) => c.includes('selections=')).length;
+    await feed.tick();
+    await feed.tick();
+    assert.equal(reads(), 1);
+    // 3 s after that read the session is trained: asked for, but the read before it is too fresh.
+    t += 3000;
+    user = userApi({ energy: 5, dex: 84150 });
+    assert.equal(feed.wantSoon(), t + EARLY_READ_DELAY_MS);
+    t += EARLY_READ_DELAY_MS;
+    assert.equal(await feed.tick(), false, '5 s after the last read: not yet');
+    assert.equal(reads(), 1);
+    t = 1_790_000_000_000 + EARLY_READ_GAP_MS;
+    assert.equal(await feed.tick(), true, 'once 8 s have passed: the early read');
+    assert.equal(reads(), 2);
+    assert.equal(feed.current().energy.current, 5);
+    // Used up: the next read is the usual one, 30 s later.
+    t += 10000;
+    assert.equal(await feed.tick(), false);
+    assert.equal(reads(), 2);
+    // Asked again while training goes on: the moment moves with the last change.
+    feed.wantSoon();
+    t += 1000;
+    feed.wantSoon();
+    t += EARLY_READ_DELAY_MS - 1;
+    assert.equal(await feed.tick(), false, 'still within 2 s of the last change');
+    t += 1;
+    assert.equal(await feed.tick(), true);
+    assert.equal(reads(), 3);
+});
+
+test('the sidebar bars: energy spent or added and happy moved are actions; a regeneration tick is not', async () => {
+    const { barsActed } = await import('../src/sources/dom/gym.js');
+    const b = (energy, happy) => ({ energy: energy === null ? null : { current: energy }, happy: happy === null ? null : { current: happy } });
+    assert.equal(barsActed(b(275, 5025), b(265, 5020)), true, 'a train');
+    assert.equal(barsActed(b(20, 5025), b(270, 5100)), true, 'a Xanax');
+    assert.equal(barsActed(b(0, 5000), b(150, 5000)), true, 'a refill');
+    assert.equal(barsActed(b(150, 5025), b(150, 7475)), true, 'candy');
+    assert.equal(barsActed(b(20, 4960), b(25, 4965)), false, 'a regeneration tick');
+    assert.equal(barsActed(b(20, 5025), b(30, 5025)), false, 'two energy ticks in one look');
+    assert.equal(barsActed(b(null, null), b(20, 5025)), false, 'the bars just appeared');
+    assert.equal(barsActed(b(20, 5025), b(null, null)), false, 'the bars went away');
 });

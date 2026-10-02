@@ -179,6 +179,9 @@ window.GM_xmlhttpRequest = (o) => {
     else if (u.pathname === '/v2/key/info' && u.searchParams.get('key') === 'FullKeyHarness12') body = { info: { access: { level: 4, type: 'Full Access' }, user: { id: 2345678 }, selections: {} } };
     else if (/^\/v2\/user\/\d+\/profile$/.test(u.pathname)) body = profileOf(u.pathname.split('/')[3]);
     else body = (CANNED[u.pathname] || (() => ({})))(u);
+    // A check can change what Torn answers for the user's state mid-run (a session trained, a drug taken):
+    // window.__userPatch = (body) => body.
+    if (u.pathname === '/v2/user' && typeof window.__userPatch === 'function') body = window.__userPatch(body) || body;
     o.onload({ status: 200, responseText: JSON.stringify(body) });
   }, 20);
 };

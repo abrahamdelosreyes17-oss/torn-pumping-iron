@@ -88,6 +88,34 @@ export function readEnergyBar(doc = document) {
     return m ? { current: Number(m[1]), max: Number(m[2]) } : null;
 }
 
+/**
+ * Torn's sidebar happy bar ("4,965/5,025"), like the energy bar [check live: the selector follows the energy bar's].
+ * @returns {{current:number, max:number}|null}
+ */
+export function readHappyBar(doc = document) {
+    const bar = doc.getElementById('barHappy') || doc.querySelector('[class*="bar___"][class*="happy___"]');
+    const v = bar && bar.querySelector('[class*="bar-value___"]');
+    const m = v && String(v.textContent || '').replace(/,/g, '').match(/(\d+)\s*\/\s*(\d+)/);
+    return m ? { current: Number(m[1]), max: Number(m[2]) } : null;
+}
+
+/**
+ * Did the player do something between two looks at the sidebar bars (round 7, D.4)? Energy that dropped (trained),
+ * or rose by more than a regeneration tick (a Xanax, a refill, a can); happy that moved by more than a tick's worth
+ * (trains use it, boosters add it). Natural regeneration alone is not an action.
+ * @param {{energy, happy}} a - {current} each, or null
+ * @param {{energy, happy}} b
+ */
+export function barsActed(a, b) {
+    const num = (x) => (x && Number.isFinite(x.current) ? x.current : null);
+    const e0 = num(a && a.energy);
+    const e1 = num(b && b.energy);
+    const h0 = num(a && a.happy);
+    const h1 = num(b && b.happy);
+    if (e0 !== null && e1 !== null && (e1 < e0 || e1 - e0 > 10)) return true;
+    return h0 !== null && h1 !== null && Math.abs(h1 - h0) > 10;
+}
+
 /** Unlocked gym ids (usable now), the gym you're in, and the one being unlocked. */
 export function gymListSummary(buttons) {
     const unlocked = buttons.filter((b) => b.state === 'active' || b.state === 'selected').map((b) => b.id);

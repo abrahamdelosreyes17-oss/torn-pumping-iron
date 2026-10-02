@@ -19,6 +19,8 @@ import { clock, cd, sectionHead, meta, trainsText, headsList, gainsCard, STAT_CO
 import { partsText, trainInText, whyMix, whyOneStat } from '../../core/gympage.js';
 import { spentOverDays } from '../../core/receipts.js';
 import { hm } from '../../core/drugcd.js';
+import { lineAt, plannedBetween, planStatAt } from '../../core/planline.js';
+import { dayGainPlan } from './progress.js';
 
 const DAYS = DAY_NAMES;
 const MONTHS = MONTH_NAMES;
@@ -210,9 +212,27 @@ function buildFoot(m, ctx = null) {
     return foot.length ? h('div', { class: 'sgfoot num' }, foot) : null;
 }
 
-/** Next 7 days: stats gained a day, split by the stats trained. */
-function weekChart(m) {
-    const days = m.projection || [];
+/**
+ * Next 7 days: stats gained a day, split by the stats trained. Round 7: from the plan you follow (its own line, read
+ * by time: a jump plan shows its stack days and its jumps), today being what is left of it; with no plan line yet,
+ * the steady projection as before.
+ */
+function weekChart(m, ctx) {
+    const lines = (ctx && ctx.planLines) || [];
+    const today = tornDayStart(m.now);
+    let days = m.projection || [];
+    let fromPlan = false;
+    if (lineAt(lines, m.now)) {
+        fromPlan = true;
+        days = Array.from({ length: 7 }, (_, i) => {
+            const from = i === 0 ? m.now : today + i * DAY;
+            const to = today + (i + 1) * DAY;
+            const d = { gain: Math.max(0, plannedBetween(lines, from, to) || 0) };
+            // The split: each stat's own planned gain that day (used as weights, like trains).
+            for (const k of STATS) d[k] = Math.max(0, Math.round((planStatAt(lines, k, to) || 0) - (planStatAt(lines, k, from) || 0)));
+            return d;
+        });
+    }
     if (!days.length) return null;
     const start = new Date(m.now).getUTCDay();
     const perDay = days.map((d) => {
@@ -223,7 +243,7 @@ function weekChart(m) {
     const used = STATS.filter((k) => days.some((d) => d[k]));
     const legend = h('span', { class: 'legend2' }, used.map((k) => h('span', {}, [h('i', { style: 'background:' + STAT_COLOR[k] }), STAT_LABEL[k]])));
     return h('div', {}, [
-        h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('lab', 'Next 7 days · stats gained a day'), legend]),
+        h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('lab', fromPlan ? 'Next 7 days · what your plan gains a day (today: what is left)' : 'Next 7 days · stats gained a day'), legend]),
         stackBars(perDay, days.map((_, i) => DAYS[(start + i) % 7]), { w: 1000, h: 84, top: totals.map((v) => '+' + fmtShort(v)), label: 'Stats gained each of the next 7 days' }),
     ]);
 }
@@ -234,8 +254,10 @@ function weekCard(m, ctx) {
     const today = tornDayStart(m.now);
     const days = Object.keys(totals).map(Number).filter((d) => d > today - 7 * DAY && d <= today).sort((a, b) => a - b);
     const sum = (k) => days.reduce((a, d) => a + ((totals[d] && totals[d][k]) || 0), 0);
-    const gained = sum('gained');
-    const planned = sum('planned');
+    // Gained: what your stats really rose each day; planned: the plan's line for those days (round 7).
+    const nums = days.map((d) => dayGainPlan(m, ctx, d));
+    const gained = nums.reduce((a, r) => a + (r.gained || 0), 0);
+    const planned = nums.reduce((a, r) => a + (r.planned || 0), 0);
     const xan = sum('xanax');
     const xanP = sum('xanaxPlanned');
     const refills = sum('refills');
@@ -281,13 +303,16 @@ export function renderHome(m, ctx) {
     const late = next && next.kind === 'xanax' && m.strip.drug.left === 0;
     // "On plan" only while no step is waiting on you (the plan re-times, so a due step is the one sign of being behind).
     const overdue = Boolean(next && next.at <= now - 5 * 60 * 1000);
+    // What the plan says for today (its line: fixed for the day), else what today's steps add up to.
+    const todayNums = dayGainPlan(m, ctx, tornDayStart(now));
+    const plannedToday = todayNums.planned !== null && todayNums.planned !== undefined ? todayNums.planned : m.plannedGain;
     const buyTotal = buyRows(m.buyToday.filter((n) => n.buy > 0), ctx.prices, itemContext(ctx.statics || {}, ctx.settings || {}, now)).reduce((a, r) => a + (r.fill ? r.fill.total : 0), 0);
 
     const head = sectionHead(
         'Today',
         meta([
             dateLine(now) + ' · ',
-            h('b', { text: fmtSigned(m.plannedGain) }),
+            h('b', { text: fmtSigned(plannedToday) }),
             ' planned',
             buyTotal ? ' · ' + fmtMoney(buyTotal) + ' to spend' : '',
             ' · ',
@@ -309,8 +334,9 @@ export function renderHome(m, ctx) {
         const k = Object.keys(st.trains || {});
         rows.push(
             h('tr', {}, [
-                h('td', { class: 't', text: clock(st.at, s) }),
-                h('td', {}, [h('b', { class: 'w', text: st.label })]),
+                // A step past midnight says its day (round 7: tomorrow's jump was listed under Today with a clock only).
+                h('td', { class: 't' }, tornDayStart(st.at) > tornDayStart(now) ? [h('small', { class: 'muted', text: Math.round((tornDayStart(st.at) - tornDayStart(now)) / DAY) === 1 ? 'tomorrow' : DAY_NAMES[new Date(st.at).getUTCDay()] }), h('br'), clock(st.at, s)] : [clock(st.at, s)]),
+                h('td', {}, [h('b', { class: 'w', text: st.label }), st.mid && st.note ? h('div', { class: 'muted', style: 'font-size:12px', text: st.note }) : null]),
                 h('td', {}, [h('span', { class: k.length === 1 ? 's-' + k[0] : null, text: trainsText(st.trains) || '—' })]),
                 h('td', { class: 'r', text: st.gain ? fmtSigned(st.gain) : '' }),
                 h('td', { class: 'r muted' }, [st.at > now ? cd(st.at, now, { cls: 'when' }) : h('span', { class: 'when', text: 'now' })]),
@@ -323,10 +349,10 @@ export function renderHome(m, ctx) {
               h('tbody', {}, rows),
           ])
         : null;
-    const foot = h('div', { class: 'row muted num', style: 'justify-content:space-between;margin-top:6px;font-size:12px;gap:12px;flex-wrap:wrap' }, [h('span', {}, ['So far ', h('b', { class: 'white', text: fmtSigned(m.gainedToday) }), ' of ' + fmtInt(m.plannedGain) + ' today']), h('span', { text: dayResetWords(m) + ' · ' + xanaxCdWords(m.xanaxCd) })]);
+    const foot = h('div', { class: 'row muted num', style: 'justify-content:space-between;margin-top:6px;font-size:12px;gap:12px;flex-wrap:wrap' }, [h('span', {}, ['So far ', h('b', { class: 'white', text: fmtSigned(m.gainedToday) }), ' of ' + fmtInt(plannedToday) + ' today']), h('span', { text: dayResetWords(m) + ' · ' + xanaxCdWords(m.xanaxCd) })]);
 
     const lead = h('div', { class: 'lead' }, [head, nowBand, steps, foot]);
-    const week = weekChart(m);
+    const week = weekChart(m, ctx);
     return {
         strip: true,
         main: [lead, nextDays(m, s), youVsBuild(m, ctx), week].filter(Boolean),

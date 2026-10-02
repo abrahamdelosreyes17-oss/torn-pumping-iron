@@ -9,6 +9,7 @@
     "test": "node --test \"test/*.test.js\"",
     "test:worker": "node --test \"worker/test/*.test.js\"",
     "check": "node build.mjs && node --check dist/torn-pumping-iron.user.js && node --test \"test/*.test.js\" \"worker/test/*.test.js\"",
-    "perf": "node build.mjs && node test/perf-check.mjs"
+    "perf": "node build.mjs && node test/perf-check.mjs",
+    "baseline": "node test/baseline.mjs"
   }
 }

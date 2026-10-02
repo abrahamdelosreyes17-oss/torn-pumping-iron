@@ -53,9 +53,11 @@ test('the plan picks the candy for every candy plan, by the Plan’s rule, and n
     assert.equal(most.steady.candy, undefined);
     assert.ok(most.dailyChoco.cost <= 150e6, 'inside the budget');
     const max = compareStrategies({ state, pc, shares, settings: SETTINGS, prices: PRICES, pickBy: 'max' });
-    assert.equal(max.chocoJump.candy.id, CUPCAKE, 'no budget: the most happy');
-    assert.ok(max.chocoJump.gained > most.chocoJump.gained);
-    assert.match(planWhat('chocoJump', max.chocoJump), /^Stack 4 Xanax, then Birthday Cupcake × 49 \+ Ecstasy/);
+    // Round 7 (the owner's rule): a stronger candy only at an equal or better cost per stat, "Max gains" too: no
+    // Birthday Cupcake at any price, and the same candy whatever the Plan rule.
+    assert.notEqual(max.chocoJump.candy.id, CUPCAKE, 'no budget is not "whatever it costs" for the candy');
+    assert.equal(max.chocoJump.candy.id, most.chocoJump.candy.id, 'the candy with the best cost per stat, under every rule');
+    assert.match(planWhat('chocoJump', max.chocoJump), /^Stack 4 Xanax, then .+ × 49 \+ Ecstasy/);
     assert.match(planWhat('dailyChoco', most.dailyChoco), / × 49 \+ Ecstasy once a day/);
     // Only sample prices known: Candy Kisses is the one priced candy.
     const bare = compareStrategies({ state, pc, shares, settings: SETTINGS, prices: {} });

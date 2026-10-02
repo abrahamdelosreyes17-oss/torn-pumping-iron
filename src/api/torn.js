@@ -8,6 +8,7 @@
 import { TornApiError } from './client.js';
 import { TRAINING_EVENTS } from '../core/events.js';
 import { itemsInfoFrom } from '../core/market.js';
+import { logFieldsOf, logFieldsList } from '../core/report.js';
 
 /** Torn's "incorrect category" and "access level too low". */
 export const TORN_ERROR_WRONG_FIELDS = 4;
@@ -308,16 +309,20 @@ export async function fetchLogCategories(client) {
  */
 export async function fetchMoneyLog(client, { from, categories, perCategory = 100 }) {
     const out = [];
+    // Round 7 (C.0): the log by type, with the names of each type's data fields (never a value).
+    const fields = logFieldsOf([]);
     // A category that filled its page covers less than the whole span: only the newest `perCategory` lines came back.
     let coveredFrom = from * 1000;
     for (const c of categories) {
         const d = await client.get('v2/user/log', { cat: c.id, from, limit: perCategory });
         const rows = (d && d.log) || [];
+        logFieldsOf(rows, fields);
         for (const e of rows) out.push({ at: Number(e.timestamp) * 1000, title: String((e.details && e.details.title) || ''), category: c.title, money: moneyOf(e.data) });
         if (rows.length >= perCategory) coveredFrom = Math.max(coveredFrom, Math.min(...rows.map((e) => Number(e.timestamp) * 1000)));
     }
     out.sort((a, b) => b.at - a.at);
     out.coveredFrom = coveredFrom;
+    out.fields = logFieldsList(fields);
     return out;
 }
 

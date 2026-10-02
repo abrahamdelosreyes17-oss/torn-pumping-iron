@@ -12,13 +12,13 @@ import { focusFrom, FOCUS_FRESH_MS } from './core/lanes.js';
 import { TornApiClient } from './api/client.js';
 import { StateFeed } from './feed/state.js';
 import { normalizeState, tornDayStart } from './core/bars.js';
-import { buildModel, compareSteps, simInputs, compareStrategiesAsync, blissWhatIf, companyWhatIf, playerContext, buildOf, isDrugEntry, specialLeft, heldBoosters, steadyCostPerDay } from './core/model.js';
+import { buildModel, compareSteps, simInputs, compareStrategiesAsync, blissWhatIfSteps, companyWhatIfSteps, playerContext, buildOf, isDrugEntry, specialLeft, heldBoosters, steadyCostPerDay, openByOf, gymWorthSteps } from './core/model.js';
 import { recommend, pickWarning, PICK_BY } from './core/recommend.js';
 import { targetShares } from './core/plan.js';
 import { INCOME_MIN_DAYS, budgetOf, incomeFrom, autoState, effectivePickBy, incomeBreakdown } from './core/auto.js';
 import { incomeFloor } from './core/income-floor.js';
 import { eventsBetween } from './core/events.js';
-import { yearSteps, segEvents, unlockHook } from './core/year.js';
+import { yearSteps, segEvents, unlockHook, segmentsOf } from './core/year.js';
 import { planWindow, scheduleAt, daysLeft, planProgress, snapshotOf, makeSavedPlan, planNowOf, usablePlanNow, SAVED_PLAN_V } from './core/saved-plan.js';
 import { loadSavedPlan, saveSavedPlan } from './platform/plan-store.js';
 import { archived, pageGet, pageSet, archivesReady } from './platform/archive.js';
@@ -30,6 +30,10 @@ import { useDampingMode } from './core/gain.js';
 import { parsePerks } from './core/perks.js';
 import { joinFights, runLearning, learnedModel } from './core/learndata.js';
 import { applyGymModel } from './core/learn.js';
+import { logAction, logError, logNote, notePlanRun } from './problem-log.js';
+import { makeLine, addLine } from './core/planline.js';
+import { makePause, runSliced, PlanCancelled } from './core/slices.js';
+import { STRATEGIES } from './core/strategies.js';
 
 export const pi = {
     tabId: makeTabId(),
@@ -211,9 +215,11 @@ export function planNowStored() {
  */
 function savedFor(pn) {
     if (!pn) return null;
-    if (pi.saved && pi.saved.rev === pn.rev) return pi.saved;
-    if (pi.savedLoading !== pn.rev) {
-        pi.savedLoading = pn.rev;
+    // The same plan, with its what-ifs if they have been added since (another tab worked them out).
+    if (pi.saved && pi.saved.rev === pn.rev && (pi.saved.extrasAt || 0) >= (pn.extrasAt || 0)) return pi.saved;
+    const want = pn.rev + ':' + (pn.extrasAt || 0);
+    if (pi.savedLoading !== want) {
+        pi.savedLoading = want;
         loadSavedPlan()
             .then((p) => {
                 if (p && p.rev === pn.rev) {
@@ -228,24 +234,70 @@ function savedFor(pn) {
     return null;
 }
 
+/** Listeners for a running plan's progress (the Plan card's bar and words): called with the busy record. */
+const progressListeners = [];
+export function onPlanProgress(fn) {
+    progressListeners.push(fn);
+}
+
+/** The Plan card's Cancel: the run stops at its next break, nothing is saved, the old plan stays. */
+export function cancelPlan() {
+    if (pi.planBusy) pi.planBusy.cancel = true;
+}
+
+/** How much of a run each part is (measured: the comparison about 40%, the path about 45%, its range the rest). */
+const RUN_SHARE = { compare: 0.4, path: 0.45, band: 0.15 };
+
 /**
- * Create plan (1, 3, 6 or 12 months) or Recalibrate, on a click only: every
- * plan is worked out over the plan's days from what's true now (stats,
- * income, prices, gyms), the best one is recommended, and the whole thing is
- * saved with what it saw. Recalibrate keeps the plan's start and end and
- * re-plans only the days left. Worked out in slices (the page stays free).
- * @param {object} o - {months: 1|3|6|12} or {recalibrate: true}
- * @returns {Promise<object>} the saved plan
+ * Create plan (1, 3, 6 or 12 months) or Re-plan, on a click only: every plan
+ * is worked out over the plan's days from what's true now (stats, income,
+ * prices, gyms), the best one is recommended, and the whole thing is saved
+ * with what it saw. Re-plan keeps the plan's start and end and re-plans only
+ * the days left.
+ *
+ * Round 7 (R7.3b): worked out in slices of about 30 ms with breaks that are
+ * not timers (so it finishes in a tab you left), with live progress and
+ * Cancel; nothing is saved until the end, so a cancelled run leaves the old
+ * plan. The what-ifs (Bliss, a company, what each gym is worth) are worked
+ * out after the plan is saved and shown, and added to it.
+ * @param {object} o - {months: 1|3|6|12} or {recalibrate: true}; `pause` (tests): the caller's own break, and the
+ *   what-ifs are waited for
+ * @returns {Promise<object|null>} the saved plan (null: cancelled)
  */
-export async function createPlan({ months = 1, recalibrate = false, pause = pauseForPage } = {}) {
+export async function createPlan({ months = 1, recalibrate = false, pause: pauseIn = null } = {}) {
     if (pi.planBusy) return pi.planBusy.promise;
+    const busy = { recalibrate, months, at: Date.now(), promise: null, part: 'start', done: 0, words: 'Reading what is true now', cancel: false };
+    const cancelled = () => busy.cancel === true;
+    // Breaks for the page: a message to ourselves, not a timer (a hidden tab's timers run once a second at best:
+    // 3 seconds of work took minutes), and only once 30 ms of work is done since the last one.
+    const own = pauseIn ? null : makePause({ cancelled });
+    const pause = own || (() => (cancelled() ? Promise.reject(new PlanCancelled()) : pauseIn()));
+    let told = 0;
+    const tell = (part, done, words) => {
+        const moved = part !== busy.part;
+        busy.part = part;
+        busy.done = Math.max(busy.done, Math.min(1, done));
+        busy.words = words;
+        // The card is told when the run moves to its next part, and otherwise at most ten times a second.
+        const t = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+        if (!moved && t - told < 100 && done < 1) return;
+        told = t;
+        for (const fn of progressListeners) {
+            try {
+                fn(busy);
+            } catch {
+                // A listener's own problem never stops the run.
+            }
+        }
+    };
+    let extrasCtx = null;
     const run = (async () => {
         const now = Date.now();
         const s = get(K.userState, null);
         const state = s && s.api ? normalizeState(s.api, s.at) : null;
         if (!state) throw new Error('Waiting for the first read of your stats.');
         const prev = recalibrate ? await loadSavedPlan() : null;
-        if (recalibrate && !(prev && prev.v === SAVED_PLAN_V)) throw new Error('No plan to recalibrate yet: create one first.');
+        if (recalibrate && !(prev && prev.v === SAVED_PLAN_V)) throw new Error('No plan to re-plan yet: create one first.');
         if (recalibrate && planProgress(prev, now).ended) throw new Error('Your plan has ended: create a new one.');
         const plan = getPlan();
         const settings = getSettings();
@@ -262,7 +314,8 @@ export async function createPlan({ months = 1, recalibrate = false, pause = paus
         const perDay = plan.pickBy === 'max' ? Infinity : auto.ready ? auto.budgetPerDay : budgetOf(settings) / (settings.horizonDays || 30);
         const runSettings = { ...settings, horizonDays: win.days, budget: Number.isFinite(perDay) ? perDay * win.days : Infinity };
         const pickBy = effectivePickBy(PICK_BY[plan.pickBy] ? plan.pickBy : 'most', auto);
-        const args = { state, pc, shares, settings: runSettings, prices, special, statics, pickBy };
+        // `live`: every plan starts from the bars as they are now (round 7), like today's steps do.
+        const args = { state, pc, shares, settings: runSettings, prices, special, statics, pickBy, live: true };
         // R6.5: the events on their dates and the gyms opening as energy is trained, in every plan's run.
         const from = recalibrate ? tornDayStart(now) : win.start;
         const cal = statics.calendar || null;
@@ -270,24 +323,43 @@ export async function createPlan({ months = 1, recalibrate = false, pause = paus
         const gp = get(K.gymProgress, null);
         const top = Math.max(1, ...pc.unlocked.filter((id) => id <= 24));
         const progress = gp && Number(gp.nextId) === top + 1 ? { top, energy: Number(gp.energy) || 0 } : null;
-        const hook = unlockHook({ top, progress: progress ? progress.energy : 0, gymExpMult: pc.perks.gymExpMult || 1, table: pc.table, active: state.gymId, known: pc.unlocked.filter((id) => id > 24), paid: new Set(pc.unlocked.filter((id) => id > 24)) });
-        const compare = await compareStrategiesAsync({ ...args, events: segEvents(events, { from, to: win.end }), unlock: hook }, { pause });
-        await pause();
-        const goal = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
+        const hookFor = (stopAt) => unlockHook({ top, progress: progress ? progress.energy : 0, gymExpMult: pc.perks.gymExpMult || 1, table: pc.table, active: state.gymId, known: pc.unlocked.filter((id) => id > 24), paid: new Set(pc.unlocked.filter((id) => id > 24)), ...(stopAt ? { stopAt } : {}) });
+        const hook = hookFor(null);
+        // The comparison: each plan over the whole length (its id is yielded as it starts).
+        const names = [];
+        const nPlans = 8;
+        const compare = await runSliced(compareSteps({ ...args, events: segEvents(events, { from, to: win.end }), unlock: hook }), pause, (v) => {
+            if (typeof v !== 'string') return;
+            names.push(v);
+            tell('compare', (RUN_SHARE.compare * (names.length - 0.5)) / Math.max(nPlans, names.length), 'Comparing plans: ' + ((STRATEGIES_NAME(v) || v).toLowerCase()) + ' (' + names.length + ')');
+        });
+        // Round 7: a gym to unlock never outranks stats. Every plan says when it opens the gym; an "open it by" date
+        // leaves out the plans that miss it, then the Plan rule picks as usual.
+        const openBy = openByOf(plan, pc, from, win.days);
         const budget = budgetOf(runSettings);
-        const rec = recommend(compare, { budget, bliss: pc.perks.bliss, pickBy, goal });
-        // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
-        const whatIf = pc.perks.bliss ? null : blissWhatIf(args);
-        await pause();
-        const jobWhatIf = companyWhatIf({ ...args, compare, recommended: rec.recommended });
+        const rec = recommend(compare, { budget, bliss: pc.perks.bliss, pickBy, openBy });
         // The path: the best plan again every 30 days and for each event, from the stats projected for that day.
-        const goalYear = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
-        const year = await runSteps(yearSteps({ compare: compareSteps, inputs: simInputs, args, start: from, end: win.end, budgetPerDay: perDay, events, progress, goal: goalYear }), pause);
+        const nSegs = Math.max(1, segmentsOf(from, win.end, events).length);
+        let seg = 0;
+        let band = 0;
+        const year = await runSliced(yearSteps({ compare: compareSteps, inputs: simInputs, args, start: from, end: win.end, budgetPerDay: perDay, events, progress, openBy }), pause, (v) => {
+            if (v && typeof v === 'object' && Number.isFinite(v.from)) {
+                seg++;
+                const day = Math.round((v.from - from) / 86400e3) + 1;
+                tell('path', RUN_SHARE.compare + (RUN_SHARE.path * (seg - 0.5)) / nSegs, 'Your ' + (win.months > 1 ? win.months + ' months' : 'month') + ': day ' + day + ' of ' + win.days);
+            } else if (v === 'band') {
+                band++;
+                tell('band', RUN_SHARE.compare + RUN_SHARE.path + (RUN_SHARE.band * band) / (2 * nSegs), 'The range of the plan (a little better, a little worse)');
+            }
+        });
+        tell('save', 1, 'Saving your plan');
         const snapshot = snapshotOf({ state, pc, statics, plan, prices: livePrices(prices), income: auto.ready ? { perDay: auto.perDay, source: auto.source, days: auto.days, certain: auto.floor ? { perDay: auto.floor.perDay, bank: auto.floor.bank, dividends: auto.floor.dividends, rent: auto.floor.rent } : null } : null, budgetPerDay: Number.isFinite(perDay) ? perDay : null, held: heldBoosters(statics.inventory), now });
-        const saved = makeSavedPlan({ compare, rec, snapshot, start: win.start, end: win.end, months: win.months, days: win.days, budget, whatIf, jobWhatIf, prev, year, now });
+        // The what-ifs come after the plan is saved and shown (`extras: 'pending'` until they are in).
+        const saved = makeSavedPlan({ compare, rec, snapshot, start: win.start, end: win.end, months: win.months, days: win.days, budget, whatIf: null, jobWhatIf: [], prev, year, gymWorth: [], extras: 'pending', now });
         const best = compare[rec.recommended];
         const warn = {};
         for (const [id, r] of Object.entries(compare)) if (r && best && id !== rec.recommended) warn[id] = pickWarning(best, r, { bliss: pc.perks.bliss, days: win.days }).warn;
+        if (cancelled()) throw new PlanCancelled();
         await saveSavedPlan(saved);
         pi.saved = saved;
         set(K.planNow, planNowOf(saved, warn));
@@ -296,17 +368,92 @@ export async function createPlan({ months = 1, recalibrate = false, pause = paus
         const keep = recalibrate && cur.strategyPicked && compare[cur.strategy];
         const strategy = keep ? cur.strategy : year.segments.length ? year.segments[0].strategy : rec.recommended;
         setPlan({ ...cur, strategy, strategyPicked: Boolean(keep), createdAt: now });
-        recordPlanLine(saved, keep ? strategy : 'path', now);
+        recordPlanLine(saved, keep ? strategy : 'path', now, recalibrate ? 'replan' : 'create');
+        extrasCtx = { args, compare, rec, bliss: pc.perks.bliss, gymArgs: { ...args, events: segEvents(events, { from, to: win.end }) }, hookFor };
         return saved;
     })();
-    pi.planBusy = { recalibrate, months, at: Date.now(), promise: run };
+    busy.promise = run;
+    pi.planBusy = busy;
     refresh();
+    // How long it took, and how much of that with the tab not in front (the problem log; Settings › Report a problem).
+    const t0 = Date.now();
+    let hiddenMs = 0;
+    let hidAt = isVisible() ? null : t0;
+    const onVis = () => {
+        if (!isVisible() && hidAt === null) hidAt = Date.now();
+        else if (isVisible() && hidAt !== null) {
+            hiddenMs += Date.now() - hidAt;
+            hidAt = null;
+        }
+    };
+    const doc = typeof document !== 'undefined' && typeof document.addEventListener === 'function' ? document : null;
+    if (doc) doc.addEventListener('visibilitychange', onVis);
+    logAction(recalibrate ? 'Re-plan pressed' : 'Create plan pressed (' + months + (months === 1 ? ' month)' : ' months)'));
+    const done = (ok, error, saved) => {
+        if (doc) doc.removeEventListener('visibilitychange', onVis);
+        if (hidAt !== null) hiddenMs += Date.now() - hidAt;
+        notePlanRun({ at: t0, kind: recalibrate ? 'replan' : 'create', months: saved ? saved.months : months, days: saved ? saved.days : null, ms: Date.now() - t0, hiddenMs, ok, cancelled: Boolean(error && error.cancelled), error: ok ? null : String((error && error.message) || error) });
+    };
+    let saved = null;
     try {
-        return await run;
+        saved = await run;
+        done(true, null, saved);
+    } catch (error) {
+        done(false, error, null);
+        // Cancelled: nothing was saved, the old plan stays; not an error to show.
+        if (!(error && error.cancelled)) throw error;
+        return null;
     } finally {
+        if (own) own.stop();
         pi.planBusy = null;
         refresh();
     }
+    // The what-ifs, after the plan is saved and shown. A caller with its own pause (tests) waits for them.
+    pi.planExtras = planExtras(saved, extrasCtx, pauseIn);
+    if (pauseIn) return (await pi.planExtras) || saved;
+    return saved;
+}
+
+/**
+ * What a saved plan gets after it is shown (round 7, R7.3b): what each gym
+ * the recommended plan opens is worth, the Bliss what-if, the company
+ * what-ifs. Worked out in slices; dropped if another run starts or the plan
+ * is replaced meanwhile. Then the plan is saved again with them.
+ */
+async function planExtras(saved, ctx, pauseIn = null) {
+    const rev = saved.rev;
+    const alive = () => !pi.planBusy && pi.saved && pi.saved.rev === rev;
+    const own = pauseIn ? null : makePause({ cancelled: () => !alive() });
+    const pause = own || pauseIn;
+    const t0 = Date.now();
+    try {
+        // Is each gym the recommended plan opens worth its fee: the plan with and without it.
+        const gymWorth = await runSliced(gymWorthSteps(ctx.compare[ctx.rec.recommended], ctx.gymArgs, ctx.hookFor), pause);
+        // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
+        const whatIf = ctx.bliss ? null : await runSliced(blissWhatIfSteps(ctx.args), pause);
+        const jobWhatIf = await runSliced(companyWhatIfSteps({ ...ctx.args, compare: ctx.compare, recommended: ctx.rec.recommended }), pause);
+        if (!alive()) return null;
+        const next = { ...pi.saved, gymWorth, whatIf, jobWhatIf, extras: 'done', extrasAt: Date.now() };
+        await saveSavedPlan(next);
+        if (!alive()) return null;
+        pi.saved = next;
+        // The other tabs of the webpage read the plan again (its small part says the what-ifs are in).
+        const pn = getShared(K.planNow, null);
+        if (pn && pn.rev === rev) set(K.planNow, { ...pn, extrasAt: next.extrasAt });
+        logNote('The what-ifs after the plan took ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s');
+        refresh();
+        return next;
+    } catch (error) {
+        if (!(error && error.cancelled)) logError('The what-ifs after the plan', error);
+        return null;
+    } finally {
+        if (own) own.stop();
+    }
+}
+
+/** A plan's short name for the progress words. */
+function STRATEGIES_NAME(id) {
+    return STRATEGIES[id] ? STRATEGIES[id].short : null;
 }
 
 /** Recalibrate (a click): the plan's end stays, the days left are re-planned from what's true now. */
@@ -322,7 +469,8 @@ export function followStrategy(id) {
     const saved = pi.saved;
     const cur = getPlan();
     setPlan({ ...cur, strategy: id, strategyPicked: true, createdAt: Date.now() });
-    if (saved && saved.compare && saved.compare[id]) recordPlanLine(saved, id, Date.now());
+    if (saved && saved.compare && saved.compare[id]) recordPlanLine(saved, id, Date.now(), 'pick');
+    logAction('Picked the plan ' + id);
     refresh();
 }
 
@@ -332,21 +480,9 @@ export function followPath() {
     const cur = getPlan();
     const seg = scheduleAt(saved && saved.year ? saved.year.segments : null, Date.now());
     setPlan({ ...cur, strategy: seg ? seg.strategy : cur.strategy, strategyPicked: false, createdAt: Date.now() });
-    if (saved) recordPlanLine(saved, saved.year ? 'path' : cur.strategy, Date.now());
+    if (saved) recordPlanLine(saved, saved.year ? 'path' : cur.strategy, Date.now(), 'path');
+    logAction('Back to the saved plan');
     refresh();
-}
-
-/** A break for the page between two pieces of work. */
-const pauseForPage = () => new Promise((r) => setTimeout(r, 0));
-
-/** Run a generator of work to its end, with a break for the page after each step. */
-async function runSteps(gen, pause) {
-    let r = gen.next();
-    while (!r.done) {
-        await pause();
-        r = gen.next();
-    }
-    return r.value;
 }
 
 /**
@@ -371,6 +507,11 @@ export function currentModel(now = Date.now()) {
     const pn = planNowStored();
     const saved = app ? savedFor(pn) : null;
     const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult, learnedHappyLoss: learnedNow().happyLoss });
+    // The gym the plan was to unlock is open: the goal has nothing left to do (round 7; cleared once, on the webpage).
+    if (app && plan.goal && plan.goal.kind === 'unlockGym' && pc.unlocked.map(Number).includes(Number(plan.goal.gymId))) {
+        setPlan({ ...getPlan(), goal: null });
+        logNote('The gym to unlock is open: the goal is cleared');
+    }
     // The saved plan's numbers: every plan's whole result on the webpage, the small part on Torn's pages.
     let compare = null;
     let rec = null;
@@ -380,7 +521,8 @@ export function currentModel(now = Date.now()) {
     const followed = seg && seg.strategy ? { ...plan, strategy: seg.strategy } : plan;
     if (pn) {
         compare = saved ? saved.compare : pn.slim;
-        if (seg && seg.candy && compare[seg.strategy]) compare = { ...compare, [seg.strategy]: { ...compare[seg.strategy], candy: seg.candy } };
+        // This stretch's own candy and Xanax a day (the path re-picks them every stretch).
+        if (seg && compare[seg.strategy] && (seg.candy || Number.isFinite(seg.xanaxPerDay))) compare = { ...compare, [seg.strategy]: { ...compare[seg.strategy], ...(seg.candy ? { candy: seg.candy } : {}), ...(Number.isFinite(seg.xanaxPerDay) ? { xanaxPerDay: seg.xanaxPerDay } : {}) } };
         rec = saved ? saved.rec : { recommended: pn.recommended, pickBy: pn.pickBy, alternatives: [], reasons: [] };
         planSettings = { ...settings, horizonDays: pn.days, budget: pn.budget === null ? Infinity : pn.budget };
     }
@@ -390,7 +532,7 @@ export function currentModel(now = Date.now()) {
     const m = buildModel({ state, statics, plan: followed, onPath: Boolean(seg && seg.strategy), settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: (app ? archived(K.statsHistory, {}) : get(K.statsHistory, {})) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
     if (m.ready) {
         m.strategy = followed.strategy;
-        m.planBusy = pi.planBusy ? { recalibrate: pi.planBusy.recalibrate, months: pi.planBusy.months, at: pi.planBusy.at } : null;
+        m.planBusy = pi.planBusy ? { recalibrate: pi.planBusy.recalibrate, months: pi.planBusy.months, at: pi.planBusy.at, done: pi.planBusy.done, words: pi.planBusy.words } : null;
         m.savedPlan = saved;
     }
     return m;
@@ -422,16 +564,23 @@ function recordDayTotals(m) {
 }
 
 /**
- * The plan's line for Progress: the projection of the plan followed, from
- * the day it was made or recalibrated (or picked).
+ * The plan's line (core/planline.js; Progress, the Plan card, Home): a new
+ * line from this moment, from your stats now. Create plan and Re-plan start
+ * the saved plan's own run; a pick (or back to the saved plan) follows that
+ * plan's saved run from where it stands today. The lines before it stay
+ * (round 7: a pick no longer re-bases the line, Re-plan no longer wipes it).
+ * @param {string} why - 'create' | 'replan' | 'pick' | 'path'
  */
-function recordPlanLine(saved, strategy, now) {
+function recordPlanLine(saved, strategy, now, why) {
     // 'path': the saved path (a plan per segment); else one plan over the whole length.
     const r = strategy === 'path' ? saved && saved.year && saved.year.path : saved && saved.compare ? saved.compare[strategy] : null;
     if (!r || !Array.isArray(r.daily)) return;
-    const plan = getPlan();
-    const stats = saved.snapshot.stats;
-    pageSet(K.planLine, { key: [plan.createdAt || 0, strategy, plan.build].join('|'), start: saved.from || tornDayStart(now), total: Object.values(stats).reduce((a, v) => a + v, 0), perStat: { ...stats }, daily: r.daily, perStatGain: r.perStat, cost: r.cost, days: r.daily.length });
+    const fresh = why === 'create' || why === 'replan';
+    // Your stats at this moment: what the plan saw when it was just made, else the last read.
+    const s = get(K.userState, null);
+    const read = !fresh && s && s.api ? normalizeState(s.api, s.at).stats : null;
+    const line = makeLine({ at: now, t0: fresh ? now : saved.rev || now, stats: read || saved.snapshot.stats, result: r, strategy, build: getPlan().build, why });
+    pageSet(K.planLine, addLine(pageGet(K.planLine, null), line));
 }
 
 /**
@@ -513,6 +662,7 @@ export function refresh() {
         recordDayTotals(pi.model);
     } catch (error) {
         set(K.lastError, { at: Date.now(), where: 'model', message: String((error && error.message) || error) });
+        logError('Working out the page', error);
         return;
     }
     for (const fn of pi.listeners) {
@@ -520,8 +670,32 @@ export function refresh() {
             fn(pi.model);
         } catch (error) {
             set(K.lastError, { at: Date.now(), where: 'render', message: String((error && error.message) || error) });
+            logError('Drawing the page', error);
         }
     }
+}
+
+/**
+ * Torn's own page shows something was done (the energy bar dropped, happy jumped): read the state about two seconds
+ * after the last such change, not at the next 30 s read, so the panel moves to the next step with its countdown
+ * (round 7, D.4). One read, by the tab that leads; nothing while paused or hidden.
+ */
+let soonTimer = null;
+export function readSoon() {
+    if (!pi.feed || !isVisible() || isPaused()) return;
+    const at = pi.feed.wantSoon();
+    if (soonTimer) clearTimeout(soonTimer);
+    const go = () => {
+        soonTimer = null;
+        pi.feed
+            .tick()
+            .then((read) => {
+                // Too soon after the read before it: once more when the gap has passed.
+                if (!read && pi.feed.wantAt !== null && !soonTimer) soonTimer = setTimeout(go, 2000);
+            })
+            .catch(() => {});
+    };
+    soonTimer = setTimeout(go, Math.max(0, at - Date.now()) + 50);
 }
 
 /** Ask the feed now (a new key was saved): no waiting for the next heartbeat. */
@@ -545,8 +719,10 @@ export function startFeed() {
         nextStep: () => (pi.model && pi.model.next) || null,
         isPaused: () => isPaused(),
         onState: () => refresh(),
+        onStatic: () => refresh(),
         onError: (error) => {
             set(K.lastError, { at: Date.now(), where: 'feed', code: error && error.code, message: String((error && error.message) || error) });
+            logError('Reading your state from Torn', error);
             // This tab's own writes fire no change event here: redraw so the warning shows now.
             refresh();
         },

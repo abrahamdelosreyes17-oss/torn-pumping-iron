@@ -19,6 +19,7 @@ import { clock, sectionHead, meta, gainsCard, STAT_COLOR, MONTH_NAMES, DAY_NAMES
 import { sessionsOf } from '../../core/gains.js';
 import { logSessions, mergeSessions } from '../../core/gymlog.js';
 import { summarizeReceipts, spentOverDays, itemsWords, receiptDays, readReceipts, whatIfPeriod, whatIfLines, runWhatIf } from '../../core/receipts.js';
+import { lineAt, lineEnd, planGain, planStatAt, progressOf, dayNumbers, makeLine } from '../../core/planline.js';
 
 const dayLabel = (d) => new Date(d).getUTCDate() + ' ' + MONTH_NAMES[new Date(d).getUTCMonth()];
 
@@ -29,27 +30,26 @@ export function planColor(ratio) {
     return 'bad';
 }
 
-/** Days from the plan's start to show (14, 30 or all), with the plan's cumulative line under them. */
+/**
+ * The days shown (14, 30 or all the history there is), "you" on each, and the
+ * plan's lines read by time (core/planline.js). Round 7: "you" on a past day
+ * is that day's last read, so the plan is read at the same moment (the day's
+ * end; today: now); history from before the plan stays on the chart; a pick
+ * or a Re-plan starts a new line and the old one stays.
+ */
 function seriesFor(m, ctx, range) {
     const hist = ctx.history || {};
-    const today = tornDayStart(m.now);
-    const line = ctx.planProjection && ctx.planProjection.start <= today ? ctx.planProjection : null;
+    const now = m.now;
+    const today = tornDayStart(now);
+    let lines = ctx.planLines || [];
+    // No line yet (a plan followed before any was saved): the plan's own run from now, for the chart only.
+    if (!lines.length && m.compare && m.compare[ctx.plan.strategy] && Array.isArray(m.compare[ctx.plan.strategy].daily)) lines = [makeLine({ at: now, stats: m.pc.stats, result: m.compare[ctx.plan.strategy], strategy: ctx.plan.strategy })];
     let days = Object.keys(hist).map(Number).filter((d) => d <= today).sort((a, b) => a - b);
-    if (line) days = days.filter((d) => d >= line.start);
     if (range !== 'all') days = days.slice(-range);
     if (!days.length || days[days.length - 1] !== today) days.push(today);
+    const timeOf = (d) => (d === today ? now : d < today ? d + DAY - 1 : d + DAY - 1);
     const actual = days.map((d) => (d === today ? m.total : hist[d] ? hist[d].total : null));
-    const first = days[0];
-    // The plan line: from the day it was set; before any history, the line from today forward (planned + today).
-    const start = line ? line.start : today;
-    const base = line ? line.total : m.total;
-    const planAt = (d) => {
-        const i = Math.round((d - start) / DAY);
-        if (i < 0) return null;
-        const daily = line ? line.daily : m.compare && m.compare[ctx.plan.strategy] ? m.compare[ctx.plan.strategy].daily : [];
-        return i === 0 ? base : daily[Math.min(i - 1, daily.length - 1)] !== undefined ? base + daily[Math.min(i - 1, daily.length - 1)] : null;
-    };
-    return { days, actual, planAt, first, start, line };
+    return { days, actual, lines, line: lineAt(lines, now), timeOf, today, now, first: days[0] };
 }
 
 function totalChart(m, ctx, s) {
@@ -57,18 +57,29 @@ function totalChart(m, ctx, s) {
     // With only today, show the plan's line ahead (planned + today).
     const ahead = onlyToday ? 14 : 0;
     const xs = s.days.concat(Array.from({ length: ahead }, (_, i) => s.days[s.days.length - 1] + (i + 1) * DAY));
-    const plan = xs.map((d) => s.planAt(d));
+    // One dashed line per plan line: the one you follow now, and the ones before it up to where each ended.
+    const plans = s.lines.map((l) => {
+        const end = lineEnd(s.lines, l);
+        const values = xs.map((d) => {
+            const at = s.timeOf(d);
+            // On the day it starts (today, with nothing before): the line's own start, so it begins where you are.
+            if (onlyToday && d === s.today && l === s.line) return l.base + planGain(l, at);
+            return at >= l.at && at < end ? l.base + planGain(l, at) : null;
+        });
+        return { line: l, values, current: l === s.line };
+    });
     const you = s.actual.concat(Array(ahead).fill(null));
     const lbl = (i) => (onlyToday && i === 0 ? 'today' : dayLabel(xs[i]));
     const labels = [[0, lbl(0)], [xs.length - 1, lbl(xs.length - 1)]];
-    const vals = plan.concat(you).filter((v) => v !== null);
+    const vals = plans.flatMap((p) => p.values).concat(you).filter((v) => v !== null);
     const lo = Math.min(...vals);
     const hi = Math.max(...vals);
+    const old = plans.some((p) => !p.current && p.values.some((v) => v !== null));
     return h('div', {}, [
-        h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('lab', 'Total stats against the plan'), h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), 'you']), h('span', {}, [h('i', { class: 'dash', style: 'color:var(--muted)' }), 'plan'])])]),
+        h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('lab', 'Total stats against the plan'), h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), 'you']), h('span', {}, [h('i', { class: 'dash', style: 'color:var(--muted)' }), 'plan']), old ? h('span', {}, [h('i', { class: 'dash', style: 'color:var(--dim)' }), 'earlier plan']) : null])]),
         lineChart(
             [
-                { name: 'plan', color: 'var(--muted)', dash: '5 4', width: 1.5, values: plan, label: 'plan' },
+                ...plans.filter((p) => p.values.some((v) => v !== null)).map((p) => ({ name: p.current ? 'plan' : 'earlier plan', color: p.current ? 'var(--muted)' : 'var(--dim)', dash: p.current ? '5 4' : '2 4', width: p.current ? 1.5 : 1.2, values: p.values, label: p.current ? 'plan' : false })),
                 { name: 'you', color: 'var(--chalk)', width: 2.5, values: you, label: 'you ' + fmtShort(m.total) },
             ],
             { w: 1000, h: 200, left: 50, right: 110, yMin: lo - (hi - lo) * 0.08, yMax: hi + (hi - lo) * 0.08 || hi * 1.01, grid: [lo, hi], xLabels: labels, n: xs.length, today: onlyToday ? 0 : undefined, label: 'Total stats against the plan' },
@@ -88,20 +99,17 @@ function statCharts(m, ctx, s) {
         const gained = known.length > 1 ? known[known.length - 1] - known[0] : 0;
         const row = m.statRows.find((r) => r.stat === k);
         const what = trains[k] ? trains[k] + ' trains today' : row && row.over ? 'over target, skipped' : 'no trains today';
-        // The plan's line for this stat: its share of the plan's gains, over the same days (and 14 ahead on day one).
+        // The plan's line for this stat: the simulator's own line for it (round 7: not one share of the total applied to
+        // every day), read at the same moments as "you", over the same days (and 14 ahead on day one).
         const ahead = s.days.length === 1 ? 14 : 0;
-        const r = s.line ? { perStat: s.line.perStatGain, gained: s.line.daily[s.line.daily.length - 1], daily: s.line.daily, base: s.line.perStat[k] } : m.compare && m.compare[ctx.plan.strategy] ? { ...m.compare[ctx.plan.strategy], base: m.pc.stats[k] } : null;
-        const share = r && r.gained > 0 ? (r.perStat[k] || 0) / r.gained : 0;
-        const planVals = r ? s.days.concat(Array.from({ length: ahead }, (_, i) => s.days[s.days.length - 1] + (i + 1) * DAY)).map((d) => {
-            const i = Math.round((d - s.start) / DAY);
-            return i < 0 ? null : r.base + (i === 0 ? 0 : (r.daily[Math.min(i - 1, r.daily.length - 1)] || 0) * share);
-        }) : [];
+        const planVals = s.lines.length ? s.days.concat(Array.from({ length: ahead }, (_, i) => s.days[s.days.length - 1] + (i + 1) * DAY)).map((d) => planStatAt(s.lines, k, d === s.today && ahead ? Math.max(s.now, s.lines[0].at) : s.timeOf(d))) : [];
         const youVals = vals.concat(Array(ahead).fill(null));
         const all = known.concat(planVals.filter((v) => v !== null));
         const lo = Math.min(...all);
         const hi = Math.max(...all);
         const series = [];
-        if (share > 0) series.push({ name: 'plan', color: 'var(--muted)', dash: '5 4', width: 1.2, values: planVals, label: false });
+        const moves = planVals.filter((v) => v !== null);
+        if (moves.length && Math.max(...moves) > Math.min(...moves)) series.push({ name: 'plan', color: 'var(--muted)', dash: '5 4', width: 1.2, values: planVals, label: false });
         series.push({ name: k, color: STAT_COLOR[k], width: 2, values: youVals.length > 1 ? youVals : [youVals[0], youVals[0]], label: false });
         return h('div', {}, [
             h('div', { class: 't' }, [h('b', { class: 's-' + k, text: STAT_LABEL[k] }), h('span', { text: fmtInt(m.pc.stats[k]) + (gained ? ' · ' + fmtSigned(gained) : '') + ' · ' + what })]),
@@ -111,18 +119,23 @@ function statCharts(m, ctx, s) {
     return h('div', {}, [h('div', { class: 'lab', style: 'margin-bottom:8px', text: 'Each stat · own scale' }), h('div', { class: 'mult num' }, cells)]);
 }
 
+/** One Torn day's gained and planned (core/planline.js dayNumbers), for the bars and "This week". */
+export function dayGainPlan(m, ctx, day) {
+    return dayNumbers({ lines: ctx.planLines || [], history: ctx.history || {}, totals: ctx.dayTotals || {}, day, today: tornDayStart(m.now), nowTotal: m.total, gainedToday: m.gainedToday, plannedToday: m.plannedGain });
+}
+
 function dayBars(m, ctx) {
     const totals = ctx.dayTotals || {};
     const today = tornDayStart(m.now);
-    const days = Object.keys(totals).map(Number).filter((d) => d <= today).sort((a, b) => a - b).slice(-14);
+    const days = [...new Set([...Object.keys(totals), ...Object.keys(ctx.history || {})].map(Number))].filter((d) => d <= today).sort((a, b) => a - b).slice(-14);
     if (!days.includes(today)) days.push(today);
-    const pct = days.map((d) => {
-        const r = d === today ? { gained: m.gainedToday, planned: m.plannedGain } : totals[d];
-        return r && r.planned > 0 ? (100 * (r.gained || 0)) / r.planned : null;
-    });
+    // A day's planned is what the plan's line says for that day (round 7: fixed, it doesn't move as you train);
+    // gained is what your stats really rose.
+    const nums = days.map((d) => dayGainPlan(m, ctx, d));
+    const pct = nums.map((r) => (r.planned > 0 ? (100 * (r.gained || 0)) / r.planned : null));
     const labels = days.map((d, i) => (d === today ? 'today' : i === 0 || i % 3 === 0 ? dayLabel(d) : ''));
     const done = days.filter((d) => d < today);
-    const onPlan = done.filter((d) => totals[d] && totals[d].planned > 0 && totals[d].gained / totals[d].planned >= 0.95).length;
+    const onPlan = days.filter((d, i) => d < today && nums[i].planned > 0 && nums[i].gained / nums[i].planned >= 0.95).length;
     return h('div', {}, [
         h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [
             h('span', {}, [t('lab', 'Gained against plan, each day'), done.length ? h('span', { class: 'muted', style: 'margin-left:10px;font-size:12px', text: onPlan + ' of ' + done.length + ' days on plan' }) : null]),
@@ -146,14 +159,14 @@ function lastTrains(m, ctx) {
         return h('tr', {}, [
             h('td', { class: 't', text: clock(x.at, ctx.settings) }),
             h('td', { class: stats.length === 1 ? 's-' + stats[0] : null, text: stats.map((k) => STAT_LABEL[k] + ' × ' + x.trains[k]).join(' · ') }),
-            h('td', {}, [x.gyms.join(' / '), x.fromLog ? h('span', { class: 'muted', title: 'From Torn’s own log: Pumping Iron had no clean read of this session (you trained elsewhere, e.g. on your phone, or a drug, booster or refill came between two reads), so there’s no plan figure to check it against', text: ' · Torn log' }) : null]),
+            h('td', {}, [x.gyms.join(' / '), x.fromLog ? h('span', { class: 'muted', title: 'From Torn’s own log: Pumping Iron had no clean read of this session (you trained elsewhere, e.g. on your phone, or a drug, booster or refill came between two reads), so there’s no formula figure to check it against', text: ' · Torn log' }) : null]),
             h('td', { class: 'r', text: checked ? fmtSigned(x.predicted) : '—' }),
             h('td', { class: 'r', text: x.actual === null || x.actual === undefined ? '—' : fmtSigned(x.actual) }),
             h('td', { class: checked ? 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn') : 'r muted', text: checked ? fmtPct(off, 1) : '—' }),
         ]);
     });
     if (rows.length > 1) {
-        // "Plan said" and "Off by" add up only when every row has a plan figure (the log's sessions have none).
+        // "Formula says" and "Off by" add up only when every row has a formula figure (the log's sessions have none).
         const all = sessions.every((x) => x.predicted !== null && x.predicted !== undefined);
         const p = all ? sessions.reduce((s, x) => s + x.predicted, 0) : 0;
         const a = sessions.reduce((s, x) => s + (x.actual || 0), 0);
@@ -161,11 +174,11 @@ function lastTrains(m, ctx) {
         rows.push(h('tr', { class: 'total' }, [h('td'), h('td', {}, [h('b', { text: 'Total' })]), h('td'), h('td', { class: 'r', text: all ? fmtSigned(p) : '—' }), h('td', { class: 'r' }, [h('b', { text: fmtSigned(a) })]), h('td', { class: all ? 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn') : 'r muted', text: all ? fmtPct(off, 1) : '—' })]));
     }
     return h('div', {}, [
-        sectionHead('Last trains', meta(['what the plan said, what Torn showed']), null, 'h3'),
+        sectionHead('Last trains', meta(['what the gain formula says for the trains you did, what Torn showed']), null, 'h3'),
         rows.length
-            ? h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Session' }), h('th', { text: 'Gym' }), h('th', { class: 'r', text: 'Plan said' }), h('th', { class: 'r', text: 'You got' }), h('th', { class: 'r', style: 'width:80px', text: 'Off by' })])]), h('tbody', {}, rows)])
+            ? h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Session' }), h('th', { text: 'Gym' }), h('th', { class: 'r', title: 'The gain formula on the trains you did, at the happy and stat of the read before them. It checks the formula, not the plan.', text: 'Formula says' }), h('th', { class: 'r', text: 'You got' }), h('th', { class: 'r', style: 'width:80px', text: 'Off by' })])]), h('tbody', {}, rows)])
             : null,
-        h('p', { class: 'muted', style: rows.length ? 'margin:6px 0 0;font-size:12px' : 'margin:0', text: 'Only the reads with one stat trained and nothing taken in between (no drug, booster or refill): they check the gain maths, so a session’s total here can be less than what you really gained. Your real gains are under “Your gains”.' + (ctx.gymLog ? ' Sessions marked “Torn log” are from Torn’s own log (your Full key): trains while Pumping Iron wasn’t open, e.g. on your phone.' : ' With a Full key (Settings), trains on your phone show here too, from Torn’s log.') }),
+        h('p', { class: 'muted', style: rows.length ? 'margin:6px 0 0;font-size:12px' : 'margin:0', text: 'Only reads under two minutes apart with one stat trained and nothing taken in between (no drug, booster or refill, no happy reset): they check the gain maths, not your plan, so a session’s total here can be less than what you really gained. Your real gains are under “Your gains”.' + (ctx.gymLog ? ' Sessions marked “Torn log” are from Torn’s own log (your Full key): trains while Pumping Iron wasn’t open, e.g. on your phone.' : ' With a Full key (Settings), trains on your phone show here too, from Torn’s log.') }),
     ]);
 }
 
@@ -174,8 +187,9 @@ function weekFacts(m, ctx) {
     const today = tornDayStart(m.now);
     const days = Object.keys(totals).map(Number).filter((d) => d > today - 7 * DAY && d <= today);
     const sum = (k) => days.reduce((a, d) => a + ((totals[d] && totals[d][k]) || 0), 0);
-    const g = sum('gained');
-    const p = sum('planned');
+    const nums = days.map((d) => dayGainPlan(m, ctx, d));
+    const g = nums.reduce((a, r) => a + (r.gained || 0), 0);
+    const p = nums.reduce((a, r) => a + (r.planned || 0), 0);
     const xp = unitPrice((ctx.prices || {})[XANAX]) || 0;
     const pp = unitPrice((ctx.prices || {})[POINTS], 300) || 0;
     // Money really spent this week (receipts: every item and refill at that day's price); before receipts, Xanax and refills.
@@ -202,7 +216,7 @@ function budgetFacts(m, ctx, s) {
     const auto = m.auto && m.auto.ready && ctx.plan && ctx.plan.pickBy === 'auto' ? m.auto : null;
     const budget = auto ? auto.budget : ctx.settings.budget || 0;
     const line = s.line;
-    const dayN = line ? Math.min(days, Math.floor((tornDayStart(m.now) - line.start) / DAY) + 1) : 1;
+    const dayN = line ? Math.min(days, Math.floor((tornDayStart(m.now) - tornDayStart(line.at)) / DAY) + 1) : 1;
     const perDay = line ? line.cost / days : m.spend ? m.spend.perDay : 0;
     const spent = perDay * dayN;
     return h('div', {}, [
@@ -400,7 +414,7 @@ export function receiptsCard(m, ctx) {
 /* ---------- What if you'd done another plan ---------- */
 
 /** One colour per plan (never the stat colours); "you" is chalk. */
-export const WHAT_IF_COLOR = { steady: '#8fb8e8', dailyChoco: '#e8a33d', chocoJump: '#c79bf0', edvdJump: '#e98fb5', happy99k: '#f06f9f', blissSteady: '#5cc8c0', steadyBoost: '#a6e08a', steadyMax: '#d7d06a', candyXanax: '#f0c8a0', consoleJump: '#9aa8ff', consoleJumpToy: '#9aa8ff', edvdJumpAN: '#e98fb5' };
+export const WHAT_IF_COLOR = { steady: '#8fb8e8', dailyChoco: '#e8a33d', chocoJump: '#c79bf0', edvdJump: '#e98fb5', happy99k: '#f06f9f', blissSteady: '#5cc8c0', steadyBoost: '#a6e08a', steadyMax: '#d7d06a', candyXanax: '#f0c8a0', consoleJump: '#9aa8ff', consoleJumpToy: '#9aa8ff', edvdJumpAN: '#e98fb5', steadyLite: '#b9c4d0' };
 
 const whatIfMemo = { key: '', value: null };
 
@@ -477,18 +491,21 @@ export function renderProgress(m, ctx) {
     const rangeKey = ctx.ui.progressRange || 14;
     const s = seriesFor(m, ctx, rangeKey === 'all' ? 'all' : rangeKey);
     const hist = ctx.history || {};
-    const firstVal = s.days.map((d) => hist[d]).find(Boolean);
-    const gained = firstVal ? m.total - firstVal.total : m.gainedToday;
-    const planned = s.planAt(tornDayStart(m.now));
-    const pct = s.line && planned && planned > s.line.total ? Math.round((100 * (m.total - s.line.total)) / (planned - s.line.total)) : null;
+    // Gained over the days shown: from the first day's opening read (round 7: not from its last read, which made day
+    // one read "+0"). Against the plan: since the line you follow began, the plan read at this moment.
+    const firstVal = hist[s.first] || null;
+    const sumOf = (o) => STATS.reduce((a, k) => a + (Number(o[k]) || 0), 0);
+    const gained = firstVal ? m.total - (firstVal.open ? sumOf(firstVal.open) : firstVal.total) : m.gainedToday;
+    const pr = (ctx.planLines || []).length ? progressOf(ctx.planLines, m.now, m.total) : null;
+    const pct = pr && pr.pct !== null ? Math.round(pr.pct) : null;
     const strat = STRATEGIES[ctx.plan.strategy] || STRATEGIES.steady;
     const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Show' }, [14, 30, 'all'].map((n) => h('button', { type: 'button', 'aria-pressed': String(n === rangeKey), onclick: () => { ctx.ui.progressRange = n; ctx.rerender(); }, text: n === 'all' ? 'All' : n + ' days' })));
     const ctl = [
         t('lab', 'Show'),
         seg,
-        h('span', { class: 'muted', text: (s.line ? 'since ' + dayLabel(s.line.start) : 'from today') + ' · plan: ' + strat.short + ' · ' + m.build.name }),
+        h('span', { class: 'muted', text: 'plan: ' + strat.short + ' · ' + m.build.name + (pr ? ' · followed since ' + dayLabel(pr.line.at) : '') }),
         h('span', { class: 'grow' }),
-        h('span', { class: pct === null || pct >= 95 ? 'c-good' : 'c-warn' }, [h('b', { text: fmtSigned(gained) }), ' gained' + (pct !== null ? ' · ' + pct + '% of plan' : '')]),
+        h('span', { class: pct === null || pct >= 95 ? 'c-good' : 'c-warn', title: pr ? 'Since ' + dayLabel(pr.line.at) + ' ' + clock(pr.line.at, ctx.settings) + ': you gained ' + fmtSigned(pr.gained) + ', the plan said ' + fmtSigned(pr.planned) + ' by now' : null }, [h('b', { text: fmtSigned(gained) }), ' gained' + (pct !== null ? ' · ' + pct + '% of plan' : '')]),
     ];
     const lead = totalChart(m, ctx, s);
     lead.classList.add('lead');

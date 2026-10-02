@@ -56,8 +56,10 @@ export function stepsForWorker(steps, limit = 48) {
         kind: s.kind,
         label: s.label,
         train: Object.entries(s.trains || {}).filter(([, n]) => n > 0).map(([k, n]) => STAT_LABEL[k] + ' × ' + n).join(' · ') || null,
-        strict: Boolean(s.strict),
-        tick: s.tick ? Math.round(s.tick / 1000) : null,
+        // A step in the middle of a boost or jump (round 7) is due now and ends at the tick: for the Worker it is a
+        // "step now" (its strict pings say "right after the tick", which would be the wrong way round).
+        strict: Boolean(s.strict) && !s.mid,
+        tick: s.tick && !s.mid ? Math.round(s.tick / 1000) : null,
     }));
 }
 

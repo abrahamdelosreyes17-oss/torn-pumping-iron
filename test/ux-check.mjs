@@ -15,6 +15,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { readZip } from '../src/core/zip.js';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PWPATH || 'playwright-core');
@@ -121,11 +122,11 @@ async function checkTab(page, tab, errors, want) {
 
 const TABS = {
     home: ['Auto mode needs a Full key · Add it in Settings', 'Today', 'Take Xanax #1, then train', 'Refill · 30 points', 'Buy today', 'Heads-up', 'Pick your build type', "You vs Baldr's, STR high", 'Next 7 days', 'This week'],
-    plan: ['Auto (from your income)', 'Auto mode needs a Full key', 'month plan ·', 'Recalibrate', 'New plan…', 'Recommended', 'Steady training', 'Per $1M', 'Other plans', 'Why it isn’t the pick', 'Where your energy comes from', 'Natural energy', 'Build', 'High stat', "Hank's", 'pick yours', 'Ignorance Is Bliss', 'what-if'],
+    plan: ['Auto (from your income)', 'Auto mode needs a Full key', 'month plan ·', 'Re-plan', 'New plan…', 'Recommended', 'Steady training', 'Per $1M', 'Other plans', 'Why it isn’t the pick', 'Where your energy comes from', 'Natural energy', 'Build', 'High stat', "Hank's", 'pick yours', 'Ignorance Is Bliss', 'what-if'],
     buy: ['Buy for', 'Your list', 'Xanax', 'Iron_Monk', 'Points market', 'Deals', '7-day prices', 'You hold', 'TornW3B'],
     progress: ['Total stats against the plan', 'Each stat', 'Gained against plan', 'Receipts', 'Energy trained', '$ per 1,000 stats', 'What if you’d done another plan', 'the comparison appears after two days', 'Last trains', 'This week', 'Budget', 'Force Training'],
     eye: ['Targets', 'Chain', 'War', 'How sure', 'FFScouter', 'Gear seen', 'Your side'],
-    settings: ['Torn API key', 'How this key is used', 'Full key (Auto mode)', 'Keep for war days', 'Discord pings', 'Log in with Discord', 'FFScouter', 'data policy', 'TornStats', 'Torn Eye colours', 'On Torn’s pages', 'Developer', 'Export as .zip', 'Your data', 'Diagnostics', 'of 85'],
+    settings: ['Torn API key', 'How this key is used', 'Full key (Auto mode)', 'Keep for war days', 'Discord pings', 'Log in with Discord', 'FFScouter', 'data policy', 'TornStats', 'Torn Eye colours', 'On Torn’s pages', 'Report a problem', 'Download report (.zip)', 'Developer', 'Export as .zip', 'Your data', 'Diagnostics', 'of 85'],
 };
 
 const { page, errors, tornHits } = await openApp('');
@@ -161,7 +162,18 @@ for (const [tab, want] of Object.entries(TABS)) {
     const stored0 = await o.page.evaluate(() => _store['pumpingIron.v1.planNow'] || null);
     ok(stored0 === null, 'buttons: nothing worked out before a click');
     ok(await click('3 months'), 'buttons: pick 3 months');
-    ok(await click('Create plan'), 'buttons: Create plan clicked');
+    // Round 7 (R7.3b): the click shows the run at once, its bar and Cancel (null: no such button to click).
+    const clickRun = (label) => o.page.evaluate(async (l) => {
+        const root = document.getElementById('pi-app').shadowRoot;
+        const b = [...root.querySelectorAll('button')].find((x) => x.textContent.trim() === l && !x.disabled);
+        if (!b) return null;
+        b.click();
+        await new Promise((r) => setTimeout(r, 60));
+        return Boolean(root.querySelector('[data-plan-bar]')) && [...root.querySelectorAll('button')].some((x) => x.textContent.trim() === 'Cancel');
+    }, label);
+    const run1 = await clickRun('Create plan');
+    ok(run1 !== null, 'buttons: Create plan clicked');
+    ok(run1 === true, 'buttons: the run shows its bar and Cancel');
     ok(await waitText(/3-month plan · /), 'buttons: the 3-month plan is made and shown');
     ok(await waitText(/you are here/), 'buttons: its months, with "you are here"');
     const pn = await o.page.evaluate(() => JSON.parse(_store['pumpingIron.v1.planNow'] || 'null'));
@@ -169,8 +181,10 @@ for (const [tab, want] of Object.entries(TABS)) {
     const shotA = resolve(shots, 'app-plan-card.png');
     await o.page.screenshot({ path: shotA, fullPage: true });
     console.log('     shot ' + shotA);
-    ok(await click('Recalibrate'), 'buttons: Recalibrate clicked');
-    ok(await waitText(/recalibrated /), 'buttons: recalibrated (same end)');
+    const run2 = await clickRun('Re-plan');
+    ok(run2 !== null, 'buttons: Re-plan clicked');
+    ok(run2 === true, 'buttons: the re-plan shows its bar and Cancel');
+    ok(await waitText(/re-planned /), 'buttons: re-planned (same end)');
     const pn2 = await o.page.evaluate(() => JSON.parse(_store['pumpingIron.v1.planNow'] || 'null'));
     ok(pn2 && pn2.end === pn.end && pn2.rev !== pn.rev && pn2.recalibratedAt, 'buttons: the end date stays, the plan is re-worked');
     ok(await click('New plan…'), 'buttons: New plan… opens the lengths');
@@ -244,6 +258,30 @@ if (!only.length || only.includes('plan')) {
     await page.waitForTimeout(400);
     m = await measure(page);
     ok(m.text.includes('That isn’t the developer key') && !m.text.includes('What it learned'), 'developer: a wrong key is refused');
+    // Round 7 (R7.0b): Report a problem: the form, what goes in the zip shown first, the log on a click, one .zip downloaded.
+    ok(/report a problem/i.test(m.text) && /what goes in the zip/i.test(m.text) && m.text.includes('The problem log:'), 'report: the section says what the zip will hold');
+    await page.locator('#pi-app textarea[aria-label="What happened"]').fill('The bar stopped at month 5.');
+    await page.locator('#pi-app button', { hasText: 'Show the log' }).click();
+    await page.waitForTimeout(300);
+    m = await measure(page);
+    ok(/did\s+\[app plan\] Create plan pressed|Create plan \d+ months? \(\d+ days\) took/.test(m.text), 'report: the log shows the plan runs and clicks (' + (m.text.match(/note\s+\[app[^\]]*\][^·]{0,60}/) || [''])[0] + ')');
+    const still = await page.evaluate(() => document.getElementById('pi-app').shadowRoot.querySelector('textarea[aria-label="What happened"]').value);
+    ok(still === 'The bar stopped at month 5.', 'report: what you typed survives a redraw');
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('#pi-app button', { hasText: 'Download report (.zip)' }).click()]);
+    const zipPath = await dl.path();
+    const zip = readZip(new Uint8Array(await readFile(zipPath))).files;
+    ok(/^pumping-iron-report-\d{8}-\d{4}\.zip$/.test(dl.suggestedFilename()), 'report: the file is named ' + dl.suggestedFilename());
+    ok(['report.txt', 'problem-log.txt', 'player.json', 'plan.json', 'state.json', 'stats-history.json', 'money-log-fields.json', 'learning/gym-log.json'].every((n) => n in zip), 'report: the zip holds its files (' + Object.keys(zip).length + ')');
+    ok(zip['report.txt'].includes('The bar stopped at month 5.') && /stats STR [\d,]+/.test(zip['report.txt']), 'report: your words and your stats are in report.txt');
+    const keys = await page.evaluate(() => Object.entries(_store).filter(([k]) => /Key$/.test(k)).map(([, v]) => String(JSON.parse(v))).filter((v) => v && v.length >= 8));
+    const all = Object.values(zip).join(' ');
+    ok(keys.length > 0 && keys.every((k) => !all.includes(k)), 'report: no API key in any file (' + keys.length + ' keys checked)');
+    const player = JSON.parse(zip['player.json']);
+    ok(player && player.stats && player.stats.str > 0 && player.happyMax > 0 && Array.isArray(player.perks.lines), 'report: player.json has the stat split, happy maximum and perks');
+    await page.waitForTimeout(300);
+    m = await measure(page);
+    const cleared = await page.evaluate(() => document.getElementById('pi-app').shadowRoot.querySelector('textarea[aria-label="What happened"]').value);
+    ok(m.text.includes('Saved pumping-iron-report-') && cleared === '', 'report: saved, and the form is clean for the next one');
     // One layout (the owner: "i dont need 2 layouts, just one, compact is fine"): no density switch anywhere.
     const switches = await page.evaluate(() => /Comfortable/.test(document.getElementById('pi-app').shadowRoot.textContent));
     ok(!switches, 'one layout: no Compact/Comfortable switch');

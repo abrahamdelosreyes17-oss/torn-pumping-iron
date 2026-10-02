@@ -13,7 +13,8 @@
  *   npm run build
  *   PWPATH=<dir>/node_modules/playwright-core node test/perf-check.mjs [case ...]
  *
- * Cases: gym, plain, profile (default: all three), friend, noscript (Torn's page alone).
+ * Cases: gym, plain, profile, plan (default: these four), friend, noscript (Torn's page alone).
+ * plan (round 7): Create plan and Re-plan for 12 months on the webpage, at 1× and at 4× whatever CPU says.
  * CPU=1 runs without the slowdown. PERF_OUT=<file> appends each result as a JSON line.
  * Exits 1 when a target is missed (REPORT_ONLY=1: always 0).
  */
@@ -35,6 +36,17 @@ export const TARGETS = {
     steadyScriptPer10s: 60, // script time per 10 s once loaded
     gmKB: 30, // Tampermonkey's store (handed to every page before the script starts)
     gmWritesPer10s: 2, // GM writes per 10 s once loaded (each goes to every tab)
+};
+
+/**
+ * Round 7 (R7.3b): making a 12-month plan on the webpage. The time is until the plan shows; a freeze is the longest
+ * task up to the end of the what-ifs that follow it; the memory is what is alive (cleaned up before each reading).
+ * A tab left in the background needs a real window, so that one is docs/sims/round7/plan-hidden.mjs (within 1.5×).
+ */
+export const PLAN_TARGETS = {
+    1: { wallMs: 2000, worstMs: 50 },
+    4: { wallMs: 8000, worstMs: 200 },
+    liveMB: 30,
 };
 
 const P = 'pumpingIron.v1.';
@@ -75,7 +87,7 @@ const server = http.createServer(async (req, res) => {
         res.end();
     }
 }).listen(PORT);
-const browser = await chromium.launch({ channel: process.env.PWCHANNEL || 'msedge' });
+const browser = await chromium.launch({ channel: process.env.PWCHANNEL || 'msedge', args: ['--enable-precise-memory-info'] });
 
 const store = realisticStore({ receiptsDays: 1 });
 const eyeRaw = JSON.stringify(store.eye);
@@ -337,7 +349,82 @@ async function runCase(name) {
     return row;
 }
 
-const wanted = process.argv.slice(2).length ? process.argv.slice(2) : ['gym', 'plain', 'profile'];
+/** The webpage's Plan tab on the realistic store (the owner), its first read in. */
+async function planPage() {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    await ctx.route(/torn\.com/, (r) => r.abort());
+    await ctx.addInitScript({ content: 'window.__piSeedRaw = ' + JSON.stringify(JSON.stringify(store.gm)) + ';' });
+    await ctx.addInitScript(longtaskInit);
+    const p = await ctx.newPage();
+    const errors = [];
+    p.on('pageerror', (e) => errors.push(String(e)));
+    await p.goto(BASE + 'pi=app&' + PAGES.plain + '#plan');
+    await p.waitForFunction(() => window.__pi && window.__pi.model() && window.__pi.model().ready, null, { timeout: 30000 });
+    await p.waitForTimeout(2500);
+    return { ctx, p, errors, cdp: await ctx.newCDPSession(p) };
+}
+
+/** One Create plan or Re-plan: until the plan shows, until the what-ifs are in, and the freezes over the whole of it. */
+function timePlan(p, fn, arg) {
+    return p.evaluate(
+        async ({ fn, arg }) => {
+            const t0 = performance.now();
+            let shown = null;
+            let error = null;
+            try {
+                const out = await window.__pi[fn](arg);
+                shown = performance.now();
+                if (!out) error = 'no plan came back';
+                await window.__pi.extras();
+            } catch (e) {
+                error = String((e && e.message) || e);
+            }
+            const end = performance.now();
+            // The observer reports a long task just after it ends.
+            await new Promise((r) => setTimeout(r, 300));
+            const L = (window.__long || []).filter((x) => x.at + x.ms >= t0 && x.at <= end);
+            return { wallMs: Math.round((shown || end) - t0), allMs: Math.round(end - t0), worstMs: L.reduce((a, x) => Math.max(a, x.ms), 0), frozenMs: L.reduce((a, x) => a + x.ms, 0), freezes: L.length, error };
+        },
+        { fn, arg },
+    );
+}
+
+async function runPlan() {
+    const runs = [];
+    for (const cpu of [1, 4]) {
+        const { ctx, p, errors, cdp } = await planPage();
+        if (cpu > 1) await cdp.send('Emulation.setCPUThrottlingRate', { rate: cpu });
+        const create = await timePlan(p, 'createPlan', { months: 12 });
+        await p.waitForTimeout(2500);
+        const replan = await timePlan(p, 'recalibratePlan', {});
+        await ctx.close();
+        runs.push({ cpu, create, replan, errors: errors.concat([create.error, replan.error].filter(Boolean)) });
+    }
+    // Memory on its own page, at 1×: cleaning up before each reading slows the run, so it isn't timed.
+    const { ctx, p, cdp } = await planPage();
+    await cdp.send('HeapProfiler.enable');
+    const live = async () => {
+        await cdp.send('HeapProfiler.collectGarbage');
+        return p.evaluate(() => performance.memory.usedJSHeapSize / 1048576);
+    };
+    const idle = await live();
+    let peak = idle;
+    for (const [fn, arg] of [['createPlan', { months: 12 }], ['recalibratePlan', {}]]) {
+        await p.evaluate(({ fn, arg }) => {
+            window.__done = false;
+            window.__pi[fn](arg).then(() => window.__pi.extras()).then(() => (window.__done = true), () => (window.__done = true));
+        }, { fn, arg });
+        while (!(await p.evaluate(() => window.__done))) {
+            peak = Math.max(peak, await live());
+            await p.waitForTimeout(150);
+        }
+    }
+    await ctx.close();
+    const mb = (x) => Math.round(x * 10) / 10;
+    return { case: 'plan', at: new Date().toISOString(), runs, idleMB: mb(idle), liveMB: mb(peak) };
+}
+
+const wanted = process.argv.slice(2).length ? process.argv.slice(2) : ['gym', 'plain', 'profile', 'plan'];
 // RUNS=3: each case three times, the median of each number (one run varies by ±80 ms at 4×).
 const RUNS = Math.max(1, Number(process.env.RUNS || 1));
 const median = (xs) => xs.slice().sort((a, b) => a - b)[Math.floor(xs.length / 2)];
@@ -352,7 +439,20 @@ async function runMedian(name) {
     return out;
 }
 const rows = [];
+let planRow = null;
 for (const name of wanted) {
+    if (name === 'plan') {
+        planRow = await runPlan();
+        if (process.env.PERF_OUT) await appendFile(process.env.PERF_OUT, JSON.stringify(planRow) + '\n');
+        console.log('\nplan (12 months, the webpage, realistic store)');
+        const line = (r) => `${r.wallMs} ms until the plan shows · ${r.allMs} ms with the what-ifs · frozen ${r.frozenMs} ms in ${r.freezes}, longest ${r.worstMs} ms${r.error ? ' · ERROR ' + r.error : ''}`;
+        for (const r of planRow.runs) {
+            console.log(`  ${r.cpu}× Create plan: ${line(r.create)}`);
+            console.log(`  ${r.cpu}× Re-plan:     ${line(r.replan)}`);
+        }
+        console.log(`  memory alive: idle ${planRow.idleMB} MB · peak ${planRow.liveMB} MB`);
+        continue;
+    }
     if (!CASES[name]) {
         console.log('unknown case ' + name);
         continue;
@@ -392,6 +492,22 @@ if (CPU === 4) {
             console.log(`  MISS ${row.case} errors on the page`);
         }
     }
+}
+if (planRow) {
+    console.log('\nTargets for the plan (12 months):');
+    const check = (ok, words) => {
+        if (!ok) missed++;
+        console.log(`  ${ok ? 'PASS' : 'MISS'} plan ${words}`);
+    };
+    for (const r of planRow.runs) {
+        const t = PLAN_TARGETS[r.cpu];
+        for (const [label, x] of [['Create plan', r.create], ['Re-plan', r.replan]]) {
+            check(x.wallMs <= t.wallMs, `${r.cpu}× ${label} ${x.wallMs} ms (target ≤ ${t.wallMs})`);
+            check(x.worstMs <= t.worstMs, `${r.cpu}× ${label} longest freeze ${x.worstMs} ms (target ≤ ${t.worstMs})`);
+        }
+        if (r.errors.length) check(false, `${r.cpu}× errors: ${r.errors.join(' | ')}`);
+    }
+    check(planRow.liveMB <= PLAN_TARGETS.liveMB, `memory alive ${planRow.liveMB} MB (target ≤ ${PLAN_TARGETS.liveMB})`);
 }
 console.log(missed ? `\n${missed} target(s) missed` : '\nALL TARGETS MET');
 process.exit(missed && !process.env.REPORT_ONLY ? 1 : 0);

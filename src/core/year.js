@@ -21,7 +21,8 @@
 import { STATS, totalOf } from './gain.js';
 import { DAY } from './bars.js';
 import { GEORGES, SSL, gymsOpenAt, bestGymFor, gymById, unlockEnergyAfter } from './gyms.js';
-import { simulateStrategy } from './strategies.js';
+import { simulateStrategy, STAT_LINE_DAILY_DAYS } from './strategies.js';
+import { statCurveAt, statLineFrom } from './planline.js';
 import { recommend } from './recommend.js';
 import { budgetOf } from './auto.js';
 
@@ -107,11 +108,12 @@ function newMemberships(best, paid, table) {
  * side don't share it. The ladder gym's fee and a specialist's membership are
  * paid when they're first used.
  */
-export function unlockHook({ top, progress, gymExpMult, table, active, drugsTaken, known, paid = new Set() }) {
+export function unlockHook({ top, progress, gymExpMult, table, active, drugsTaken, known, paid = new Set(), stopAt = GEORGES }) {
     if (!(top >= 1 && top < GEORGES)) return null;
     const steps = [];
     let acc = -Math.max(0, progress || 0);
-    for (let id = top; id < GEORGES; id++) {
+    // `stopAt` (round 7, "is this gym worth opening"): the ladder stops there, as if the next gym were never bought.
+    for (let id = top; id < Math.min(GEORGES, stopAt); id++) {
         const e = unlockEnergyAfter(id, gymExpMult);
         if (e === null) break;
         acc += e;
@@ -166,10 +168,11 @@ function carryOver(args, r) {
  * @param {number} o.budgetPerDay - Infinity: none
  * @param {object[]} [o.events] - eventsBetween() for the span
  * @param {object} [o.progress] - {top: highest ladder gym open, energy: gym experience toward the next}
- * @param {string|null} [o.goal] - recommend's goal ('unlock')
+ * @param {boolean} [o.centre] - also re-run the path unchanged (`band.centre`: it should match the path; a check for tests)
+ * @param {object|null} [o.openBy] - the gym to unlock {gymId, name, by (ms, or null)}: passed to the stretches before it opens
  * @returns {Generator} whose value is {segments, result, band, unlocks, events}
  */
-export function* yearSteps({ compare, inputs = null, args, start, end, budgetPerDay = Infinity, events = [], progress = null, goal = null }) {
+export function* yearSteps({ compare, inputs = null, args, start, end, budgetPerDay = Infinity, events = [], progress = null, openBy = null, centre = false }) {
     const pc0 = args.pc;
     const table = pc0.table;
     const gymExpMult = (pc0.perks && pc0.perks.gymExpMult) || 1;
@@ -185,6 +188,9 @@ export function* yearSteps({ compare, inputs = null, args, start, end, budgetPer
     const segs = segmentsOf(start, end, events);
     const out = [];
     const daily = [];
+    // Round 7 (Progress): when in each day the gain lands, and each stat's own line, along the whole path.
+    const quart = [];
+    const statDaily = { str: [], spd: [], def: [], dex: [] };
     const perStat = { str: 0, spd: 0, def: 0, dex: 0 };
     const used = {};
     const unlocks = [];
@@ -205,13 +211,19 @@ export function* yearSteps({ compare, inputs = null, args, start, end, budgetPer
         const pc = { ...pc0, stats: { ...stats }, unlocked: open, best };
         const state = { ...cur.state, stats: { ...stats } };
         const unlock = unlockHook({ top, progress: toNext, gymExpMult, table, active, known: knownSpecialists, paid });
-        const segArgs = { ...cur, state, pc, settings: { ...cur.settings, horizonDays: seg.days, budget: Number.isFinite(budgetPerDay) ? Math.max(0, budgetPerDay * seg.days - fees) : Infinity }, events: segEvents(events, seg), unlock };
+        // Only the first stretch starts from the bars as they are now; later ones from a full bar (their day isn't known).
+        const segArgs = { ...cur, state, pc, settings: { ...cur.settings, horizonDays: seg.days, budget: Number.isFinite(budgetPerDay) ? Math.max(0, budgetPerDay * seg.days - fees) : Infinity }, events: segEvents(events, seg), unlock, live: Boolean(args.live) && !out.length };
         const cmp = yield* compare(segArgs);
-        const rec = recommend(cmp, { budget: budgetOf(segArgs.settings), bliss: pc.perks.bliss, pickBy: cur.pickBy || 'most', goal });
+        // The gym to unlock: only for the stretches before it opens, with what's left of its date.
+        const segOpenBy = openBy && top < openBy.gymId ? { gymId: openBy.gymId, name: openBy.name || null, days: openBy.by ? Math.ceil((openBy.by - seg.from) / DAY) : null, horizon: seg.days } : null;
+        const rec = recommend(cmp, { budget: budgetOf(segArgs.settings), bliss: pc.perks.bliss, pickBy: cur.pickBy || 'most', openBy: segOpenBy });
         const r = cmp[rec.recommended];
         if (!r) break;
         const base = totalOf(stats) - startTotal;
         for (const v of r.daily) daily.push(Math.round(base + v));
+        if (r.quart) quart.push(...r.quart);
+        else for (let d = 0; d < r.daily.length; d++) quart.push(360, 720, 1080);
+        for (const k of STATS) for (let d = 1; d <= r.daily.length; d++) statDaily[k].push(Math.round(perStat[k] + statCurveAt(r.statLine, k, d * DAY)));
         for (const k of STATS) {
             stats[k] += r.perStat[k] || 0;
             perStat[k] += r.perStat[k] || 0;
@@ -223,12 +235,11 @@ export function* yearSteps({ compare, inputs = null, args, start, end, budgetPer
         for (const u of r.unlocked || []) unlocks.push({ gymId: u.gymId, day: Math.round((seg.from - start) / DAY) + Math.floor((u.at / Math.max(1, r.energyTrained || 1)) * seg.days), cost: u.cost });
         for (const u of r.unlocked || []) for (const id of u.joined || []) paid.add(id);
         ({ top, toNext } = climb(top, toNext, r.energyTrained || 0, gymExpMult));
-        out.push({ from: seg.from, to: seg.to, days: seg.days, event: seg.event ? segEvents(events, seg).map((e) => e.id) : null, strategy: rec.recommended, gained: r.gained, cost: r.cost + fees, energy: r.energyTrained || 0, statsEnd: { ...stats }, candy: r.candy || null, refill: r.refill, booster: r.booster || null, alternatives: rec.alternatives.slice(0, 3).map((a) => ({ id: a.id, deltaStatsPct: a.deltaStatsPct })) });
+        out.push({ from: seg.from, to: seg.to, days: seg.days, event: seg.event ? segEvents(events, seg).map((e) => e.id) : null, strategy: rec.recommended, gained: r.gained, cost: r.cost + fees, energy: r.energyTrained || 0, statsEnd: { ...stats }, candy: r.candy || null, refill: r.refill, booster: r.booster || null, ...(Number.isFinite(r.xanaxPerDay) ? { xanaxPerDay: r.xanaxPerDay } : {}), alternatives: rec.alternatives.slice(0, 3).map((a) => ({ id: a.id, deltaStatsPct: a.deltaStatsPct })) });
         cur = carryOver(cur, r);
     }
-    const result = { id: 'year', gained: Math.round(totalOf(stats) - startTotal), perStat: Object.fromEntries(STATS.map((k) => [k, Math.round(perStat[k])])), cost: Math.round(cost), energyTrained: energy, daily, used, unlocks };
-    yield 'band';
-    const band = inputs ? yearBand(out, args, { inputs, events, gymExpMult, knownSpecialists, table, active, top0, toNext0 }) : null;
+    const result = { id: 'year', gained: Math.round(totalOf(stats) - startTotal), perStat: Object.fromEntries(STATS.map((k) => [k, Math.round(perStat[k])])), cost: Math.round(cost), energyTrained: energy, daily, used, unlocks, quart, statLine: statLineFrom(statDaily, daily.length > STAT_LINE_DAILY_DAYS ? 7 : 1) };
+    const band = inputs ? yield* yearBandSteps(out, args, { inputs, events, gymExpMult, knownSpecialists, table, active, top0, toNext0, centre }) : null;
     return { segments: out, result, band, unlocks, events };
 }
 
@@ -248,10 +259,13 @@ export function climb(top, toNext, energy, gymExpMult = 1) {
 /**
  * The same path (the plan, candy, booster and refill picked for each stretch,
  * with the simulator's own inputs) with the model a little off each way: low
- * and high totals. `centre` is the same re-run unchanged (it should match the path).
+ * and high totals. With `centre` the same re-run unchanged too (it should
+ * match the path: a check; round 7 leaves it out of a plan's own work, a
+ * third of the band's time). A generator: it yields 'band' before each
+ * stretch of each run (a chance for a break).
  */
-function yearBand(segments, args, { inputs, events, gymExpMult, knownSpecialists, table, active, top0, toNext0 }) {
-    const run = (gainMult, lossMult) => {
+function* yearBandSteps(segments, args, { inputs, events, gymExpMult, knownSpecialists, table, active, top0, toNext0, centre = false }) {
+    const run = function* (gainMult, lossMult) {
         let stats = { ...args.pc.stats };
         let top = top0;
         let toNext = toNext0;
@@ -259,11 +273,12 @@ function yearBand(segments, args, { inputs, events, gymExpMult, knownSpecialists
         const paid = new Set(knownSpecialists);
         const t0 = totalOf(stats);
         for (const s of segments) {
+            yield 'band';
             const open = openAt(top, knownSpecialists);
             const { best } = gymsFor(stats, open, { table, active, drugsTaken: null });
             for (const x of newMemberships(best, paid, table)) paid.add(x.id);
             const pc = { ...args.pc, stats: { ...stats }, unlocked: open, best };
-            const base = inputs({ ...cur, state: { ...cur.state, stats: { ...stats } }, pc, settings: { ...cur.settings, horizonDays: s.days } });
+            const base = inputs({ ...cur, state: { ...cur.state, stats: { ...stats } }, pc, settings: { ...cur.settings, horizonDays: s.days }, live: Boolean(args.live) && s === segments[0] });
             const o = {
                 ...base,
                 perks: Object.fromEntries(STATS.map((k) => [k, ((base.perks && base.perks[k]) || 1) * gainMult])),
@@ -271,6 +286,7 @@ function yearBand(segments, args, { inputs, events, gymExpMult, knownSpecialists
                 ...(s.candy ? { candyId: s.candy.id, candyCount: s.candy.count } : {}),
                 ...(s.booster ? { energyBooster: { id: s.booster.id, perDay: s.booster.perDay } } : {}),
                 ...(s.refill === false ? { noRefill: true } : {}),
+                ...(Number.isFinite(s.xanaxPerDay) ? { xanaxPerDay: s.xanaxPerDay } : {}),
                 special: 0,
                 events: segEvents(events, s),
                 unlock: unlockHook({ top, progress: toNext, gymExpMult, table, active, known: knownSpecialists, paid }),
@@ -284,5 +300,8 @@ function yearBand(segments, args, { inputs, events, gymExpMult, knownSpecialists
         }
         return Math.round(totalOf(stats) - t0);
     };
-    return { low: run(1 - BAND_GAIN, 1 + BAND_HAPPY_LOSS), centre: run(1, 1), high: run(1 + BAND_GAIN, 1 - BAND_HAPPY_LOSS) };
+    const low = yield* run(1 - BAND_GAIN, 1 + BAND_HAPPY_LOSS);
+    const mid = centre ? yield* run(1, 1) : null;
+    const high = yield* run(1 + BAND_GAIN, 1 - BAND_HAPPY_LOSS);
+    return { low, ...(centre ? { centre: mid } : {}), high };
 }

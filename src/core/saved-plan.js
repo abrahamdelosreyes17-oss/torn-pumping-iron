@@ -21,6 +21,7 @@
 
 import { DAY, tornDayStart } from './bars.js';
 import { STATS } from './gain.js';
+import { statCurveAt } from './planline.js';
 
 /** The lengths Create plan offers, in months (owner: 1 / 3 / 6 / 12). */
 export const PLAN_MONTHS = [1, 3, 6, 12];
@@ -65,8 +66,8 @@ export function planProgress(saved, now) {
 /** What Torn's pages need of one plan's result to follow it (no day-by-day line). */
 export function slimResult(r) {
     if (!r) return null;
-    const out = { id: r.id, gained: r.gained, cost: r.cost, used: r.used || {}, perStat: r.perStat || {} };
-    for (const k of ['candy', 'refill', 'refillGain', 'refillCost', 'specialHelps', 'specialGain', 'booster', 'blocked']) if (r[k] !== undefined) out[k] = r[k];
+    const out = { id: r.id, gained: r.gained, cost: r.cost, used: r.used || {}, perStat: r.perStat || {}, energyTrained: r.energyTrained || 0 };
+    for (const k of ['candy', 'refill', 'refillGain', 'refillCost', 'specialHelps', 'specialGain', 'booster', 'blocked', 'xanaxPerDay']) if (r[k] !== undefined) out[k] = r[k];
     return out;
 }
 
@@ -77,7 +78,7 @@ export function slimResult(r) {
  * @param {object} r - a strategy result ({daily, perStat, cost, used, gained})
  * @param {object} o - {start, days, stats: the stats it starts from}
  */
-export function monthlyOf(r, { start, days, stats }) {
+export function monthlyOf(r, { start, days, stats, anchor = start }) {
     if (!r || !Array.isArray(r.daily) || !days) return [];
     const out = [];
     const perDayCost = r.cost / days;
@@ -87,12 +88,15 @@ export function monthlyOf(r, { start, days, stats }) {
     let from = start;
     let d0 = 0;
     for (let i = 1; d0 < days; i++) {
-        const to = Math.min(addMonths(start, i), start + days * DAY);
+        // Month ends count from the plan's first day (`anchor`), so a re-plan mid-month keeps the plan's own months.
+        if (addMonths(anchor, i) <= start) continue;
+        const to = Math.min(addMonths(anchor, i), start + days * DAY);
         const d1 = Math.min(days, Math.round((to - start) / DAY));
         const gained = gainedAt(d1) - gainedAt(d0);
         const share = total > 0 ? gainedAt(d1) / total : d1 / days;
         const planned = {};
-        for (const k of STATS) planned[k] = Math.round((stats[k] || 0) + (statTotal > 0 ? ((r.perStat[k] || 0) / statTotal) * total * share : 0));
+        // Each stat from its own line (round 7); results from before it: the stat's share of the whole gain.
+        for (const k of STATS) planned[k] = Math.round((stats[k] || 0) + (r.statLine ? statCurveAt(r.statLine, k, d1 * DAY) : statTotal > 0 ? ((r.perStat[k] || 0) / statTotal) * total * share : 0));
         const used = {};
         for (const [id, n] of Object.entries(r.used || {})) if (n > 0) used[id] = Math.round(((n * (d1 - d0)) / days) * 10) / 10;
         out.push({ month: i, from, to, days: d1 - d0, gained: Math.round(gained), cost: Math.round(perDayCost * (d1 - d0)), stats: planned, used });
@@ -143,7 +147,7 @@ export function snapshotOf({ state, pc, statics = {}, plan = {}, prices = {}, in
  * @param {object|null} [o.year] - core/year.js yearSteps' value: the path followed (a plan per segment, re-picked
  *   every 30 days and for each event), gyms opening, the events, the band
  */
-export function makeSavedPlan({ compare, rec, snapshot, start, end, months, days, budget, whatIf = null, jobWhatIf = [], prev = null, year = null, now }) {
+export function makeSavedPlan({ compare, rec, snapshot, start, end, months, days, budget, whatIf = null, jobWhatIf = [], prev = null, year = null, gymWorth = [], extras = 'done', now }) {
     const from = prev ? tornDayStart(now) : start;
     const best = compare && rec && rec.recommended ? compare[rec.recommended] : null;
     const history = prev ? (prev.history || []).slice(-(HISTORY_KEEP - 1)) : [];
@@ -173,8 +177,12 @@ export function makeSavedPlan({ compare, rec, snapshot, start, end, months, days
         rec,
         whatIf,
         jobWhatIf: jobWhatIf || [],
+        // What each of the first gyms the recommended plan opens adds, against its fee (round 7).
+        gymWorth: gymWorth || [],
+        // 'pending' while the what-ifs above are still being worked out after the plan was saved (R7.3b), then 'done'.
+        extras,
         // The months of the path you follow (the year's path when there is one).
-        monthly: year && year.result ? monthlyOf(year.result, { start: from, days, stats: snapshot.stats }) : best ? monthlyOf(best, { start: from, days, stats: snapshot.stats }) : [],
+        monthly: year && year.result ? monthlyOf(year.result, { start: from, days, stats: snapshot.stats, anchor: prev ? prev.start : start }) : best ? monthlyOf(best, { start: from, days, stats: snapshot.stats, anchor: prev ? prev.start : start }) : [],
         year: year ? { path: year.result, segments: year.segments, band: year.band, unlocks: year.unlocks, events: (year.events || []).map((e) => ({ id: e.id, name: e.name, start: e.start, end: e.end, expected: Boolean(e.expected) })) } : null,
         history,
     };
@@ -212,7 +220,9 @@ export function planNowOf(saved, warn = {}) {
         warn,
         slim,
         // Which plan the path follows when (a switch on its date is following the saved plan, not re-planning).
-        schedule: saved.year ? saved.year.segments.map((s) => ({ from: s.from, to: s.to, strategy: s.strategy, candy: s.candy || null })) : null,
+        // When the what-ifs were added to the whole plan (other tabs read it again then).
+        extrasAt: saved.extrasAt || null,
+        schedule: saved.year ? saved.year.segments.map((s) => ({ from: s.from, to: s.to, strategy: s.strategy, candy: s.candy || null, ...(Number.isFinite(s.xanaxPerDay) ? { xanaxPerDay: s.xanaxPerDay } : {}) })) : null,
     };
 }
 

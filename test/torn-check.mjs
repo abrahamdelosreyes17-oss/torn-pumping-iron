@@ -111,6 +111,44 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     await page.close();
 }
 
+/* Round 7 (D.4): a session trained on the gym page. Torn's page shows it at once (the stat box, the sidebar bars) and
+   its API answers the new state: the panel moves to the next step within a few seconds (it waited for the next 30 s
+   read: 7 to 26 s), with one state read and no click of ours. */
+{
+    const { page, errors } = await open('page=gym&fixture=gym-friend&energy=275&build=balanced', { wait: 9000 });
+    const reads = () => page.evaluate(() => window.__calls.filter((c) => /\/v2\/user$/.test(c.split('?')[0])).length);
+    const r0 = await reads();
+    const t0 = Date.now();
+    await page.evaluate(() => {
+        document.querySelector('li[class*="dexterity___"] [class*="propertyValue___"]').textContent = '84,150.00';
+        document.querySelector('#barEnergy [class*="bar-value___"]').textContent = '5/150';
+        document.querySelector('#barHappy [class*="bar-value___"]').textContent = '4,965/5,025';
+        window.__userPatch = (b) => { b.bars.energy.current = 5; b.bars.happy.current = 4965; b.battlestats.dexterity.value = 84150; b.battlestats.total = 409650; return b; };
+    });
+    let ms = null;
+    for (let i = 0; i < 80 && ms === null; i++) {
+        await page.waitForTimeout(100);
+        const next = await page.evaluate(() => { const m = window.__pi.model(); return m && m.next ? { kind: m.next.kind, energy: m.strip.energy.current, trains: JSON.stringify(m.next.trains) } : null; });
+        if (next && next.energy === 5) ms = Date.now() - t0;
+    }
+    ok(ms !== null && ms < 5000, 'roll-over: after a session the panel moves to the next step in ' + (ms === null ? 'more than 8 s' : (ms / 1000).toFixed(1) + ' s') + ' (was 7 to 26 s: the next 30 s read)');
+    ok((await reads()) - r0 === 1, 'roll-over: with one state read (' + ((await reads()) - r0) + ')');
+    const head = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.querySelector('.head').textContent);
+    ok(!/Train DEX × 27/.test(head) && !/Session done/.test(head) && /\d:\d\d/.test(head), 'roll-over: the panel bar shows the next step and its countdown, not "Session done" (' + head.replace(/\s+/g, ' ').trim() + ')');
+    const card = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.textContent.replace(/\s+/g, ' '));
+    ok(/Session done\. Next: /.test(card), 'roll-over: the panel says the session is done and what is next (' + (card.match(/Session done\. Next: [^·]{0,60}/) || [''])[0] + ')');
+    // A regeneration tick (energy +5, happy +5) is not an action: no read is asked for.
+    const r1 = await reads();
+    await page.evaluate(() => {
+        document.querySelector('#barEnergy [class*="bar-value___"]').textContent = '10/150';
+        document.querySelector('#barHappy [class*="bar-value___"]').textContent = '4,970/5,025';
+    });
+    await page.waitForTimeout(3500);
+    ok((await reads()) - r1 === 0, 'roll-over: a regeneration tick asks for nothing');
+    ok(errors.length === 0, 'roll-over: no page errors ' + JSON.stringify(errors));
+    await page.close();
+}
+
 /* Round 6: the plan is made on a click and saved; the next Torn page follows it and works nothing out. */
 {
     const first = await open('page=gym&fixture=gym-friend&energy=275&build=balanced', { wait: 6000 });

@@ -17,6 +17,7 @@ import { apiKeyPageUrl } from '../../sources/route.js';
 import { sectionHead, headsList } from './common.js';
 import { BAND_WORDS, BAND_COLORS, DEFAULT_BAND_LIMITS } from '../../core/eye/bands.js';
 import { developerSection, renderDeveloper } from './developer.js';
+import { reportSection } from './report.js';
 
 /** Torn's API ToS disclosure for the userscript's Torn key. */
 export const TOS_TORN = [
@@ -407,6 +408,7 @@ export function renderSettings(m, ctx) {
     const d = ctx.diagnostics();
     const diagSec = h('div', {}, [sectionHead('Diagnostics', null, null, 'h3'), h('dl', { class: 'facts num' }, [h('dt', { text: 'Torn API, last minute' }), h('dd', { text: d.torn + ' of ' + (d.tornMax || 85) + (d.focus ? ' · first: ' + d.focus : '') }), h('dt', { text: 'FFScouter, last minute' }), h('dd', { text: d.ffs + ' of 60' }), h('dt', { text: 'TornW3B, last minute' }), h('dd', { text: d.w3b + ' of 80' }), h('dt', { text: 'Last error' }), h('dd', { text: d.lastError || 'none' }), h('dt', { text: 'Perk lines not understood' }), h('dd', { text: String(d.unknownPerks) }), h('dt', { text: 'Version' }), h('dd', { text: d.version })])]);
     const devSec = developerSection(m, ctx);
+    const reportSec = reportSection(m, ctx);
 
     const dataRows = [
         ['keys', 'Keys', 'Torn, Full, FFScouter, TornStats, Discord service', 'Forget keys'],
@@ -422,6 +424,6 @@ export function renderSettings(m, ctx) {
         h('div', {}, [sectionHead('What it never does', null, null, 'h3'), headsList([{ tone: 'plain', text: 'Train, buy, use or attack', sub: 'Fill only types a number' }, { tone: 'plain', text: 'Load a Torn page by itself' }, { tone: 'plain', text: 'Ping from a Torn tab', sub: 'only your Discord service does' }])]),
     ];
     // One card per section, ordered by use.
-    return { main: [tornSec, fullSec, discordSec, ffsSec, tsSec, bandsSec, overlaySec, displaySec, devSec].filter(Boolean), pane };
+    return { main: [tornSec, fullSec, discordSec, ffsSec, tsSec, bandsSec, overlaySec, displaySec, reportSec, devSec].filter(Boolean), pane };
 }
 

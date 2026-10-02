@@ -176,6 +176,7 @@ a:hover { text-decoration: underline; }
 .inp { height: 30px; padding: 0 10px; border-radius: 5px; border: 1px solid var(--line2); background: #111315; color: var(--text); font: 13px Arial; min-width: 0; }
 .inp:focus { outline: 2px solid var(--chalk); outline-offset: -1px; }
 .inp.masked { -webkit-text-security: disc; }
+textarea.inp.ta { height: auto; padding: 8px 10px; line-height: 1.4; resize: vertical; }
 .row { display: flex; gap: 8px; align-items: center; }
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 12px; }
 .kv dt { color: var(--muted); } .kv dd { margin: 0; text-align: right; }
@@ -192,6 +193,16 @@ a:hover { text-decoration: underline; }
 .secbody { display: flex; flex-direction: column; gap: 10px; max-width: 760px; }
 .secbody p { margin: 0; color: var(--muted); }
 ol.steps-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+/* A plan being worked out (the Plan card): the card's own day line, filling */
+.planrun { margin-top: 10px; }
+.planrun .dayline i { transition: none; }
+/* Report a problem */
+ul.incl { margin: 4px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
+.shots { display: flex; flex-wrap: wrap; gap: 8px; }
+.shot { position: relative; display: inline-block; }
+.shot img { display: block; height: 72px; max-width: 160px; object-fit: cover; border-radius: 5px; border: 1px solid var(--line2); }
+.shot .x { position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; border-radius: 50%; border: 0; background: #111315; color: var(--text); cursor: pointer; line-height: 1; }
+pre.logbox { margin: 0; padding: 10px; max-height: 260px; overflow: auto; white-space: pre-wrap; font: 11px/1.5 Consolas, monospace; color: var(--muted); background: #111315; border: 1px solid var(--line); border-radius: 5px; }
 details.dis > summary { cursor: pointer; color: var(--link); font-size: 12px; list-style: none; }
 details.dis > summary::before { content: "▸ "; }
 details.dis[open] > summary::before { content: "▾ "; }

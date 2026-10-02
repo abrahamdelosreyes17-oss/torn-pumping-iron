@@ -74,18 +74,32 @@ test('the Plan dropdown lists Auto first; old saved plans move to Auto once, a p
     gmDel('plan');
 });
 
-test('Auto picks the most stats inside the income budget; the unlock goal picks the most energy through the gym', () => {
+test('Auto picks the most stats inside the income budget; a gym to unlock never outranks stats (round 7), a date leaves out the plans that miss it', () => {
+    // `unlocked[].t`: the minute of the run the gym opened (day = t / 1440 + 1).
     const results = {
-        steady: { id: 'steady', gained: 100, cost: 10e6, energyTrained: 30000 },
-        chocoJump: { id: 'chocoJump', gained: 130, cost: 60e6, energyTrained: 22000 },
-        steadyMax: { id: 'steadyMax', gained: 140, cost: 400e6, energyTrained: 45000 },
+        steady: { id: 'steady', gained: 100, cost: 10e6, energyTrained: 30000, unlocked: [{ gymId: 13, t: 4 * 1440 }] },
+        chocoJump: { id: 'chocoJump', gained: 130, cost: 60e6, energyTrained: 22000, unlocked: [{ gymId: 13, t: 9 * 1440 }] },
+        steadyMax: { id: 'steadyMax', gained: 140, cost: 400e6, energyTrained: 45000, unlocked: [{ gymId: 13, t: 2 * 1440 }] },
     };
     assert.equal(recommend(results, { budget: 90e6, pickBy: 'auto' }).recommended, 'chocoJump');
     assert.equal(recommend(results, { budget: 20e6, pickBy: 'auto' }).recommended, 'steady');
-    const u = recommend(results, { budget: 90e6, pickBy: 'auto', goal: 'unlock' });
-    assert.equal(u.recommended, 'steady', 'more energy through the gym inside the budget');
-    assert.match(u.reasons.join(' '), /next gym opens soonest/);
-    assert.equal(recommend(results, { budget: Infinity, pickBy: 'max', goal: 'unlock' }).recommended, 'steadyMax');
+    // The gym alone changes nothing: the pick is still by the rule, and every plan says when it opens.
+    const u = recommend(results, { budget: 90e6, pickBy: 'auto', openBy: { gymId: 13, name: 'Racing Fitness', days: null, horizon: 30 } });
+    assert.equal(u.recommended, 'chocoJump', 'the most stats inside the budget, whatever opens the gym soonest');
+    assert.equal(u.facts.opens, 10);
+    assert.equal(u.alternatives.find((a) => a.id === 'steady').opens, 5);
+    assert.equal(recommend(results, { budget: Infinity, pickBy: 'max', openBy: { gymId: 13, days: null } }).recommended, 'steadyMax');
+    // "Open it by day 6": the choco jump (day 10) is left out, and its line says so.
+    const d = recommend(results, { budget: 90e6, pickBy: 'auto', openBy: { gymId: 13, name: 'Racing Fitness', days: 6, horizon: 30 } });
+    assert.equal(d.recommended, 'steady');
+    assert.match(d.reasons.join(' '), /Left out for opening Racing Fitness after day 6: Choco jump \(day 10\)/);
+    assert.match(d.alternatives.find((a) => a.id === 'chocoJump').why, /^Opens Racing Fitness on day 10, after your day 6 \(it would gain \+30% for \$50M more\)/);
+    // No plan makes the date: it isn't counted, and the page says which is soonest.
+    const none = recommend(results, { budget: 90e6, pickBy: 'auto', openBy: { gymId: 13, name: 'Racing Fitness', days: 1, horizon: 30 } });
+    assert.equal(none.recommended, 'chocoJump');
+    assert.match(none.reasons.join(' '), /No plan opens Racing Fitness by day 1; the soonest is Steady \+ FHC max on day 3/);
+    // A date past the run's days can't be judged in this run: nothing is left out.
+    assert.equal(recommend(results, { budget: 90e6, pickBy: 'auto', openBy: { gymId: 13, days: 45, horizon: 30 } }).recommended, 'chocoJump');
 });
 
 test('unlock goal: energy left from your top gym, less the progress read on the gym page; days per plan', () => {

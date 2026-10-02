@@ -71,7 +71,7 @@ export function statusStrip(m, settings) {
             return c;
         })(),
         withBooster ? stCell('Booster', boosterTxt, s.booster.left > 0 ? null : 'good', s.booster.capH ? (100 * Math.min(s.booster.left, s.booster.capH * 3600e3)) / (s.booster.capH * 3600e3) : 0, 'var(--chalk)', boosterWords(s.booster, now)) : null,
-        stCell('Refill', s.refill.free ? 'Unused' : 'Used', null, s.refill.free ? 0 : 100, 'var(--chalk)', s.refill.free ? (s.refill.plannedAt ? 'Planned ' + clock(s.refill.plannedAt, settings) : 'Use before 00:00') : 'Next at 00:00 Torn time'),
+        stCell('Refill', s.refill.free ? 'Unused' : 'Used', null, s.refill.free ? 0 : 100, 'var(--chalk)', s.refill.free ? (s.refill.plannedAt ? 'Planned ' + clock(s.refill.plannedAt, settings) : s.refill.stacking ? 'No use while stacked' : 'Use before 00:00') : 'Next at 00:00 Torn time'),
     ]);
 }
 
@@ -141,4 +141,10 @@ export function headsList(items, go = null) {
             return h('li', { class: [x.tone === 'warn' ? 'w' : x.tone === 'good' ? 'g' : null, link ? 'go' : null].filter(Boolean).join(' ') || null, role: link ? 'link' : null, tabindex: link ? '0' : null, onclick: link ? open : null, onkeydown: link ? (e) => { if (e.key === 'Enter') open(); } : null }, [h('i'), h('div', {}, [x.text, x.sub ? h('span', { text: ' · ' + x.sub }) : null])]);
         }),
     );
+}
+
+/** "Comparing plans: steady (3) · 4 s" for the Plan card while a plan is worked out (round 7, R7.3b). */
+export function planRunWords(busy, now = Date.now()) {
+    const s = Math.max(0, Math.round((now - (busy.at || now)) / 1000));
+    return (busy.words || 'Working it out') + ' · ' + s + ' s';
 }

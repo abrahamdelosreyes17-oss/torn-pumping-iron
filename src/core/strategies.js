@@ -13,7 +13,7 @@ import { XANAX, ECSTASY, EDVD, FHC, CANDY_KISSES, POINTS, REFILL_POINTS, XANAX_C
 import { candyWords, fillFromPool, takeFromHeld } from './candy.js';
 import { pickStat } from './builds.js';
 
-export const STRATEGY_IDS = ['steady', 'dailyChoco', 'chocoJump', 'edvdJump', 'happy99k', 'blissSteady', 'steadyBoost', 'steadyMax', 'candyXanax', 'consoleJump', 'consoleJumpToy', 'edvdJumpAN'];
+export const STRATEGY_IDS = ['steady', 'dailyChoco', 'chocoJump', 'edvdJump', 'happy99k', 'blissSteady', 'steadyBoost', 'steadyMax', 'candyXanax', 'consoleJump', 'consoleJumpToy', 'edvdJumpAN', 'steadyLite'];
 
 /** Special refills, counted like an item (free: they come with the account). */
 export const SPECIAL = 'special';
@@ -68,6 +68,8 @@ export const STRATEGIES = {
     consoleJump: { id: 'consoleJump', kind: 'jump', name: 'Console jump', short: 'Console jump', what: 'Stack 3 Xanax, 300 energy on the Game Console for happy, candy + Ecstasy, train it all' },
     consoleJumpToy: { id: 'consoleJumpToy', kind: 'jump', name: 'Console jump, 5★ Toy/Game Shop', short: 'Console jump 5★', what: 'The console jump with your job’s doubled console happy' },
     edvdJumpAN: { id: 'edvdJumpAN', kind: 'jump', name: 'EDVD jump, 10★ Adult Novelties', short: 'EDVD jump AN', what: 'Stack 4 Xanax, then 5 EDVD (doubled by your job) + Ecstasy' },
+    // Round 7 (A.4): steady when the budget doesn't cover a Xanax on every cooldown: as many a day as the money covers.
+    steadyLite: { id: 'steadyLite', kind: 'steady', name: 'Steady, fewer Xanax', short: 'Steady, fewer Xanax', what: 'As many Xanax a day as the budget covers, natural energy as it comes' },
 };
 
 /**
@@ -79,6 +81,7 @@ export const STRATEGIES = {
 export function planWhat(id, r = null) {
     const s = STRATEGIES[id];
     if (!s) return '';
+    if (id === 'steadyLite' && r && Number.isFinite(r.xanaxPerDay)) return (r.xanaxPerDay > 0 ? r.xanaxPerDay + ' Xanax a day' : 'No Xanax') + ', natural energy as it comes' + (r.used && r.used[POINTS] > 0 ? ', the daily refill' : ', no refill') + ': what your budget covers';
     const c = r && r.candy ? candyWords(r.candy) : null;
     if (!c) return s.what;
     if (id === 'dailyChoco') return c + ' + Ecstasy once a day on top of a Xanax';
@@ -91,6 +94,9 @@ export function planWhat(id, r = null) {
 
 /** Minutes per simulation step. */
 export const STEP_MIN = 5;
+
+/** Plans up to this long keep each stat's line day by day; longer ones week by week (a year of days for every plan is too much to store). */
+export const STAT_LINE_DAILY_DAYS = 92;
 
 /** Xanax stacked before a jump (ffscouter guide's 4-Xan jumps). */
 export const JUMP_STACK = 4;
@@ -142,10 +148,39 @@ export const TICK_OFFSET_MIN = 5;
  * @param {object} [o.unlock] - round 6: gyms opening as energy is trained: {left: energy to the next gym,
  *   next: () => ({gyms, left}|null)}: when the energy trained reaches `left`, the gyms switch to `next()`'s
  *   (per stat {dots, energy}) and `left` becomes the next step; `unlocked` counts them (with the day)
- * @returns {{id, gained:number, perStat:object, cost:number, energyTrained:number, daily:number[], used:object}}
+ * @param {object} [o.start] - round 7: the bars as they are when the plan is made: {energy, happy, drugCdMin (drug
+ *   cooldown left, minutes), refillUsed (today's refill is gone)}. The day plan (plan.js) always started from the live
+ *   bars; the simulator started from a full bar with no cooldown, so day one of a plan promised more than its own
+ *   steps could do. Unset: a full bar, happy at its maximum, no cooldown (stretches of a plan that start later)
+ * @param {number} [o.xanaxPerDay] - round 7 (the small-budget plan): at most this many Xanax a day in a steady plan
+ *   (0: natural energy only); unset: one on every cooldown
+ * @param {function} [o.trace] - round 7: called for every train with {t (minutes from the start), k (stat), e (its
+ *   energy), E and H (energy and happy before it), gain}. For tests and the baseline; it changes nothing.
+ * @returns {{id, gained:number, perStat:object, cost:number, energyTrained:number, daily:number[], used:object, quart:number[], statLine:object}}
+ *   daily: the total gained by the end of each 24 h from the start. Round 7 (Progress): `quart` says when in each of
+ *   those days the gain lands (three minutes a day: a quarter, half and three quarters of the day's gain reached), so a jump
+ *   reads as a step and steady training as a slope; `statLine` is each stat's own line ({step (days), days, str: [],
+ *   spd, def, dex}: the gain by the end of every `step` days, the last entry at `days`).
  * Refills (points or special) set energy to the maximum, never above it: anything over is wasted (O2, owner).
  */
 export function simulateStrategy(id, o) {
+    const run = simulateSteps(id, o);
+    let r = run.next();
+    while (!r.done) r = run.next();
+    return r.value;
+}
+
+/** Simulated days between two breaks of a sliced run: a few milliseconds of work each. */
+export const SIM_SLICE_DAYS = 30;
+
+/**
+ * The same simulation as a generator (round 7, R7.3b): with `o.sliceDays` it yields every that many simulated days,
+ * so a long plan can be worked out in slices with breaks for the page in between (one 12-month run is about a tenth
+ * of a second: too long to hold the page at 4x slower). It returns what simulateStrategy returns; the numbers are
+ * the same sliced or not.
+ */
+export function* simulateSteps(id, o) {
+    const sliceMin = o.sliceDays > 0 ? Math.round(o.sliceDays) * 1440 : 0;
     const days = o.days || 30;
     const maxE = o.energyMax || 150;
     const maxH = o.happyMax;
@@ -166,11 +201,12 @@ export function simulateStrategy(id, o) {
     const S = { ...o.stats };
     const single = typeof o.target === 'string' ? o.target : null;
     const shares = single ? null : o.target;
-    let E = maxE;
-    let H = maxH;
+    const st = o.start && typeof o.start === 'object' ? o.start : null;
+    let E = st && Number.isFinite(st.energy) ? Math.max(0, st.energy) : maxE;
+    let H = st && Number.isFinite(st.happy) ? Math.max(0, st.happy) : maxH;
     let cost = 0;
     let trainedE = 0;
-    let drugFree = 0;
+    let drugFree = st ? Math.max(0, Number(st.drugCdMin) || 0) : 0;
     // Minute the booster cooldown reaches 0. Every booster (candy, EDVD, FHC, cans) goes in only while the cooldown
     // is under the cap (the last one overshoots it): 49 candy take 24.5 h, so a full load can't happen every day.
     let boosterFree = Math.max(0, Number(o.boosterCdMin) || 0);
@@ -180,7 +216,12 @@ export function simulateStrategy(id, o) {
     };
     // A daily candy boost still to come today: the next Xanax (before midnight) will find room under the cap.
     const boostLaterToday = (t, day) => t + xanCD < (day + 1) * 1440 && boosterFree - (t + xanCD) < capH * 60;
-    let refillDay = -1;
+    // Today's refill already used: the first of the simulator's days has none.
+    let refillDay = st && st.refillUsed ? 0 : -1;
+    // The small-budget plan: at most this many Xanax a day (steady plans); the day plan (plan.js) keeps the same count.
+    const xanCap = Number.isFinite(o.xanaxPerDay) ? Math.max(0, Math.floor(o.xanaxPerDay)) : Infinity;
+    let xanDay = -1;
+    let xanToday = 0;
     let stacked = 0;
     let phase = id === 'dailyChoco' ? 'free' : 'stack';
     let doneDay = -1;
@@ -214,9 +255,49 @@ export function simulateStrategy(id, o) {
     let ebToday = 0;
     const isConsole = id === 'consoleJump' || id === 'consoleJumpToy';
     const stackTo = isConsole ? CONSOLE_STACK : JUMP_STACK;
+    // Energy already above the maximum at the start is Xanax stacked (a jump) or held (daily choco), as the day plan reads it.
+    if (st && E > maxE + 50) {
+        if (id === 'dailyChoco') phase = 'hold';
+        else if (STRATEGIES[id] && STRATEGIES[id].kind === 'jump') {
+            stacked = Math.min(stackTo, Math.ceil((E - maxE - 50) / ITEMS[XANAX].energy));
+            if (stacked === stackTo) phase = 'wait';
+        }
+    }
     const consoleHappy = CONSOLE_HAPPY_EACH * (id === 'consoleJumpToy' || o.toyShop5 ? 2 : 1);
     const daily = [];
     const start = totalOf(S);
+    const trace = typeof o.trace === 'function' ? o.trace : null;
+    let curT = 0;
+    // When in each day the gain lands (Progress's plan line), and each stat's own line.
+    const quart = [];
+    let gainSum = 0;
+    let gainSeen = 0;
+    let dayBase = 0;
+    let dayMarks = [];
+    const closeDay = () => {
+        const total = gainSum - dayBase;
+        // The minutes of the day by which a quarter, half and three quarters of its gain were reached (a day with
+        // no gain: an even slope, which adds nothing).
+        let q1 = 360;
+        let q2 = 720;
+        let q3 = 1080;
+        if (total > 0) {
+            q1 = q2 = q3 = dayMarks[dayMarks.length - 2];
+            for (let i = dayMarks.length - 2; i >= 0; i -= 2) {
+                if (dayMarks[i + 1] >= 0.75 * total) q3 = dayMarks[i];
+                if (dayMarks[i + 1] >= 0.5 * total) q2 = dayMarks[i];
+                if (dayMarks[i + 1] >= 0.25 * total) q1 = dayMarks[i];
+            }
+        }
+        quart.push(q1, q2, q3);
+        dayBase = gainSum;
+        dayMarks = [];
+    };
+    const statStep = days > STAT_LINE_DAILY_DAYS ? 7 : 1;
+    const statLine = { step: statStep, days, str: [], spd: [], def: [], dex: [] };
+    const statMark = () => {
+        for (const k of STATS) statLine[k].push(Math.round(S[k] - o.stats[k]));
+    };
 
     // Toward a build: the same per-train split as the day plan (builds.js pickStat), in each stat's gym.
     const cands = single ? null : STATS.filter((k) => o.gyms[k] && o.gyms[k].dots > 0).map((k) => ({ k, dots: o.gyms[k].dots, energy: o.gyms[k].energy }));
@@ -225,13 +306,22 @@ export function simulateStrategy(id, o) {
         const c = pickStat(cands, S, shares, H, o.perks || null, o.splitRule, undefined, maxH);
         return c ? c.k : null;
     };
+    // The cheapest train there is: with less energy than that nothing can be trained, whatever the split would pick
+    // (round 7, R7.3b: the split was worked out on every 5-minute step, most of them with no energy to train: half
+    // of all its calls. The result is the same: the pick's own train costs at least this).
+    const minTrainE = () => (single ? (o.gyms[single] ? o.gyms[single].energy : Infinity) : cands.reduce((a, c) => Math.min(a, c.energy), Infinity));
+    let minE = minTrainE();
     const train = (keep = 0) => {
         for (;;) {
+            if (E - minE < keep) return;
             const k = pick();
             if (!k) return;
             const g = o.gyms[k];
             if (E - g.energy < keep) return;
-            S[k] += gainPerTrain(k, S[k], H, g.dots, g.energy, o.perks ? o.perks[k] : 1);
+            const gain = gainPerTrain(k, S[k], H, g.dots, g.energy, o.perks ? o.perks[k] : 1);
+            if (trace) trace({ t: curT, k, e: g.energy, E, H, gain });
+            S[k] += gain;
+            gainSum += gain;
             E -= g.energy;
             H = Math.max(0, H - HAPPY_LOSS_PER_ENERGY * g.energy * lossMult);
             trainedE += g.energy;
@@ -246,11 +336,13 @@ export function simulateStrategy(id, o) {
             unlockLeft = Infinity;
             return;
         }
-        unlocked.push({ at: trainedE, gymId: n.gymId, cost: n.cost || 0, joined: n.joined || [] });
+        // `t`: the minute it opened (round 7: each plan says when it opens a gym).
+        unlocked.push({ at: trainedE, t: curT, gymId: n.gymId, cost: n.cost || 0, joined: n.joined || [] });
         cost += n.cost || 0;
         if (n.gyms) {
             o = { ...o, gyms: n.gyms };
             if (cands) cands.splice(0, cands.length, ...STATS.filter((k) => o.gyms[k] && o.gyms[k].dots > 0).map((k) => ({ k, dots: o.gyms[k].dots, energy: o.gyms[k].energy })));
+            minE = minTrainE();
         }
         unlockLeft += n.left > 0 ? n.left : Infinity;
     }
@@ -376,8 +468,19 @@ export function simulateStrategy(id, o) {
     };
 
     for (let t = 0; t < days * 1440; t += STEP_MIN) {
+        if (sliceMin && t && t % sliceMin === 0) yield t;
         const day = Math.floor(t / 1440);
-        if (t % 1440 === 0 && t) daily.push(Math.round(totalOf(S) - start));
+        curT = t;
+        if (gainSum !== gainSeen) {
+            // What the last step trained, at that step's minute of its day.
+            dayMarks.push((t - STEP_MIN) % 1440, gainSum - dayBase);
+            gainSeen = gainSum;
+        }
+        if (t % 1440 === 0 && t) {
+            daily.push(Math.round(totalOf(S) - start));
+            closeDay();
+            if ((t / 1440) % statStep === 0) statMark();
+        }
         if (evs.length) {
             evCandy = 1;
             evCan = 1;
@@ -399,9 +502,16 @@ export function simulateStrategy(id, o) {
             else H = H > maxH ? maxH : Math.min(maxH, H + 5);
         }
 
-        if (id === 'steady' || id === 'blissSteady' || id === 'steadyBoost' || id === 'steadyMax') {
-            const took = t >= drugFree;
-            if (took) xanax(t);
+        if (id === 'steady' || id === 'blissSteady' || id === 'steadyBoost' || id === 'steadyMax' || id === 'steadyLite') {
+            if (day !== xanDay) {
+                xanDay = day;
+                xanToday = 0;
+            }
+            const took = t >= drugFree && xanToday < xanCap;
+            if (took) {
+                xanax(t);
+                xanToday++;
+            }
             // Job-point happy: once a day, on that day's first Xanax session.
             if (took && jh && day !== jpDay) H += jobHappy(day);
             if (id === 'blissSteady' && fitsAt(EDVD, t) > 0) {
@@ -508,9 +618,12 @@ export function simulateStrategy(id, o) {
         }
     }
     daily.push(Math.round(totalOf(S) - start));
+    if (gainSum !== gainSeen) dayMarks.push(1435, gainSum - dayBase);
+    closeDay();
+    statMark();
     const perStat = {};
     for (const k of STATS) perStat[k] = Math.round(S[k] - o.stats[k]);
-    const out = { id, gained: Math.round(totalOf(S) - start), perStat, cost: Math.round(cost), energyTrained: trainedE, daily, used };
+    const out = { id, gained: Math.round(totalOf(S) - start), perStat, cost: Math.round(cost), energyTrained: trainedE, daily, used, quart, statLine };
     if (unlocked.length) out.unlocked = unlocked;
     return out;
 }
@@ -523,6 +636,10 @@ export function feasibleStrategies({ bliss = false, boosterCapH = BOOSTER_CAP_H,
         if (id === 'happy99k') return boosterCapH > BOOSTER_CAP_H;
         // Needs the ladder's choice of FHC or cans and how many a day: the caller adds it.
         if (id === 'steadyBoost') return false;
+        // Only when steady is over the budget, with the Xanax a day the money covers: the caller adds it.
+        if (id === 'steadyLite') return false;
+        // Only when steady is over the budget, with the Xanax a day the money covers: the caller adds it.
+        if (id === 'steadyLite') return false;
         // In that job the variant replaces the plain plan (the same plan with the perk).
         if (id === 'consoleJumpToy') return toyShop5;
         if (id === 'consoleJump') return !toyShop5;

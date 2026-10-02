@@ -49,7 +49,7 @@
     'use strict';
 
     const PI_BUILD_VERSION = '1.3.0';
-    const PI_BUILD_HASH = 'e9e331e4754b';
+    const PI_BUILD_HASH = '9b4aa14767ea';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -726,7 +726,14 @@
     }
 
     /**
-     * The candy that gives the most stats under the Plan's rule.
+     * The candy a plan takes.
+     *
+     * Round 7: when `evaluate` gives the whole plan's stats and cost (the engine
+     * always does), the pick is by cost per stat: start from the candy with the
+     * best cost per stat; a stronger one replaces it only when the stats rise by
+     * at least as much, in percent, as the cost (no tolerance). The owner:
+     * "+151k for $176M vs +176k for $616M... I would take 176k if it costs let's
+     * say 200".
      *
      * Without `evaluate`, each candy is scored by the happy it adds (a stand-in
      * for stats: more happy, more stats) and the cost of `boosts` boosts. With
@@ -780,7 +787,10 @@
         const pool = options.filter((o) => o.fits);
         let best;
         if (!pool.length) best = options.reduce((a, b) => (b.cost < a.cost ? b : a));
-        else if (pickBy === 'value') best = pool.reduce((a, b) => (perM(b) > perM(a) || (perM(b) === perM(a) && b.gained > a.gained) ? b : a));
+        // Round 7 (the owner's rule, D6): with the whole plan's real stats and money (`evaluate`), a stronger candy is
+        // taken only at an equal or better cost per stat, under every Plan rule ("Max gains" too): the candy with the best
+        // cost per stat that fits, and at the same cost per stat the one with more stats.
+        else if (evaluate || pickBy === 'value') best = pool.reduce((a, b) => (perM(b) > perM(a) || (perM(b) === perM(a) && b.gained > a.gained) ? b : a));
         else best = pool.reduce((a, b) => (b.gained > a.gained || (b.gained === a.gained && b.cost < a.cost) ? b : a));
         // Owner (2026-09-29): the candy named flipped between reloads (every +25 candy is interchangeable). Today's pick stays
         // unless the new one gives more happy or saves at least CANDY_SWITCH_PCT on the boost.
@@ -1608,6 +1618,11 @@
         planNow: 'planNow',
         // Your trains from Torn's log (Full key): the sessions no read of ours saw (core/gymlog.js).
         gymLog: 'gymLog',
+        // The problem log (core/errlog.js): the webpage keeps it; a Torn page's new lines wait in the small buffer.
+        problemLog: 'problemLog',
+        problemBuf: 'problemBuf',
+        // The last plan runs with their time (Settings › Report a problem).
+        planRuns: 'planRuns',
     };
 
     /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */
@@ -3339,7 +3354,7 @@
 
 
 
-    const STRATEGY_IDS = ['steady', 'dailyChoco', 'chocoJump', 'edvdJump', 'happy99k', 'blissSteady', 'steadyBoost', 'steadyMax', 'candyXanax', 'consoleJump', 'consoleJumpToy', 'edvdJumpAN'];
+    const STRATEGY_IDS = ['steady', 'dailyChoco', 'chocoJump', 'edvdJump', 'happy99k', 'blissSteady', 'steadyBoost', 'steadyMax', 'candyXanax', 'consoleJump', 'consoleJumpToy', 'edvdJumpAN', 'steadyLite'];
 
     /** Special refills, counted like an item (free: they come with the account). */
     const SPECIAL = 'special';
@@ -3394,6 +3409,8 @@
         consoleJump: { id: 'consoleJump', kind: 'jump', name: 'Console jump', short: 'Console jump', what: 'Stack 3 Xanax, 300 energy on the Game Console for happy, candy + Ecstasy, train it all' },
         consoleJumpToy: { id: 'consoleJumpToy', kind: 'jump', name: 'Console jump, 5★ Toy/Game Shop', short: 'Console jump 5★', what: 'The console jump with your job’s doubled console happy' },
         edvdJumpAN: { id: 'edvdJumpAN', kind: 'jump', name: 'EDVD jump, 10★ Adult Novelties', short: 'EDVD jump AN', what: 'Stack 4 Xanax, then 5 EDVD (doubled by your job) + Ecstasy' },
+        // Round 7 (A.4): steady when the budget doesn't cover a Xanax on every cooldown: as many a day as the money covers.
+        steadyLite: { id: 'steadyLite', kind: 'steady', name: 'Steady, fewer Xanax', short: 'Steady, fewer Xanax', what: 'As many Xanax a day as the budget covers, natural energy as it comes' },
     };
 
     /**
@@ -3405,6 +3422,7 @@
     function planWhat(id, r = null) {
         const s = STRATEGIES[id];
         if (!s) return '';
+        if (id === 'steadyLite' && r && Number.isFinite(r.xanaxPerDay)) return (r.xanaxPerDay > 0 ? r.xanaxPerDay + ' Xanax a day' : 'No Xanax') + ', natural energy as it comes' + (r.used && r.used[POINTS] > 0 ? ', the daily refill' : ', no refill') + ': what your budget covers';
         const c = r && r.candy ? candyWords(r.candy) : null;
         if (!c) return s.what;
         if (id === 'dailyChoco') return c + ' + Ecstasy once a day on top of a Xanax';
@@ -3417,6 +3435,9 @@
 
     /** Minutes per simulation step. */
     const STEP_MIN = 5;
+
+    /** Plans up to this long keep each stat's line day by day; longer ones week by week (a year of days for every plan is too much to store). */
+    const STAT_LINE_DAILY_DAYS = 92;
 
     /** Xanax stacked before a jump (ffscouter guide's 4-Xan jumps). */
     const JUMP_STACK = 4;
@@ -3468,10 +3489,39 @@
      * @param {object} [o.unlock] - round 6: gyms opening as energy is trained: {left: energy to the next gym,
      *   next: () => ({gyms, left}|null)}: when the energy trained reaches `left`, the gyms switch to `next()`'s
      *   (per stat {dots, energy}) and `left` becomes the next step; `unlocked` counts them (with the day)
-     * @returns {{id, gained:number, perStat:object, cost:number, energyTrained:number, daily:number[], used:object}}
+     * @param {object} [o.start] - round 7: the bars as they are when the plan is made: {energy, happy, drugCdMin (drug
+     *   cooldown left, minutes), refillUsed (today's refill is gone)}. The day plan (plan.js) always started from the live
+     *   bars; the simulator started from a full bar with no cooldown, so day one of a plan promised more than its own
+     *   steps could do. Unset: a full bar, happy at its maximum, no cooldown (stretches of a plan that start later)
+     * @param {number} [o.xanaxPerDay] - round 7 (the small-budget plan): at most this many Xanax a day in a steady plan
+     *   (0: natural energy only); unset: one on every cooldown
+     * @param {function} [o.trace] - round 7: called for every train with {t (minutes from the start), k (stat), e (its
+     *   energy), E and H (energy and happy before it), gain}. For tests and the baseline; it changes nothing.
+     * @returns {{id, gained:number, perStat:object, cost:number, energyTrained:number, daily:number[], used:object, quart:number[], statLine:object}}
+     *   daily: the total gained by the end of each 24 h from the start. Round 7 (Progress): `quart` says when in each of
+     *   those days the gain lands (three minutes a day: a quarter, half and three quarters of the day's gain reached), so a jump
+     *   reads as a step and steady training as a slope; `statLine` is each stat's own line ({step (days), days, str: [],
+     *   spd, def, dex}: the gain by the end of every `step` days, the last entry at `days`).
      * Refills (points or special) set energy to the maximum, never above it: anything over is wasted (O2, owner).
      */
     function simulateStrategy(id, o) {
+        const run = simulateSteps(id, o);
+        let r = run.next();
+        while (!r.done) r = run.next();
+        return r.value;
+    }
+
+    /** Simulated days between two breaks of a sliced run: a few milliseconds of work each. */
+    const SIM_SLICE_DAYS = 30;
+
+    /**
+     * The same simulation as a generator (round 7, R7.3b): with `o.sliceDays` it yields every that many simulated days,
+     * so a long plan can be worked out in slices with breaks for the page in between (one 12-month run is about a tenth
+     * of a second: too long to hold the page at 4x slower). It returns what simulateStrategy returns; the numbers are
+     * the same sliced or not.
+     */
+    function* simulateSteps(id, o) {
+        const sliceMin = o.sliceDays > 0 ? Math.round(o.sliceDays) * 1440 : 0;
         const days = o.days || 30;
         const maxE = o.energyMax || 150;
         const maxH = o.happyMax;
@@ -3492,11 +3542,12 @@
         const S = { ...o.stats };
         const single = typeof o.target === 'string' ? o.target : null;
         const shares = single ? null : o.target;
-        let E = maxE;
-        let H = maxH;
+        const st = o.start && typeof o.start === 'object' ? o.start : null;
+        let E = st && Number.isFinite(st.energy) ? Math.max(0, st.energy) : maxE;
+        let H = st && Number.isFinite(st.happy) ? Math.max(0, st.happy) : maxH;
         let cost = 0;
         let trainedE = 0;
-        let drugFree = 0;
+        let drugFree = st ? Math.max(0, Number(st.drugCdMin) || 0) : 0;
         // Minute the booster cooldown reaches 0. Every booster (candy, EDVD, FHC, cans) goes in only while the cooldown
         // is under the cap (the last one overshoots it): 49 candy take 24.5 h, so a full load can't happen every day.
         let boosterFree = Math.max(0, Number(o.boosterCdMin) || 0);
@@ -3506,7 +3557,12 @@
         };
         // A daily candy boost still to come today: the next Xanax (before midnight) will find room under the cap.
         const boostLaterToday = (t, day) => t + xanCD < (day + 1) * 1440 && boosterFree - (t + xanCD) < capH * 60;
-        let refillDay = -1;
+        // Today's refill already used: the first of the simulator's days has none.
+        let refillDay = st && st.refillUsed ? 0 : -1;
+        // The small-budget plan: at most this many Xanax a day (steady plans); the day plan (plan.js) keeps the same count.
+        const xanCap = Number.isFinite(o.xanaxPerDay) ? Math.max(0, Math.floor(o.xanaxPerDay)) : Infinity;
+        let xanDay = -1;
+        let xanToday = 0;
         let stacked = 0;
         let phase = id === 'dailyChoco' ? 'free' : 'stack';
         let doneDay = -1;
@@ -3540,9 +3596,49 @@
         let ebToday = 0;
         const isConsole = id === 'consoleJump' || id === 'consoleJumpToy';
         const stackTo = isConsole ? CONSOLE_STACK : JUMP_STACK;
+        // Energy already above the maximum at the start is Xanax stacked (a jump) or held (daily choco), as the day plan reads it.
+        if (st && E > maxE + 50) {
+            if (id === 'dailyChoco') phase = 'hold';
+            else if (STRATEGIES[id] && STRATEGIES[id].kind === 'jump') {
+                stacked = Math.min(stackTo, Math.ceil((E - maxE - 50) / ITEMS[XANAX].energy));
+                if (stacked === stackTo) phase = 'wait';
+            }
+        }
         const consoleHappy = CONSOLE_HAPPY_EACH * (id === 'consoleJumpToy' || o.toyShop5 ? 2 : 1);
         const daily = [];
         const start = totalOf(S);
+        const trace = typeof o.trace === 'function' ? o.trace : null;
+        let curT = 0;
+        // When in each day the gain lands (Progress's plan line), and each stat's own line.
+        const quart = [];
+        let gainSum = 0;
+        let gainSeen = 0;
+        let dayBase = 0;
+        let dayMarks = [];
+        const closeDay = () => {
+            const total = gainSum - dayBase;
+            // The minutes of the day by which a quarter, half and three quarters of its gain were reached (a day with
+            // no gain: an even slope, which adds nothing).
+            let q1 = 360;
+            let q2 = 720;
+            let q3 = 1080;
+            if (total > 0) {
+                q1 = q2 = q3 = dayMarks[dayMarks.length - 2];
+                for (let i = dayMarks.length - 2; i >= 0; i -= 2) {
+                    if (dayMarks[i + 1] >= 0.75 * total) q3 = dayMarks[i];
+                    if (dayMarks[i + 1] >= 0.5 * total) q2 = dayMarks[i];
+                    if (dayMarks[i + 1] >= 0.25 * total) q1 = dayMarks[i];
+                }
+            }
+            quart.push(q1, q2, q3);
+            dayBase = gainSum;
+            dayMarks = [];
+        };
+        const statStep = days > STAT_LINE_DAILY_DAYS ? 7 : 1;
+        const statLine = { step: statStep, days, str: [], spd: [], def: [], dex: [] };
+        const statMark = () => {
+            for (const k of STATS) statLine[k].push(Math.round(S[k] - o.stats[k]));
+        };
 
         // Toward a build: the same per-train split as the day plan (builds.js pickStat), in each stat's gym.
         const cands = single ? null : STATS.filter((k) => o.gyms[k] && o.gyms[k].dots > 0).map((k) => ({ k, dots: o.gyms[k].dots, energy: o.gyms[k].energy }));
@@ -3551,13 +3647,22 @@
             const c = pickStat(cands, S, shares, H, o.perks || null, o.splitRule, undefined, maxH);
             return c ? c.k : null;
         };
+        // The cheapest train there is: with less energy than that nothing can be trained, whatever the split would pick
+        // (round 7, R7.3b: the split was worked out on every 5-minute step, most of them with no energy to train: half
+        // of all its calls. The result is the same: the pick's own train costs at least this).
+        const minTrainE = () => (single ? (o.gyms[single] ? o.gyms[single].energy : Infinity) : cands.reduce((a, c) => Math.min(a, c.energy), Infinity));
+        let minE = minTrainE();
         const train = (keep = 0) => {
             for (;;) {
+                if (E - minE < keep) return;
                 const k = pick();
                 if (!k) return;
                 const g = o.gyms[k];
                 if (E - g.energy < keep) return;
-                S[k] += gainPerTrain(k, S[k], H, g.dots, g.energy, o.perks ? o.perks[k] : 1);
+                const gain = gainPerTrain(k, S[k], H, g.dots, g.energy, o.perks ? o.perks[k] : 1);
+                if (trace) trace({ t: curT, k, e: g.energy, E, H, gain });
+                S[k] += gain;
+                gainSum += gain;
                 E -= g.energy;
                 H = Math.max(0, H - HAPPY_LOSS_PER_ENERGY * g.energy * lossMult);
                 trainedE += g.energy;
@@ -3572,11 +3677,13 @@
                 unlockLeft = Infinity;
                 return;
             }
-            unlocked.push({ at: trainedE, gymId: n.gymId, cost: n.cost || 0, joined: n.joined || [] });
+            // `t`: the minute it opened (round 7: each plan says when it opens a gym).
+            unlocked.push({ at: trainedE, t: curT, gymId: n.gymId, cost: n.cost || 0, joined: n.joined || [] });
             cost += n.cost || 0;
             if (n.gyms) {
                 o = { ...o, gyms: n.gyms };
                 if (cands) cands.splice(0, cands.length, ...STATS.filter((k) => o.gyms[k] && o.gyms[k].dots > 0).map((k) => ({ k, dots: o.gyms[k].dots, energy: o.gyms[k].energy })));
+                minE = minTrainE();
             }
             unlockLeft += n.left > 0 ? n.left : Infinity;
         }
@@ -3702,8 +3809,19 @@
         };
 
         for (let t = 0; t < days * 1440; t += STEP_MIN) {
+            if (sliceMin && t && t % sliceMin === 0) yield t;
             const day = Math.floor(t / 1440);
-            if (t % 1440 === 0 && t) daily.push(Math.round(totalOf(S) - start));
+            curT = t;
+            if (gainSum !== gainSeen) {
+                // What the last step trained, at that step's minute of its day.
+                dayMarks.push((t - STEP_MIN) % 1440, gainSum - dayBase);
+                gainSeen = gainSum;
+            }
+            if (t % 1440 === 0 && t) {
+                daily.push(Math.round(totalOf(S) - start));
+                closeDay();
+                if ((t / 1440) % statStep === 0) statMark();
+            }
             if (evs.length) {
                 evCandy = 1;
                 evCan = 1;
@@ -3725,9 +3843,16 @@
                 else H = H > maxH ? maxH : Math.min(maxH, H + 5);
             }
 
-            if (id === 'steady' || id === 'blissSteady' || id === 'steadyBoost' || id === 'steadyMax') {
-                const took = t >= drugFree;
-                if (took) xanax(t);
+            if (id === 'steady' || id === 'blissSteady' || id === 'steadyBoost' || id === 'steadyMax' || id === 'steadyLite') {
+                if (day !== xanDay) {
+                    xanDay = day;
+                    xanToday = 0;
+                }
+                const took = t >= drugFree && xanToday < xanCap;
+                if (took) {
+                    xanax(t);
+                    xanToday++;
+                }
                 // Job-point happy: once a day, on that day's first Xanax session.
                 if (took && jh && day !== jpDay) H += jobHappy(day);
                 if (id === 'blissSteady' && fitsAt(EDVD, t) > 0) {
@@ -3834,9 +3959,12 @@
             }
         }
         daily.push(Math.round(totalOf(S) - start));
+        if (gainSum !== gainSeen) dayMarks.push(1435, gainSum - dayBase);
+        closeDay();
+        statMark();
         const perStat = {};
         for (const k of STATS) perStat[k] = Math.round(S[k] - o.stats[k]);
-        const out = { id, gained: Math.round(totalOf(S) - start), perStat, cost: Math.round(cost), energyTrained: trainedE, daily, used };
+        const out = { id, gained: Math.round(totalOf(S) - start), perStat, cost: Math.round(cost), energyTrained: trainedE, daily, used, quart, statLine };
         if (unlocked.length) out.unlocked = unlocked;
         return out;
     }
@@ -3849,6 +3977,10 @@
             if (id === 'happy99k') return boosterCapH > BOOSTER_CAP_H;
             // Needs the ladder's choice of FHC or cans and how many a day: the caller adds it.
             if (id === 'steadyBoost') return false;
+            // Only when steady is over the budget, with the Xanax a day the money covers: the caller adds it.
+            if (id === 'steadyLite') return false;
+            // Only when steady is over the budget, with the Xanax a day the money covers: the caller adds it.
+            if (id === 'steadyLite') return false;
             // In that job the variant replaces the plain plan (the same plan with the perk).
             if (id === 'consoleJumpToy') return toyShop5;
             if (id === 'consoleJump') return !toyShop5;
@@ -4131,6 +4263,32 @@
     /** A refill the plan couldn't place earlier goes this long before midnight. */
     const REFILL_LAST_CALL_MS = 30 * MIN;
 
+    /**
+     * Round 7 (review 2.6): in the middle of a boost or jump. Happy this far above the maximum (a share of what the
+     * plan's boosters add, at least MID_BOOST_MIN) means the boosters are eaten: the step stays, and what is left of it
+     * (the drug, the trains, the refill) is due before the quarter tick that resets the happy.
+     */
+    const MID_BOOST_SHARE = 0.25;
+    const MID_BOOST_MIN = 300;
+
+    /**
+     * A boost or jump as its actions in order (round 7, D.1), each with what proves it done from Torn's bars:
+     * the boosters (the booster cooldown goes up, happy goes above the maximum), job points, the drug (the drug
+     * cooldown goes up), the trains (energy goes down), the refill and its trains. `now` is the action of the moment.
+     * @param {object} o - {eat: words|null, eaten, jp: words|null, drug: 'Ecstasy'|'Xanax'|null, drugDone, trained, refill}
+     * @returns {{list:{id, text, proof, done}[], now:number}}
+     */
+    function boostActions({ eat = null, eaten = false, jp = null, drug = null, drugDone = false, trained = false, refill = false }) {
+        const list = [];
+        if (eat) list.push({ id: 'eat', text: 'Eat ' + eat, proof: 'the booster cooldown goes up and happy goes above your maximum', done: eaten });
+        if (jp) list.push({ id: 'jp', text: jp, proof: 'happy goes up', done: eaten && drugDone });
+        if (drug) list.push({ id: 'drug', text: 'Take the ' + drug, proof: 'the drug cooldown starts', done: drugDone });
+        list.push({ id: 'train', text: 'Train it all', proof: 'energy goes down', done: trained });
+        if (refill) list.push({ id: 'refill', text: 'Refill, then train again', proof: 'the refill shows as used', done: false });
+        const now = list.findIndex((a) => !a.done);
+        return { list, now: now < 0 ? list.length - 1 : now };
+    }
+
     /** The plan type a strategy belongs to. */
     function planTypeOf(strategyId, goal = null) {
         if (goal) return 'goal';
@@ -4231,7 +4389,7 @@
      *   xanaxCdMin, ecstasyCdMin, candyId, candyCount, edvdCount, boosterCapH, stackedSoFar, drugsToday,
      *   specialLeft (special refills the plan may still use), energyBooster {id, perDay} (steadyBoost),
      *   holdBooster (an event that needs the booster cooldown is near: no boosters), candyMult, canMult,
-     *   toyShop5, adultNovelties10}
+     *   toyShop5, adultNovelties10, xanaxPerDay (the small-budget plan: at most this many Xanax a Torn day)}
      *   held: {[id]: qty} boosters in the inventory (used first: candy and energy drinks as a pool)
      * @param {number} [o.until] - end of the window (default: the next Torn midnight; later: the look-ahead, days rolling on)
      * @returns {object[]} steps {id, at, kind, label, items:[{id,qty}], trains:{}, gyms:{}, parts:[] (train steps: the session in gym parts), gain, energy, strict, warnAt, note}
@@ -4259,6 +4417,8 @@
         // While specials are held the day's refill is a special: one already used today counts as it.
         let refillLeft = refillAvailable(state, now) && !(ctx.specialHeld > 0 && (ctx.specialToday || 0) >= 1);
         let xanN = (ctx.drugsToday || 0) + 1;
+        // The small-budget plan: at most this many Xanax a Torn day (the simulator keeps the same count: strategies.js).
+        const xanCap = Number.isFinite(ctx.xanaxPerDay) ? Math.max(0, Math.floor(ctx.xanaxPerDay)) : Infinity;
         const steps = [];
         let n = 0;
         let curDay = tornDayStart(now);
@@ -4406,6 +4566,16 @@
         let holding = Boolean(ctx.holding);
         let naturalOk = true;
 
+        // What this plan's boosters add to happy (for telling a boost under way from the bars).
+        const boostPlan = isJump || s === 'dailyChoco' || s === 'candyXanax';
+        const boostHappy = () => {
+            const candy = candyQty() * ITEMS[candyId].happy * candyMult;
+            if (isConsole) return CONSOLE_USES * CONSOLE_HAPPY_EACH * (s === 'consoleJumpToy' || ctx.toyShop5 ? 2 : 1) + candy;
+            if (s === 'chocoJump' || s === 'dailyChoco' || s === 'candyXanax') return candy;
+            return (ctx.edvdCount || 5) * ITEMS[EDVD].happy * (ctx.adultNovelties10 || s === 'edvdJumpAN' ? 2 : 1);
+        };
+        let midDone = false;
+
         // A new Torn day: its refill (today's, if unused, goes in before midnight), Xanax count, boost and share.
         const rollDay = (at) => {
             while (tornDayStart(at) > curDay) {
@@ -4425,9 +4595,50 @@
             }
         };
 
+        // Mid-step (round 7, review 2.6): the boosters of this plan's boost are in (happy is above the maximum by a boost's
+        // worth, now). The step stays until it is finished: the drug if its cooldown is clear, train it all, the refill,
+        // train; all before the next quarter tick, which resets the happy. Before, the plan was worked out again from the
+        // bars as if nothing had started: after 5 EDVD it said the jump was in 30 hours (the booster cooldown it had just
+        // filled), and after the day's candy it planned a plain Xanax and a second candy boost.
+        if (boostPlan && H >= happyMax + Math.max(MID_BOOST_MIN, MID_BOOST_SHARE * boostHappy())) {
+            const tick = nextQuarterTick(now);
+            const keep = Math.max(0, Math.min(E, ctx.keepEnergy || 0));
+            const drugName = s === 'candyXanax' ? 'Xanax' : 'Ecstasy';
+            // The cooldown is clear: the step's drug is still to take. Running, and ending before the tick: an earlier
+            // Xanax, the drug waits for it. Running past the tick: the drug is in.
+            const drugDue = drugAt <= now;
+            const drugSoon = !drugDue && drugAt < tick - MIN;
+            const at = drugSoon ? drugAt : now;
+            if (drugDue || drugSoon) {
+                if (drugSoon) advance(at);
+                if (s === 'candyXanax') {
+                    E += ITEMS[XANAX].energy;
+                    H = Math.min(HAPPY_CAP, H + ITEMS[XANAX].happy);
+                } else H = Math.min(HAPPY_CAP, H * ITEMS[ECSTASY].happyMult);
+            }
+            const takes = drugDue || drugSoon;
+            const canTrain = E - keep >= minTrain;
+            if (canTrain || refillLeft) {
+                const label = takes ? (s === 'candyXanax' ? 'Xanax #' + xanN++ : 'Ecstasy') + (drugSoon ? ' at ' + clockOf(at) : ' now') + ', then train it all' : 'Train it all now';
+                const note = (takes ? 'The boosters are in' : 'Your happy is boosted') + ': finish before the ' + clockOf(tick) + ' tick, when the happy resets';
+                const acts = boostActions({ eat: 'the boosters', eaten: true, drug: drugName, drugDone: !takes, refill: refillLeft });
+                if (canTrain) train(at, isJump ? 'jump' : 'boost', label, takes ? [{ id: s === 'candyXanax' ? XANAX : ECSTASY, qty: 1 }] : [], { strict: true, warnAt: now, tick, deadline: tick, mid: true, actions: acts.list, actionNow: acts.now, note });
+                if (refillLeft) {
+                    refill(at + MIN, canTrain ? {} : { strict: true, warnAt: now, tick, deadline: tick, mid: true, note });
+                    refillLeft = false;
+                }
+                special(at + 2 * MIN);
+                if (takes) drugAt = at + (s === 'candyXanax' ? xanCD : ecsCD);
+                boosted = true;
+                holding = false;
+                midDone = true;
+            }
+        }
+
         if (isJump) {
             const stackTo = isConsole ? CONSOLE_STACK : JUMP_STACK;
-            let stacked = Math.min(stackTo, ctx.stackedSoFar || 0);
+            // After a jump finished from the middle (above), the next stack starts from nothing.
+            let stacked = midDone ? 0 : Math.min(stackTo, ctx.stackedSoFar || 0);
             for (let jumps = 0; jumps < 20; jumps++) {
                 // Today's plan always shows the next jump in full; the look-ahead runs on to its end.
                 if (jumps > 0 && (drugAt >= end || !lookAhead)) break;
@@ -4492,7 +4703,8 @@
                 }
                 H = Math.min(HAPPY_CAP, H * ITEMS[ECSTASY].happyMult);
                 items.push({ id: ECSTASY, qty: 1 });
-                const jump = train(at, 'jump', label, items, { strict: true, warnAt: tick - STRICT_WARN_MS, note });
+                const acts = boostActions({ eat: label.split(' + Ecstasy')[0], jp: jp.happy ? jp.words : null, drug: 'Ecstasy', refill: refillLeft });
+                const jump = train(at, 'jump', label, items, { strict: true, warnAt: tick - STRICT_WARN_MS, note, deadline: tick + 15 * MIN, actions: acts.list, actionNow: acts.now });
                 jump.tick = tick;
                 if (refillLeft) {
                     refill(at + MIN);
@@ -4524,7 +4736,8 @@
                 const jp = jobPoints();
                 H = Math.min(HAPPY_CAP, (H + c.happy + jp.happy) * ITEMS[ECSTASY].happyMult);
                 if (qty > 0) addBooster(candyId, qty, at);
-                train(at, 'boost', (c.words ? c.words + ' + ' : '') + 'Ecstasy, then train it all', [...c.items, { id: ECSTASY, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, note: joinNote(jp.happy ? 'Before the Ecstasy: ' + jp.words : null, c.note) });
+                const acts = boostActions({ eat: c.words || null, jp: jp.happy ? jp.words : null, drug: 'Ecstasy', refill: refillLeft });
+                train(at, 'boost', (c.words ? c.words + ' + ' : '') + 'Ecstasy, then train it all', [...c.items, { id: ECSTASY, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, deadline: tick + 15 * MIN, actions: acts.list, actionNow: acts.now, note: joinNote(jp.happy ? 'Before the Ecstasy: ' + jp.words : null, c.note) });
                 if (refillLeft) {
                     refill(at + MIN);
                     refillLeft = false;
@@ -4544,12 +4757,24 @@
                 if (!st.energy) {
                     steps.pop();
                     naturalOk = false;
+                } else if (refillLeft && xanN > xanCap && full + 5 * MIN < Math.min(end, curDay + DAY)) {
+                    // No Xanax left today (the small-budget plan): the day's refill goes right after this session, when energy is near zero.
+                    advance(full + 5 * MIN);
+                    refill(t);
+                    refillLeft = false;
                 }
                 continue;
             }
             if (drugAt >= end && steps.length) break;
             rollDay(drugAt);
             advance(drugAt);
+            // The day's Xanax are taken (the small-budget plan): the next one waits for the next Torn day; natural
+            // energy is trained as it fills meanwhile (the branch above).
+            if (xanN > xanCap) {
+                drugAt = curDay + DAY;
+                if (drugAt >= end && !(naturalOk && fullAt() < end)) break;
+                continue;
+            }
             // A daily boost waits for room under the booster cap: until then its Xanax is a plain session.
             let waitNote = null;
             if (daily && !boosted) {
@@ -4586,7 +4811,8 @@
                     const jp = jobPoints();
                     H = Math.min(HAPPY_CAP, H + c.happy + jp.happy);
                     addBooster(candyId, qty, at);
-                    train(at, 'boost', c.words + ' + Xanax #' + xanN++ + ', then train it all', [...c.items, { id: XANAX, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, note: joinNote('Right after the ' + clockOf(tick) + ' tick' + (jp.happy ? '; with it: ' + jp.words : ''), c.note) });
+                    const acts = boostActions({ eat: c.words, jp: jp.happy ? jp.words : null, drug: 'Xanax', refill: refillLeft });
+                    train(at, 'boost', c.words + ' + Xanax #' + xanN++ + ', then train it all', [...c.items, { id: XANAX, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, deadline: tick + 15 * MIN, actions: acts.list, actionNow: acts.now, note: joinNote('Right after the ' + clockOf(tick) + ' tick' + (jp.happy ? '; with it: ' + jp.words : ''), c.note) });
                     if (refillLeft) {
                         refill(at + MIN);
                         refillLeft = false;
@@ -4722,10 +4948,20 @@
             out.push({ at, kind: 'catchup', label: catchUpLabel(trained, { drug: diff.drugTaken, booster: diff.boosterUsed, refill: diff.refillUsed }), trained: { ...trained }, gain, drug: Boolean(diff.drugTaken) });
             return out;
         }
+        // Round 7: a boost or jump is logged when it is finished (its drug taken), not at its first sign. Its boosters eaten
+        // with the drug still to take is noted as that ("boosting"), which is neither the boost done nor a drug taken: the
+        // day plan keeps the step from the bars meanwhile. (It was logged as done at the candy, so the plan moved on.)
+        const stepDrug = nextStep && (nextStep.kind === 'boost' || nextStep.kind === 'jump') && (nextStep.items || []).some((it) => it.id === XANAX || it.id === ECSTASY);
+        if (diff && diff.boosterUsed && !diff.drugTaken && !diff.refillUsed && stepDrug && !nextStep.mid) {
+            out.push({ at, kind: 'boosting', label: 'Boosters eaten · ' + nextStep.label, trained: { ...trained }, gain });
+            return out;
+        }
         if (diff && (diff.drugTaken || diff.refillUsed || diff.boosterUsed)) {
             const kind = diff.refillUsed && !diff.drugTaken ? 'refill' : nextStep && nextStep.kind !== 'natural' ? nextStep.kind : 'xanax';
             const label = diff.refillUsed && !diff.drugTaken ? 'Refill · ' + REFILL_POINTS + ' points' : nextStep && nextStep.kind !== 'natural' ? nextStep.label : 'Xanax';
-            out.push({ at, kind, label, trained: { ...trained }, gain });
+            // `xanax`: this step's drug was a Xanax (a candy + Xanax boost carries one): it counts in the day's Xanax.
+            const xanax = Boolean(diff.drugTaken && nextStep && (nextStep.items || []).some((it) => it.id === XANAX));
+            out.push({ at, kind, label, trained: { ...trained }, gain, ...(xanax && kind !== 'xanax' && kind !== 'stack' && kind !== 'hold' ? { xanax: true } : {}) });
             return out;
         }
         if (gain > 0) {
@@ -4742,7 +4978,7 @@
 
     /** Drugs taken so far today, from the log (numbers the next Xanax; a held Xanax counts too). */
     function drugsToday(log, now) {
-        return (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(now) && (e.kind === 'xanax' || e.kind === 'stack' || e.kind === 'hold' || (e.kind === 'catchup' && e.drug))).length;
+        return (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(now) && (e.kind === 'xanax' || e.kind === 'stack' || e.kind === 'hold' || e.xanax === true || (e.kind === 'catchup' && e.drug))).length;
     }
 
     /* ===== src/core/calibration.js ===== */
@@ -4755,6 +4991,14 @@
 
 
 
+
+
+    /**
+     * Round 7 (review 4.9): only two reads this close check the formula. Over a long gap several sessions at different
+     * happy become one row (+201% "off" across 8 hours); and with happy above the maximum at the first read, a quarter
+     * tick in between resets it, so the trains had less happy than the read says (-85% "off" after a jump).
+     */
+    const CALIBRATION_MAX_GAP_MS = 2 * 60 * 1000;
 
     /** Samples kept (the learner wants many; each is ~150 bytes). */
     const CALIBRATION_KEEP = 500;
@@ -4769,6 +5013,8 @@
     function calibrationSample(prev, next, diff, { table, perks = null } = {}) {
         const stats = Object.keys((diff && diff.trained) || {});
         if (stats.length !== 1 || diff.drugTaken || diff.boosterUsed || diff.refillUsed) return null;
+        if (!(next.at - prev.at <= CALIBRATION_MAX_GAP_MS)) return null;
+        if (prev.happy && prev.happy.current > prev.happy.maximum && nextQuarterTick(prev.at) <= next.at) return null;
         const stat = stats[0];
         const gym = gymById(next.gymId || prev.gymId, table);
         if (!gym || !(gym.dots[stat] > 0) || !prev.stats) return null;
@@ -5189,6 +5435,247 @@
         return { text: e.name + ' ' + when + (e.exact ? '' : ' (about)'), sub: e.effect + ' ' + e.advice, at: e.start, active: e.active, id: e.id, until: e.end };
     }
 
+    /* ===== src/core/errlog.js ===== */
+    /*
+     * The problem log (round 7; the pattern is Torn Trading's core/errlog.js).
+     * Every tab adds what went wrong (a script error, a read that failed, a
+     * plan that couldn't be worked out) and what you did just before (Create
+     * plan, Re-plan, a plan picked), plus how long each plan took. Kept 7 days,
+     * LOG_MAX lines at most. Settings › Report a problem puts it in the zip, so
+     * a bug is found from what happened, not by guessing. No key (masked before
+     * it is stored), no player id or name. Pure.
+     */
+
+    const LOG_MAX = 400;
+    const LOG_KEEP_MS = 7 * 24 * 60 * 60 * 1000;
+
+    /** Lines a Torn page keeps in the shared store until the webpage takes them (it is handed to every page: kept small). */
+    const LOG_BUFFER_MAX = 40;
+
+    /** The stored log plus new entries: oldest first, a week at most, `max` lines at most. */
+    function addLogEntries(stored, entries, now = Date.now(), max = LOG_MAX) {
+        const all = [...(Array.isArray(stored) ? stored : []), ...(entries || [])]
+            .filter((e) => e && Number.isFinite(Number(e.at)) && now - Number(e.at) < LOG_KEEP_MS)
+            .sort((a, b) => a.at - b.at);
+        // The same line twice in a row within a minute is counted, not repeated.
+        const out = [];
+        for (const e of all) {
+            const last = out[out.length - 1];
+            if (last && last.kind === e.kind && last.where === e.where && last.what === e.what && e.at - (last.lastAt || last.at) < 60000) {
+                last.times = (last.times || 1) + (e.times || 1);
+                last.lastAt = e.lastAt || e.at;
+            } else {
+                out.push({ ...e });
+            }
+        }
+        return out.slice(-max);
+    }
+
+    /** A line of text, never a key: anything key-like is masked (16 letters and digits), and a link's query is dropped. */
+    function logText(text, max = 300) {
+        return String(text === null || text === undefined ? '' : text)
+            .replace(/key=[^&\s"']+/gi, 'key=****')
+            .replace(/\b[A-Za-z0-9]{16}\b/g, '****')
+            .replace(/\b(XID|ID|user2ID|userID)=\d+/gi, '$1=N')
+            .slice(0, max);
+    }
+
+    /** The log as plain text, one line each, in Torn time (UTC), for the report. */
+    function logAsText(list) {
+        const t = (ms) => new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
+        return (list || []).map((e) => t(e.at) + '  ' + (e.kind === 'error' ? 'ERROR ' : e.kind === 'action' ? 'did   ' : 'note  ') + '[' + (e.where || '?') + '] ' + e.what + (e.detail ? ' - ' + e.detail : '') + (e.times > 1 ? ' (x' + e.times + ', last ' + t(e.lastAt) + ')' : '')).join('\n') + '\n';
+    }
+
+    /* ===== src/core/report.js ===== */
+    /*
+     * Settings › Report a problem (round 7; the pattern is Torn Trading's
+     * ui/report-view.js): what happened, what you expected, screenshots, and one
+     * .zip that also holds the problem log (core/errlog.js) and what the app
+     * knows: your stats and gym set-up, your trains from Torn's log, the saved
+     * plan in short, how long each plan took, and the field names of your money
+     * log. Nothing is sent anywhere: the zip is downloaded, and you send it.
+     * No API key, player id or name is in it. Pure.
+     */
+
+
+
+    const REPORT_KIND = 'torn-pumping-iron-report';
+
+    /** The first money-like field of a log line's data (what moneyOf reads), or null. */
+    const MONEY_FIELDS = ['money', 'total_value', 'value', 'cost', 'total_cost', 'price', 'amount', 'worth'];
+
+    function moneyFieldOf(data) {
+        if (!data || typeof data !== 'object') return null;
+        for (const k of MONEY_FIELDS) {
+            const n = Number(data[k]);
+            if (Number.isFinite(n) && n > 0) return k;
+        }
+        return null;
+    }
+
+    /** What a value is, never the value: "number", "text", "list", or an object's own field names. */
+    function logShapeOf(v) {
+        if (v === null || v === undefined) return 'empty';
+        if (Array.isArray(v)) {
+            const first = v.find((x) => x && typeof x === 'object');
+            return first ? 'list of {' + Object.keys(first).sort().join(', ') + '}' : 'list';
+        }
+        if (typeof v === 'object') return '{' + Object.keys(v).sort().join(', ') + '}';
+        if (typeof v === 'number') return 'number';
+        if (typeof v === 'boolean') return 'yes/no';
+        return /^-?\d+(\.\d+)?$/.test(String(v)) ? 'number as text' : 'text';
+    }
+
+    /**
+     * The money log by log type: Torn's title and type id, how many lines on how
+     * many days, the names of the `data` fields (never an amount, an id or a
+     * name) and which field was read as the amount (ROUND7-PLAN §3 C.0: the
+     * account table is written from this, not from guesses). A line listed under
+     * two categories counts once.
+     * @param {object[]} rows - raw v2 log lines ({id, timestamp, details: {id, title, category}, data})
+     * @param {object} [acc] - what earlier pages gave: {types: {}, seen: Set}
+     */
+    function logFieldsOf(rows, acc = null) {
+        const out = acc || { types: {}, seen: new Set() };
+        for (const e of Array.isArray(rows) ? rows : []) {
+            if (!e) continue;
+            const key = e.id !== undefined && e.id !== null ? String(e.id) : null;
+            if (key) {
+                if (out.seen.has(key)) continue;
+                out.seen.add(key);
+            }
+            const d = e.details || {};
+            const type = d.id !== undefined && d.id !== null ? String(d.id) : 'title:' + String(d.title || '?');
+            const r = out.types[type] || (out.types[type] = { type: d.id !== undefined && d.id !== null ? Number(d.id) : null, title: String(d.title || ''), category: String(d.category || ''), lines: 0, days: {}, fields: {}, amount: {} });
+            r.lines++;
+            r.days[Math.floor(Number(e.timestamp) / 86400)] = 1;
+            const data = e.data && typeof e.data === 'object' ? e.data : {};
+            for (const [k, v] of Object.entries(data)) {
+                const f = r.fields[k] || (r.fields[k] = { lines: 0, is: {} });
+                f.lines++;
+                f.is[logShapeOf(v)] = 1;
+            }
+            const m = moneyFieldOf(data) || '(none read)';
+            r.amount[m] = (r.amount[m] || 0) + 1;
+        }
+        return out;
+    }
+
+    /** The stored form: a list, the busiest type first; names and counts only. */
+    function logFieldsList(acc) {
+        return Object.values((acc && acc.types) || {})
+            .map((r) => ({ type: r.type, title: r.title, category: r.category, lines: r.lines, days: Object.keys(r.days).length, fields: Object.entries(r.fields).map(([name, f]) => ({ name, lines: f.lines, is: Object.keys(f.is).sort().join(' / ') })), amount: r.amount }))
+            .sort((a, b) => b.lines - a.lines || String(a.title).localeCompare(String(b.title)));
+    }
+
+    const reportTotal = (s) => ['str', 'spd', 'def', 'dex'].reduce((a, k) => a + (Number(s && s[k]) || 0), 0);
+
+    /** The saved plan, short: its dates, rule and every plan's totals (no day-by-day lines). */
+    function planSummary(saved) {
+        if (!saved) return null;
+        const plans = {};
+        for (const [id, r] of Object.entries(saved.compare || {})) if (r) plans[id] = { gained: r.gained, cost: r.cost, energy: r.energyTrained, perStat: r.perStat, candy: r.candy ? { id: r.candy.id, count: r.candy.count } : null, refill: r.refill, blocked: r.blocked || null, gyms: (r.unlocked || []).map((u) => u.gymId) };
+        const y = saved.year;
+        return {
+            months: saved.months,
+            days: saved.days,
+            start: saved.start,
+            end: saved.end,
+            from: saved.from,
+            createdAt: saved.createdAt,
+            recalibratedAt: saved.recalibratedAt,
+            budget: saved.budget,
+            recommended: saved.rec ? saved.rec.recommended : null,
+            rule: saved.rec ? saved.rec.pickBy : null,
+            reasons: saved.rec ? saved.rec.reasons : [],
+            plans,
+            path: y ? { gained: y.path && y.path.gained, cost: y.path && y.path.cost, band: y.band || null, segments: (y.segments || []).map((s) => ({ from: s.from, to: s.to, days: s.days, strategy: s.strategy, gained: s.gained, cost: s.cost })), unlocks: y.unlocks || [] } : null,
+            snapshot: saved.snapshot ? { at: saved.snapshot.at, stats: saved.snapshot.stats, gymId: saved.snapshot.gymId, happyMax: saved.snapshot.happyMax, energyMax: saved.snapshot.energyMax, budgetPerDay: saved.snapshot.budgetPerDay, build: saved.snapshot.build, goal: saved.snapshot.goal, pickBy: saved.snapshot.pickBy } : null,
+            history: (saved.history || []).map((h) => ({ at: h.at, from: h.from && { strategy: h.from.strategy, gained: h.from.gained, days: h.from.days }, to: h.to && { strategy: h.to.strategy, gained: h.to.gained, days: h.to.days } })),
+        };
+    }
+
+    /**
+     * What goes in the report zip (tested): the words, the screenshots, the
+     * problem log and the data files.
+     * @param {object} r
+     * @param {string} r.happened
+     * @param {string} r.expected
+     * @param {Array<{name: string, data: Uint8Array}>} r.shots
+     * @param {object[]} r.log - the problem log
+     * @param {object} r.state - {version, build, settings, plan, runs, diagnostics, keys: which are saved (yes/no only)}
+     * @param {object|null} r.player - {stats, happyMax, energyMax, gymId, unlocked, build, perks: {mult, lines, unknown}, job}
+     * @param {object|null} r.saved - the whole saved plan (summarised here)
+     * @param {object[]} [r.learning] - the learning export's files (core/learndata.js exportFiles): gym samples, gym log, fights, model
+     * @param {object[]|null} [r.moneyFields] - logFieldsList()
+     * @param {object} [r.statsHistory] - {day: {str, spd, def, dex, total}}
+     * @param {object} [r.env] - {userAgent, screen, memoryMB, cores}
+     * @returns {Array<{name: string, data: string|Uint8Array}>}
+     */
+    function reportFiles({ happened = '', expected = '', shots = [], log = [], state = {}, player = null, saved = null, learning = [], moneyFields = null, statsHistory = null, env = {}, now = Date.now() }) {
+        const errors = log.filter((e) => e.kind === 'error');
+        const safe = (n) => String(n || 'screenshot').replace(/[^\w.-]+/g, '_').slice(0, 60);
+        const stamp = new Date(now).toISOString();
+        const fmt = (v) => Math.round(v).toLocaleString('en-US');
+        const lines = [
+            'Torn Pumping Iron - problem report',
+            'Made ' + stamp + ' (UTC = Torn time)',
+            'Version ' + (state.version || '?') + (state.build ? ' (' + state.build + ')' : '') + (env.userAgent ? ' · ' + env.userAgent : '') + (env.screen ? ' · screen ' + env.screen : '') + (env.cores ? ' · ' + env.cores + ' cores' : '') + (env.memoryGB ? ' · ' + env.memoryGB + ' GB' : ''),
+            '',
+            'WHAT HAPPENED',
+            happened.trim() || '(not filled in)',
+            '',
+            'WHAT I EXPECTED',
+            expected.trim() || '(not filled in)',
+            '',
+            'IN SHORT',
+            player ? '  stats ' + ['str', 'spd', 'def', 'dex'].map((k) => k.toUpperCase() + ' ' + fmt(player.stats[k] || 0)).join(' · ') + ' · total ' + fmt(reportTotal(player.stats)) : '  stats: not read yet',
+            player ? '  happy maximum ' + fmt(player.happyMax || 0) + ' · energy maximum ' + (player.energyMax || '?') + ' · gym ' + (player.gymId || '?') + ' · build ' + (player.build || '?') : null,
+            saved ? '  plan: ' + saved.months + (saved.months === 1 ? ' month, ' : ' months, ') + (saved.rec ? saved.rec.recommended : '?') + ' recommended' : '  plan: none saved',
+            (state.runs || []).length ? '  last plan run: ' + state.runs.slice(-1).map((x) => (x.kind === 'replan' ? 'Re-plan' : 'Create plan') + ' ' + (x.months || '?') + (x.months === 1 ? ' month, ' : ' months, ') + (x.ms / 1000).toFixed(1) + ' s' + (x.hiddenMs > 0 ? ' (' + (x.hiddenMs / 1000).toFixed(1) + ' s of it with the tab not in front)' : '') + (x.ok ? '' : ' - ' + (x.error || 'failed')))[0] : null,
+            '',
+            'ATTACHED',
+            shots.length ? shots.map((s, i) => '  screenshots/' + (i + 1) + '-' + safe(s.name)).join('\n') : '  no screenshots',
+            '  problem-log.txt - ' + errors.length + ' errors and ' + (log.length - errors.length) + ' other lines, the last 7 days, every tab',
+            '  player.json - stats, happy and energy maximum, gym, gyms unlocked, build, the perks read (and the lines not understood)',
+            '  plan.json - the saved plan in short: every plan\'s stats and cost, the path, what it was made from',
+            '  state.json - version, settings (no keys), the last plan runs with their time, diagnostics',
+            '  stats-history.json - your stats at each day\'s last read',
+            '  learning/ - your trains from Torn\'s log, the sessions the app saw, fights, what it learned',
+            '  money-log-fields.json - your money log by log type: titles and the NAMES of the fields, never an amount',
+            '',
+            'No API key, player id or name is in these files.',
+        ].filter((x) => x !== null);
+        const files = [
+            { name: 'report.txt', data: lines.join('\n') + '\n' },
+            { name: 'problem-log.txt', data: logAsText(log) },
+            { name: 'problem-log.json', data: JSON.stringify(log) },
+            { name: 'player.json', data: JSON.stringify(player, null, 1) },
+            { name: 'plan.json', data: JSON.stringify(planSummary(saved), null, 1) },
+            { name: 'state.json', data: JSON.stringify({ kind: REPORT_KIND, v: 1, exportedAt: stamp, ...state, env }, null, 1) },
+            { name: 'stats-history.json', data: JSON.stringify(statsHistory || {}) },
+            { name: 'money-log-fields.json', data: JSON.stringify(moneyFields || [], null, 1) },
+        ];
+        for (const f of learning || []) files.push({ name: 'learning/' + f.name, data: f.data });
+        shots.forEach((s, i) => files.push({ name: 'screenshots/' + (i + 1) + '-' + safe(s.name), data: s.data }));
+        return files;
+    }
+
+    /** The lines Settings shows before anything is made: what the zip will hold. */
+    function reportIncludes({ shots = 0, log = [], player = null, saved = null, gymLog = 0, moneyTypes = 0 }) {
+        const errors = log.filter((e) => e.kind === 'error').length;
+        return [
+            'What you wrote above',
+            shots ? shots + (shots === 1 ? ' screenshot' : ' screenshots') : 'No screenshots yet',
+            'The problem log: ' + errors + (errors === 1 ? ' error' : ' errors') + ' and ' + (log.length - errors) + ' other lines (what you clicked, how long each plan took), the last 7 days, every tab',
+            player ? 'Your stats, happy maximum, gym, build and the perks read' : 'Your stats (not read yet)',
+            saved ? 'Your saved plan in short (every plan’s stats and cost)' : 'No saved plan yet',
+            gymLog ? 'Your trains from Torn’s log (' + gymLog + ' lines) and what the app learned' : 'What the app learned from your trains',
+            moneyTypes ? 'Your money log by type (' + moneyTypes + ' types): titles and field names only, never an amount' : 'Money log fields: none read (needs the Full key)',
+            'Version and settings: no API key, no player id or name',
+        ];
+    }
+
     /* ===== src/api/torn.js ===== */
     /*
      * Torn API v2 calls the app makes, each a thin wrapper over TornApiClient
@@ -5196,6 +5683,7 @@
      * Shapes: docs/research-api-shapes.md. Every function returns plain data the
      * core can read; none of them retries on its own beyond the client.
      */
+
 
 
 
@@ -5500,16 +5988,20 @@
      */
     async function fetchMoneyLog(client, { from, categories, perCategory = 100 }) {
         const out = [];
+        // Round 7 (C.0): the log by type, with the names of each type's data fields (never a value).
+        const fields = logFieldsOf([]);
         // A category that filled its page covers less than the whole span: only the newest `perCategory` lines came back.
         let coveredFrom = from * 1000;
         for (const c of categories) {
             const d = await client.get('v2/user/log', { cat: c.id, from, limit: perCategory });
             const rows = (d && d.log) || [];
+            logFieldsOf(rows, fields);
             for (const e of rows) out.push({ at: Number(e.timestamp) * 1000, title: String((e.details && e.details.title) || ''), category: c.title, money: moneyOf(e.data) });
             if (rows.length >= perCategory) coveredFrom = Math.max(coveredFrom, Math.min(...rows.map((e) => Number(e.timestamp) * 1000)));
         }
         out.sort((a, b) => b.at - a.at);
         out.coveredFrom = coveredFrom;
+        out.fields = logFieldsList(fields);
         return out;
     }
 
@@ -6235,6 +6727,7 @@
     const JUMP_LIKE = new Set(['chocoJump', 'edvdJump', 'happy99k', 'consoleJump', 'consoleJumpToy', 'edvdJumpAN']);
     const HAPPY_BOUGHT = new Set(['dailyChoco', 'chocoJump', 'edvdJump', 'happy99k', 'consoleJump', 'consoleJumpToy', 'edvdJumpAN']);
     const BOOSTERS = new Set(['steadyBoost', 'steadyMax']);
+    const STEADY_LIKE = new Set(['steady', 'steadyLite', 'steadyBoost', 'steadyMax', 'blissSteady']);
 
     /** The Plan dropdown: what "best" means. */
     const PICK_BY = {
@@ -6247,7 +6740,11 @@
     /** A plan that loses more than this share of the best plan's stats doesn't fit the player (hidden unless asked). */
     const FIT_MIN_SHARE = 0.5;
 
-    /** Does a plan fit this player? (Owner: only show what fits; a tick shows the rest.) */
+    /**
+     * Does a plan fit this player? (Owner: only show what fits; a tick shows the rest.)
+     * `best` is the plan that gains most inside the limit (round 7: not the pick,
+     * which under "best value" can be a small plan and hid everything else).
+     */
     function fitsPlayer(r, best) {
         if (!r || !best) return true;
         return !(best.gained > 0) || r.gained >= FIT_MIN_SHARE * best.gained;
@@ -6259,26 +6756,57 @@
     }
 
     /**
+     * The day of a plan a gym opens on (1 = its first day), from the simulator's
+     * own run (`unlocked[].t`, minutes); null when the plan doesn't open it in
+     * its days.
+     */
+    function opensOnDay(r, gymId) {
+        const u = r && Array.isArray(r.unlocked) ? r.unlocked.find((x) => Number(x.gymId) === Number(gymId)) : null;
+        return u && Number.isFinite(u.t) ? Math.floor(u.t / 1440) + 1 : null;
+    }
+
+    const cheaperOf = (a, b) => (b.cost < a.cost ? b : a);
+    const shortNameOf = (id) => (STRATEGIES[id] && STRATEGIES[id].short) || id;
+
+    /**
+     * Round 7 (ROUND7-PLAN §3 A): the pick is always by the Plan rule. A gym to
+     * unlock never outranks stats: every plan says when it opens the gym, and an
+     * optional "open it by" day leaves out the plans that miss it (when any plan
+     * makes it), then the rule picks as usual.
+     *
      * @param {object} results - {id: simulateStrategy result}
      * @param {object} o
      * @param {number} [o.budget] - money for the horizon; Infinity when unset
      * @param {string} [o.pickBy] - 'auto' (most stats in the income budget), 'most' (most stats in the budget), 'value' (most per $1M in the budget), 'max' (most stats, no budget)
-     * @param {string} [o.goal] - 'unlock': the plan that puts the most energy through the gym (unlocks soonest) in the budget
-     * @returns {{recommended:string, pickBy:string, alternatives:object[], reasons:string[]}}
+     * @param {object} [o.openBy] - {gymId, days, name?, horizon?}: the gym to unlock; with `days`, it must open by that day
+     *   of the run (horizon: the run's days; a day past it can't be judged in this run and leaves nothing out)
+     * @returns {{recommended:string, pickBy:string, alternatives:object[], reasons:string[], facts:object}}
      */
-    function recommend(results, { budget = Infinity, bliss = false, pickBy = 'most', goal = null } = {}) {
+    function recommend(results, { budget = Infinity, bliss = false, pickBy = 'most', openBy = null } = {}) {
         const list = Object.values(results).filter(Boolean);
         if (!list.length) return { recommended: null, pickBy, alternatives: [], reasons: [] };
         const limit = pickBy === 'max' ? Infinity : budget;
         // A plan that doesn't fit the player (the console jump over 250k in a stat it trains) is shown, never picked.
         const pickable = list.filter((r) => !r.blocked);
-        const inBudget = (pickable.length ? pickable : list).filter((r) => r.cost <= limit);
-        const pool = inBudget.length ? inBudget : [(pickable.length ? pickable : list).reduce((a, b) => (b.cost < a.cost ? b : a))];
+        const cands = pickable.length ? pickable : list;
+        // "Open it by": the plans that open the gym in time, when any does.
+        const date = openBy && openBy.gymId && openBy.days > 0 && !(openBy.horizon > 0 && openBy.days > openBy.horizon) ? openBy : null;
+        const opens = {};
+        if (openBy && openBy.gymId) for (const r of list) opens[r.id] = opensOnDay(r, openBy.gymId);
+        const onTime = date ? cands.filter((r) => opens[r.id] !== null && opens[r.id] <= date.days) : cands;
+        const missedDate = Boolean(date) && !onTime.length;
+        const dated = missedDate ? cands : onTime;
+        const late = new Set(date && !missedDate ? cands.filter((r) => !onTime.includes(r)).map((r) => r.id) : []);
+        const inBudget = dated.filter((r) => r.cost <= limit);
+        const nothingFits = !inBudget.length;
+        const pool = nothingFits ? [dated.reduce(cheaperOf)] : inBudget;
         const perM = perMillion;
-        if (goal === 'unlock') pool.sort((a, b) => (b.energyTrained || 0) - (a.energyTrained || 0) || b.gained - a.gained);
-        else if (pickBy === 'value') pool.sort((a, b) => perM(b) - perM(a) || b.gained - a.gained);
+        if (pickBy === 'value') pool.sort((a, b) => perM(b) - perM(a) || b.gained - a.gained);
         else pool.sort((a, b) => b.gained - a.gained || perM(b) - perM(a));
         const best = pool[0];
+        // Fit: against the plan that gains most inside the limit; the cheapest plan is never hidden.
+        const top = pool.reduce((a, b) => (b.gained > a.gained ? b : a));
+        const cheapest = cands.reduce(cheaperOf);
         budget = limit;
         const alternatives = list
             .filter((r) => r.id !== best.id)
@@ -6290,42 +6818,72 @@
                 if (overBudget && r.gained > best.gained) verdict = 'overBudget';
                 else if (Math.abs(deltaStatsPct) < 1 && Math.abs(deltaCost) < 1e6) verdict = 'same';
                 else if (deltaStatsPct > 0 && !overBudget) verdict = 'better';
-                const alt = { id: r.id, gained: r.gained, cost: r.cost, perM: perM(r), deltaStatsPct, deltaCost, overBudget, verdict, fits: !r.blocked && fitsPlayer(r, best), blocked: r.blocked || null, buysConsole: Boolean(r.used && r.used[104] > 0) };
-                return { ...alt, why: whyNot(best, alt, { bliss, budget, pickBy }) };
+                const alt = { id: r.id, gained: r.gained, cost: r.cost, perM: perM(r), deltaStatsPct, deltaCost, overBudget, verdict, fits: !r.blocked && (r.id === cheapest.id || fitsPlayer(r, top)), blocked: r.blocked || null, buysConsole: Boolean(r.used && r.used[104] > 0), late: late.has(r.id), opens: opens[r.id] === undefined ? undefined : opens[r.id] };
+                return { ...alt, why: whyNot(best, alt, { bliss, budget, pickBy, openBy: date }) };
             })
             .sort((a, b) => b.gained - a.gained);
-        return { recommended: best.id, pickBy, goal, perM: perM(best), alternatives, reasons: whyRecommended(best, results, { budget, pickBy, goal }) };
+        const facts = { limit: Number.isFinite(limit) ? limit : null, nothingFits, missedDate, late: [...late], top: top.id, cheapest: cheapest.id, opens: openBy && openBy.gymId ? opens[best.id] : undefined };
+        return { recommended: best.id, pickBy, openBy: openBy || null, perM: perM(best), alternatives, reasons: whyRecommended(best, results, { budget, pickBy, date, missedDate, late, nothingFits, opens, cands }), facts };
     }
 
-    /** One line on why the recommended plan wins. */
-    function whyRecommended(best, results, { budget, pickBy = 'most', goal = null }) {
+    /**
+     * Why the recommended plan wins: sentences built from the comparison's own
+     * numbers (round 7: a line that says "most stats" is only written when no
+     * plan it could have picked gains more).
+     */
+    function whyRecommended(best, results, { budget, pickBy = 'most', date = null, missedDate = false, late = new Set(), nothingFits = false, opens = {}, cands = [] }) {
         const out = [];
-        if (goal === 'unlock') out.push('It puts the most energy through the gym, so the next gym opens soonest.');
-        if (pickBy === 'value') out.push('The most stats for each $1M you spend.');
-        if (pickBy === 'max') out.push('The most stats, whatever it costs.');
+        const all = Object.values(results).filter(Boolean);
+        const money = fmtMoney(best.cost);
+        const gymName = date && date.name ? date.name : 'the gym';
+        const among = late.size ? ' of the plans that open ' + gymName + ' by day ' + date.days : '';
+        if (nothingFits) out.push('Nothing fits ' + fmtMoney(budget) + ': this is the cheapest plan' + among + ' at ' + money + ', ' + fmtMoney(best.cost - budget) + ' over.');
+        else if (pickBy === 'value') out.push('The most stats for each $1M' + among + ': ' + (best.cost > 0 ? fmtShort(perMillion(best)) + ' per $1M' : 'it costs nothing') + (Number.isFinite(budget) ? ', inside your ' + fmtMoney(budget) : '') + '.');
+        else if (!Number.isFinite(budget)) out.push('The most stats' + (among || ' of every plan') + ': +' + fmtShort(best.gained) + ' for ' + money + '.');
+        else out.push('The most stats inside your ' + fmtMoney(budget) + among + ': +' + fmtShort(best.gained) + ' for ' + money + '.');
+        // What gains more and why it isn't the pick: over the budget, or it misses the date.
+        const more = cands.filter((r) => r.id !== best.id && r.gained > best.gained);
+        const over = more.filter((r) => r.cost > budget && !late.has(r.id)).sort((a, b) => a.cost - b.cost);
+        if (over.length && !nothingFits) out.push((over.length === 1 ? shortNameOf(over[0].id) + ' gains more but is' : over.length + ' plans gain more but are') + ' over your budget' + (over.length === 1 ? ' (' + fmtMoney(over[0].cost) + ')' : '; the cheapest of them is ' + shortNameOf(over[0].id) + ' at ' + fmtMoney(over[0].cost)) + '.');
+        if (late.size) {
+            const names = [...late].map((id) => shortNameOf(id) + (opens[id] ? ' (day ' + opens[id] + ')' : ' (not in these days)'));
+            out.push('Left out for opening ' + gymName + ' after day ' + date.days + ': ' + names.join(', ') + '.');
+        }
+        if (missedDate) {
+            const soonest = cands.filter((r) => opens[r.id]).sort((a, b) => opens[a.id] - opens[b.id])[0];
+            out.push('No plan opens ' + gymName + ' by day ' + date.days + (soonest ? '; the soonest is ' + shortNameOf(soonest.id) + ' on day ' + opens[soonest.id] : '') + ', so the date is not counted.');
+        }
+        // The mechanism, only where the numbers back it.
+        const jumps = all.filter((r) => JUMP_LIKE.has(r.id));
+        const steady = results.steady;
         if (BOOSTERS.has(best.id)) out.push('FHC and cans use the booster cooldown, so they add to your Xanax instead of replacing it.');
-        const beaten = Object.values(results).filter((r) => r && r.id !== best.id && r.gained > best.gained);
-        if (beaten.length && beaten.every((r) => r.cost > budget)) out.push('Anything that gains more is over your budget.');
-        if (best.id === 'steady') out.push('Stacking Xanax for a jump stops natural energy, so you end with fewer stats.');
+        if (STEADY_LIKE.has(best.id) && jumps.length && jumps.every((r) => r.gained < best.gained)) out.push('Stacking Xanax for a jump stops natural energy, so the jumps end with fewer stats.');
         if (best.id === 'blissSteady') out.push('Ignorance Is Bliss lets happy climb above your maximum, so boosters keep paying off.');
-        if (JUMP_LIKE.has(best.id)) out.push('At your stats a bigger happy multiplies each train more than the energy you lose while stacking.');
+        if (JUMP_LIKE.has(best.id) && steady && best.gained > steady.gained) out.push('At your stats a bigger happy multiplies each train more than the energy you lose while stacking.');
         return out;
     }
 
     /**
      * One line on why an alternative is not the recommendation (Plan › Other
-     * plans): the number that decides it first, then the mechanism.
+     * plans): the numbers that decide it, then the mechanism. A cheaper plan is
+     * never "more"; a plan that gains more says what kept it out (the budget,
+     * the Plan rule, the date, or that it doesn't fit).
      * @param {object} best - the recommended result {id, gained, cost}
      * @param {object} alt - an alternatives[] row
      */
-    function whyNot(best, alt, { bliss = false, budget = Infinity, pickBy = 'most' } = {}) {
+    function whyNot(best, alt, { bliss = false, budget = Infinity, pickBy = 'most', openBy = null } = {}) {
         if (!best || !alt) return '';
         const pct = Math.round(alt.deltaStatsPct);
-        // Picking by value: a plan with more stats loses on stats per $1M.
-        if (pickBy === 'value' && pct > 0) return '+' + pct + '% stats but fewer per $1M (' + fmtShort(alt.perM || 0) + ' vs ' + fmtShort(perMillion(best)) + ').';
-        // Over budget is the reason only when it would otherwise win; a worse plan leads with what it loses.
-        if (alt.overBudget && alt.gained > best.gained) return 'Over your ' + fmtMoney(budget) + ' budget (it would gain +' + pct + '% more).';
+        const dCost = alt.deltaCost;
+        const moneyWords = dCost >= 0.5e6 ? fmtMoney(dCost) + ' more' : dCost <= -0.5e6 ? fmtMoney(-dCost) + ' less' : 'the same money';
         if (alt.blocked) return 'Doesn’t fit you: ' + alt.blocked + '.';
+        if (alt.late && openBy) return (alt.opens ? 'Opens ' + (openBy.name || 'the gym') + ' on day ' + alt.opens + ', after your day ' + openBy.days : 'Misses your date: it doesn’t open ' + (openBy.name || 'the gym') + ' in these days') + (alt.gained > best.gained ? ' (it would gain +' + pct + '% for ' + moneyWords + ')' : '') + '.';
+        if (alt.gained > best.gained) {
+            // Picking by value: a plan with more stats loses on stats per $1M.
+            if (pickBy === 'value' && !alt.overBudget) return '+' + pct + '% stats but fewer per $1M (' + fmtShort(alt.perM || 0) + ' vs ' + fmtShort(perMillion(best)) + ').';
+            if (alt.overBudget) return 'Over your ' + fmtMoney(budget) + ' budget by ' + fmtMoney(alt.cost - budget) + ' (it would gain +' + pct + '% for ' + moneyWords + ').';
+            return '+' + pct + '% stats for ' + moneyWords + '.';
+        }
         if (alt.verdict === 'same') return 'The same stats for the same money: nothing to gain by switching.';
         const why = [];
         if (alt.buysConsole) why.push('the cost includes a Game Console (you have none)');
@@ -6333,10 +6891,11 @@
         if (HAPPY_BOUGHT.has(alt.id)) why.push('the Ecstasy takes a drug cooldown a Xanax would fill');
         if (alt.id === 'dailyChoco' || alt.id === 'candyXanax') why.push('the candy lifts happy for one session a day');
         if (alt.id === 'consoleJump' || alt.id === 'consoleJumpToy') why.push('300 energy a day goes to the console, not the gym');
-        if (BOOSTERS.has(alt.id)) why.push('FHC and cans cost far more per stat than Xanax and the refill');
+        if (BOOSTERS.has(alt.id) && dCost > 0) why.push('FHC and cans cost far more per stat than Xanax and the refill');
         if (HAPPY_BOUGHT.has(alt.id) && !bliss) why.push('without Ignorance Is Bliss the extra happy resets');
-        const head = pct < 0 ? '−' + -pct + '% stats' : pct > 0 ? '+' + pct + '% stats for ' + fmtMoney(alt.deltaCost) + ' more' : 'No more stats';
-        const cost = pct < 0 && alt.deltaCost > 0 ? ' and ' + fmtMoney(alt.deltaCost) + ' more' + (alt.overBudget ? ', over your budget' : '') : '';
+        if (pickBy === 'value' && Number.isFinite(alt.perM) && alt.perM < perMillion(best)) why.unshift('fewer stats per $1M (' + fmtShort(alt.perM) + ' vs ' + fmtShort(perMillion(best)) + ')');
+        const head = pct < 0 ? '−' + -pct + '% stats' : 'No more stats';
+        const cost = dCost >= 0.5e6 ? ' and ' + moneyWords + (alt.overBudget ? ', over your budget' : '') : dCost <= -0.5e6 ? ' for ' + moneyWords : '';
         return head + cost + (why.length ? ': ' + why.join('; ') + '.' : '.');
     }
 
@@ -6713,6 +7272,102 @@
         return out.reverse();
     }
 
+    /* ===== src/core/slices.js ===== */
+    /*
+     * Breaks for the page while a plan is worked out (round 7, R7.3b).
+     *
+     * What was wrong: Create plan and Re-plan waited on a 0 ms timer between
+     * slices, 170 times for 12 months. A browser runs a hidden tab's timers
+     * once a second at best, so a player who clicked and went back to Torn
+     * waited minutes (280 s in Edge, over 400 s in Chrome) for 3 seconds of
+     * work, and saw "stuck".
+     *
+     * Now a break is a message to ourselves (a MessageChannel: the browser does
+     * not slow those down in a hidden tab), and only once enough work has been
+     * done since the last break; in between, a break costs nothing. The same
+     * break carries the run's progress and lets it be cancelled.
+     */
+
+    /** Work between two breaks: short enough that a click or a scroll never waits long. */
+    const SLICE_MS = 30;
+
+    /** Thrown at a break when the run was cancelled: nothing is saved, the old plan stays. */
+    class PlanCancelled extends Error {
+        constructor() {
+            super('Cancelled: your plan is unchanged.');
+            this.cancelled = true;
+        }
+    }
+
+    /**
+     * @param {object} o
+     * @param {number} [o.everyMs] - work between breaks
+     * @param {function} [o.now] - a clock in ms (performance.now)
+     * @param {function} [o.cancelled] - () => true to stop the run at the next break
+     * @param {function} [o.post] - how to wait one turn of the page (tests); default: a MessageChannel message, else a 0 ms timer
+     * @returns {function & {breaks: function, stop: function}} pause(): a promise, already resolved while the slice has time left
+     */
+    function makePause({ everyMs = SLICE_MS, now = defaultNow, cancelled = null, post = null } = {}) {
+        let last = now();
+        let breaks = 0;
+        let channel = null;
+        const waiting = [];
+        const viaChannel = () =>
+            new Promise((resolve) => {
+                if (!channel) {
+                    channel = new MessageChannel();
+                    channel.port1.onmessage = () => {
+                        const r = waiting.shift();
+                        // Under node (tests) an open port keeps the process alive: only while a break is waiting.
+                        if (!waiting.length && typeof channel.port1.unref === 'function') channel.port1.unref();
+                        if (r) r();
+                    };
+                }
+                if (typeof channel.port1.ref === 'function') channel.port1.ref();
+                waiting.push(resolve);
+                channel.port2.postMessage(0);
+            });
+        const turn = post || (typeof MessageChannel === 'function' ? viaChannel : () => new Promise((r) => setTimeout(r, 0)));
+        const done = Promise.resolve();
+        const pause = () => {
+            if (cancelled && cancelled()) return Promise.reject(new PlanCancelled());
+            if (now() - last < everyMs) return done;
+            breaks++;
+            return turn().then(() => {
+                last = now();
+                if (cancelled && cancelled()) throw new PlanCancelled();
+            });
+        };
+        pause.breaks = () => breaks;
+        // The page goes away, or the run is over: let the channel go.
+        pause.stop = () => {
+            if (channel) {
+                channel.port1.onmessage = null;
+                channel.port1.close();
+                channel = null;
+            }
+        };
+        return pause;
+    }
+
+    function defaultNow() {
+        return typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+    }
+
+    /**
+     * Run a generator of work to its end, with a break after each step when one
+     * is due. `onStep(value)` sees what each step yielded (progress).
+     */
+    async function runSliced(gen, pause, onStep = null) {
+        let r = gen.next();
+        while (!r.done) {
+            if (onStep) onStep(r.value);
+            await pause();
+            r = gen.next();
+        }
+        return r.value;
+    }
+
     /* ===== src/core/model.js ===== */
     /*
      * Everything a page shows, worked out from stored data in one pure pass:
@@ -6720,6 +7375,7 @@
      * plan, the day's log and settings. The webpage and the overlay both render
      * from this, so they can never disagree.
      */
+
 
 
 
@@ -6764,7 +7420,7 @@
 
     /** Drug steps in the day log (a held Xanax and a catch-up with a drug count too): one rule everywhere. */
     function isDrugEntry(e) {
-        return e.kind === 'xanax' || e.kind === 'stack' || e.kind === 'hold' || (e.kind === 'catchup' && e.drug);
+        return e.kind === 'xanax' || e.kind === 'stack' || e.kind === 'hold' || e.xanax === true || (e.kind === 'catchup' && e.drug);
     }
 
     function projectionFor(args) {
@@ -6799,6 +7455,21 @@
         const best = {};
         for (const k of STATS) best[k] = bestGymFor(k, stats, unlocked, { table, drugsTaken: extra.drugsTaken ?? null, active: state && state.gymId });
         return { table, perks, unlocked, stats, best };
+    }
+
+    /**
+     * The gym to unlock (Plan › Train toward › Unlock): its id and name, and with
+     * an "open it by" date the day of the run it must open by. Null once the gym
+     * is open (the goal has nothing left to do). Round 7: it never outranks stats.
+     * @param {number} from - the run's first day (ms)
+     * @param {number} days - the run's days
+     */
+    function openByOf(plan, pc, from, days) {
+        const g = plan && plan.goal && plan.goal.kind === 'unlockGym' ? plan.goal : null;
+        if (!g || !pc || (pc.unlocked || []).map(Number).includes(Number(g.gymId))) return null;
+        const gym = gymById(g.gymId, pc.table);
+        const by = Number(g.by) > 0 ? Number(g.by) : null;
+        return { gymId: Number(g.gymId), name: gym ? gym.name : null, by, days: by ? Math.ceil((by - from) / DAY) : null, horizon: days };
     }
 
     /** The booster cap: 24 h, plus faction Voracity's extra hours, or the setting if higher. */
@@ -6845,8 +7516,12 @@
         };
     }
 
-    /** The simulation inputs every strategy shares. */
-    function simInputs({ state, pc, shares, settings, prices, special = 0, statics = {}, events = null, unlock = null }) {
+    /**
+     * The simulation inputs every strategy shares. `live` (round 7; Create plan and Re-plan): the run starts from the
+     * bars as they are (energy, happy, the drug cooldown, today's refill used), like the day plan does; without it, from
+     * a full bar with no cooldown (a stretch that starts later, a what-if over past days).
+     */
+    function simInputs({ state, pc, shares, settings, prices, special = 0, statics = {}, events = null, unlock = null, live = false }) {
         const gyms = {};
         for (const k of STATS) if (pc.best[k]) gyms[k] = { dots: pc.best[k].dots[k], energy: pc.best[k].energy };
         const ic = itemContext(statics, settings);
@@ -6884,6 +7559,7 @@
             xanaxCdMin: xanaxCdOf(statics.xanaxCds).min,
             // Today's candy pick, kept unless another is clearly cheaper.
             candyPrefer: statics.candyPick && statics.candyPick.day === tornDayStart(state.at) ? statics.candyPick.id : null,
+            ...(live ? { start: { energy: state.energy.current, happy: state.happy.current, drugCdMin: Math.max(0, Number(state.drugCd) || 0) / 60, refillUsed: state.refillUsed === true } } : {}),
             // Year plans (core/year.js): events on their dates, gyms opening as energy is trained.
             ...(events ? { events } : {}),
             ...(unlock ? { unlock } : {}),
@@ -6903,15 +7579,34 @@
      * with the most stats in the budget (or per $1M, or no budget) wins.
      * @returns {{result:object, candy:object|null}}
      */
-    function withBestCandy(id, base, { budget = Infinity, pickBy = 'most' } = {}) {
+    function* withBestCandySteps(id, base, { budget = Infinity, pickBy = 'most' } = {}) {
+        const ask = { prices: base.prices, npc: base.npc, capH: base.boosterCapH, cdCuts: base.cdMult, happyMult: base.candyMult, budget, pickBy, prefer: base.candyPrefer };
+        // Which candy the pick will weigh (it asks about every candidate, whatever the answers), each run in slices.
+        const asked = [];
+        bestCandy({ ...ask, evaluate: (cid, n) => (asked.push([cid, n]), { gained: 0, cost: 0 }) });
         const runs = {};
-        const evaluate = (cid, n) => (runs[cid] = runs[cid] || simulateStrategy(id, { ...base, special: 0, candyId: cid, candyCount: n }));
-        const pick = bestCandy({ prices: base.prices, npc: base.npc, capH: base.boosterCapH, cdCuts: base.cdMult, happyMult: base.candyMult, budget, pickBy, evaluate, prefer: base.candyPrefer });
-        if (!pick) return { result: withBestSpecial(id, base), candy: null };
+        for (const [cid, n] of asked) if (!runs[cid]) runs[cid] = yield* simSliced(id, { ...base, special: 0, candyId: cid, candyCount: n });
+        const pick = bestCandy({ ...ask, evaluate: (cid) => runs[cid] });
+        if (!pick) return { result: yield* withBestSpecialSteps(id, base), candy: null };
         const input = { ...base, candyId: pick.id, candyCount: pick.count };
-        const result = base.special > 0 ? withBestSpecial(id, input) : runs[pick.id];
+        const result = base.special > 0 ? yield* withBestSpecialSteps(id, input) : runs[pick.id];
         const candy = { id: pick.id, count: pick.count, unit: pick.unit, source: pick.source, shop: pick.shop, perBoost: pick.perBoost, options: pick.options.length };
         return { result: { ...result, candy }, candy };
+    }
+
+    /**
+     * One simulator run in slices (round 7, R7.3b): it yields every SIM_SLICE_DAYS simulated days, so whoever drives
+     * the work can give the page a break. The result is the same as simulateStrategy's.
+     */
+    function* simSliced(id, o) {
+        return yield* simulateSteps(id, { ...o, sliceDays: SIM_SLICE_DAYS });
+    }
+
+    /** Run a generator of work to its end in one go (no breaks). */
+    function drainSteps(gen) {
+        let r = gen.next();
+        while (!r.done) r = gen.next();
+        return r.value;
     }
 
     /**
@@ -6935,41 +7630,59 @@
      * page in between (a comparison is 60+ thirty-day runs: in one go it froze
      * the page for a few hundred ms after a click, e.g. ticking a city shop).
      */
-    async function compareStrategiesAsync(args, { pause = () => new Promise((r) => setTimeout(r, 0)) } = {}) {
-        const steps = compareSteps(args);
-        let r = steps.next();
-        while (!r.done) {
-            await pause();
-            r = steps.next();
+    async function compareStrategiesAsync(args, { pause = null } = {}) {
+        // Without a pause of the caller's: a break that is not a timer (core/slices.js), let go at the end.
+        const own = pause ? null : makePause();
+        try {
+            return await runSliced(compareSteps(args), pause || own);
+        } finally {
+            if (own) own.stop();
         }
-        return r.value;
     }
 
-    /** The comparison, yielding after each plan (see compareStrategies / compareStrategiesAsync). */
-    function* compareSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', events = null, unlock = null }) {
-        const base = simInputs({ state, pc, shares, settings, prices, special, statics, events, unlock });
+    /**
+     * The comparison as a generator: it yields the id of each plan as it starts on it (progress), and a number every few
+     * simulated weeks inside a run (a chance for a break: see compareStrategies / compareStrategiesAsync, core/slices.js).
+     */
+    function* compareSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', events = null, unlock = null, live = false }) {
+        const base = simInputs({ state, pc, shares, settings, prices, special, statics, events, unlock, live });
         const results = {};
         const budget = budgetOf(settings);
         for (const id of feasibleStrategies({ bliss: pc.perks.bliss, boosterCapH: base.boosterCapH, toyShop5: base.toyShop5, adultNovelties10: base.adultNovelties10 })) {
             yield id;
             if (id === 'consoleJump' || id === 'consoleJumpToy') {
                 // Low-stat players only: over 250k in a stat it trains, it's shown (behind the tick) and never picked.
-                const probe = simulateStrategy(id, { ...base, special: 0 });
+                const probe = yield* simSliced(id, { ...base, special: 0 });
                 const blocked = consoleBlocked(pc.stats, probe.perStat);
                 if (blocked) {
                     results[id] = { ...probe, blocked };
                     continue;
                 }
             }
-            results[id] = withBestRefill(id, base, { budget, pickBy }, (b) => (CANDY_PLANS.has(id) ? withBestCandy(id, b, { budget, pickBy }).result : withBestSpecial(id, b)));
+            results[id] = yield* withBestRefillSteps(id, base, { budget, pickBy }, function* (b) {
+                return CANDY_PLANS.has(id) ? (yield* withBestCandySteps(id, b, { budget, pickBy })).result : yield* withBestSpecialSteps(id, b);
+            });
         }
         if (results.steady && Number.isFinite(budget)) {
             const choice = boosterChoice({ perDay: (budget - results.steady.cost) / base.days, maxE: base.energyMax, prices: base.prices, canMult: base.canMult, capH: base.boosterCapH });
             // Only a real middle rung: fewer than steadyMax's FHC every time.
             if (choice && !(choice.id === steadyMaxItem() && results.steadyMax && choice.perDay >= boostersPerDayMax(base))) {
                 yield 'steadyBoost';
-                results.steadyBoost = { ...withBestSpecial('steadyBoost', { ...base, energyBooster: { id: choice.id, perDay: choice.perDay } }), booster: choice };
+                results.steadyBoost = { ...(yield* withBestSpecialSteps('steadyBoost', { ...base, energyBooster: { id: choice.id, perDay: choice.perDay } })), booster: choice };
             }
+        }
+        // Round 7 (A.4): steady costs more than the budget. Steady with as many Xanax a day as the money covers (3, 2, 1
+        // or none) and the refill only when it fits: more Xanax is more stats, so the first that fits is the one.
+        const limit = pickBy === 'max' ? Infinity : budget;
+        if (results.steady && Number.isFinite(limit) && results.steady.cost > limit) {
+            yield 'steadyLite';
+            let lite = null;
+            for (const n of [3, 2, 1, 0]) {
+                const r = yield* withBestRefillSteps('steadyLite', { ...base, xanaxPerDay: n }, { budget, pickBy }, (b) => withBestSpecialSteps('steadyLite', b));
+                lite = { ...r, xanaxPerDay: n };
+                if (r.cost <= limit) break;
+            }
+            results.steadyLite = lite;
         }
         return results;
     }
@@ -6982,13 +7695,21 @@
      * lower the stats per $1M. The result says which (`refill`, `refillGain`,
      * `refillCost`), and the day plan follows it.
      */
-    function withBestRefill(id, base, { budget = Infinity, pickBy = 'most' } = {}, run) {
-        const withIt = run(base);
+    function withBestRefill(id, base, opts = {}, run) {
+        // eslint-disable-next-line require-yield
+        return drainSteps(withBestRefillSteps(id, base, opts, function* (b) {
+            return run(b);
+        }));
+    }
+
+    /** withBestRefill in slices: `run` is a generator (a plan's run, yielding for breaks). */
+    function* withBestRefillSteps(id, base, { budget = Infinity, pickBy = 'most' } = {}, run) {
+        const withIt = yield* run(base);
         // Nothing to decide: no points bought for refills in this plan (special refills stand in), or no limit and "most".
         if (!(withIt.used && withIt.used[POINTS] > 0)) return withIt;
         const limit = pickBy === 'max' ? Infinity : budget;
         if (pickBy !== 'value' && withIt.cost <= limit) return { ...withIt, refill: true };
-        const without = run({ ...base, noRefill: true });
+        const without = yield* run({ ...base, noRefill: true });
         const gain = withIt.gained - without.gained;
         const cost = withIt.cost - without.cost;
         const per = (r) => (r.cost > 0 ? r.gained / r.cost : Infinity);
@@ -7001,11 +7722,52 @@
      * maximum (steady training) spending them can cost more than they add. Run
      * the plan with and without them and keep the better (`specialHelps`).
      */
-    function withBestSpecial(id, base) {
-        const r = simulateStrategy(id, base);
+    function* withBestSpecialSteps(id, base) {
+        const r = yield* simSliced(id, base);
         if (!(base.special > 0)) return r;
-        const without = simulateStrategy(id, { ...base, special: 0 });
+        const without = yield* simSliced(id, { ...base, special: 0 });
         return without.gained > r.gained ? { ...without, specialHelps: false } : { ...r, specialHelps: true, specialGain: r.gained - without.gained };
+    }
+
+    /** How many of the gyms a plan opens are weighed (the nearest ones: each is a run of the whole plan). */
+    const GYM_WORTH_MAX = 3;
+
+    /**
+     * Is a gym worth opening (round 7, the friend's question)? For the first
+     * gyms a plan opens in its days, the plan is run again with the ladder
+     * stopping just before each: the difference is what that gym adds by the
+     * plan's end, against its fee. The plan keeps its own candy, booster,
+     * refill and Xanax a day (as the year's band re-runs a stretch).
+     * @param {object} r - the plan's result (with `unlocked`)
+     * @param {object} args - compareSteps' arguments
+     * @param {function} hookFor - (stopAt gym id) => an unlock hook that stops there
+     * @returns {Generator} yielding between runs; its value: [{gymId, name, day, fee, gain}]
+     */
+    function* gymWorthSteps(r, args, hookFor) {
+        const opened = r && Array.isArray(r.unlocked) ? r.unlocked.filter((u) => u.gymId <= 24).slice(0, GYM_WORTH_MAX) : [];
+        if (!opened.length) return [];
+        const base = simInputs(args);
+        const run = function* (stopAt) {
+            const out = yield* simSliced(r.id, {
+                ...base,
+                ...(r.candy ? { candyId: r.candy.id, candyCount: r.candy.count } : {}),
+                ...(r.booster ? { energyBooster: { id: r.booster.id, perDay: r.booster.perDay } } : {}),
+                ...(r.refill === false ? { noRefill: true } : {}),
+                ...(Number.isFinite(r.xanaxPerDay) ? { xanaxPerDay: r.xanaxPerDay } : {}),
+                ...(r.specialHelps === false ? { special: 0 } : {}),
+                unlock: hookFor(stopAt),
+            });
+            return out.gained;
+        };
+        // With the ladder open up to each gym in turn; the gym's worth is the step between two runs.
+        const upTo = [];
+        yield 'gyms';
+        upTo.push(yield* run(opened[0].gymId - 1));
+        for (const u of opened) {
+            yield 'gyms';
+            upTo.push(yield* run(u.gymId));
+        }
+        return opened.map((u, i) => ({ gymId: u.gymId, name: (gymById(u.gymId, args.pc.table) || {}).name || 'Gym ' + u.gymId, day: Number.isFinite(u.t) ? Math.floor(u.t / 1440) + 1 : null, fee: u.cost || 0, gain: upTo[i + 1] - upTo[i] }));
     }
 
     /** The steady plan's cost a day (Auto's income adds it back while receipts cover under 3 days: it never depends on the budget). */
@@ -7026,9 +7788,18 @@
      * Ignorance Is Bliss, what if (Plan's Bliss card): the plans the book
      * changes most, run as if it were active. Not recommended from; shown.
      */
-    function blissWhatIf({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most' }) {
-        const base = { ...simInputs({ state, pc, shares, settings, prices, special, statics }), bliss: true };
-        return { blissSteady: { ...simulateStrategy('blissSteady', base), whatIf: true }, dailyChoco: { ...withBestCandy('dailyChoco', base, { budget: budgetOf(settings), pickBy }).result, whatIf: true } };
+    function blissWhatIf(args) {
+        return drainSteps(blissWhatIfSteps(args));
+    }
+
+    /** blissWhatIf in slices (a generator: yields for breaks inside each run). */
+    function* blissWhatIfSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', live = false }) {
+        const base = { ...simInputs({ state, pc, shares, settings, prices, special, statics, live }), bliss: true };
+        yield 'bliss';
+        const steady = yield* simSliced('blissSteady', base);
+        yield 'bliss';
+        const choco = (yield* withBestCandySteps('dailyChoco', base, { budget: budgetOf(settings), pickBy })).result;
+        return { blissSteady: { ...steady, whatIf: true }, dailyChoco: { ...choco, whatIf: true } };
     }
 
     /**
@@ -7040,10 +7811,15 @@
      * @param {object} o - as compareStrategies, plus `compare` (the real plans) and `recommended` (its id)
      * @returns {object[]} [{id, strategy, company, stars, title, result, deltaPct, note}]
      */
-    function companyWhatIf({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', compare = null, recommended = null }) {
+    function companyWhatIf(args) {
+        return drainSteps(companyWhatIfSteps(args));
+    }
+
+    /** companyWhatIf in slices (a generator: yields for breaks inside each run). */
+    function* companyWhatIfSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', compare = null, recommended = null, live = false }) {
         const best = compare && recommended ? compare[recommended] : null;
         if (!best) return [];
-        const base = simInputs({ state, pc, shares, settings, prices, special, statics });
+        const base = simInputs({ state, pc, shares, settings, prices, special, statics, live });
         const cj = companyJob(statics.job, statics.jobPoints);
         const limit = pickBy === 'max' ? Infinity : budgetOf(settings);
         const out = [];
@@ -7054,11 +7830,13 @@
             out.push({ id: key, strategy, company, stars, title: 'Hired at a ' + stars + '★ ' + company, result: { ...r, whatIf: true }, deltaPct, note });
         };
         if (!worksAt(cj, 'Adult Novelties', 10) && !base.adultNovelties10) {
-            add('an10', 'edvdJumpAN', 'Adult Novelties', 10, withBestSpecial('edvdJumpAN', { ...base, adultNovelties10: true, freeEdvdPerDay: 10 / VOYEUR_JP, jobHappy: null }));
+            yield 'job';
+            add('an10', 'edvdJumpAN', 'Adult Novelties', 10, yield* withBestSpecialSteps('edvdJumpAN', { ...base, adultNovelties10: true, freeEdvdPerDay: 10 / VOYEUR_JP, jobHappy: null }));
         }
         if (!base.toyShop5) {
-            const probe = simulateStrategy('consoleJumpToy', { ...base, special: 0, toyShop5: true, jobHappy: null });
-            if (!consoleBlocked(pc.stats, probe.perStat)) add('toy5', 'consoleJumpToy', 'Toy Shop or Game Shop', 5, withBestCandy('consoleJumpToy', { ...base, toyShop5: true, jobHappy: null }, { budget: budgetOf(settings), pickBy }).result);
+            yield 'job';
+            const probe = yield* simSliced('consoleJumpToy', { ...base, special: 0, toyShop5: true, jobHappy: null });
+            if (!consoleBlocked(pc.stats, probe.perStat)) add('toy5', 'consoleJumpToy', 'Toy Shop or Game Shop', 5, (yield* withBestCandySteps('consoleJumpToy', { ...base, toyShop5: true, jobHappy: null }, { budget: budgetOf(settings), pickBy })).result);
         }
         return out.sort((a, b) => b.result.gained - a.result.gained);
     }
@@ -7109,6 +7887,7 @@
         const shares = targetShares(plan, pc.stats, build.shares);
         const keep = (build.gyms || []).filter((id) => pc.unlocked.includes(id) && gymAccess(gymById(id, pc.table), pc.stats).ok);
         const today = (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(now));
+        // Today's boost counts once it is finished (round 7: boosters eaten with the drug still to take is "boosting").
         const boostedToday = today.some((e) => e.kind === 'boost');
         // Energy above the maximum is stacked (a jump) or held (daily choco) Xanax: read from the bars, so it survives Torn midnight and reloads.
         // A can (+20–30) above the maximum isn't a Xanax; one Xanax always puts at least 100 above it.
@@ -7138,6 +7917,8 @@
             canMult: pc.perks.canMult || 1,
             // The comparison found the points refill not worth it in this plan: the day plan leaves it out.
             noRefill: Boolean(compare && compare[plan.strategy] && compare[plan.strategy].refill === false),
+            // The small-budget plan: the Xanax a day the comparison found the money covers.
+            ...(compare && compare[plan.strategy] && Number.isFinite(compare[plan.strategy].xanaxPerDay) ? { xanaxPerDay: compare[plan.strategy].xanaxPerDay } : {}),
             toyShop5: Boolean(pc.perks.toyShop5),
             adultNovelties10: Boolean(pc.perks.adultNovelties10),
         };
@@ -7199,14 +7980,18 @@
         const boosterLeft = Math.max(0, boosterFreeAt(state) - now);
         const refillFree = refillAvailable(state, now);
         const refillStep = steps.find((s) => s.kind === 'refill');
-        const xanaxPlanned = today.filter(isDrugEntry).length + steps.filter((s) => (s.kind === 'xanax' || s.kind === 'stack' || s.kind === 'hold') && s.at < tornDayStart(now) + DAY).length;
+        // Xanax today: the ones taken and the ones still planned before midnight, in whatever step they come (a candy +
+        // Xanax boost carries one: round 7, "Xanax 1 of 1 today" while the next step was Xanax #2).
+        const xanaxPlanned = today.filter(isDrugEntry).length + steps.filter((s) => (s.items || []).some((it) => it.id === XANAX) && s.at < tornDayStart(now) + DAY).length;
+        // Xanax stacked for a jump: energy is above the maximum, so a refill (it only fills to the maximum) would add nothing.
+        const stackingNow = (STRATEGIES[plan.strategy] || {}).kind === 'jump' && over > 0;
         const strip = {
             energy: { current: energy, max: e.maximum, fullAt },
             happy: { current: happyAt(state, now, { bliss: pc.perks.bliss }), max: state.happy.maximum, property: statics.property && statics.property.property ? statics.property.property.name : null },
             drug: { left: drugLeft, total: drugLeft > 0 ? Math.max(drugLeft, state.drugCd * 1000) : 0, xanaxDone: ctx.drugsToday, xanaxPlanned },
             // The cooldown left, when it's back under the cap (a booster can be used again), and the plan's next booster step.
             booster: { left: boosterLeft, capH: ctx.boosterCapH, underCapIn: Math.max(0, boosterLeft - ctx.boosterCapH * 3600e3), used: steps.some(usesBooster), next: nextBoost ? { at: nextBoost.at, label: nextBoost.label, kind: nextBoost.kind } : null },
-            refill: { free: refillFree, plannedAt: refillStep ? refillStep.at : null },
+            refill: { free: refillFree, plannedAt: refillStep ? refillStep.at : null, stacking: stackingNow },
         };
 
         // Stats vs build
@@ -7215,7 +8000,8 @@
         const trainedToday = {};
         for (const x of today) for (const k of STATS) trainedToday[k] = (trainedToday[k] || 0) + ((x.trained && x.trained[k]) || 0);
         const plannedToday = {};
-        for (const s of steps) for (const [k, n] of Object.entries(s.trains || {})) plannedToday[k] = (plannedToday[k] || 0) + n;
+        // Today's trains only (round 7: tomorrow's jump was counted in "trains today").
+        for (const s of steps) if (s.at < tornDayStart(now) + DAY) for (const [k, n] of Object.entries(s.trains || {})) plannedToday[k] = (plannedToday[k] || 0) + n;
         const statRows = STATS.map((k) => ({
             stat: k,
             value: pc.stats[k],
@@ -7234,7 +8020,11 @@
         const plannedGain = gainedToday + steps.filter((s) => s.at < tornDayStart(now) + DAY).reduce((a, s) => a + (s.gain || 0), 0);
 
         // Build ETA and next gym
-        const energyPerDay = Math.round(((e.interval <= 600 ? 720 : 480) + 250 * Math.floor(1440 / 420) + e.maximum) / 10) * 10;
+        // Energy a day: the plan followed's own (round 7: the build date and the next gym's days were a fixed steady
+        // 1,620 a day for every plan), else steady's.
+        const planR = compare && compare[plan.strategy];
+        const planDaysN = settings.horizonDays || 30;
+        const energyPerDay = planR && planR.energyTrained > 0 ? Math.round(planR.energyTrained / planDaysN / 10) * 10 : Math.round(((e.interval <= 600 ? 720 : 480) + 250 * Math.floor(1440 / 420) + e.maximum) / 10) * 10;
         // With Ignorance Is Bliss happy doesn't fall back to the maximum: the projection trains at today's happy.
         const projHappy = pc.perks.bliss ? Math.min(HAPPY_CAP, Math.max(state.happy.current, state.happy.maximum) + 300) : state.happy.maximum + 300;
         const proj = projectionFor({ stats: pc.stats, shares, energyPerDay, happy: projHappy, unlocked: pc.unlocked, perks: pc.perks.mult, keep, days: lite ? 2 : 30, active: state.gymId, table: pc.table });
@@ -7252,7 +8042,8 @@
         const heads = [];
         if (!plan.buildPicked) heads.push({ tone: 'warn', text: 'Pick your build type', sub: 'Plan › Build: the plan trains toward it', go: 'plan' });
         for (const w of strictWarnings(steps, now)) heads.push({ tone: 'warn', text: w.text });
-        if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS && !ctx.noRefill) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
+        // Not on a stack day: with energy above the maximum the refill would do nothing (round 7).
+        if (refillFree && msToTornMidnight(now) < REFILL_WARN_MS && !ctx.noRefill && !stackingNow) heads.push({ tone: 'warn', text: 'Refill unused', sub: 'use before 00:00 Torn time' });
         if (ctx.noRefill) {
             const r = compare[plan.strategy];
             heads.push({ tone: 'plain', text: 'Daily refill left out', sub: 'not worth its price in your plan' + (r && r.refillGain > 0 ? ' (+' + Math.round(r.refillGain).toLocaleString('en-US') + ' stats for $' + Math.round(r.refillCost / 1e6) + 'M over the plan)' : ''), go: 'plan' });
@@ -7276,14 +8067,15 @@
         let ladder = null;
         // Auto without its Full key (or before the income is read) runs as "most stats in my budget".
         const pickBy = effectivePickBy(PICK_BY[plan.pickBy] ? plan.pickBy : 'most', auto);
-        const goalKind = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
+        // A gym to unlock: said on every plan (when it opens), with an optional date; never a reason to pick fewer stats.
+        const openBy = openByOf(plan, pc, saved && saved.from ? saved.from : tornDayStart(now), settings.horizonDays || 30);
         if (auto && auto.needsKey) heads.unshift({ tone: 'warn', text: 'Auto mode needs a Full key', sub: 'Settings › Full key · until then a new plan uses your budget', go: 'settings' });
         // No saved plan yet (a new install, or plans from before round 6): today's steps follow the plan picked (steady by
         // default) until you create one. Nothing is worked out in the background.
         if (!saved && !compare) heads.unshift({ tone: 'warn', text: 'Create your plan', sub: 'Plan › Create plan · until then the steps follow ' + ((STRATEGIES[plan.strategy] || STRATEGIES.steady).name || 'steady training').toLowerCase(), go: 'plan' });
         if (saved && saved.progress && saved.progress.ended) heads.unshift({ tone: 'warn', text: 'Your plan has ended', sub: 'Plan › Create plan for the next one', go: 'plan' });
         if (compare) {
-            const r = recIn || recommend(compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy, goal: goalKind });
+            const r = recIn || recommend(compare, { budget: budgetOf(settings), bliss: pc.perks.bliss, pickBy, openBy });
             rec = r;
             const mine = compare[plan.strategy];
             // Following the saved path (its plan for this stretch): that is the plan, not a pick to warn about.
@@ -7300,16 +8092,22 @@
         const recRow = rec && compare ? compare[rec.recommended] : null;
         const cash = statics.inventory && Number.isFinite(statics.inventory.cash) ? statics.inventory.cash : null;
         const spend = recRow ? { perDay: recRow.cost / horizon, budgetPerDay: Number.isFinite(settings.budget) ? settings.budget / horizon : null, cash, lastsDays: cash !== null && recRow.cost > 0 ? cash / (recRow.cost / horizon) : null } : null;
-        // Unlock goal: when the gym opens on each plan (energy through the gym), and what it costs in stats against the best plan.
+        // The gym to unlock: the day each plan opens it (the simulator's own run; an estimate from its energy a day for
+        // plans saved before round 7), with its stats and cost against the recommended plan (one baseline on the page).
         let unlock = null;
-        if (goalKind && compare && !lite) {
-            const gym = gymById(plan.goal.gymId, pc.table);
-            const left = unlockEnergyLeft(pc.unlocked, plan.goal.gymId, gymProgress, pc.perks.gymExpMult);
+        if (openBy && compare && !lite) {
+            const gym = gymById(openBy.gymId, pc.table);
+            const left = unlockEnergyLeft(pc.unlocked, openBy.gymId, gymProgress, pc.perks.gymExpMult);
             if (gym && left !== null) {
-                const most = Object.values(compare).filter(Boolean).reduce((a, b) => (b.gained > a.gained ? b : a), { gained: 0 });
+                const base = (rec && compare[rec.recommended]) || null;
+                const from = saved && saved.from ? saved.from : tornDayStart(now);
                 const rows = {};
-                for (const [id, r] of Object.entries(compare)) if (r) rows[id] = { days: unlockDays(r, left, horizon), statsPct: most.gained > 0 ? (100 * (r.gained - most.gained)) / most.gained : 0 };
-                unlock = { gym, energyLeft: left, rows, best: most.id || null };
+                for (const [id, r] of Object.entries(compare)) {
+                    if (!r) continue;
+                    const day = opensOnDay(r, openBy.gymId);
+                    rows[id] = { day, at: day ? from + (day - 1) * DAY : null, days: day ? null : unlockDays(r, left, horizon), gained: r.gained, cost: r.cost, statsPct: base && base.gained > 0 ? (100 * (r.gained - base.gained)) / base.gained : 0, dCost: base ? r.cost - base.cost : 0, blocked: Boolean(r.blocked) };
+                }
+                unlock = { gym, energyLeft: left, rows, best: rec ? rec.recommended : null, by: openBy.by, byDay: openBy.days };
             }
         }
 
@@ -7900,6 +8698,15 @@
 
     const STATE_POLL_MS = 30000;
 
+    /**
+     * Round 7 (D.4): when Torn's own page shows that something was done (energy spent, a Xanax or a booster taken), the
+     * state is asked for this long after the last such change, instead of at the next 30 s read; never sooner than
+     * EARLY_READ_GAP_MS after the read before it. Measured on the gym fixture: the panel moved to the next step 7 to 26 s
+     * after a session; with this, about 3 s.
+     */
+    const EARLY_READ_DELAY_MS = 2000;
+    const EARLY_READ_GAP_MS = 8000;
+
     /** After a failed state call, wait this long before asking again (not every 3 s heartbeat). */
     const STATE_RETRY_MS = 30000;
 
@@ -7950,11 +8757,12 @@
          * @param {function} [o.isVisible]
          * @param {function} [o.nextStep] - () => the plan's next step (names a drug taken)
          * @param {function} [o.onState] - (state, api) => void, after each poll
+         * @param {function} [o.onStatic] - (statics) => void, after slow data (inventory, perks, gyms…) was read again
          * @param {function} [o.onError] - (error) => void
          * @param {function} [o.isPaused] - () => boolean: Torn Trading runs, ask nothing
          * @param {object} [o.keys] - store keys {state, static, log, leader, history, receipts}
          */
-        constructor({ client, store, tabId, now = () => Date.now(), isVisible = () => true, nextStep = () => null, onState = () => {}, onError = () => {}, isPaused = () => false, keys = {} }) {
+        constructor({ client, store, tabId, now = () => Date.now(), isVisible = () => true, nextStep = () => null, onState = () => {}, onStatic = () => {}, onError = () => {}, isPaused = () => false, keys = {} }) {
             this.isPaused = isPaused;
             this.client = client;
             this.store = store;
@@ -7963,9 +8771,17 @@
             this.isVisible = isVisible;
             this.nextStep = nextStep;
             this.onState = onState;
+            this.onStatic = onStatic;
             this.onError = onError;
             this.keys = { state: 'userState', static: 'userStatic', log: 'dayLog', leader: 'leader', history: 'statsHistory', dead: 'apiKeyDead', stateError: 'stateError', receipts: 'receipts', xanaxCds: 'xanaxCds', ...keys };
             this.polling = false;
+            this.wantAt = null;
+        }
+
+        /** Something was done on Torn's page: read the state soon (once, after the last change). @returns the time to tick at */
+        wantSoon() {
+            this.wantAt = this.now() + EARLY_READ_DELAY_MS;
+            return this.wantAt;
         }
 
         /** Leader election: one heartbeat. Returns true when this tab may poll. */
@@ -7989,10 +8805,13 @@
             if (this.isPaused()) return false;
             const last = this.store.get(this.keys.state, null);
             const t = this.now();
-            if (last && t - last.at < STATE_POLL_MS) {
+            // An early read asked for by the page (wantSoon), once its moment has come and the last read is not too fresh.
+            const early = this.wantAt !== null && t >= this.wantAt && (!last || t - last.at >= EARLY_READ_GAP_MS);
+            if (last && t - last.at < STATE_POLL_MS && !early) {
                 await this.refreshStatic();
                 return false;
             }
+            this.wantAt = null;
             // A refused state call: a key without access waits for a new key (saving one clears this); anything else waits 30 s.
             const failed = this.store.get(this.keys.stateError, null);
             if (failed && (failed.code === ACCESS_TOO_LOW || t - failed.at < STATE_RETRY_MS)) return false;
@@ -8094,6 +8913,11 @@
             try {
                 const st = await this.refreshStaticOnce();
                 this.recordInventory(st);
+                // This tab's own page follows the new slow data at once (a store change only tells the other tabs).
+                if (this.staticRead) {
+                    this.staticRead = false;
+                    this.onStatic(st);
+                }
                 return st;
             } finally {
                 this.refreshing = false;
@@ -8188,6 +9012,7 @@
                 st[k + 'At'] = stamp;
                 // Merge into what's stored now: other parts (e.g. equipment for Torn Eye) may have been saved meanwhile.
                 this.store.set(this.keys.static, { ...(this.store.get(this.keys.static, {}) || {}), [k]: st[k], [k + 'At']: stamp });
+                this.staticRead = true;
             }
             return this.store.get(this.keys.static, {}) || st;
         }
@@ -8257,6 +9082,243 @@
         return { perDay: bank + dividends + rent, bank, dividends, rent, lines: lines.sort((a, b) => b.perDay - a.perDay) };
     }
 
+    /* ===== src/core/planline.js ===== */
+    /*
+     * The plan's line: what the plan you follow says your stats should be at any
+     * moment (Progress, the Plan card, Home). Pure. Round 7, review §4.
+     *
+     * What was wrong: the line was read by Torn day against "you" at the day's
+     * last read, so it was a day off (a player doing exactly what the plan said
+     * read 151% of plan); a pick re-based the whole line to the plan's first
+     * day; Re-plan wiped it.
+     *
+     * Now a line is read by time. It starts at the moment it was made (Create
+     * plan, Re-plan, a pick, back to the saved plan) from your stats at that
+     * moment, and a new one never erases the ones before it: the old line ends
+     * where the new one starts. The simulator's result gives the shape: `daily`
+     * (the gain by the end of each 24 h from its start), `quart` (when in each of
+     * those days the gain lands, so a jump is a step and steady training a
+     * slope) and `statLine` (each stat's own line).
+     */
+
+
+
+
+    const PLAN_LINE_V = 2;
+
+    /** Lines kept (the last few picks and re-plans). */
+    const PLAN_LINES_KEPT = 12;
+
+    /**
+     * "N% of plan" is shown once the line is this old and has planned anything. In its first hours a session done a
+     * little early or late is most of the number (the plan trains energy as it comes, you train a bar at a time).
+     */
+    const PCT_MIN_AGE_MS = 6 * 3600e3;
+    const MIN_PLANNED_FOR_PCT = 1;
+
+    /** Marks a day in `quart`: the minutes by which a quarter, half and three quarters of the day's gain were reached. */
+    const QUART = 3;
+
+    /**
+     * How far into a day's gain the plan is at `minute` of that day, 0–1, from
+     * the day's marks. A session lands at once, so the gain reached at a mark is
+     * there from that minute on; between two marks the line is straight.
+     */
+    function dayShape(minute, q) {
+        const m = Math.max(0, Math.min(1440, minute));
+        const xs = [0, q[0], q[1], q[2], 1440];
+        const ys = [0, 0.25, 0.5, 0.75, 1];
+        // The last mark at or before this minute (marks on the same minute: the highest), then straight to the next.
+        let i = 0;
+        for (let j = 1; j < 4; j++) if (xs[j] <= m) i = j;
+        if (m >= 1440) return 1;
+        const x0 = xs[i];
+        const x1 = xs[i + 1];
+        return x1 > x0 ? ys[i] + ((ys[i + 1] - ys[i]) * (m - x0)) / (x1 - x0) : ys[i + 1];
+    }
+
+    /**
+     * A result's total gain `ms` after its simulation began: 0 at the start, the
+     * day marks at each 24 h, shaped inside a day by `quart`, flat after the end.
+     */
+    function curveAt(r, ms) {
+        const daily = (r && r.daily) || [];
+        const n = daily.length;
+        if (!n || !(ms > 0)) return 0;
+        const d = ms / DAY;
+        if (d >= n) return daily[n - 1];
+        const i = Math.floor(d);
+        const a = i === 0 ? 0 : daily[i - 1];
+        const b = daily[i];
+        const q = r.quart && r.quart.length >= QUART * (i + 1) ? r.quart.slice(QUART * i, QUART * i + QUART) : null;
+        // A step inside the day (a jump: every mark at one minute): nothing before it, everything after.
+        const minute = (ms - i * DAY) / 60000;
+        if (q && q[0] === q[2] && q[0] > 0 && q[0] < 1440) return minute >= q[0] ? b : a;
+        const f = q ? dayShape(minute, q) : d - i;
+        return a + (b - a) * f;
+    }
+
+    /** One stat's gain `ms` after the simulation began, from its `statLine` (straight between its marks). */
+    function statCurveAt(statLine, k, ms) {
+        const arr = statLine && Array.isArray(statLine[k]) ? statLine[k] : null;
+        if (!arr || !arr.length || !(ms > 0)) return 0;
+        const step = statLine.step || 1;
+        const days = statLine.days || arr.length * step;
+        const d = Math.min(days, ms / DAY);
+        // Mark j is at day min((j + 1) × step, days).
+        const j = Math.min(arr.length - 1, Math.floor(d / step));
+        const x0 = j * step;
+        const x1 = Math.min((j + 1) * step, days);
+        const a = j === 0 ? 0 : arr[j - 1];
+        return x1 > x0 ? a + ((arr[j] - a) * Math.max(0, Math.min(1, (d - x0) / (x1 - x0)))) : arr[j];
+    }
+
+    /** Day-by-day per-stat values squeezed to one mark every `step` days (the last at `days`). */
+    function statLineFrom(perDay, step = 1) {
+        const days = (perDay.str || []).length;
+        const out = { step, days, str: [], spd: [], def: [], dex: [] };
+        for (const k of STATS) {
+            const arr = perDay[k] || [];
+            for (let d = step; d < days; d += step) out[k].push(arr[d - 1]);
+            if (days > 0) out[k].push(arr[days - 1]);
+        }
+        return out;
+    }
+
+    /**
+     * A new line.
+     * @param {object} o
+     * @param {number} o.at - when it starts being the plan (ms)
+     * @param {number} [o.t0] - when the result's simulation began (the saved plan's own moment; `at` for a new plan)
+     * @param {object} o.stats - your stats at `at`
+     * @param {object} o.result - the plan's result ({daily, quart, statLine, perStat, cost})
+     * @param {string} o.strategy - its id ('path' for the saved path)
+     * @param {string} o.why - 'create' | 'replan' | 'pick' | 'path'
+     */
+    function makeLine({ at, t0 = at, stats, result, strategy, build = null, why = 'create' }) {
+        const off = curveAt(result, at - t0);
+        const statOff = {};
+        for (const k of STATS) statOff[k] = statCurveAt(result.statLine, k, at - t0);
+        return {
+            at,
+            t0,
+            off,
+            base: STATS.reduce((a, k) => a + (Number(stats[k]) || 0), 0),
+            perStat: Object.fromEntries(STATS.map((k) => [k, Number(stats[k]) || 0])),
+            daily: result.daily,
+            quart: result.quart || null,
+            statLine: result.statLine || null,
+            statOff,
+            perStatGain: result.perStat || null,
+            cost: result.cost || 0,
+            days: result.daily.length,
+            strategy,
+            build,
+            why,
+        };
+    }
+
+    /** The stored lines (also what 1.3.0 stored: one line from a Torn day's start), oldest first. */
+    function readLines(store) {
+        if (!store) return [];
+        if (store.v === PLAN_LINE_V && Array.isArray(store.lines)) return store.lines.filter((l) => l && Array.isArray(l.daily)).sort((a, b) => a.at - b.at);
+        if (Array.isArray(store.daily) && Number.isFinite(store.start)) {
+            return [{ at: store.start, t0: store.start, off: 0, base: store.total, perStat: store.perStat || {}, daily: store.daily, quart: null, statLine: null, statOff: {}, perStatGain: store.perStatGain || null, cost: store.cost || 0, days: store.days || store.daily.length, strategy: String(store.key || '').split('|')[1] || null, build: null, why: 'create' }];
+        }
+        return [];
+    }
+
+    /** The lines with a new one added: it ends the one before it; lines that began at or after it are replaced. */
+    function addLine(store, line) {
+        const lines = readLines(store).filter((l) => l.at < line.at);
+        return { v: PLAN_LINE_V, lines: [...lines, line].slice(-PLAN_LINES_KEPT) };
+    }
+
+    /** The line that is the plan at `t` (null before the first). */
+    function lineAt(lines, t) {
+        let hit = null;
+        for (const l of lines || []) if (l.at <= t) hit = l;
+        return hit;
+    }
+
+    /** When a line stops being the plan: the next one's start (Infinity for the last). */
+    function lineEnd(lines, line) {
+        const i = (lines || []).indexOf(line);
+        return i >= 0 && i + 1 < lines.length ? lines[i + 1].at : Infinity;
+    }
+
+    /** What a line plans to have gained by `t` since it began. */
+    function planGain(line, t) {
+        if (!line || !(t > line.at)) return 0;
+        return Math.max(0, curveAt(line, t - line.t0) - line.off);
+    }
+
+    /** Total stats the plan says at `t` (null before any line). */
+    function planTotalAt(lines, t) {
+        const l = lineAt(lines, t);
+        return l ? l.base + planGain(l, t) : null;
+    }
+
+    /** One stat the plan says at `t` (null before any line). Lines from before round 7 have no per-stat line: the stat's share of the plan's whole gain. */
+    function planStatAt(lines, k, t) {
+        const l = lineAt(lines, t);
+        if (!l) return null;
+        const base = Number(l.perStat && l.perStat[k]) || 0;
+        if (l.statLine) return base + Math.max(0, statCurveAt(l.statLine, k, t - l.t0) - ((l.statOff && l.statOff[k]) || 0));
+        const whole = l.daily.length ? l.daily[l.daily.length - 1] : 0;
+        const share = whole > 0 && l.perStatGain ? (l.perStatGain[k] || 0) / whole : 0;
+        return base + planGain(l, t) * share;
+    }
+
+    /** What the plan gains between two moments, across the lines that were the plan in between (a day's "planned"). */
+    function plannedBetween(lines, t1, t2) {
+        let sum = 0;
+        let any = false;
+        for (const l of lines || []) {
+            const from = Math.max(t1, l.at);
+            const to = Math.min(t2, lineEnd(lines, l));
+            if (!(to > from)) continue;
+            any = true;
+            sum += planGain(l, to) - planGain(l, from);
+        }
+        return any ? sum : null;
+    }
+
+    /**
+     * Where you stand against the line you follow now: gained and planned since
+     * it began, and the share. `pct` is null until the plan has planned anything.
+     */
+    function progressOf(lines, t, total) {
+        const line = lineAt(lines, t);
+        if (!line) return null;
+        const planned = planGain(line, t);
+        const gained = total - line.base;
+        return { line, gained, planned, pct: planned >= MIN_PLANNED_FOR_PCT && t - line.at >= PCT_MIN_AGE_MS ? (100 * gained) / planned : null, whole: Math.max(0, (line.daily.length ? line.daily[line.daily.length - 1] : 0) - line.off) };
+    }
+
+    const sumStats = (o) => STATS.reduce((a, k) => a + (Number(o && o[k]) || 0), 0);
+
+    /**
+     * One Torn day's gained and planned. Gained: what Torn's stats really rose
+     * (the day's opening read to its last; from the line's start on the day a
+     * first line began). Planned: what the lines say for that day (fixed once the
+     * day begins: it no longer moves as you train). The day's stored totals fill
+     * in where the history or a line is missing.
+     * @param {object} o - {lines, history, totals, day, today, nowTotal, gainedToday, plannedToday}
+     * @returns {{gained:number|null, planned:number|null}}
+     */
+    function dayNumbers({ lines = [], history = {}, totals = {}, day, today, nowTotal = null, gainedToday = null, plannedToday = null }) {
+        const h = history && history[day];
+        const row = totals && totals[day];
+        const end = day === today ? nowTotal : h ? h.total : null;
+        const first = lines.length && lines[0].at >= day && lines[0].at < day + DAY ? lines[0] : null;
+        const open = first ? first.base : h && h.open ? sumStats(h.open) : null;
+        const gained = open !== null && end !== null ? end - open : day === today ? gainedToday : row ? row.gained || 0 : null;
+        const p = plannedBetween(lines, day, day + DAY);
+        const planned = p !== null ? p : day === today ? plannedToday : row ? row.planned || 0 : null;
+        return { gained, planned };
+    }
+
     /* ===== src/core/year.js ===== */
     /*
      * The long plan (round 6, R6.5; docs/research-year-events.md §5,
@@ -8277,6 +9339,7 @@
      * way round. The monthly steps are what you follow; the year is a range.
      * Pure (compareStrategies is pure).
      */
+
 
 
 
@@ -8367,11 +9430,12 @@
      * side don't share it. The ladder gym's fee and a specialist's membership are
      * paid when they're first used.
      */
-    function unlockHook({ top, progress, gymExpMult, table, active, drugsTaken, known, paid = new Set() }) {
+    function unlockHook({ top, progress, gymExpMult, table, active, drugsTaken, known, paid = new Set(), stopAt = GEORGES }) {
         if (!(top >= 1 && top < GEORGES)) return null;
         const steps = [];
         let acc = -Math.max(0, progress || 0);
-        for (let id = top; id < GEORGES; id++) {
+        // `stopAt` (round 7, "is this gym worth opening"): the ladder stops there, as if the next gym were never bought.
+        for (let id = top; id < Math.min(GEORGES, stopAt); id++) {
             const e = unlockEnergyAfter(id, gymExpMult);
             if (e === null) break;
             acc += e;
@@ -8426,10 +9490,11 @@
      * @param {number} o.budgetPerDay - Infinity: none
      * @param {object[]} [o.events] - eventsBetween() for the span
      * @param {object} [o.progress] - {top: highest ladder gym open, energy: gym experience toward the next}
-     * @param {string|null} [o.goal] - recommend's goal ('unlock')
+     * @param {boolean} [o.centre] - also re-run the path unchanged (`band.centre`: it should match the path; a check for tests)
+     * @param {object|null} [o.openBy] - the gym to unlock {gymId, name, by (ms, or null)}: passed to the stretches before it opens
      * @returns {Generator} whose value is {segments, result, band, unlocks, events}
      */
-    function* yearSteps({ compare, inputs = null, args, start, end, budgetPerDay = Infinity, events = [], progress = null, goal = null }) {
+    function* yearSteps({ compare, inputs = null, args, start, end, budgetPerDay = Infinity, events = [], progress = null, openBy = null, centre = false }) {
         const pc0 = args.pc;
         const table = pc0.table;
         const gymExpMult = (pc0.perks && pc0.perks.gymExpMult) || 1;
@@ -8445,6 +9510,9 @@
         const segs = segmentsOf(start, end, events);
         const out = [];
         const daily = [];
+        // Round 7 (Progress): when in each day the gain lands, and each stat's own line, along the whole path.
+        const quart = [];
+        const statDaily = { str: [], spd: [], def: [], dex: [] };
         const perStat = { str: 0, spd: 0, def: 0, dex: 0 };
         const used = {};
         const unlocks = [];
@@ -8465,13 +9533,19 @@
             const pc = { ...pc0, stats: { ...stats }, unlocked: open, best };
             const state = { ...cur.state, stats: { ...stats } };
             const unlock = unlockHook({ top, progress: toNext, gymExpMult, table, active, known: knownSpecialists, paid });
-            const segArgs = { ...cur, state, pc, settings: { ...cur.settings, horizonDays: seg.days, budget: Number.isFinite(budgetPerDay) ? Math.max(0, budgetPerDay * seg.days - fees) : Infinity }, events: segEvents(events, seg), unlock };
+            // Only the first stretch starts from the bars as they are now; later ones from a full bar (their day isn't known).
+            const segArgs = { ...cur, state, pc, settings: { ...cur.settings, horizonDays: seg.days, budget: Number.isFinite(budgetPerDay) ? Math.max(0, budgetPerDay * seg.days - fees) : Infinity }, events: segEvents(events, seg), unlock, live: Boolean(args.live) && !out.length };
             const cmp = yield* compare(segArgs);
-            const rec = recommend(cmp, { budget: budgetOf(segArgs.settings), bliss: pc.perks.bliss, pickBy: cur.pickBy || 'most', goal });
+            // The gym to unlock: only for the stretches before it opens, with what's left of its date.
+            const segOpenBy = openBy && top < openBy.gymId ? { gymId: openBy.gymId, name: openBy.name || null, days: openBy.by ? Math.ceil((openBy.by - seg.from) / DAY) : null, horizon: seg.days } : null;
+            const rec = recommend(cmp, { budget: budgetOf(segArgs.settings), bliss: pc.perks.bliss, pickBy: cur.pickBy || 'most', openBy: segOpenBy });
             const r = cmp[rec.recommended];
             if (!r) break;
             const base = totalOf(stats) - startTotal;
             for (const v of r.daily) daily.push(Math.round(base + v));
+            if (r.quart) quart.push(...r.quart);
+            else for (let d = 0; d < r.daily.length; d++) quart.push(360, 720, 1080);
+            for (const k of STATS) for (let d = 1; d <= r.daily.length; d++) statDaily[k].push(Math.round(perStat[k] + statCurveAt(r.statLine, k, d * DAY)));
             for (const k of STATS) {
                 stats[k] += r.perStat[k] || 0;
                 perStat[k] += r.perStat[k] || 0;
@@ -8483,12 +9557,11 @@
             for (const u of r.unlocked || []) unlocks.push({ gymId: u.gymId, day: Math.round((seg.from - start) / DAY) + Math.floor((u.at / Math.max(1, r.energyTrained || 1)) * seg.days), cost: u.cost });
             for (const u of r.unlocked || []) for (const id of u.joined || []) paid.add(id);
             ({ top, toNext } = climb(top, toNext, r.energyTrained || 0, gymExpMult));
-            out.push({ from: seg.from, to: seg.to, days: seg.days, event: seg.event ? segEvents(events, seg).map((e) => e.id) : null, strategy: rec.recommended, gained: r.gained, cost: r.cost + fees, energy: r.energyTrained || 0, statsEnd: { ...stats }, candy: r.candy || null, refill: r.refill, booster: r.booster || null, alternatives: rec.alternatives.slice(0, 3).map((a) => ({ id: a.id, deltaStatsPct: a.deltaStatsPct })) });
+            out.push({ from: seg.from, to: seg.to, days: seg.days, event: seg.event ? segEvents(events, seg).map((e) => e.id) : null, strategy: rec.recommended, gained: r.gained, cost: r.cost + fees, energy: r.energyTrained || 0, statsEnd: { ...stats }, candy: r.candy || null, refill: r.refill, booster: r.booster || null, ...(Number.isFinite(r.xanaxPerDay) ? { xanaxPerDay: r.xanaxPerDay } : {}), alternatives: rec.alternatives.slice(0, 3).map((a) => ({ id: a.id, deltaStatsPct: a.deltaStatsPct })) });
             cur = carryOver(cur, r);
         }
-        const result = { id: 'year', gained: Math.round(totalOf(stats) - startTotal), perStat: Object.fromEntries(STATS.map((k) => [k, Math.round(perStat[k])])), cost: Math.round(cost), energyTrained: energy, daily, used, unlocks };
-        yield 'band';
-        const band = inputs ? yearBand(out, args, { inputs, events, gymExpMult, knownSpecialists, table, active, top0, toNext0 }) : null;
+        const result = { id: 'year', gained: Math.round(totalOf(stats) - startTotal), perStat: Object.fromEntries(STATS.map((k) => [k, Math.round(perStat[k])])), cost: Math.round(cost), energyTrained: energy, daily, used, unlocks, quart, statLine: statLineFrom(statDaily, daily.length > STAT_LINE_DAILY_DAYS ? 7 : 1) };
+        const band = inputs ? yield* yearBandSteps(out, args, { inputs, events, gymExpMult, knownSpecialists, table, active, top0, toNext0, centre }) : null;
         return { segments: out, result, band, unlocks, events };
     }
 
@@ -8508,10 +9581,13 @@
     /**
      * The same path (the plan, candy, booster and refill picked for each stretch,
      * with the simulator's own inputs) with the model a little off each way: low
-     * and high totals. `centre` is the same re-run unchanged (it should match the path).
+     * and high totals. With `centre` the same re-run unchanged too (it should
+     * match the path: a check; round 7 leaves it out of a plan's own work, a
+     * third of the band's time). A generator: it yields 'band' before each
+     * stretch of each run (a chance for a break).
      */
-    function yearBand(segments, args, { inputs, events, gymExpMult, knownSpecialists, table, active, top0, toNext0 }) {
-        const run = (gainMult, lossMult) => {
+    function* yearBandSteps(segments, args, { inputs, events, gymExpMult, knownSpecialists, table, active, top0, toNext0, centre = false }) {
+        const run = function* (gainMult, lossMult) {
             let stats = { ...args.pc.stats };
             let top = top0;
             let toNext = toNext0;
@@ -8519,11 +9595,12 @@
             const paid = new Set(knownSpecialists);
             const t0 = totalOf(stats);
             for (const s of segments) {
+                yield 'band';
                 const open = openAt(top, knownSpecialists);
                 const { best } = gymsFor(stats, open, { table, active, drugsTaken: null });
                 for (const x of newMemberships(best, paid, table)) paid.add(x.id);
                 const pc = { ...args.pc, stats: { ...stats }, unlocked: open, best };
-                const base = inputs({ ...cur, state: { ...cur.state, stats: { ...stats } }, pc, settings: { ...cur.settings, horizonDays: s.days } });
+                const base = inputs({ ...cur, state: { ...cur.state, stats: { ...stats } }, pc, settings: { ...cur.settings, horizonDays: s.days }, live: Boolean(args.live) && s === segments[0] });
                 const o = {
                     ...base,
                     perks: Object.fromEntries(STATS.map((k) => [k, ((base.perks && base.perks[k]) || 1) * gainMult])),
@@ -8531,6 +9608,7 @@
                     ...(s.candy ? { candyId: s.candy.id, candyCount: s.candy.count } : {}),
                     ...(s.booster ? { energyBooster: { id: s.booster.id, perDay: s.booster.perDay } } : {}),
                     ...(s.refill === false ? { noRefill: true } : {}),
+                    ...(Number.isFinite(s.xanaxPerDay) ? { xanaxPerDay: s.xanaxPerDay } : {}),
                     special: 0,
                     events: segEvents(events, s),
                     unlock: unlockHook({ top, progress: toNext, gymExpMult, table, active, known: knownSpecialists, paid }),
@@ -8544,7 +9622,10 @@
             }
             return Math.round(totalOf(stats) - t0);
         };
-        return { low: run(1 - BAND_GAIN, 1 + BAND_HAPPY_LOSS), centre: run(1, 1), high: run(1 + BAND_GAIN, 1 - BAND_HAPPY_LOSS) };
+        const low = yield* run(1 - BAND_GAIN, 1 + BAND_HAPPY_LOSS);
+        const mid = centre ? yield* run(1, 1) : null;
+        const high = yield* run(1 + BAND_GAIN, 1 - BAND_HAPPY_LOSS);
+        return { low, ...(centre ? { centre: mid } : {}), high };
     }
 
     /* ===== src/core/saved-plan.js ===== */
@@ -8568,6 +9649,7 @@
      *   - `planNow` (GM, a few KB): what Torn's pages and the bot need to follow
      *     it (per plan: candy, refill, special refills, items used, gains, cost).
      */
+
 
 
 
@@ -8615,8 +9697,8 @@
     /** What Torn's pages need of one plan's result to follow it (no day-by-day line). */
     function slimResult(r) {
         if (!r) return null;
-        const out = { id: r.id, gained: r.gained, cost: r.cost, used: r.used || {}, perStat: r.perStat || {} };
-        for (const k of ['candy', 'refill', 'refillGain', 'refillCost', 'specialHelps', 'specialGain', 'booster', 'blocked']) if (r[k] !== undefined) out[k] = r[k];
+        const out = { id: r.id, gained: r.gained, cost: r.cost, used: r.used || {}, perStat: r.perStat || {}, energyTrained: r.energyTrained || 0 };
+        for (const k of ['candy', 'refill', 'refillGain', 'refillCost', 'specialHelps', 'specialGain', 'booster', 'blocked', 'xanaxPerDay']) if (r[k] !== undefined) out[k] = r[k];
         return out;
     }
 
@@ -8627,7 +9709,7 @@
      * @param {object} r - a strategy result ({daily, perStat, cost, used, gained})
      * @param {object} o - {start, days, stats: the stats it starts from}
      */
-    function monthlyOf(r, { start, days, stats }) {
+    function monthlyOf(r, { start, days, stats, anchor = start }) {
         if (!r || !Array.isArray(r.daily) || !days) return [];
         const out = [];
         const perDayCost = r.cost / days;
@@ -8637,12 +9719,15 @@
         let from = start;
         let d0 = 0;
         for (let i = 1; d0 < days; i++) {
-            const to = Math.min(addMonths(start, i), start + days * DAY);
+            // Month ends count from the plan's first day (`anchor`), so a re-plan mid-month keeps the plan's own months.
+            if (addMonths(anchor, i) <= start) continue;
+            const to = Math.min(addMonths(anchor, i), start + days * DAY);
             const d1 = Math.min(days, Math.round((to - start) / DAY));
             const gained = gainedAt(d1) - gainedAt(d0);
             const share = total > 0 ? gainedAt(d1) / total : d1 / days;
             const planned = {};
-            for (const k of STATS) planned[k] = Math.round((stats[k] || 0) + (statTotal > 0 ? ((r.perStat[k] || 0) / statTotal) * total * share : 0));
+            // Each stat from its own line (round 7); results from before it: the stat's share of the whole gain.
+            for (const k of STATS) planned[k] = Math.round((stats[k] || 0) + (r.statLine ? statCurveAt(r.statLine, k, d1 * DAY) : statTotal > 0 ? ((r.perStat[k] || 0) / statTotal) * total * share : 0));
             const used = {};
             for (const [id, n] of Object.entries(r.used || {})) if (n > 0) used[id] = Math.round(((n * (d1 - d0)) / days) * 10) / 10;
             out.push({ month: i, from, to, days: d1 - d0, gained: Math.round(gained), cost: Math.round(perDayCost * (d1 - d0)), stats: planned, used });
@@ -8693,7 +9778,7 @@
      * @param {object|null} [o.year] - core/year.js yearSteps' value: the path followed (a plan per segment, re-picked
      *   every 30 days and for each event), gyms opening, the events, the band
      */
-    function makeSavedPlan({ compare, rec, snapshot, start, end, months, days, budget, whatIf = null, jobWhatIf = [], prev = null, year = null, now }) {
+    function makeSavedPlan({ compare, rec, snapshot, start, end, months, days, budget, whatIf = null, jobWhatIf = [], prev = null, year = null, gymWorth = [], extras = 'done', now }) {
         const from = prev ? tornDayStart(now) : start;
         const best = compare && rec && rec.recommended ? compare[rec.recommended] : null;
         const history = prev ? (prev.history || []).slice(-(HISTORY_KEEP - 1)) : [];
@@ -8723,8 +9808,12 @@
             rec,
             whatIf,
             jobWhatIf: jobWhatIf || [],
+            // What each of the first gyms the recommended plan opens adds, against its fee (round 7).
+            gymWorth: gymWorth || [],
+            // 'pending' while the what-ifs above are still being worked out after the plan was saved (R7.3b), then 'done'.
+            extras,
             // The months of the path you follow (the year's path when there is one).
-            monthly: year && year.result ? monthlyOf(year.result, { start: from, days, stats: snapshot.stats }) : best ? monthlyOf(best, { start: from, days, stats: snapshot.stats }) : [],
+            monthly: year && year.result ? monthlyOf(year.result, { start: from, days, stats: snapshot.stats, anchor: prev ? prev.start : start }) : best ? monthlyOf(best, { start: from, days, stats: snapshot.stats, anchor: prev ? prev.start : start }) : [],
             year: year ? { path: year.result, segments: year.segments, band: year.band, unlocks: year.unlocks, events: (year.events || []).map((e) => ({ id: e.id, name: e.name, start: e.start, end: e.end, expected: Boolean(e.expected) })) } : null,
             history,
         };
@@ -8762,7 +9851,9 @@
             warn,
             slim,
             // Which plan the path follows when (a switch on its date is following the saved plan, not re-planning).
-            schedule: saved.year ? saved.year.segments.map((s) => ({ from: s.from, to: s.to, strategy: s.strategy, candy: s.candy || null })) : null,
+            // When the what-ifs were added to the whole plan (other tabs read it again then).
+            extrasAt: saved.extrasAt || null,
+            schedule: saved.year ? saved.year.segments.map((s) => ({ from: s.from, to: s.to, strategy: s.strategy, candy: s.candy || null, ...(Number.isFinite(s.xanaxPerDay) ? { xanaxPerDay: s.xanaxPerDay } : {}) })) : null,
         };
     }
 
@@ -8955,7 +10046,7 @@
     };
 
     /** Data only the webpage uses: its IndexedDB, never GM (moved out of GM once). */
-    const PAGE_KEYS = ['moneyLog', 'gymLog', 'fightLog', 'learnLog', 'planLine', 'eyeTargets', 'eyeFlights', 'eyeWatchState'];
+    const PAGE_KEYS = ['moneyLog', 'gymLog', 'fightLog', 'learnLog', 'planLine', 'eyeTargets', 'eyeFlights', 'eyeWatchState', 'problemLog'];
 
     const mem = { loaded: false, loading: null, arch: {}, page: {}, idb: false };
 
@@ -9789,12 +10880,146 @@
         };
     }
 
+    /* ===== src/problem-log.js ===== */
+    /*
+     * The problem log, this tab's side (core/errlog.js has the rules). Each tab
+     * keeps its new lines and adds them to the stored log every few seconds and
+     * when the page goes. The webpage holds the log (its own IndexedDB, a week);
+     * a Torn page's lines wait in a small shared buffer until the webpage takes
+     * them, so Tampermonkey never hands a long log to every Torn page.
+     * Settings › Report a problem puts it in the zip. Userscript-only.
+     */
+
+
+
+
+
+
+    const PLOG_FLUSH_MS = 5000;
+    /** A freeze of the webpage this long is worth a line. */
+    const FREEZE_NOTE_MS = 200;
+    /** Plan runs kept with their time. */
+    const PLAN_RUNS_KEPT = 12;
+
+    const plog = { where: 'torn', pending: [], timer: null, started: false };
+
+    /** Where this tab is: the webpage's tab, or the Torn page (its path, never its query). */
+    function plogWhere() {
+        if (typeof location === 'undefined') return '?';
+        if (plog.where === 'app') return 'app ' + (String(location.hash || '#home').replace(/^#\/?/, '').split(/[?&]/)[0] || 'home');
+        return 'torn ' + location.pathname.replace(/^\//, '') + (location.search && /[?&]sid=([a-z]+)/i.test(location.search) ? ' ' + location.search.match(/[?&]sid=([a-z]+)/i)[1] : '');
+    }
+
+    /** kind: 'error' (something failed), 'action' (what you did), 'note'. */
+    function logProblem(kind, what, detail = null) {
+        plog.pending.push({ at: Date.now(), kind, where: plogWhere(), what: logText(what), ...(detail ? { detail: logText(detail) } : {}) });
+        if (!plog.timer && typeof setTimeout === 'function') plog.timer = setTimeout(flushProblemLog, PLOG_FLUSH_MS);
+    }
+
+    const logAction = (what, detail = null) => logProblem('action', what, detail);
+    const logNote = (what, detail = null) => logProblem('note', what, detail);
+
+    /** Something failed: into the log, with where in the app it was. */
+    function logError(area, error) {
+        const msg = String((error && error.message) || error || 'failed');
+        const stack = error && error.stack ? String(error.stack).split('\n').slice(1, 4).map((l) => l.trim()).join(' | ') : null;
+        logProblem('error', area + ': ' + msg + (error && error.code ? ' [code ' + error.code + ']' : ''), stack);
+    }
+
+    function flushProblemLog() {
+        if (plog.timer) clearTimeout(plog.timer);
+        plog.timer = null;
+        const add = plog.pending;
+        plog.pending = [];
+        if (plog.where === 'app') {
+            // The webpage: its own lines and what Torn's pages left in the buffer.
+            const buf = gmGet(K.problemBuf, null);
+            const more = Array.isArray(buf) ? buf : [];
+            if (!add.length && !more.length) return;
+            pageSet(K.problemLog, addLogEntries(pageGet(K.problemLog, null), [...more, ...add]));
+            if (more.length) gmSet(K.problemBuf, []);
+            return;
+        }
+        if (!add.length) return;
+        gmSet(K.problemBuf, addLogEntries(gmGet(K.problemBuf, null), add, Date.now(), LOG_BUFFER_MAX));
+    }
+
+    /** The whole log now (the webpage): stored, the buffer and this tab's unsaved lines. */
+    function problemLogNow() {
+        const buf = gmGet(K.problemBuf, null);
+        return addLogEntries(pageGet(K.problemLog, null), [...(Array.isArray(buf) ? buf : []), ...plog.pending]);
+    }
+
+    function clearProblemLog() {
+        plog.pending = [];
+        pageSet(K.problemLog, []);
+        gmSet(K.problemBuf, []);
+    }
+
+    /**
+     * A Create plan or Re-plan that finished (or failed): how long it took, how
+     * much of that with the tab not in front, kept with the last few.
+     * @param {object} run - {at, kind: 'create'|'replan', months, days, ms, hiddenMs, ok, error, cancelled}
+     */
+    function notePlanRun(run) {
+        const list = [...(gmGet(K.planRuns, null) || []), run].slice(-PLAN_RUNS_KEPT);
+        gmSet(K.planRuns, list);
+        const words = (run.kind === 'replan' ? 'Re-plan' : 'Create plan') + ' ' + (run.months || '?') + (run.months === 1 ? ' month' : ' months') + ' (' + (run.days || '?') + ' days)';
+        const time = (run.ms / 1000).toFixed(1) + ' s' + (run.hiddenMs > 0 ? ', ' + (run.hiddenMs / 1000).toFixed(1) + ' s of it with the tab not in front' : '');
+        if (run.ok) logNote(words + ' took ' + time);
+        else if (run.cancelled) logNote(words + ' cancelled after ' + time);
+        else logProblem('error', words + ' failed after ' + time, run.error || null);
+    }
+
+    const planRuns = () => gmGet(K.planRuns, null) || [];
+
+    /** Ours only, never Torn's page's own scripts. */
+    const plogOurs = (file, stack) => /userscript|tampermonkey|pumping-?iron|harness/i.test(String(file || '') + ' ' + String(stack || ''));
+
+    /**
+     * Start logging in this tab: script errors (ours), and on the webpage the
+     * moments the page froze. Called once from main.js.
+     */
+    function startProblemLog({ where = 'torn' } = {}) {
+        plog.where = where;
+        if (plog.started || typeof window === 'undefined') return;
+        plog.started = true;
+        window.addEventListener('pagehide', flushProblemLog);
+        window.addEventListener('error', (ev) => {
+            if (!plogOurs(ev.filename, ev.error && ev.error.stack)) return;
+            logProblem('error', 'Script error: ' + (ev.message || 'unknown'), ((ev.error && ev.error.stack) || '').split('\n').slice(0, 4).join(' | '));
+        });
+        window.addEventListener('unhandledrejection', (ev) => {
+            const r = ev.reason;
+            if (!plogOurs('', r && r.stack)) return;
+            logProblem('error', 'Script error (promise): ' + ((r && r.message) || String(r)), ((r && r.stack) || '').split('\n').slice(0, 4).join(' | '));
+        });
+        if (where !== 'app') return;
+        // The webpage takes the Torn pages' lines every minute, and notes its own freezes (a long task: the page didn't answer).
+        setInterval(flushProblemLog, 60000);
+        try {
+            if (typeof PerformanceObserver === 'function' && (PerformanceObserver.supportedEntryTypes || []).includes('longtask')) {
+                new PerformanceObserver((list) => {
+                    let worst = 0;
+                    for (const e of list.getEntries()) worst = Math.max(worst, e.duration);
+                    if (worst >= FREEZE_NOTE_MS) logNote('The page froze for a moment', Math.round(worst) + ' ms');
+                }).observe({ entryTypes: ['longtask'] });
+            }
+        } catch {
+            // No long-task timing in this browser: nothing to note.
+        }
+    }
+
     /* ===== src/runtime.js ===== */
     /*
      * What every tab shares at run time: the one Torn client (85/min across
      * tabs, visible only, silent while Torn Trading runs), the state feed, and the model every surface renders
      * from. Userscript-only; core/ and api/ stay plain modules.
      */
+
+
+
+
 
 
 
@@ -10003,9 +11228,11 @@
      */
     function savedFor(pn) {
         if (!pn) return null;
-        if (pi.saved && pi.saved.rev === pn.rev) return pi.saved;
-        if (pi.savedLoading !== pn.rev) {
-            pi.savedLoading = pn.rev;
+        // The same plan, with its what-ifs if they have been added since (another tab worked them out).
+        if (pi.saved && pi.saved.rev === pn.rev && (pi.saved.extrasAt || 0) >= (pn.extrasAt || 0)) return pi.saved;
+        const want = pn.rev + ':' + (pn.extrasAt || 0);
+        if (pi.savedLoading !== want) {
+            pi.savedLoading = want;
             loadSavedPlan()
                 .then((p) => {
                     if (p && p.rev === pn.rev) {
@@ -10020,24 +11247,70 @@
         return null;
     }
 
+    /** Listeners for a running plan's progress (the Plan card's bar and words): called with the busy record. */
+    const progressListeners = [];
+    function onPlanProgress(fn) {
+        progressListeners.push(fn);
+    }
+
+    /** The Plan card's Cancel: the run stops at its next break, nothing is saved, the old plan stays. */
+    function cancelPlan() {
+        if (pi.planBusy) pi.planBusy.cancel = true;
+    }
+
+    /** How much of a run each part is (measured: the comparison about 40%, the path about 45%, its range the rest). */
+    const RUN_SHARE = { compare: 0.4, path: 0.45, band: 0.15 };
+
     /**
-     * Create plan (1, 3, 6 or 12 months) or Recalibrate, on a click only: every
-     * plan is worked out over the plan's days from what's true now (stats,
-     * income, prices, gyms), the best one is recommended, and the whole thing is
-     * saved with what it saw. Recalibrate keeps the plan's start and end and
-     * re-plans only the days left. Worked out in slices (the page stays free).
-     * @param {object} o - {months: 1|3|6|12} or {recalibrate: true}
-     * @returns {Promise<object>} the saved plan
+     * Create plan (1, 3, 6 or 12 months) or Re-plan, on a click only: every plan
+     * is worked out over the plan's days from what's true now (stats, income,
+     * prices, gyms), the best one is recommended, and the whole thing is saved
+     * with what it saw. Re-plan keeps the plan's start and end and re-plans only
+     * the days left.
+     *
+     * Round 7 (R7.3b): worked out in slices of about 30 ms with breaks that are
+     * not timers (so it finishes in a tab you left), with live progress and
+     * Cancel; nothing is saved until the end, so a cancelled run leaves the old
+     * plan. The what-ifs (Bliss, a company, what each gym is worth) are worked
+     * out after the plan is saved and shown, and added to it.
+     * @param {object} o - {months: 1|3|6|12} or {recalibrate: true}; `pause` (tests): the caller's own break, and the
+     *   what-ifs are waited for
+     * @returns {Promise<object|null>} the saved plan (null: cancelled)
      */
-    async function createPlan({ months = 1, recalibrate = false, pause = pauseForPage } = {}) {
+    async function createPlan({ months = 1, recalibrate = false, pause: pauseIn = null } = {}) {
         if (pi.planBusy) return pi.planBusy.promise;
+        const busy = { recalibrate, months, at: Date.now(), promise: null, part: 'start', done: 0, words: 'Reading what is true now', cancel: false };
+        const cancelled = () => busy.cancel === true;
+        // Breaks for the page: a message to ourselves, not a timer (a hidden tab's timers run once a second at best:
+        // 3 seconds of work took minutes), and only once 30 ms of work is done since the last one.
+        const own = pauseIn ? null : makePause({ cancelled });
+        const pause = own || (() => (cancelled() ? Promise.reject(new PlanCancelled()) : pauseIn()));
+        let told = 0;
+        const tell = (part, done, words) => {
+            const moved = part !== busy.part;
+            busy.part = part;
+            busy.done = Math.max(busy.done, Math.min(1, done));
+            busy.words = words;
+            // The card is told when the run moves to its next part, and otherwise at most ten times a second.
+            const t = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+            if (!moved && t - told < 100 && done < 1) return;
+            told = t;
+            for (const fn of progressListeners) {
+                try {
+                    fn(busy);
+                } catch {
+                    // A listener's own problem never stops the run.
+                }
+            }
+        };
+        let extrasCtx = null;
         const run = (async () => {
             const now = Date.now();
             const s = get(K.userState, null);
             const state = s && s.api ? normalizeState(s.api, s.at) : null;
             if (!state) throw new Error('Waiting for the first read of your stats.');
             const prev = recalibrate ? await loadSavedPlan() : null;
-            if (recalibrate && !(prev && prev.v === SAVED_PLAN_V)) throw new Error('No plan to recalibrate yet: create one first.');
+            if (recalibrate && !(prev && prev.v === SAVED_PLAN_V)) throw new Error('No plan to re-plan yet: create one first.');
             if (recalibrate && planProgress(prev, now).ended) throw new Error('Your plan has ended: create a new one.');
             const plan = getPlan();
             const settings = getSettings();
@@ -10054,7 +11327,8 @@
             const perDay = plan.pickBy === 'max' ? Infinity : auto.ready ? auto.budgetPerDay : budgetOf(settings) / (settings.horizonDays || 30);
             const runSettings = { ...settings, horizonDays: win.days, budget: Number.isFinite(perDay) ? perDay * win.days : Infinity };
             const pickBy = effectivePickBy(PICK_BY[plan.pickBy] ? plan.pickBy : 'most', auto);
-            const args = { state, pc, shares, settings: runSettings, prices, special, statics, pickBy };
+            // `live`: every plan starts from the bars as they are now (round 7), like today's steps do.
+            const args = { state, pc, shares, settings: runSettings, prices, special, statics, pickBy, live: true };
             // R6.5: the events on their dates and the gyms opening as energy is trained, in every plan's run.
             const from = recalibrate ? tornDayStart(now) : win.start;
             const cal = statics.calendar || null;
@@ -10062,24 +11336,43 @@
             const gp = get(K.gymProgress, null);
             const top = Math.max(1, ...pc.unlocked.filter((id) => id <= 24));
             const progress = gp && Number(gp.nextId) === top + 1 ? { top, energy: Number(gp.energy) || 0 } : null;
-            const hook = unlockHook({ top, progress: progress ? progress.energy : 0, gymExpMult: pc.perks.gymExpMult || 1, table: pc.table, active: state.gymId, known: pc.unlocked.filter((id) => id > 24), paid: new Set(pc.unlocked.filter((id) => id > 24)) });
-            const compare = await compareStrategiesAsync({ ...args, events: segEvents(events, { from, to: win.end }), unlock: hook }, { pause });
-            await pause();
-            const goal = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
+            const hookFor = (stopAt) => unlockHook({ top, progress: progress ? progress.energy : 0, gymExpMult: pc.perks.gymExpMult || 1, table: pc.table, active: state.gymId, known: pc.unlocked.filter((id) => id > 24), paid: new Set(pc.unlocked.filter((id) => id > 24)), ...(stopAt ? { stopAt } : {}) });
+            const hook = hookFor(null);
+            // The comparison: each plan over the whole length (its id is yielded as it starts).
+            const names = [];
+            const nPlans = 8;
+            const compare = await runSliced(compareSteps({ ...args, events: segEvents(events, { from, to: win.end }), unlock: hook }), pause, (v) => {
+                if (typeof v !== 'string') return;
+                names.push(v);
+                tell('compare', (RUN_SHARE.compare * (names.length - 0.5)) / Math.max(nPlans, names.length), 'Comparing plans: ' + ((STRATEGIES_NAME(v) || v).toLowerCase()) + ' (' + names.length + ')');
+            });
+            // Round 7: a gym to unlock never outranks stats. Every plan says when it opens the gym; an "open it by" date
+            // leaves out the plans that miss it, then the Plan rule picks as usual.
+            const openBy = openByOf(plan, pc, from, win.days);
             const budget = budgetOf(runSettings);
-            const rec = recommend(compare, { budget, bliss: pc.perks.bliss, pickBy, goal });
-            // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
-            const whatIf = pc.perks.bliss ? null : blissWhatIf(args);
-            await pause();
-            const jobWhatIf = companyWhatIf({ ...args, compare, recommended: rec.recommended });
+            const rec = recommend(compare, { budget, bliss: pc.perks.bliss, pickBy, openBy });
             // The path: the best plan again every 30 days and for each event, from the stats projected for that day.
-            const goalYear = plan.goal && plan.goal.kind === 'unlockGym' ? 'unlock' : null;
-            const year = await runSteps(yearSteps({ compare: compareSteps, inputs: simInputs, args, start: from, end: win.end, budgetPerDay: perDay, events, progress, goal: goalYear }), pause);
+            const nSegs = Math.max(1, segmentsOf(from, win.end, events).length);
+            let seg = 0;
+            let band = 0;
+            const year = await runSliced(yearSteps({ compare: compareSteps, inputs: simInputs, args, start: from, end: win.end, budgetPerDay: perDay, events, progress, openBy }), pause, (v) => {
+                if (v && typeof v === 'object' && Number.isFinite(v.from)) {
+                    seg++;
+                    const day = Math.round((v.from - from) / 86400e3) + 1;
+                    tell('path', RUN_SHARE.compare + (RUN_SHARE.path * (seg - 0.5)) / nSegs, 'Your ' + (win.months > 1 ? win.months + ' months' : 'month') + ': day ' + day + ' of ' + win.days);
+                } else if (v === 'band') {
+                    band++;
+                    tell('band', RUN_SHARE.compare + RUN_SHARE.path + (RUN_SHARE.band * band) / (2 * nSegs), 'The range of the plan (a little better, a little worse)');
+                }
+            });
+            tell('save', 1, 'Saving your plan');
             const snapshot = snapshotOf({ state, pc, statics, plan, prices: livePrices(prices), income: auto.ready ? { perDay: auto.perDay, source: auto.source, days: auto.days, certain: auto.floor ? { perDay: auto.floor.perDay, bank: auto.floor.bank, dividends: auto.floor.dividends, rent: auto.floor.rent } : null } : null, budgetPerDay: Number.isFinite(perDay) ? perDay : null, held: heldBoosters(statics.inventory), now });
-            const saved = makeSavedPlan({ compare, rec, snapshot, start: win.start, end: win.end, months: win.months, days: win.days, budget, whatIf, jobWhatIf, prev, year, now });
+            // The what-ifs come after the plan is saved and shown (`extras: 'pending'` until they are in).
+            const saved = makeSavedPlan({ compare, rec, snapshot, start: win.start, end: win.end, months: win.months, days: win.days, budget, whatIf: null, jobWhatIf: [], prev, year, gymWorth: [], extras: 'pending', now });
             const best = compare[rec.recommended];
             const warn = {};
             for (const [id, r] of Object.entries(compare)) if (r && best && id !== rec.recommended) warn[id] = pickWarning(best, r, { bliss: pc.perks.bliss, days: win.days }).warn;
+            if (cancelled()) throw new PlanCancelled();
             await saveSavedPlan(saved);
             pi.saved = saved;
             set(K.planNow, planNowOf(saved, warn));
@@ -10088,17 +11381,92 @@
             const keep = recalibrate && cur.strategyPicked && compare[cur.strategy];
             const strategy = keep ? cur.strategy : year.segments.length ? year.segments[0].strategy : rec.recommended;
             setPlan({ ...cur, strategy, strategyPicked: Boolean(keep), createdAt: now });
-            recordPlanLine(saved, keep ? strategy : 'path', now);
+            recordPlanLine(saved, keep ? strategy : 'path', now, recalibrate ? 'replan' : 'create');
+            extrasCtx = { args, compare, rec, bliss: pc.perks.bliss, gymArgs: { ...args, events: segEvents(events, { from, to: win.end }) }, hookFor };
             return saved;
         })();
-        pi.planBusy = { recalibrate, months, at: Date.now(), promise: run };
+        busy.promise = run;
+        pi.planBusy = busy;
         refresh();
+        // How long it took, and how much of that with the tab not in front (the problem log; Settings › Report a problem).
+        const t0 = Date.now();
+        let hiddenMs = 0;
+        let hidAt = isVisible() ? null : t0;
+        const onVis = () => {
+            if (!isVisible() && hidAt === null) hidAt = Date.now();
+            else if (isVisible() && hidAt !== null) {
+                hiddenMs += Date.now() - hidAt;
+                hidAt = null;
+            }
+        };
+        const doc = typeof document !== 'undefined' && typeof document.addEventListener === 'function' ? document : null;
+        if (doc) doc.addEventListener('visibilitychange', onVis);
+        logAction(recalibrate ? 'Re-plan pressed' : 'Create plan pressed (' + months + (months === 1 ? ' month)' : ' months)'));
+        const done = (ok, error, saved) => {
+            if (doc) doc.removeEventListener('visibilitychange', onVis);
+            if (hidAt !== null) hiddenMs += Date.now() - hidAt;
+            notePlanRun({ at: t0, kind: recalibrate ? 'replan' : 'create', months: saved ? saved.months : months, days: saved ? saved.days : null, ms: Date.now() - t0, hiddenMs, ok, cancelled: Boolean(error && error.cancelled), error: ok ? null : String((error && error.message) || error) });
+        };
+        let saved = null;
         try {
-            return await run;
+            saved = await run;
+            done(true, null, saved);
+        } catch (error) {
+            done(false, error, null);
+            // Cancelled: nothing was saved, the old plan stays; not an error to show.
+            if (!(error && error.cancelled)) throw error;
+            return null;
         } finally {
+            if (own) own.stop();
             pi.planBusy = null;
             refresh();
         }
+        // The what-ifs, after the plan is saved and shown. A caller with its own pause (tests) waits for them.
+        pi.planExtras = planExtras(saved, extrasCtx, pauseIn);
+        if (pauseIn) return (await pi.planExtras) || saved;
+        return saved;
+    }
+
+    /**
+     * What a saved plan gets after it is shown (round 7, R7.3b): what each gym
+     * the recommended plan opens is worth, the Bliss what-if, the company
+     * what-ifs. Worked out in slices; dropped if another run starts or the plan
+     * is replaced meanwhile. Then the plan is saved again with them.
+     */
+    async function planExtras(saved, ctx, pauseIn = null) {
+        const rev = saved.rev;
+        const alive = () => !pi.planBusy && pi.saved && pi.saved.rev === rev;
+        const own = pauseIn ? null : makePause({ cancelled: () => !alive() });
+        const pause = own || pauseIn;
+        const t0 = Date.now();
+        try {
+            // Is each gym the recommended plan opens worth its fee: the plan with and without it.
+            const gymWorth = await runSliced(gymWorthSteps(ctx.compare[ctx.rec.recommended], ctx.gymArgs, ctx.hookFor), pause);
+            // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
+            const whatIf = ctx.bliss ? null : await runSliced(blissWhatIfSteps(ctx.args), pause);
+            const jobWhatIf = await runSliced(companyWhatIfSteps({ ...ctx.args, compare: ctx.compare, recommended: ctx.rec.recommended }), pause);
+            if (!alive()) return null;
+            const next = { ...pi.saved, gymWorth, whatIf, jobWhatIf, extras: 'done', extrasAt: Date.now() };
+            await saveSavedPlan(next);
+            if (!alive()) return null;
+            pi.saved = next;
+            // The other tabs of the webpage read the plan again (its small part says the what-ifs are in).
+            const pn = getShared(K.planNow, null);
+            if (pn && pn.rev === rev) set(K.planNow, { ...pn, extrasAt: next.extrasAt });
+            logNote('The what-ifs after the plan took ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s');
+            refresh();
+            return next;
+        } catch (error) {
+            if (!(error && error.cancelled)) logError('The what-ifs after the plan', error);
+            return null;
+        } finally {
+            if (own) own.stop();
+        }
+    }
+
+    /** A plan's short name for the progress words. */
+    function STRATEGIES_NAME(id) {
+        return STRATEGIES[id] ? STRATEGIES[id].short : null;
     }
 
     /** Recalibrate (a click): the plan's end stays, the days left are re-planned from what's true now. */
@@ -10114,7 +11482,8 @@
         const saved = pi.saved;
         const cur = getPlan();
         setPlan({ ...cur, strategy: id, strategyPicked: true, createdAt: Date.now() });
-        if (saved && saved.compare && saved.compare[id]) recordPlanLine(saved, id, Date.now());
+        if (saved && saved.compare && saved.compare[id]) recordPlanLine(saved, id, Date.now(), 'pick');
+        logAction('Picked the plan ' + id);
         refresh();
     }
 
@@ -10124,21 +11493,9 @@
         const cur = getPlan();
         const seg = scheduleAt(saved && saved.year ? saved.year.segments : null, Date.now());
         setPlan({ ...cur, strategy: seg ? seg.strategy : cur.strategy, strategyPicked: false, createdAt: Date.now() });
-        if (saved) recordPlanLine(saved, saved.year ? 'path' : cur.strategy, Date.now());
+        if (saved) recordPlanLine(saved, saved.year ? 'path' : cur.strategy, Date.now(), 'path');
+        logAction('Back to the saved plan');
         refresh();
-    }
-
-    /** A break for the page between two pieces of work. */
-    const pauseForPage = () => new Promise((r) => setTimeout(r, 0));
-
-    /** Run a generator of work to its end, with a break for the page after each step. */
-    async function runSteps(gen, pause) {
-        let r = gen.next();
-        while (!r.done) {
-            await pause();
-            r = gen.next();
-        }
-        return r.value;
     }
 
     /**
@@ -10163,6 +11520,11 @@
         const pn = planNowStored();
         const saved = app ? savedFor(pn) : null;
         const pc = playerContext(state, statics, { unlockedKnown: get(K.unlocked, null), learnedMult: learnedNow().mult, learnedHappyLoss: learnedNow().happyLoss });
+        // The gym the plan was to unlock is open: the goal has nothing left to do (round 7; cleared once, on the webpage).
+        if (app && plan.goal && plan.goal.kind === 'unlockGym' && pc.unlocked.map(Number).includes(Number(plan.goal.gymId))) {
+            setPlan({ ...getPlan(), goal: null });
+            logNote('The gym to unlock is open: the goal is cleared');
+        }
         // The saved plan's numbers: every plan's whole result on the webpage, the small part on Torn's pages.
         let compare = null;
         let rec = null;
@@ -10172,7 +11534,8 @@
         const followed = seg && seg.strategy ? { ...plan, strategy: seg.strategy } : plan;
         if (pn) {
             compare = saved ? saved.compare : pn.slim;
-            if (seg && seg.candy && compare[seg.strategy]) compare = { ...compare, [seg.strategy]: { ...compare[seg.strategy], candy: seg.candy } };
+            // This stretch's own candy and Xanax a day (the path re-picks them every stretch).
+            if (seg && compare[seg.strategy] && (seg.candy || Number.isFinite(seg.xanaxPerDay))) compare = { ...compare, [seg.strategy]: { ...compare[seg.strategy], ...(seg.candy ? { candy: seg.candy } : {}), ...(Number.isFinite(seg.xanaxPerDay) ? { xanaxPerDay: seg.xanaxPerDay } : {}) } };
             rec = saved ? saved.rec : { recommended: pn.recommended, pickBy: pn.pickBy, alternatives: [], reasons: [] };
             planSettings = { ...settings, horizonDays: pn.days, budget: pn.budget === null ? Infinity : pn.budget };
         }
@@ -10182,7 +11545,7 @@
         const m = buildModel({ state, statics, plan: followed, onPath: Boolean(seg && seg.strategy), settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: (app ? archived(K.statsHistory, {}) : get(K.statsHistory, {})) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
         if (m.ready) {
             m.strategy = followed.strategy;
-            m.planBusy = pi.planBusy ? { recalibrate: pi.planBusy.recalibrate, months: pi.planBusy.months, at: pi.planBusy.at } : null;
+            m.planBusy = pi.planBusy ? { recalibrate: pi.planBusy.recalibrate, months: pi.planBusy.months, at: pi.planBusy.at, done: pi.planBusy.done, words: pi.planBusy.words } : null;
             m.savedPlan = saved;
         }
         return m;
@@ -10214,16 +11577,23 @@
     }
 
     /**
-     * The plan's line for Progress: the projection of the plan followed, from
-     * the day it was made or recalibrated (or picked).
+     * The plan's line (core/planline.js; Progress, the Plan card, Home): a new
+     * line from this moment, from your stats now. Create plan and Re-plan start
+     * the saved plan's own run; a pick (or back to the saved plan) follows that
+     * plan's saved run from where it stands today. The lines before it stay
+     * (round 7: a pick no longer re-bases the line, Re-plan no longer wipes it).
+     * @param {string} why - 'create' | 'replan' | 'pick' | 'path'
      */
-    function recordPlanLine(saved, strategy, now) {
+    function recordPlanLine(saved, strategy, now, why) {
         // 'path': the saved path (a plan per segment); else one plan over the whole length.
         const r = strategy === 'path' ? saved && saved.year && saved.year.path : saved && saved.compare ? saved.compare[strategy] : null;
         if (!r || !Array.isArray(r.daily)) return;
-        const plan = getPlan();
-        const stats = saved.snapshot.stats;
-        pageSet(K.planLine, { key: [plan.createdAt || 0, strategy, plan.build].join('|'), start: saved.from || tornDayStart(now), total: Object.values(stats).reduce((a, v) => a + v, 0), perStat: { ...stats }, daily: r.daily, perStatGain: r.perStat, cost: r.cost, days: r.daily.length });
+        const fresh = why === 'create' || why === 'replan';
+        // Your stats at this moment: what the plan saw when it was just made, else the last read.
+        const s = get(K.userState, null);
+        const read = !fresh && s && s.api ? normalizeState(s.api, s.at).stats : null;
+        const line = makeLine({ at: now, t0: fresh ? now : saved.rev || now, stats: read || saved.snapshot.stats, result: r, strategy, build: getPlan().build, why });
+        pageSet(K.planLine, addLine(pageGet(K.planLine, null), line));
     }
 
     /**
@@ -10305,6 +11675,7 @@
             recordDayTotals(pi.model);
         } catch (error) {
             set(K.lastError, { at: Date.now(), where: 'model', message: String((error && error.message) || error) });
+            logError('Working out the page', error);
             return;
         }
         for (const fn of pi.listeners) {
@@ -10312,8 +11683,32 @@
                 fn(pi.model);
             } catch (error) {
                 set(K.lastError, { at: Date.now(), where: 'render', message: String((error && error.message) || error) });
+                logError('Drawing the page', error);
             }
         }
+    }
+
+    /**
+     * Torn's own page shows something was done (the energy bar dropped, happy jumped): read the state about two seconds
+     * after the last such change, not at the next 30 s read, so the panel moves to the next step with its countdown
+     * (round 7, D.4). One read, by the tab that leads; nothing while paused or hidden.
+     */
+    let soonTimer = null;
+    function readSoon() {
+        if (!pi.feed || !isVisible() || isPaused()) return;
+        const at = pi.feed.wantSoon();
+        if (soonTimer) clearTimeout(soonTimer);
+        const go = () => {
+            soonTimer = null;
+            pi.feed
+                .tick()
+                .then((read) => {
+                    // Too soon after the read before it: once more when the gap has passed.
+                    if (!read && pi.feed.wantAt !== null && !soonTimer) soonTimer = setTimeout(go, 2000);
+                })
+                .catch(() => {});
+        };
+        soonTimer = setTimeout(go, Math.max(0, at - Date.now()) + 50);
     }
 
     /** Ask the feed now (a new key was saved): no waiting for the next heartbeat. */
@@ -10337,8 +11732,10 @@
             nextStep: () => (pi.model && pi.model.next) || null,
             isPaused: () => isPaused(),
             onState: () => refresh(),
+            onStatic: () => refresh(),
             onError: (error) => {
                 set(K.lastError, { at: Date.now(), where: 'feed', code: error && error.code, message: String((error && error.message) || error) });
+                logError('Reading your state from Torn', error);
                 // This tab's own writes fire no change event here: redraw so the warning shows now.
                 refresh();
             },
@@ -10458,8 +11855,10 @@
             kind: s.kind,
             label: s.label,
             train: Object.entries(s.trains || {}).filter(([, n]) => n > 0).map(([k, n]) => STAT_LABEL[k] + ' × ' + n).join(' · ') || null,
-            strict: Boolean(s.strict),
-            tick: s.tick ? Math.round(s.tick / 1000) : null,
+            // A step in the middle of a boost or jump (round 7) is due now and ends at the tick: for the Worker it is a
+            // "step now" (its strict pings say "right after the tick", which would be the wrong way round).
+            strict: Boolean(s.strict) && !s.mid,
+            tick: s.tick && !s.mid ? Math.round(s.tick / 1000) : null,
         }));
     }
 
@@ -11158,6 +12557,7 @@
     .inp { height: 30px; padding: 0 10px; border-radius: 5px; border: 1px solid var(--line2); background: #111315; color: var(--text); font: 13px Arial; min-width: 0; }
     .inp:focus { outline: 2px solid var(--chalk); outline-offset: -1px; }
     .inp.masked { -webkit-text-security: disc; }
+    textarea.inp.ta { height: auto; padding: 8px 10px; line-height: 1.4; resize: vertical; }
     .row { display: flex; gap: 8px; align-items: center; }
     .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 12px; }
     .kv dt { color: var(--muted); } .kv dd { margin: 0; text-align: right; }
@@ -11174,6 +12574,16 @@
     .secbody { display: flex; flex-direction: column; gap: 10px; max-width: 760px; }
     .secbody p { margin: 0; color: var(--muted); }
     ol.steps-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+    /* A plan being worked out (the Plan card): the card's own day line, filling */
+    .planrun { margin-top: 10px; }
+    .planrun .dayline i { transition: none; }
+    /* Report a problem */
+    ul.incl { margin: 4px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
+    .shots { display: flex; flex-wrap: wrap; gap: 8px; }
+    .shot { position: relative; display: inline-block; }
+    .shot img { display: block; height: 72px; max-width: 160px; object-fit: cover; border-radius: 5px; border: 1px solid var(--line2); }
+    .shot .x { position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; border-radius: 50%; border: 0; background: #111315; color: var(--text); cursor: pointer; line-height: 1; }
+    pre.logbox { margin: 0; padding: 10px; max-height: 260px; overflow: auto; white-space: pre-wrap; font: 11px/1.5 Consolas, monospace; color: var(--muted); background: #111315; border: 1px solid var(--line); border-radius: 5px; }
     details.dis > summary { cursor: pointer; color: var(--link); font-size: 12px; list-style: none; }
     details.dis > summary::before { content: "▸ "; }
     details.dis[open] > summary::before { content: "▾ "; }
@@ -11475,7 +12885,7 @@
                 return c;
             })(),
             withBooster ? stCell('Booster', boosterTxt, s.booster.left > 0 ? null : 'good', s.booster.capH ? (100 * Math.min(s.booster.left, s.booster.capH * 3600e3)) / (s.booster.capH * 3600e3) : 0, 'var(--chalk)', boosterWords(s.booster, now)) : null,
-            stCell('Refill', s.refill.free ? 'Unused' : 'Used', null, s.refill.free ? 0 : 100, 'var(--chalk)', s.refill.free ? (s.refill.plannedAt ? 'Planned ' + clock(s.refill.plannedAt, settings) : 'Use before 00:00') : 'Next at 00:00 Torn time'),
+            stCell('Refill', s.refill.free ? 'Unused' : 'Used', null, s.refill.free ? 0 : 100, 'var(--chalk)', s.refill.free ? (s.refill.plannedAt ? 'Planned ' + clock(s.refill.plannedAt, settings) : s.refill.stacking ? 'No use while stacked' : 'Use before 00:00') : 'Next at 00:00 Torn time'),
         ]);
     }
 
@@ -11545,6 +12955,12 @@
                 return h('li', { class: [x.tone === 'warn' ? 'w' : x.tone === 'good' ? 'g' : null, link ? 'go' : null].filter(Boolean).join(' ') || null, role: link ? 'link' : null, tabindex: link ? '0' : null, onclick: link ? open : null, onkeydown: link ? (e) => { if (e.key === 'Enter') open(); } : null }, [h('i'), h('div', {}, [x.text, x.sub ? h('span', { text: ' · ' + x.sub }) : null])]);
             }),
         );
+    }
+
+    /** "Comparing plans: steady (3) · 4 s" for the Plan card while a plan is worked out (round 7, R7.3b). */
+    function planRunWords(busy, now = Date.now()) {
+        const s = Math.max(0, Math.round((now - (busy.at || now)) / 1000));
+        return (busy.words || 'Working it out') + ' · ' + s + ' s';
     }
 
     /* ===== src/ui/charts.js ===== */
@@ -12100,6 +13516,648 @@
         return { stat: k, pts, days: days === undefined ? null : days, text };
     }
 
+    /* ===== src/core/gymlog.js ===== */
+    /*
+     * Your trains from Torn's own log (owner, 2026-09-30: "how about tracking of
+     * stats such as training on phone since laptop was closed"). The log has one
+     * line per TRAIN click: the stat, trains, energy, the gym, happy used, and
+     * the stat before and after. With the Full key (the log is Full only), the
+     * leader tab reads what's new; Progress' "Last trains" shows the sessions no
+     * read of ours saw. Pure. Research: docs/research-gym-log.md.
+     *
+     * Not a gain-model check: the log doesn't say the happy a click started at,
+     * so these sessions have no "Plan said" (Your gains already count them, from
+     * Torn's stats).
+     */
+
+
+
+
+
+    /** Torn's log types for a train, by stat [code: factionops probe; snippet: logtypes dumps]. */
+    const GYM_LOG_TYPES = { 5300: 'str', 5301: 'def', 5302: 'spd', 5303: 'dex' };
+
+    /** Lines kept (one a TRAIN click, ~120 bytes each: a few months for a heavy trainer), and for how long. */
+    const GYM_LOG_KEEP = 600;
+    const GYM_LOG_DAYS = 120;
+
+    /** How often the leader reads it, and how far back the first read goes. */
+    const GYM_LOG_EVERY_MS = 15 * 60 * 1000;
+    const GYM_LOG_FIRST_DAYS = 7;
+
+    const logNum = (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+    };
+
+    /**
+     * Torn's log lines (v2 `log` array) as trains: {id, at (ms), stat, trains,
+     * energy, happy, gymId, before, after, gain}. Lines that aren't a train, or
+     * carry no trains or energy, are left out. The stat comes from the log type,
+     * or from the title ("Gym train defense") when the type is missing.
+     * `before` is a string in the one real sample seen [snippet]: numbers are read with Number().
+     */
+    function parseGymLog(rows) {
+        const out = [];
+        for (const e of Array.isArray(rows) ? rows : []) {
+            if (!e || !e.data) continue;
+            const type = Number(e.details && e.details.id);
+            const title = String((e.details && e.details.title) || '').toLowerCase();
+            const stat = GYM_LOG_TYPES[type] || (/^gym train /.test(title) ? { strength: 'str', defense: 'def', defence: 'def', speed: 'spd', dexterity: 'dex' }[title.slice(10).trim()] : null);
+            if (!stat) continue;
+            const trains = logNum(e.data.trains);
+            const energy = logNum(e.data.energy_used);
+            const at = logNum(e.timestamp);
+            if (!(trains > 0) || !(energy > 0) || !(at > 0)) continue;
+            const name = STAT_API[stat];
+            const before = logNum(e.data[name + '_before']);
+            const after = logNum(e.data[name + '_after']);
+            let gain = logNum(e.data[name + '_increased']);
+            if (gain === null && before !== null && after !== null) gain = after - before;
+            out.push({ id: String(e.id || at + ':' + type), at: at * 1000, stat, trains, energy, happy: logNum(e.data.happy_used), gymId: logNum(e.data.gym), before, after, gain });
+        }
+        return out;
+    }
+
+    /**
+     * Add new lines to the kept ones: deduped by id (pages overlap at the edge), oldest first, the last GYM_LOG_DAYS
+     * and GYM_LOG_KEEP. `gap` ({from, to} in unix seconds, or null): what a read couldn't reach yet (it stopped at its
+     * page limit), read next; the newest line can be newer than the gap, so `newest` alone would skip it.
+     */
+    function mergeGymLog(kept, lines, now, gap = null) {
+        const byId = new Map();
+        for (const x of [...((kept && kept.lines) || []), ...(lines || [])]) if (x && x.id) byId.set(x.id, x);
+        const since = now - GYM_LOG_DAYS * 86400e3;
+        const all = [...byId.values()].filter((x) => x.at >= since).sort((a, b) => a.at - b.at);
+        // A gap older than what's kept doesn't need filling.
+        const g = gap && gap.to > gap.from && gap.to * 1000 > since ? { from: Math.max(gap.from, Math.floor(since / 1000)), to: gap.to } : null;
+        return { lines: all.slice(-GYM_LOG_KEEP), at: now, newest: all.length ? all[all.length - 1].at : (kept && kept.newest) || null, gap: g };
+    }
+
+    /** Where the next read starts (unix seconds): after the newest line kept, or GYM_LOG_FIRST_DAYS back. */
+    function gymLogFrom(kept, now) {
+        const newest = kept && kept.newest;
+        return Math.floor((newest ? newest : now - GYM_LOG_FIRST_DAYS * 86400e3) / 1000);
+    }
+
+    /**
+     * The log's lines as sessions (clicks within SESSION_GAP_MS of each other),
+     * like gains.js' sessionsOf: {at, end, trains:{stat: n}, gyms:[names], actual, energy, fromLog: true}. Newest first.
+     */
+    function logSessions(lines, table) {
+        const list = (lines || []).filter((x) => x && x.at).slice().sort((a, b) => a.at - b.at);
+        const out = [];
+        for (const x of list) {
+            let s = out[out.length - 1];
+            if (!s || x.at - s.end > SESSION_GAP_MS) out.push((s = { at: x.at, end: x.at, trains: {}, gyms: [], actual: 0, gained: false, energy: 0, reads: 0, predicted: null, fromLog: true }));
+            s.end = x.at;
+            s.trains[x.stat] = (s.trains[x.stat] || 0) + x.trains;
+            const g = x.gymId ? gymById(x.gymId, table) : null;
+            const name = g ? g.name : x.gymId ? 'Gym ' + x.gymId : null;
+            if (name && !s.gyms.includes(name)) s.gyms.push(name);
+            // A gain Torn didn't give (a field name we haven't seen) is unknown, not zero: a session with none shows "—".
+            if (x.gain !== null && x.gain !== undefined) {
+                s.actual = (s.actual || 0) + x.gain;
+                s.gained = true;
+            }
+            s.energy += x.energy;
+            s.reads++;
+        }
+        for (const s of out) if (!s.gained) s.actual = null;
+        return out.reverse();
+    }
+
+    /**
+     * "Last trains": the sessions our reads saw (with the plan's prediction) and
+     * the ones only Torn's log has (a phone, another device, the laptop closed).
+     * A log session that overlaps a read session is the same session: the read's
+     * one is kept. Newest first.
+     */
+    function mergeSessions(readSessions, logList) {
+        const reads = readSessions || [];
+        const overlaps = (l) => reads.some((r) => l.at <= r.end + SESSION_GAP_MS && l.end >= r.at - SESSION_GAP_MS);
+        return [...reads, ...(logList || []).filter((l) => !overlaps(l))].sort((a, b) => b.at - a.at);
+    }
+
+    /* ===== src/ui/app/progress.js ===== */
+    /*
+     * Progress (mockups/round3/V-progress.html): one question, "am I on the
+     * line?". Total stats against the plan's line, one chart per stat on its own
+     * scale, gained against plan each day, and the last trains (what the plan
+     * said, what Torn showed). Before any history: the planned line and today,
+     * never a "come back tomorrow" paragraph (owner).
+     */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    const dayLabel = (d) => new Date(d).getUTCDate() + ' ' + MONTH_NAMES[new Date(d).getUTCMonth()];
+
+    /** Plan-vs-actual colour: green within ±20%, yellow 50–79% or 121–150%, red further off. */
+    function planColor(ratio) {
+        if (ratio >= 0.8 && ratio <= 1.2) return 'good';
+        if ((ratio >= 0.5 && ratio < 0.8) || (ratio > 1.2 && ratio <= 1.5)) return 'warn';
+        return 'bad';
+    }
+
+    /**
+     * The days shown (14, 30 or all the history there is), "you" on each, and the
+     * plan's lines read by time (core/planline.js). Round 7: "you" on a past day
+     * is that day's last read, so the plan is read at the same moment (the day's
+     * end; today: now); history from before the plan stays on the chart; a pick
+     * or a Re-plan starts a new line and the old one stays.
+     */
+    function seriesFor(m, ctx, range) {
+        const hist = ctx.history || {};
+        const now = m.now;
+        const today = tornDayStart(now);
+        let lines = ctx.planLines || [];
+        // No line yet (a plan followed before any was saved): the plan's own run from now, for the chart only.
+        if (!lines.length && m.compare && m.compare[ctx.plan.strategy] && Array.isArray(m.compare[ctx.plan.strategy].daily)) lines = [makeLine({ at: now, stats: m.pc.stats, result: m.compare[ctx.plan.strategy], strategy: ctx.plan.strategy })];
+        let days = Object.keys(hist).map(Number).filter((d) => d <= today).sort((a, b) => a - b);
+        if (range !== 'all') days = days.slice(-range);
+        if (!days.length || days[days.length - 1] !== today) days.push(today);
+        const timeOf = (d) => (d === today ? now : d < today ? d + DAY - 1 : d + DAY - 1);
+        const actual = days.map((d) => (d === today ? m.total : hist[d] ? hist[d].total : null));
+        return { days, actual, lines, line: lineAt(lines, now), timeOf, today, now, first: days[0] };
+    }
+
+    function totalChart(m, ctx, s) {
+        const onlyToday = s.days.length === 1;
+        // With only today, show the plan's line ahead (planned + today).
+        const ahead = onlyToday ? 14 : 0;
+        const xs = s.days.concat(Array.from({ length: ahead }, (_, i) => s.days[s.days.length - 1] + (i + 1) * DAY));
+        // One dashed line per plan line: the one you follow now, and the ones before it up to where each ended.
+        const plans = s.lines.map((l) => {
+            const end = lineEnd(s.lines, l);
+            const values = xs.map((d) => {
+                const at = s.timeOf(d);
+                // On the day it starts (today, with nothing before): the line's own start, so it begins where you are.
+                if (onlyToday && d === s.today && l === s.line) return l.base + planGain(l, at);
+                return at >= l.at && at < end ? l.base + planGain(l, at) : null;
+            });
+            return { line: l, values, current: l === s.line };
+        });
+        const you = s.actual.concat(Array(ahead).fill(null));
+        const lbl = (i) => (onlyToday && i === 0 ? 'today' : dayLabel(xs[i]));
+        const labels = [[0, lbl(0)], [xs.length - 1, lbl(xs.length - 1)]];
+        const vals = plans.flatMap((p) => p.values).concat(you).filter((v) => v !== null);
+        const lo = Math.min(...vals);
+        const hi = Math.max(...vals);
+        const old = plans.some((p) => !p.current && p.values.some((v) => v !== null));
+        return h('div', {}, [
+            h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('lab', 'Total stats against the plan'), h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), 'you']), h('span', {}, [h('i', { class: 'dash', style: 'color:var(--muted)' }), 'plan']), old ? h('span', {}, [h('i', { class: 'dash', style: 'color:var(--dim)' }), 'earlier plan']) : null])]),
+            lineChart(
+                [
+                    ...plans.filter((p) => p.values.some((v) => v !== null)).map((p) => ({ name: p.current ? 'plan' : 'earlier plan', color: p.current ? 'var(--muted)' : 'var(--dim)', dash: p.current ? '5 4' : '2 4', width: p.current ? 1.5 : 1.2, values: p.values, label: p.current ? 'plan' : false })),
+                    { name: 'you', color: 'var(--chalk)', width: 2.5, values: you, label: 'you ' + fmtShort(m.total) },
+                ],
+                { w: 1000, h: 200, left: 50, right: 110, yMin: lo - (hi - lo) * 0.08, yMax: hi + (hi - lo) * 0.08 || hi * 1.01, grid: [lo, hi], xLabels: labels, n: xs.length, today: onlyToday ? 0 : undefined, label: 'Total stats against the plan' },
+            ),
+            onlyToday ? h('div', { class: 'note2', text: 'Your line starts today; the dashed line is where the plan takes you. Each day adds a point.' }) : null,
+        ]);
+    }
+
+    function statCharts(m, ctx, s) {
+        const hist = ctx.history || {};
+        const today = tornDayStart(m.now);
+        const trains = {};
+        for (const st of m.steps) for (const [k, n] of Object.entries(st.trains || {})) trains[k] = (trains[k] || 0) + n;
+        const cells = STATS.map((k) => {
+            const vals = s.days.map((d) => (d === today ? m.pc.stats[k] : hist[d] ? hist[d][k] : null));
+            const known = vals.filter((v) => v !== null);
+            const gained = known.length > 1 ? known[known.length - 1] - known[0] : 0;
+            const row = m.statRows.find((r) => r.stat === k);
+            const what = trains[k] ? trains[k] + ' trains today' : row && row.over ? 'over target, skipped' : 'no trains today';
+            // The plan's line for this stat: the simulator's own line for it (round 7: not one share of the total applied to
+            // every day), read at the same moments as "you", over the same days (and 14 ahead on day one).
+            const ahead = s.days.length === 1 ? 14 : 0;
+            const planVals = s.lines.length ? s.days.concat(Array.from({ length: ahead }, (_, i) => s.days[s.days.length - 1] + (i + 1) * DAY)).map((d) => planStatAt(s.lines, k, d === s.today && ahead ? Math.max(s.now, s.lines[0].at) : s.timeOf(d))) : [];
+            const youVals = vals.concat(Array(ahead).fill(null));
+            const all = known.concat(planVals.filter((v) => v !== null));
+            const lo = Math.min(...all);
+            const hi = Math.max(...all);
+            const series = [];
+            const moves = planVals.filter((v) => v !== null);
+            if (moves.length && Math.max(...moves) > Math.min(...moves)) series.push({ name: 'plan', color: 'var(--muted)', dash: '5 4', width: 1.2, values: planVals, label: false });
+            series.push({ name: k, color: STAT_COLOR[k], width: 2, values: youVals.length > 1 ? youVals : [youVals[0], youVals[0]], label: false });
+            return h('div', {}, [
+                h('div', { class: 't' }, [h('b', { class: 's-' + k, text: STAT_LABEL[k] }), h('span', { text: fmtInt(m.pc.stats[k]) + (gained ? ' · ' + fmtSigned(gained) : '') + ' · ' + what })]),
+                lineChart(series, { w: 460, h: 90, left: 4, right: 4, yMin: lo - (hi - lo || hi * 0.01) * 0.1, yMax: hi + (hi - lo || hi * 0.01) * 0.1, n: youVals.length > 1 ? youVals.length : 2, label: STAT_LABEL[k] + ' over the days shown' }),
+            ]);
+        });
+        return h('div', {}, [h('div', { class: 'lab', style: 'margin-bottom:8px', text: 'Each stat · own scale' }), h('div', { class: 'mult num' }, cells)]);
+    }
+
+    /** One Torn day's gained and planned (core/planline.js dayNumbers), for the bars and "This week". */
+    function dayGainPlan(m, ctx, day) {
+        return dayNumbers({ lines: ctx.planLines || [], history: ctx.history || {}, totals: ctx.dayTotals || {}, day, today: tornDayStart(m.now), nowTotal: m.total, gainedToday: m.gainedToday, plannedToday: m.plannedGain });
+    }
+
+    function dayBars(m, ctx) {
+        const totals = ctx.dayTotals || {};
+        const today = tornDayStart(m.now);
+        const days = [...new Set([...Object.keys(totals), ...Object.keys(ctx.history || {})].map(Number))].filter((d) => d <= today).sort((a, b) => a - b).slice(-14);
+        if (!days.includes(today)) days.push(today);
+        // A day's planned is what the plan's line says for that day (round 7: fixed, it doesn't move as you train);
+        // gained is what your stats really rose.
+        const nums = days.map((d) => dayGainPlan(m, ctx, d));
+        const pct = nums.map((r) => (r.planned > 0 ? (100 * (r.gained || 0)) / r.planned : null));
+        const labels = days.map((d, i) => (d === today ? 'today' : i === 0 || i % 3 === 0 ? dayLabel(d) : ''));
+        const done = days.filter((d) => d < today);
+        const onPlan = days.filter((d, i) => d < today && nums[i].planned > 0 && nums[i].gained / nums[i].planned >= 0.95).length;
+        return h('div', {}, [
+            h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [
+                h('span', {}, [t('lab', 'Gained against plan, each day'), done.length ? h('span', { class: 'muted', style: 'margin-left:10px;font-size:12px', text: onPlan + ' of ' + done.length + ' days on plan' }) : null]),
+                h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--good)' }), 'on plan']), h('span', {}, [h('i', { style: 'background:var(--spd)' }), '75–95%']), h('span', {}, [h('i', { style: 'background:var(--bad)' }), 'under 75%']), h('span', {}, [h('i', { style: 'background:var(--line2)' }), 'today so far'])]),
+            ]),
+            planBars(pct, labels, { w: 1000, h: 110, partial: days.length - 1, label: 'Stats gained each day as a share of the plan' }),
+        ]);
+    }
+
+    function lastTrains(m, ctx) {
+        // One row a session (owner: "my 15 trains = +305,123 showed as three rows"), its reads added up. Sessions only
+        // Torn's log saw (your phone, the laptop closed; Full key) join them, without a prediction.
+        const reads = sessionsOf((ctx.calibration && ctx.calibration.samples) || []);
+        const logged = logSessions((ctx.gymLog && ctx.gymLog.lines) || [], m.pc && m.pc.table);
+        const sessions = mergeSessions(reads, logged).slice(0, 6);
+        const offOf = (p, a) => (p > 0 ? (100 * (a - p)) / p : 0);
+        const rows = sessions.map((x) => {
+            const checked = x.predicted !== null && x.predicted !== undefined;
+            const off = offOf(x.predicted, x.actual);
+            const stats = Object.keys(x.trains);
+            return h('tr', {}, [
+                h('td', { class: 't', text: clock(x.at, ctx.settings) }),
+                h('td', { class: stats.length === 1 ? 's-' + stats[0] : null, text: stats.map((k) => STAT_LABEL[k] + ' × ' + x.trains[k]).join(' · ') }),
+                h('td', {}, [x.gyms.join(' / '), x.fromLog ? h('span', { class: 'muted', title: 'From Torn’s own log: Pumping Iron had no clean read of this session (you trained elsewhere, e.g. on your phone, or a drug, booster or refill came between two reads), so there’s no formula figure to check it against', text: ' · Torn log' }) : null]),
+                h('td', { class: 'r', text: checked ? fmtSigned(x.predicted) : '—' }),
+                h('td', { class: 'r', text: x.actual === null || x.actual === undefined ? '—' : fmtSigned(x.actual) }),
+                h('td', { class: checked ? 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn') : 'r muted', text: checked ? fmtPct(off, 1) : '—' }),
+            ]);
+        });
+        if (rows.length > 1) {
+            // "Formula says" and "Off by" add up only when every row has a formula figure (the log's sessions have none).
+            const all = sessions.every((x) => x.predicted !== null && x.predicted !== undefined);
+            const p = all ? sessions.reduce((s, x) => s + x.predicted, 0) : 0;
+            const a = sessions.reduce((s, x) => s + (x.actual || 0), 0);
+            const off = offOf(p, a);
+            rows.push(h('tr', { class: 'total' }, [h('td'), h('td', {}, [h('b', { text: 'Total' })]), h('td'), h('td', { class: 'r', text: all ? fmtSigned(p) : '—' }), h('td', { class: 'r' }, [h('b', { text: fmtSigned(a) })]), h('td', { class: all ? 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn') : 'r muted', text: all ? fmtPct(off, 1) : '—' })]));
+        }
+        return h('div', {}, [
+            sectionHead('Last trains', meta(['what the gain formula says for the trains you did, what Torn showed']), null, 'h3'),
+            rows.length
+                ? h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Session' }), h('th', { text: 'Gym' }), h('th', { class: 'r', title: 'The gain formula on the trains you did, at the happy and stat of the read before them. It checks the formula, not the plan.', text: 'Formula says' }), h('th', { class: 'r', text: 'You got' }), h('th', { class: 'r', style: 'width:80px', text: 'Off by' })])]), h('tbody', {}, rows)])
+                : null,
+            h('p', { class: 'muted', style: rows.length ? 'margin:6px 0 0;font-size:12px' : 'margin:0', text: 'Only reads under two minutes apart with one stat trained and nothing taken in between (no drug, booster or refill, no happy reset): they check the gain maths, not your plan, so a session’s total here can be less than what you really gained. Your real gains are under “Your gains”.' + (ctx.gymLog ? ' Sessions marked “Torn log” are from Torn’s own log (your Full key): trains while Pumping Iron wasn’t open, e.g. on your phone.' : ' With a Full key (Settings), trains on your phone show here too, from Torn’s log.') }),
+        ]);
+    }
+
+    function weekFacts(m, ctx) {
+        const totals = ctx.dayTotals || {};
+        const today = tornDayStart(m.now);
+        const days = Object.keys(totals).map(Number).filter((d) => d > today - 7 * DAY && d <= today);
+        const sum = (k) => days.reduce((a, d) => a + ((totals[d] && totals[d][k]) || 0), 0);
+        const nums = days.map((d) => dayGainPlan(m, ctx, d));
+        const g = nums.reduce((a, r) => a + (r.gained || 0), 0);
+        const p = nums.reduce((a, r) => a + (r.planned || 0), 0);
+        const xp = unitPrice((ctx.prices || {})[XANAX]) || 0;
+        const pp = unitPrice((ctx.prices || {})[POINTS], 300) || 0;
+        // Money really spent this week (receipts: every item and refill at that day's price); before receipts, Xanax and refills.
+        const spent = spentOverDays(ctx.receipts, days, { priceHistory: ctx.priceHistory, prices: ctx.prices || {} }, (d) => ((totals[d] && totals[d].xanax) || 0) * xp + ((totals[d] && totals[d].refills) || 0) * REFILL_POINTS * pp);
+        const first = new Date(today - 6 * DAY);
+        return h('div', {}, [
+            sectionHead('This week', meta([DAY_NAMES[first.getUTCDay()] + '–' + DAY_NAMES[new Date(today).getUTCDay()] + ' · ' + days.length + ' of 7 days']), null, 'h3'),
+            h('dl', { class: 'facts num' }, [
+                h('dt', { text: 'Gained' }),
+                h('dd', {}, [fmtSigned(g) + (p ? ' of ' + fmtShort(p) : ''), h('div', { class: 'mini' }, [h('i', { style: 'width:' + (p ? Math.min(100, (100 * g) / p) : 0).toFixed(0) + '%' })])]),
+                h('dt', { text: 'Xanax' }),
+                h('dd', { text: sum('xanax') + ' of ' + sum('xanaxPlanned') }),
+                h('dt', { text: 'Refills' }),
+                h('dd', { text: sum('refills') + ' of ' + days.length }),
+                h('dt', { text: 'Spent' }),
+                h('dd', { text: xp || pp ? 'about ' + fmtMoney(spent) : '—' }),
+            ]),
+        ]);
+    }
+
+    function budgetFacts(m, ctx, s) {
+        const days = m.planDays || ctx.settings.horizonDays || 30;
+        // Auto mode: the budget is what your income affords over the horizon.
+        const auto = m.auto && m.auto.ready && ctx.plan && ctx.plan.pickBy === 'auto' ? m.auto : null;
+        const budget = auto ? auto.budget : ctx.settings.budget || 0;
+        const line = s.line;
+        const dayN = line ? Math.min(days, Math.floor((tornDayStart(m.now) - tornDayStart(line.at)) / DAY) + 1) : 1;
+        const perDay = line ? line.cost / days : m.spend ? m.spend.perDay : 0;
+        const spent = perDay * dayN;
+        return h('div', {}, [
+            sectionHead('Budget', meta([fmtMoney(budget) + ' for ' + days + ' days' + (auto ? ' · Auto, from your income' : '')]), null, 'h3'),
+            h('dl', { class: 'facts num' }, [
+                h('dt', { text: 'At the plan’s pace' }),
+                h('dd', {}, ['about ' + fmtMoney(spent) + ' · day ' + dayN + ' of ' + days, h('div', { class: 'mini' }, [h('i', { style: 'width:' + (budget ? Math.min(100, (100 * spent) / budget) : 0).toFixed(0) + '%;background:var(--muted)' })])]),
+                h('dt', { text: 'On pace for' }),
+                h('dd', { text: fmtMoney(perDay * days) }),
+                m.spend && m.spend.cash !== null ? h('dt', { text: 'Cash on hand' }) : null,
+                m.spend && m.spend.cash !== null ? h('dd', { text: fmtMoney(m.spend.cash) + (m.spend.lastsDays !== null ? (m.spend.lastsDays < 1 ? ' · lasts under a day' : ' · lasts ~' + Math.round(m.spend.lastsDays) + ' days') : '') }) : null,
+            ]),
+        ]);
+    }
+
+    /** The stat furthest behind the build, how far, and when it gets there at the recent pace. */
+    function buildFacts(m, ctx, s) {
+        const behind = m.statRows.filter((r) => !r.over && r.gap > 0).sort((a, b) => b.target - b.share - (a.target - a.share))[0];
+        const hist = ctx.history || {};
+        const firstDay = s.days.find((d) => hist[d]);
+        const pace = firstDay !== undefined && behind ? (m.pc.stats[behind.stat] - hist[firstDay][behind.stat]) / Math.max(1, (tornDayStart(m.now) - firstDay) / DAY) : 0;
+        return h('div', {}, [
+            sectionHead('Build', meta([m.build.name]), null, 'h3'),
+            behind
+                ? h('dl', { class: 'facts num' }, [
+                      h('dt', { text: STAT_LABEL[behind.stat] + ' share' }),
+                      h('dd', {}, [(behind.share * 100).toFixed(1) + '% of ' + (behind.target * 100).toFixed(1) + '%', h('div', { class: 'mini' }, [h('i', { style: 'width:' + Math.min(100, (100 * behind.share) / behind.target).toFixed(0) + '%;background:' + STAT_COLOR[behind.stat] })])]),
+                      h('dt', { text: 'To go' }),
+                      h('dd', { text: '+' + fmtShort(behind.gap) }),
+                      h('dt', { text: 'At this pace' }),
+                      h('dd', { text: pace > 0 ? 'about ' + Math.max(1, Math.round(behind.gap / pace)) + ' days' : m.reachedDay !== null && m.reachedDay !== undefined ? 'about ' + m.reachedDay + ' days (plan)' : 'more than 30 days' }),
+                  ])
+                : h('p', { class: 'muted', style: 'margin:0', text: 'On build: every stat at or over its share.' }),
+        ]);
+    }
+
+    /** Round-number milestones ahead for the stat the plan trains most, and the total. */
+    function milestones(m, ctx) {
+        const r = ctx.compare && ctx.compare[ctx.plan.strategy];
+        if (!r) return null;
+        const days = m.planDays || ctx.settings.horizonDays || 30;
+        const out = [];
+        const main = STATS.filter((k) => r.perStat && r.perStat[k] > 0).sort((a, b) => r.perStat[b] - r.perStat[a])[0];
+        const when = (target, cur, daily) => {
+            const i = daily.findIndex((v) => cur + v >= target);
+            return i < 0 ? null : i + 1;
+        };
+        const inDays = (d) => 'in ~' + d + ' day' + (d === 1 ? '' : 's');
+        const step = (v) => Math.pow(10, Math.floor(Math.log10(Math.max(10, v))));
+        const total = m.total;
+        const tStep = step(total) / 2;
+        const tTarget = Math.ceil((total + 1) / tStep) * tStep;
+        const tDay = when(tTarget, total, r.daily);
+        if (tDay) out.push([fmtShort(tTarget) + ' total', inDays(tDay)]);
+        if (main) {
+            const cur = m.pc.stats[main];
+            const share = r.perStat[main] / Math.max(1, r.gained);
+            const daily = r.daily.map((v) => v * share);
+            const st = step(cur);
+            for (const target of [Math.ceil((cur + 1) / st) * st, Math.ceil((cur + 1) / st) * st + st]) {
+                const d = when(target, cur, daily);
+                if (d) out.push([STAT_LABEL[main] + ' ' + fmtShort(target), inDays(d)]);
+            }
+        }
+        if (m.nextGym && m.nextGym.gym) out.push([m.nextGym.gym.name, m.nextGym.known ? 'in ~' + Math.max(1, Math.round(m.nextGym.days)) + ' days' : 'open the gym page once to track it']);
+        if (!out.length) return null;
+        return h('div', {}, [sectionHead('Next milestones', meta(['at the plan’s pace, ' + days + ' days']), null, 'h3'), h('dl', { class: 'facts num' }, out.flatMap(([a, b]) => [h('dt', { text: a }), h('dd', { text: b })]))]);
+    }
+
+    function gymFacts(m) {
+        const top = Math.max(0, ...m.pc.unlocked.filter((id) => id <= GEORGES));
+        const specs = (m.pc.table || GYMS).filter((g) => g.id > GEORGES);
+        const lines = [h('dt', { text: 'Ladder' }), h('dd', { text: top >= GEORGES ? 'George’s ✓ (all ' + GEORGES + ')' : ((gymById(top, m.pc.table) || {}).name || 'gym ' + top) + ' · ' + (GEORGES - top) + ' to go' })];
+        for (const g of specs) {
+            const have = m.pc.unlocked.includes(g.id);
+            const acc = gymAccess(g, m.pc.stats);
+            if (!have && top < GEORGES) continue;
+            lines.push(h('dt', { text: g.name }), h('dd', { text: have && acc.ok ? '✓ open to you' : acc.reason || 'not unlocked' }));
+        }
+        return h('div', {}, [sectionHead('Gyms', null, null, 'h3'), h('dl', { class: 'facts num' }, lines)]);
+    }
+
+    /* ---------- Receipts ---------- */
+
+    /** Items, then refills, in words: "Xanax × 3 · EDVD × 5 · Refill × 1". */
+    function usedWords(x) {
+        const parts = [itemsWords(x.items)];
+        if (x.refills > 0) parts.push('Refill × ' + x.refills);
+        if (x.special > 0) parts.push('Special refill × ' + x.special);
+        return parts.filter(Boolean).join(' · ');
+    }
+
+    /** Energy per 1,000 stats: "5.5", "1,480". */
+    function rcPerK(v) {
+        return v === null ? '—' : v >= 100 ? fmtInt(v) : v.toFixed(v >= 10 ? 1 : 2);
+    }
+
+    /**
+     * Today / 7 days / 30 days, and the last 14 days, from the stored receipts.
+     * @returns {{cols: [label, summary][], days: {day, s, d}[], any: boolean}}
+     */
+    function receiptsView(receipts, now, sources = {}) {
+        const today = tornDayStart(now);
+        const cols = [
+            ['Today', today],
+            ['7 days', today - 6 * DAY],
+            ['30 days', today - 29 * DAY],
+        ].map(([label, from]) => [label, summarizeReceipts(receipts, from, today, sources)]);
+        const r = readReceipts(receipts);
+        const days = receiptDays(receipts)
+            .filter((d) => d <= today)
+            .slice(-14)
+            .reverse()
+            .map((d) => ({ day: d, s: summarizeReceipts(receipts, d, d, sources), d: r.days[d] }));
+        return { cols, days, any: days.length > 0 };
+    }
+
+    const rcMoney = (s) => (s.cost > 0 ? (s.est ? '~' : '') + fmtMoney(s.cost) : '$0');
+
+    function receiptDetail(row, m) {
+        const d = row.d;
+        const table = (m.pc && m.pc.table) || GYMS;
+        const by = Object.entries(d.by || {}).map(([k, [n, e]]) => {
+            const [stat, gid] = k.split('@');
+            return ((gymById(Number(gid), table) || {}).name || 'Gym ' + gid) + ' · ' + STAT_LABEL[stat] + ' × ' + fmtInt(n) + ' (' + fmtInt(e) + ' E)';
+        });
+        const gains = STATS.filter((k) => d.gain && d.gain[k] > 0).map((k) => fmtSigned(d.gain[k]) + ' ' + STAT_LABEL[k]);
+        const prices = Object.entries(d.px || {}).map(([id, p]) => (id === POINTS ? 'points' : itemsWords({ [id]: 1 }).replace(/ × 1$/, '')) + ' ' + fmtMoney(p));
+        const notes = [];
+        if (Object.keys(d.guess || {}).length) notes.push(itemsWords(d.guess) + ' not seen in your inventory yet (the plan’s step)');
+        if (d.catchUp) notes.push('includes ' + d.catchUp + ' catch-up after Torn Trading ran');
+        if (d.est) notes.push('energy worked out around a drug, booster or refill');
+        if (row.s.est) notes.push('a price wasn’t seen that day: nearest known price');
+        return h('dl', { class: 'facts num', style: 'grid-template-columns:auto 1fr;padding:6px 0 10px' }, [
+            h('dt', { text: 'Trained' }),
+            h('dd', { style: 'text-align:left', text: by.length ? by.join(' · ') : fmtInt(d.e) + ' E' }),
+            h('dt', { text: 'Gained' }),
+            h('dd', { style: 'text-align:left', text: gains.join(' · ') || '+0' }),
+            prices.length ? h('dt', { text: 'Cheapest that day' }) : null,
+            prices.length ? h('dd', { style: 'text-align:left', text: prices.join(' · ') }) : null,
+            notes.length ? h('dt', { text: 'Notes' }) : null,
+            notes.length ? h('dd', { style: 'text-align:left', text: notes.join('; ') }) : null,
+        ]);
+    }
+
+    function receiptsCard(m, ctx) {
+        const v = receiptsView(ctx.receipts, m.now, { priceHistory: ctx.priceHistory, prices: ctx.prices || {} });
+        const line = (label, fn) => h('tr', {}, [h('td', { class: 'muted', text: label }), ...v.cols.map(([, s]) => h('td', { class: 'r', text: fn(s) }))]);
+        const summary = h('table', { class: 'tbl num rc-sum' }, [
+            h('thead', {}, [h('tr', {}, [h('th', { text: '' }), ...v.cols.map(([l]) => h('th', { class: 'r', text: l }))])]),
+            h('tbody', {}, [
+                line('Energy trained', (s) => fmtInt(s.e) + ' E'),
+                line('Trains', (s) => fmtInt(s.n)),
+                h('tr', {}, [h('td', { class: 'muted', text: 'Items used' }), ...v.cols.map(([, s]) => h('td', { class: 'r', style: 'white-space:normal', text: usedWords(s) || '—' }))]),
+                line('Money spent', rcMoney),
+                line('Stats gained', (s) => fmtSigned(s.gained)),
+                line('$ per 1,000 stats', (s) => (s.perK === null ? '—' : fmtMoney(s.perK))),
+                line('Energy per 1,000 stats', (s) => rcPerK(s.ePerK)),
+            ]),
+        ]);
+        const open = ctx.ui.receiptOpen;
+        const rows = [];
+        for (const row of v.days) {
+            const toggle = () => {
+                ctx.ui.receiptOpen = open === row.day ? null : row.day;
+                ctx.rerender();
+            };
+            rows.push(
+                h('tr', { class: 'click' + (open === row.day ? ' sel' : ''), tabindex: '0', 'aria-expanded': String(open === row.day), onclick: toggle, onkeydown: (e) => { if (e.key === 'Enter') toggle(); } }, [
+                    h('td', { class: 't', text: row.day === tornDayStart(m.now) ? 'today' : dayLabel(row.day) }),
+                    h('td', { class: 'r', text: fmtInt(row.s.e) }),
+                    h('td', { class: 'r', text: fmtInt(row.s.n) }),
+                    h('td', { text: usedWords(row.s) || '—' }),
+                    h('td', { class: 'r', text: rcMoney(row.s) }),
+                    h('td', { class: 'r', text: fmtSigned(row.s.gained) }),
+                    h('td', { class: 'r', text: row.s.perK === null ? '—' : fmtMoney(row.s.perK) }),
+                ]),
+            );
+            if (open === row.day) rows.push(h('tr', { class: 'sub' }, [h('td', { colspan: '7' }, [receiptDetail(row, m)])]));
+        }
+        const any = v.cols.some(([, s]) => s.est);
+        return h('div', {}, [
+            sectionHead('Receipts', meta(['energy, items and money you trained with']), null, 'h3'),
+            summary,
+            v.any
+                ? h('table', { class: 'tbl num', style: 'margin-top:14px' }, [
+                      h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'Day' }), h('th', { class: 'r', text: 'Energy' }), h('th', { class: 'r', text: 'Trains' }), h('th', { text: 'Used' }), h('th', { class: 'r', text: 'Spent' }), h('th', { class: 'r', text: 'Gained' }), h('th', { class: 'r', text: '$ / 1k' })])]),
+                      h('tbody', {}, rows),
+                  ])
+                : null,
+            h('div', { class: 'note2', text: v.any ? 'Click a day for its gyms, prices and notes.' + (any ? ' ~ a price that day wasn’t seen: the nearest known one.' : '') : 'Receipts start today: each train, drug, booster and refill is added here as Torn shows it.' }),
+        ]);
+    }
+
+    /* ---------- What if you'd done another plan ---------- */
+
+    /** One colour per plan (never the stat colours); "you" is chalk. */
+    const WHAT_IF_COLOR = { steady: '#8fb8e8', dailyChoco: '#e8a33d', chocoJump: '#c79bf0', edvdJump: '#e98fb5', happy99k: '#f06f9f', blissSteady: '#5cc8c0', steadyBoost: '#a6e08a', steadyMax: '#d7d06a', candyXanax: '#f0c8a0', consoleJump: '#9aa8ff', consoleJumpToy: '#9aa8ff', edvdJumpAN: '#e98fb5', steadyLite: '#b9c4d0' };
+
+    const whatIfMemo = { key: '', value: null };
+
+    /** The plans re-run for the period (heavy: kept until the period or the player's setup changes). */
+    function whatIfFor(m, ctx, period) {
+        // The plan runs depend on the start, the days and (for the budget) the money; a new train only moves the lines.
+        const key = JSON.stringify([period.start, period.days.length, Number((period.money || 0).toPrecision(2)), m.shares, m.pc.unlocked, m.pc.perks && m.pc.perks.mult, m.state.happy.maximum, m.state.energy.maximum, ctx.settings.boosterCapH || 24]);
+        if (key !== whatIfMemo.key) {
+            whatIfMemo.key = key;
+            whatIfMemo.value = runWhatIf({ state: m.state, pc: m.pc, shares: m.shares, settings: ctx.settings, prices: ctx.prices || {} }, period).results;
+        }
+        return whatIfLines(period, whatIfMemo.value);
+    }
+
+    /** The plans switched on: what the user picked, else the recommended plan. */
+    function whatIfShown(ui, recommended, ids) {
+        const want = Array.isArray(ui.whatIfOn) ? ui.whatIfOn : [recommended];
+        return ids.filter((id) => want.includes(id));
+    }
+
+    /** "Steady would have given +1.2M, Choco jump +1.5M over these 14 days". */
+    function whatIfSummary(plans, shown, nDays) {
+        const parts = shown.filter((id) => plans[id]).map((id) => ((STRATEGIES[id] || {}).short || id) + ' ' + fmtSigned(plans[id].gained));
+        if (!parts.length) return '';
+        return parts[0].replace(/ ([+−])/, ' would have given $1') + (parts.length > 1 ? ', ' + parts.slice(1).join(', ') : '') + ' over these ' + nDays + ' days';
+    }
+
+    function whatIfCard(m, ctx) {
+        const head = sectionHead('What if you’d done another plan', meta(['your energy, at most your money']), null, 'h3');
+        const rangeKey = ctx.ui.progressRange || 14;
+        const today = tornDayStart(m.now);
+        let days = receiptDays(ctx.receipts).filter((d) => d <= today);
+        if (rangeKey !== 'all') days = days.filter((d) => d > today - rangeKey * DAY);
+        const sources = { priceHistory: ctx.priceHistory, prices: ctx.prices || {} };
+        const period = days.length >= 2 ? whatIfPeriod(ctx.receipts, days, sources) : null;
+        if (!period || !m.state || !m.pc) return h('div', {}, [head, h('p', { class: 'muted', style: 'margin:0', text: 'Receipts start today; the comparison appears after two days.' })]);
+        const w = whatIfFor(m, ctx, period);
+        const ids = Object.keys(w.plans).sort((a, b) => w.plans[b].gained - w.plans[a].gained);
+        const rec = m.recommendation && w.plans[m.recommendation.recommended] ? m.recommendation.recommended : ids.includes('steady') ? 'steady' : ids[0];
+        const shown = whatIfShown(ctx.ui, rec, ids);
+        const toggle = (id) => {
+            const cur = whatIfShown(ctx.ui, rec, ids);
+            ctx.ui.whatIfOn = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
+            ctx.rerender();
+        };
+        const series = [{ name: 'you', color: 'var(--chalk)', width: 2.5, values: w.real, label: 'you ' + fmtSigned(period.gained) }];
+        for (const id of shown) series.push({ name: id, color: WHAT_IF_COLOR[id] || 'var(--muted)', dash: '5 4', width: id === rec ? 2 : 1.5, values: w.plans[id].values, label: ((STRATEGIES[id] || {}).short || id) + ' ' + fmtSigned(w.plans[id].gained) });
+        const vals = series.flatMap((s) => s.values);
+        const lo = Math.min(...vals);
+        const hi = Math.max(...vals);
+        const n = period.days.length;
+        const lastDay = period.days[n - 1].day;
+        const chips = ids.map((id) =>
+            h('button', { type: 'button', class: 'tk', 'aria-pressed': String(shown.includes(id)), onclick: () => toggle(id) }, [
+                h('i'),
+                h('span', { style: 'display:inline-block;width:14px;height:2px;background:' + (WHAT_IF_COLOR[id] || 'var(--muted)') }),
+                ((STRATEGIES[id] || {}).short || id) + (id === rec ? ' (recommended)' : '') + ' ' + fmtSigned(w.plans[id].gained),
+            ]),
+        );
+        const summary = whatIfSummary(w.plans, shown, n);
+        return h('div', {}, [
+            head,
+            h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [
+                h('span', { class: 'muted', style: 'font-size:12px', text: 'You: ' + fmtSigned(period.gained) + ' from ' + fmtInt(period.energy) + ' E and ' + fmtMoney(period.money) }),
+                h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), 'you']), h('span', {}, [h('i', { class: 'dash', style: 'color:var(--muted)' }), 'another plan'])]),
+            ]),
+            lineChart(series, { w: 1000, h: 180, left: 50, right: 150, yMin: lo - (hi - lo || hi * 0.01) * 0.08, yMax: hi + (hi - lo || hi * 0.01) * 0.08, grid: [lo, hi], xLabels: [[0, dayLabel(period.days[0].day)], [n, lastDay === today ? 'today' : dayLabel(lastDay)]], n: n + 1, label: 'Total stats: you against other plans with your energy' }),
+            h('div', { class: 'ticks', role: 'group', 'aria-label': 'Plans on the graph', style: 'margin-top:8px' }, chips),
+            summary ? h('div', { class: 'note2', text: summary + '. Each plan trains the energy you trained, with its own happy and boosters; one that costs more than you spent only counts what your money covers.' }) : null,
+        ]);
+    }
+
+    function renderProgress(m, ctx) {
+        const rangeKey = ctx.ui.progressRange || 14;
+        const s = seriesFor(m, ctx, rangeKey === 'all' ? 'all' : rangeKey);
+        const hist = ctx.history || {};
+        // Gained over the days shown: from the first day's opening read (round 7: not from its last read, which made day
+        // one read "+0"). Against the plan: since the line you follow began, the plan read at this moment.
+        const firstVal = hist[s.first] || null;
+        const sumOf = (o) => STATS.reduce((a, k) => a + (Number(o[k]) || 0), 0);
+        const gained = firstVal ? m.total - (firstVal.open ? sumOf(firstVal.open) : firstVal.total) : m.gainedToday;
+        const pr = (ctx.planLines || []).length ? progressOf(ctx.planLines, m.now, m.total) : null;
+        const pct = pr && pr.pct !== null ? Math.round(pr.pct) : null;
+        const strat = STRATEGIES[ctx.plan.strategy] || STRATEGIES.steady;
+        const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Show' }, [14, 30, 'all'].map((n) => h('button', { type: 'button', 'aria-pressed': String(n === rangeKey), onclick: () => { ctx.ui.progressRange = n; ctx.rerender(); }, text: n === 'all' ? 'All' : n + ' days' })));
+        const ctl = [
+            t('lab', 'Show'),
+            seg,
+            h('span', { class: 'muted', text: 'plan: ' + strat.short + ' · ' + m.build.name + (pr ? ' · followed since ' + dayLabel(pr.line.at) : '') }),
+            h('span', { class: 'grow' }),
+            h('span', { class: pct === null || pct >= 95 ? 'c-good' : 'c-warn', title: pr ? 'Since ' + dayLabel(pr.line.at) + ' ' + clock(pr.line.at, ctx.settings) + ': you gained ' + fmtSigned(pr.gained) + ', the plan said ' + fmtSigned(pr.planned) + ' by now' : null }, [h('b', { text: fmtSigned(gained) }), ' gained' + (pct !== null ? ' · ' + pct + '% of plan' : '')]),
+        ];
+        const lead = totalChart(m, ctx, s);
+        lead.classList.add('lead');
+        return {
+            ctl: [ctl],
+            main: [lead, statCharts(m, ctx, s), dayBars(m, ctx), receiptsCard(m, ctx), whatIfCard(m, ctx), lastTrains(m, ctx)],
+            pane: [gainsCard(m), weekFacts(m, ctx), budgetFacts(m, ctx, s), buildFacts(m, ctx, s), milestones(m, ctx), gymFacts(m)].filter(Boolean),
+        };
+    }
+
     /* ===== src/ui/app/home.js ===== */
     /*
      * Home (mockups/round3/S-home.html): one question, "what do I do today?".
@@ -12107,6 +14165,8 @@
      * build, the next 7 days; Buy today, Heads-up, the plan in one line and this
      * week in the pane.
      */
+
+
 
 
 
@@ -12313,9 +14373,27 @@
         return foot.length ? h('div', { class: 'sgfoot num' }, foot) : null;
     }
 
-    /** Next 7 days: stats gained a day, split by the stats trained. */
-    function weekChart(m) {
-        const days = m.projection || [];
+    /**
+     * Next 7 days: stats gained a day, split by the stats trained. Round 7: from the plan you follow (its own line, read
+     * by time: a jump plan shows its stack days and its jumps), today being what is left of it; with no plan line yet,
+     * the steady projection as before.
+     */
+    function weekChart(m, ctx) {
+        const lines = (ctx && ctx.planLines) || [];
+        const today = tornDayStart(m.now);
+        let days = m.projection || [];
+        let fromPlan = false;
+        if (lineAt(lines, m.now)) {
+            fromPlan = true;
+            days = Array.from({ length: 7 }, (_, i) => {
+                const from = i === 0 ? m.now : today + i * DAY;
+                const to = today + (i + 1) * DAY;
+                const d = { gain: Math.max(0, plannedBetween(lines, from, to) || 0) };
+                // The split: each stat's own planned gain that day (used as weights, like trains).
+                for (const k of STATS) d[k] = Math.max(0, Math.round((planStatAt(lines, k, to) || 0) - (planStatAt(lines, k, from) || 0)));
+                return d;
+            });
+        }
         if (!days.length) return null;
         const start = new Date(m.now).getUTCDay();
         const perDay = days.map((d) => {
@@ -12326,7 +14404,7 @@
         const used = STATS.filter((k) => days.some((d) => d[k]));
         const legend = h('span', { class: 'legend2' }, used.map((k) => h('span', {}, [h('i', { style: 'background:' + STAT_COLOR[k] }), STAT_LABEL[k]])));
         return h('div', {}, [
-            h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('lab', 'Next 7 days · stats gained a day'), legend]),
+            h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('lab', fromPlan ? 'Next 7 days · what your plan gains a day (today: what is left)' : 'Next 7 days · stats gained a day'), legend]),
             stackBars(perDay, days.map((_, i) => DAYS[(start + i) % 7]), { w: 1000, h: 84, top: totals.map((v) => '+' + fmtShort(v)), label: 'Stats gained each of the next 7 days' }),
         ]);
     }
@@ -12337,8 +14415,10 @@
         const today = tornDayStart(m.now);
         const days = Object.keys(totals).map(Number).filter((d) => d > today - 7 * DAY && d <= today).sort((a, b) => a - b);
         const sum = (k) => days.reduce((a, d) => a + ((totals[d] && totals[d][k]) || 0), 0);
-        const gained = sum('gained');
-        const planned = sum('planned');
+        // Gained: what your stats really rose each day; planned: the plan's line for those days (round 7).
+        const nums = days.map((d) => dayGainPlan(m, ctx, d));
+        const gained = nums.reduce((a, r) => a + (r.gained || 0), 0);
+        const planned = nums.reduce((a, r) => a + (r.planned || 0), 0);
         const xan = sum('xanax');
         const xanP = sum('xanaxPlanned');
         const refills = sum('refills');
@@ -12384,13 +14464,16 @@
         const late = next && next.kind === 'xanax' && m.strip.drug.left === 0;
         // "On plan" only while no step is waiting on you (the plan re-times, so a due step is the one sign of being behind).
         const overdue = Boolean(next && next.at <= now - 5 * 60 * 1000);
+        // What the plan says for today (its line: fixed for the day), else what today's steps add up to.
+        const todayNums = dayGainPlan(m, ctx, tornDayStart(now));
+        const plannedToday = todayNums.planned !== null && todayNums.planned !== undefined ? todayNums.planned : m.plannedGain;
         const buyTotal = buyRows(m.buyToday.filter((n) => n.buy > 0), ctx.prices, itemContext(ctx.statics || {}, ctx.settings || {}, now)).reduce((a, r) => a + (r.fill ? r.fill.total : 0), 0);
 
         const head = sectionHead(
             'Today',
             meta([
                 dateLine(now) + ' · ',
-                h('b', { text: fmtSigned(m.plannedGain) }),
+                h('b', { text: fmtSigned(plannedToday) }),
                 ' planned',
                 buyTotal ? ' · ' + fmtMoney(buyTotal) + ' to spend' : '',
                 ' · ',
@@ -12412,8 +14495,9 @@
             const k = Object.keys(st.trains || {});
             rows.push(
                 h('tr', {}, [
-                    h('td', { class: 't', text: clock(st.at, s) }),
-                    h('td', {}, [h('b', { class: 'w', text: st.label })]),
+                    // A step past midnight says its day (round 7: tomorrow's jump was listed under Today with a clock only).
+                    h('td', { class: 't' }, tornDayStart(st.at) > tornDayStart(now) ? [h('small', { class: 'muted', text: Math.round((tornDayStart(st.at) - tornDayStart(now)) / DAY) === 1 ? 'tomorrow' : DAY_NAMES[new Date(st.at).getUTCDay()] }), h('br'), clock(st.at, s)] : [clock(st.at, s)]),
+                    h('td', {}, [h('b', { class: 'w', text: st.label }), st.mid && st.note ? h('div', { class: 'muted', style: 'font-size:12px', text: st.note }) : null]),
                     h('td', {}, [h('span', { class: k.length === 1 ? 's-' + k[0] : null, text: trainsText(st.trains) || '—' })]),
                     h('td', { class: 'r', text: st.gain ? fmtSigned(st.gain) : '' }),
                     h('td', { class: 'r muted' }, [st.at > now ? cd(st.at, now, { cls: 'when' }) : h('span', { class: 'when', text: 'now' })]),
@@ -12426,10 +14510,10 @@
                   h('tbody', {}, rows),
               ])
             : null;
-        const foot = h('div', { class: 'row muted num', style: 'justify-content:space-between;margin-top:6px;font-size:12px;gap:12px;flex-wrap:wrap' }, [h('span', {}, ['So far ', h('b', { class: 'white', text: fmtSigned(m.gainedToday) }), ' of ' + fmtInt(m.plannedGain) + ' today']), h('span', { text: dayResetWords(m) + ' · ' + xanaxCdWords(m.xanaxCd) })]);
+        const foot = h('div', { class: 'row muted num', style: 'justify-content:space-between;margin-top:6px;font-size:12px;gap:12px;flex-wrap:wrap' }, [h('span', {}, ['So far ', h('b', { class: 'white', text: fmtSigned(m.gainedToday) }), ' of ' + fmtInt(plannedToday) + ' today']), h('span', { text: dayResetWords(m) + ' · ' + xanaxCdWords(m.xanaxCd) })]);
 
         const lead = h('div', { class: 'lead' }, [head, nowBand, steps, foot]);
-        const week = weekChart(m);
+        const week = weekChart(m, ctx);
         return {
             strip: true,
             main: [lead, nextDays(m, s), youVsBuild(m, ctx), week].filter(Boolean),
@@ -12447,6 +14531,8 @@
      * the pick (plans that don't fit you hidden behind a tick), and where your
      * energy comes from. Pane: the 30-day chart, the build, the Bliss card.
      */
+
+
 
 
 
@@ -12591,11 +14677,12 @@
             h('span', { class: 'sep' }),
             t('lab', 'Train toward'),
             goalChip,
+            goal && goal.kind === 'unlockGym' ? openByInput(goal, ctx) : null,
             goal
                 ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.setPlan({ goal: null }), text: 'Back to the build' })
                 : h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.goalForm = !ctx.ui.goalForm; ctx.rerender(); }, text: '+ Stat numbers' }),
             !goal && m.nextGym && m.nextGym.gym ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.setPlan({ goal: { kind: 'unlockGym', gymId: m.nextGym.gym.id } }), text: '+ Unlock ' + m.nextGym.gym.name }) : null,
-            h('span', { class: 'muted', text: 'used by the next Create plan or Recalibrate' }),
+            h('span', { class: 'muted', text: 'used by the next Create plan or Re-plan' }),
         ];
         const bar2 = [];
         const sp = m.special || {};
@@ -12615,6 +14702,21 @@
         const bliss = m.pc && m.pc.perks.bliss;
         bar2.push(t('lab', 'Ignorance Is Bliss'), h('span', { class: 'tag' + (bliss ? ' good' : ''), text: bliss ? 'Active' + (m.pc.perks.blissDays ? ' · ' + m.pc.perks.blissDays + ' days' : '') : 'Not active' }), h('span', { class: 'info', title: 'Read from your perks: the book’s line shows while it is active (31 days). The plan counts it the day it shows.', text: 'i' }));
         return [bar1, bar2];
+    }
+
+    /**
+     * "Open it by" (round 7, optional): a date for the gym to unlock. With one, the next Create plan or Re-plan leaves
+     * out the plans that open it later; without one the gym is only shown on every plan. It never outranks stats.
+     */
+    function openByInput(goal, ctx) {
+        const value = goal.by ? new Date(goal.by - 1).toISOString().slice(0, 10) : '';
+        const inp = h('input', { class: 'inp num', type: 'date', 'aria-label': 'Open it by', title: 'Optional: plans that open the gym after this day are left out of the next Create plan or Re-plan. The gym never outranks stats otherwise.', style: 'width:138px', value });
+        inp.addEventListener('change', () => {
+            const day = Date.parse(inp.value + 'T00:00:00Z');
+            // Through that Torn day: its end.
+            ctx.setPlan({ goal: { ...goal, by: Number.isFinite(day) ? day + 86400e3 : null } });
+        });
+        return h('span', { class: 'row', style: 'gap:6px' }, [t('lab', 'by'), inp]);
     }
 
     function goalForm(m, ctx) {
@@ -12653,7 +14755,8 @@
             h('div', { class: 'fig' }, [t('lab', pickBy === 'max' ? 'A day' : 'Per day'), h('b', { text: pickBy === 'max' ? fmtMoney(best.cost / days) : planPerDay(best, days) })]),
         ];
         const reasons = rec.reasons.length ? rec.reasons.join(' ') : 'It gains the most stats inside your budget.';
-        const spend = m.spend && m.spend.lastsDays !== null && m.spend.cash !== null ? ' Your ' + fmtMoney(m.spend.cash) + ' on hand lasts about ' + Math.round(m.spend.lastsDays) + ' days at ' + fmtMoney(m.spend.perDay) + ' a day.' : '';
+        // Cash on hand against the plan's pace: under a day of it is said as that, never "lasts about 0 days".
+        const spend = m.spend && m.spend.lastsDays !== null && m.spend.cash !== null ? (m.spend.lastsDays < 1 ? ' You have ' + fmtMoney(m.spend.cash) + ' on hand: less than a day of this plan (' + fmtMoney(m.spend.perDay) + ' a day).' : ' Your ' + fmtMoney(m.spend.cash) + ' on hand lasts about ' + Math.round(m.spend.lastsDays) + ' days at ' + fmtMoney(m.spend.perDay) + ' a day.') : '';
         const a = m.auto;
         // What the saved plan was made with (round 6: its budget and income are the ones it saw, until you recalibrate).
         const snap = m.savedPlan ? m.savedPlan.snapshot : null;
@@ -12677,6 +14780,7 @@
             autoOn && a.breakdown && a.breakdown.lines.length ? incomeLines(a.breakdown) : null,
             m.unlock ? unlockBlock(m, ctx, days) : null,
             refillLine(best, days),
+            gymWorthLines(m, days),
             h('div', { class: 'note2', text: 'If you’re late: steady and goal plans re-time by themselves. Jump plans warn 5 min before the tick, then re-time.' }),
         ];
         if (ctx.ui.goalForm) kids.push(goalForm(m, ctx));
@@ -12697,6 +14801,20 @@
         return h('div', { class: 'lead' }, kids);
     }
 
+    /**
+     * Is each gym the plan opens worth its fee (round 7, the friend's question)? The plan was run with and without it:
+     * "Racing Fitness opens on day 3: +12k stats by the plan's end for its $1M fee."
+     */
+    function gymWorthLines(m, days) {
+        const list = (m.savedPlan && m.savedPlan.gymWorth) || [];
+        if (!list.length) return null;
+        return h('div', { class: 'note2 num' }, [
+            h('b', { class: 'white', text: 'Gyms this plan opens: ' }),
+            list.map((g) => g.name + (g.day ? ' on day ' + g.day : '') + ': ' + (g.gain >= 0 ? '+' + fmtShort(g.gain) : '−' + fmtShort(-g.gain)) + ' stats by day ' + days + ' for its ' + fmtMoney(g.fee) + ' fee').join(' · ') + '.',
+            ' Each is the plan run with and without that gym; the fees are in the plan’s cost.',
+        ]);
+    }
+
     /** Is the daily points refill worth it in this plan? (The comparison ran it with and without when it mattered.) */
     function refillLine(r, days) {
         if (!r || r.refill === undefined) return null;
@@ -12712,23 +14830,36 @@
         return h('div', { class: 'note2 num', style: 'margin-top:8px' }, ['Coming in (your money log, ' + Math.round(b.days) + ' days): ', top.map((l) => l.title + ' ' + fmtMoney(Math.round(l.perDay)) + '/day').join(' · ')]);
     }
 
-    /** Unlock goal: when the gym opens on each plan, and what each costs in stats against the plan that gains most. */
+    /**
+     * The gym to unlock: when each plan opens it, with its stats and cost against the recommended plan (the same
+     * baseline as Other plans). Round 7: information, plus an optional date; it never changes the pick by itself.
+     */
     function unlockBlock(m, ctx, days) {
         const u = m.unlock;
+        const when = (r) => (r.day ? 'day ' + r.day + ' \u00b7 ' + new Date(r.at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }) : r.days !== null && r.days !== undefined ? (r.days < 1 ? 'today' : 'in about ' + Math.ceil(r.days) + ' days') : 'not in these ' + days + ' days');
+        const order = (r) => (r.day ? r.day : r.days !== null && r.days !== undefined ? r.days + 1 : Infinity);
+        const rec = u.rows[u.best] || null;
         const rows = Object.entries(u.rows)
-            .filter(([, r]) => r.days !== null)
-            .sort((x, y) => x[1].days - y[1].days)
-            .slice(0, 6)
-            .map(([id, r]) =>
-                h('tr', { class: id === ctx.plan.strategy ? 'sel' : '' }, [
-                    h('td', {}, [h('b', { class: 'w', text: (STRATEGIES[id] || {}).name || id })]),
-                    h('td', { class: 'r', text: r.days < 1 ? 'today' : 'in ' + Math.ceil(r.days) + ' days' }),
-                    h('td', { class: 'r ' + (r.statsPct < -0.5 ? 'c-bad' : 'muted'), text: r.statsPct < -0.5 ? fmtPct(r.statsPct) + ' stats' : 'most stats' }),
-                ]),
-            );
+            .filter(([, r]) => !r.blocked)
+            .sort((x, y) => order(x[1]) - order(y[1]) || y[1].gained - x[1].gained)
+            .slice(0, 8)
+            .map(([id, r]) => {
+                const late = u.byDay > 0 && (!r.day || r.day > u.byDay);
+                return h('tr', { class: id === ctx.plan.strategy ? 'sel' : '' }, [
+                    h('td', {}, [h('b', { class: 'w', text: (STRATEGIES[id] || {}).name || id }), id === u.best ? h('span', { class: 'tag chalk', style: 'margin-left:6px', text: 'recommended' }) : null]),
+                    h('td', { class: 'r ' + (late ? 'c-bad' : ''), text: when(r) + (late ? ' \u00b7 after your date' : '') }),
+                    h('td', { class: 'r', text: '+' + fmtShort(r.gained) }),
+                    h('td', { class: 'r ' + (id === u.best ? 'muted' : r.statsPct < -0.5 ? 'c-bad' : r.statsPct > 0.5 ? 'c-good' : 'muted'), text: id === u.best ? '\u2014' : fmtPct(r.statsPct) }),
+                    h('td', { class: 'r', text: fmtMoney(r.cost) }),
+                ]);
+            });
+        // Rushing it: the plan that opens the gym soonest against the recommended one.
+        const fastest = Object.entries(u.rows).filter(([, r]) => !r.blocked && r.day).sort((x, y) => x[1].day - y[1].day || y[1].gained - x[1].gained)[0];
+        const rush = fastest && rec && rec.day && fastest[0] !== u.best && fastest[1].day < rec.day ? ((STRATEGIES[fastest[0]] || {}).short || fastest[0]) + ' opens it ' + (rec.day - fastest[1].day) + ' day' + (rec.day - fastest[1].day === 1 ? '' : 's') + ' sooner for ' + (fastest[1].cost - rec.cost >= 0 ? fmtMoney(fastest[1].cost - rec.cost) + ' more' : fmtMoney(rec.cost - fastest[1].cost) + ' less') + ' and ' + (fastest[1].gained >= rec.gained ? fmtShort(fastest[1].gained - rec.gained) + ' more stats' : fmtShort(rec.gained - fastest[1].gained) + ' fewer stats') + ' over the ' + days + ' days.' : null;
         return h('div', { style: 'margin-top:12px' }, [
-            sectionHead('Unlock ' + u.gym.name, meta([fmtInt(u.energyLeft) + ' energy through the gym to go · stats against the plan that gains most in ' + days + ' days']), null, 'h3'),
-            h('table', { class: 'tbl num' }, [h('tbody', {}, rows)]),
+            sectionHead('Unlock ' + u.gym.name, meta([fmtInt(u.energyLeft) + ' energy through the gym to go \u00b7 ' + (u.byDay > 0 ? 'open it by day ' + u.byDay : 'no date set: shown on every plan, never a reason to pick fewer stats')]), null, 'h3'),
+            h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'Plan' }), h('th', { class: 'r', text: 'Opens' }), h('th', { class: 'r', text: 'Stats' }), h('th', { class: 'r', title: 'Against the recommended plan', text: 'vs pick' }), h('th', { class: 'r', text: 'Cost' })])]), h('tbody', {}, rows)]),
+            rush ? h('div', { class: 'note2 num', text: rush }) : null,
         ]);
     }
 
@@ -12770,8 +14901,8 @@
                     h('td', {}, [h('small', { text: kindOf(a.id) })]),
                     h('td', {}, [h('b', { class: 'w', text: st.name }), current ? h('span', { class: 'tag chalk', style: 'margin-left:6px', text: 'current plan' }) : null, pending ? h('span', { class: 'tag warn', style: 'margin-left:6px', text: 'picked · see the warning' }) : null]),
                     h('td', { class: 'muted', title: compare[a.id] && compare[a.id].candy ? tierWords(compare[a.id].candy.id) || null : null, text: planWhat(a.id, compare[a.id]) }),
-                    h('td', { class: 'r ' + (a.deltaStatsPct >= 0 ? 'c-good' : 'c-bad'), text: fmtPct(a.deltaStatsPct) }),
-                    h('td', { class: 'r ' + (a.deltaCost > 0 ? 'c-bad' : 'c-good'), text: (a.deltaCost >= 0 ? '+' : '−') + fmtMoney(Math.abs(a.deltaCost)) }),
+                    h('td', { class: 'r' }, ['+' + fmtShort(a.gained), h('br'), h('span', { class: a.deltaStatsPct >= 0 ? 'c-good' : 'c-bad', style: 'white-space:nowrap', text: fmtPct(a.deltaStatsPct) })]),
+                    h('td', { class: 'r' }, [fmtMoney(a.cost), h('br'), h('span', { class: a.deltaCost > 0 ? 'c-bad' : 'c-good', style: 'white-space:nowrap', text: (a.deltaCost >= 0 ? '+' : '−') + fmtMoney(Math.abs(a.deltaCost)) })]),
                     h('td', { class: 'r', text: a.cost > 0 ? chartNum(a.perM) : '—' }),
                     h('td', { class: 'why', title: a.why, text: shortWhy(a.why) }),
                 ]),
@@ -12812,11 +14943,13 @@
         const tick = hiddenAlts.length
             ? h('button', { type: 'button', class: 'tk', 'aria-pressed': String(showAll), onclick: () => { ctx.ui.planShowAll = !showAll; ctx.rerender(); } }, [h('i'), 'Show plans that don’t fit you (' + hiddenAlts.length + ')'])
             : null;
-        const note = hiddenAlts.length && !showAll ? h('div', { class: 'note2', text: 'Hidden: ' + hiddenAlts.map((a) => STRATEGIES[a.id].name).join(', ') + ' — they lose more than half your stats at ' + fmtShort(m.total) + ' total. They come back on their own if that changes.' }) : null;
+        // Hidden: only plans that gain under half of the best plan inside your limit, or don't fit you; the cheapest plan always shows.
+        const one = hiddenAlts.length === 1;
+        const note = hiddenAlts.length && !showAll ? h('div', { class: 'note2', text: 'Hidden: ' + hiddenAlts.map((a) => STRATEGIES[a.id].name).join(', ') + ' — ' + (one ? 'it gains' : 'they gain') + ' under half of what the best plan in your limit does at ' + fmtShort(m.total) + ' total, or ' + (one ? 'doesn’t' : 'don’t') + ' fit you. ' + (one ? 'It comes' : 'They come') + ' back on ' + (one ? 'its' : 'their') + ' own if that changes.' }) : null;
         return h('div', {}, [
             sectionHead('Other plans', meta(['against ' + STRATEGIES[rec.recommended].short.toLowerCase() + ' · click a row to pick it']), tick),
             h('table', { class: 'tbl num' }, [
-                h('thead', {}, [h('tr', {}, [h('th', { style: 'width:52px', text: 'Kind' }), h('th', { style: 'width:190px', text: 'Plan' }), h('th', { style: 'width:230px', text: 'What you do' }), h('th', { class: 'r', style: 'width:66px', text: 'Stats' }), h('th', { class: 'r', style: 'width:84px', text: 'Cost' }), h('th', { class: 'r', style: 'width:70px', title: 'Stats gained for each $1M spent over the ' + days + ' days', text: 'Per $1M' }), h('th', { text: 'Why it isn’t the pick' })])]),
+                h('thead', {}, [h('tr', {}, [h('th', { style: 'width:52px', text: 'Kind' }), h('th', { style: 'width:190px', text: 'Plan' }), h('th', { style: 'width:230px', text: 'What you do' }), h('th', { class: 'r', style: 'width:76px', title: 'Stats gained over the ' + days + ' days, and the difference from the recommended plan', text: 'Stats' }), h('th', { class: 'r', style: 'width:88px', title: 'What it costs over the ' + days + ' days, and the difference from the recommended plan', text: 'Cost' }), h('th', { class: 'r', style: 'width:70px', title: 'Stats gained for each $1M spent over the ' + days + ' days', text: 'Per $1M' }), h('th', { text: 'Why it isn’t the pick' })])]),
                 h('tbody', {}, rows.length ? rows : [h('tr', {}, [h('td', { colspan: '7', class: 'muted', text: 'No other plan fits you.' })])]),
             ]),
             note,
@@ -12919,6 +15052,7 @@
         const lines = [];
         if (bliss) lines.push(h('b', { text: 'Now' }), h('span', { text: 'Active' + (m.pc.perks.blissDays ? ' for ' + m.pc.perks.blissDays + ' days' : '') + ': happy keeps climbing above ' + happyMax + ', so the plans above already count it.' }));
         lines.push(h('b', { text: 'Changes' }), h('span', { text: 'Happy stops resetting to ' + happyMax + ' at :00/:15/:30/:45 and keeps climbing (to 99,999), so boosters and candy keep paying for 31 days.' }));
+        if (!bliss && !w.blissSteady && m.savedPlan && m.savedPlan.extras === 'pending') lines.push(h('b', { text: 'For you' }), h('span', { class: 'muted', text: 'Working it out… (the what-ifs come a moment after the plan)' }));
         if (!bliss && w.blissSteady) {
             const pct = (x) => Math.round((100 * (x.gained - best.gained)) / Math.max(1, best.gained));
             lines.push(h('b', { text: 'For you' }), h('span', { text: 'Steady with Bliss +' + fmtShort(w.blissSteady.gained) + ' in ' + days + ' days (' + fmtPct(pct(w.blissSteady)) + ') for ' + fmtMoney(w.blissSteady.cost) + (w.dailyChoco ? '; Daily choco with Bliss +' + fmtShort(w.dailyChoco.gained) + ' (' + fmtPct(pct(w.dailyChoco)) + ') for ' + fmtMoney(w.dailyChoco.cost) : '') + '.' }));
@@ -12941,6 +15075,22 @@
             { class: 'seg', role: 'group', 'aria-label': 'Plan length' },
             PLAN_LENGTHS.map((n) => h('button', { type: 'button', 'aria-pressed': String(n === cur), onclick: () => { ctx.ui.planMonths = n; ctx.ui.replaceAsk = false; ctx.rerender(); }, text: monthsWord(n) })),
         );
+    }
+
+    /**
+     * A plan being worked out (round 7, R7.3b): a bar that fills, where the run is, the seconds so far, and Cancel. The
+     * page stays usable meanwhile (other tabs too), and you can leave it: it finishes in a tab you are not looking at.
+     * The bar is the card's own day line (its width only). app.js planProgress moves it without redrawing the page.
+     */
+    function planRun(busy, ctx) {
+        if (!busy) return null;
+        return h('div', { class: 'planrun', role: 'status', 'aria-live': 'polite' }, [
+            h('div', { class: 'dayline', role: 'progressbar', 'aria-label': busy.recalibrate ? 'Re-planning' : 'Working out your plan' }, [h('i', { 'data-plan-bar': '1', style: 'width:' + Math.round(100 * Math.max(0.02, busy.done || 0)) + '%' })]),
+            h('div', { class: 'row', style: 'justify-content:space-between;margin-top:6px' }, [
+                h('span', { class: 'pc-sub num', 'data-plan-words': '1', text: planRunWords(busy) }),
+                h('span', { class: 'row', style: 'gap:10px' }, [h('span', { class: 'muted', style: 'font-size:12px', text: 'You can keep using the page, or leave it: your plan stays as it is until this is done.' }), h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.cancelPlan && ctx.cancelPlan(), text: 'Cancel' })]),
+            ]),
+        ]);
     }
 
     /** A Create plan / Recalibrate click: the page shows it working, then the new plan (or why it couldn't). */
@@ -12968,6 +15118,7 @@
                     lengthChoice(ctx, 3),
                     h('button', { class: 'btn primary', type: 'button', disabled: Boolean(busy), onclick: () => startPlan(ctx, months), text: busy ? 'Working out your plan…' : 'Create plan' }),
                 ]),
+                planRun(busy, ctx),
                 err,
             ]);
         }
@@ -12975,16 +15126,25 @@
         const p = sv.progress || { day: 1, of: sv.days, ended: false };
         const last = m.savedPlan && m.savedPlan.history && m.savedPlan.history.length ? m.savedPlan.history[m.savedPlan.history.length - 1] : null;
         const incomeMove = last && last.from.budgetPerDay !== null && last.to.budgetPerDay !== null && Math.round(last.from.budgetPerDay) !== Math.round(last.to.budgetPerDay) ? ' on ' + fmtMoney(Math.round(last.to.budgetPerDay)) + ' a day (was ' + fmtMoney(Math.round(last.from.budgetPerDay)) + ')' : '';
-        const sub = [dayWord(sv.start) + ' → ' + dayWord(sv.end), p.ended ? 'ended' : 'day ' + p.day + ' of ' + p.of, 'made ' + dayWord(sv.createdAt), sv.recalibratedAt ? 'recalibrated ' + dayWord(sv.recalibratedAt) + incomeMove : null, ctx.plan.strategyPicked ? 'following ' + S.short.toLowerCase() + ', your pick' : null].filter(Boolean).join(' · ');
+        const sub = [dayWord(sv.start) + ' → ' + dayWord(sv.end), p.ended ? 'ended' : 'day ' + p.day + ' of ' + p.of, 'made ' + dayWord(sv.createdAt), sv.recalibratedAt ? 're-planned ' + dayWord(sv.recalibratedAt) + incomeMove : null, ctx.plan.strategyPicked ? 'following ' + S.short.toLowerCase() + ', your pick' : null].filter(Boolean).join(' · ');
+        // The line above is time (day N of M). Beside it: what you gained against what the plan said by now, since the
+        // line you follow began (round 7: the card's line never said whether you were on the plan).
+        const pr = progressOf(ctx.planLines || [], m.now, m.total);
+        const soFar = pr && !p.ended ? h('div', { class: 'pc-sub num' }, ['The line is time: day ' + p.day + ' of ' + p.of + '. Stats: ', h('b', { class: 'white', text: fmtSigned(pr.gained) }), ' of ' + fmtSigned(pr.planned) + ' planned so far' + (pr.pct !== null ? ' (' + Math.round(pr.pct) + '%)' : '') + ', +' + fmtShort(pr.whole) + ' by the end · ', h('a', { href: '#progress', onclick: (e) => { e.preventDefault(); ctx.go('progress'); }, text: 'Progress' })]) : null;
+        // A build picked after the plan was made: today's steps follow it at once, the plan's numbers don't until a Re-plan.
+        const madeFor = m.savedPlan && m.savedPlan.snapshot ? m.savedPlan.snapshot.build : null;
+        const buildMoved = madeFor && ctx.plan.build && madeFor !== ctx.plan.build ? h('div', { class: 'pc-sub' }, [h('span', { class: 'tag warn', text: 'Build changed' }), ' Today’s steps already train toward ' + resolveBuild(ctx.plan.build).name + '; this plan’s numbers are for ' + resolveBuild(madeFor).name + '. ', h('b', { class: 'white', text: 'Re-plan to use it.' })]) : null;
         const kids = [
             h('div', { class: 'pc-top' }, [
                 h('div', { class: 'pc-what' }, [
                     h('div', { class: 'pc-title', text: monthsWord(sv.months).replace(' months', '-month').replace(' month', '-month') + ' plan · ' + S.name }),
                     h('div', { class: 'pc-sub num', text: sub }),
                     h('div', { class: 'dayline', role: 'img', 'aria-label': 'Day ' + p.day + ' of ' + p.of }, [h('i', { style: 'width:' + Math.min(100, (100 * p.day) / Math.max(1, p.of)).toFixed(1) + '%' })]),
+                    soFar,
+                    buildMoved,
                 ]),
                 h('div', { class: 'acts' }, [
-                    h('button', { class: 'btn primary', type: 'button', disabled: Boolean(busy) || p.ended, title: 'Re-reads your stats, income, prices and gyms now and re-plans the days left; the end date stays', onclick: () => { ctx.ui.newPlan = false; ctx.ui.replaceAsk = false; ctx.recalibratePlan(); }, text: busy && busy.recalibrate ? 'Recalibrating…' : 'Recalibrate' }),
+                    h('button', { class: 'btn primary', type: 'button', disabled: Boolean(busy) || p.ended, title: 'Re-reads your stats, income, prices and gyms now and re-plans the days left; the end date stays', onclick: () => { ctx.ui.newPlan = false; ctx.ui.replaceAsk = false; ctx.recalibratePlan(); }, text: busy && busy.recalibrate ? 'Re-planning…' : 'Re-plan' }),
                     h('button', { class: 'btn ghost', type: 'button', disabled: Boolean(busy), 'aria-expanded': String(Boolean(ctx.ui.newPlan)), onclick: () => { ctx.ui.newPlan = !ctx.ui.newPlan; ctx.ui.replaceAsk = false; ctx.rerender(); }, text: busy && !busy.recalibrate ? 'Working out…' : 'New plan…' }),
                 ]),
             ]),
@@ -13006,6 +15166,8 @@
                 ]),
             );
         }
+        const running = planRun(busy, ctx);
+        if (running) kids.push(running);
         if (err) kids.push(err);
         return h('div', { class: 'lead plancard' }, kids);
     }
@@ -13013,26 +15175,31 @@
     /** The plan's months (mockup C): total stats planned at each month's end, "you are here", the rough ones marked "~". */
     function monthsRow(m, ctx) {
         const sp = m.savedPlan;
-        if (!sp || !Array.isArray(sp.monthly) || sp.monthly.length < 2) return null;
+        if (!sp || !Array.isArray(sp.monthly)) return null;
+        // The plan you follow: the saved path's months, or (a plan you picked yourself) that plan's, counted in the plan's
+        // own months (round 7: the row showed the path whatever you followed).
+        const picked = ctx.plan.strategyPicked && sp.compare && sp.compare[m.strategy] ? sp.compare[m.strategy] : null;
+        const monthly = picked ? monthlyOf(picked, { start: sp.from, days: sp.days, stats: sp.snapshot.stats, anchor: sp.start }) : sp.monthly;
+        if (monthly.length < 2) return null;
         const now = m.now;
         const total = (st) => Object.values(st || {}).reduce((a, v) => a + (Number(v) || 0), 0);
-        const cells = sp.monthly.map((mo, i) => {
+        const cells = monthly.map((mo, i) => {
             const past = mo.to <= now;
             const cur = now >= mo.from && now < mo.to;
             const rough = i >= 3;
             const name = new Date(mo.to - 1).toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' });
             return h('div', { class: 'mo' + (past ? ' past' : '') + (cur ? ' now' : ''), title: dayWord(mo.from) + ' → ' + dayWord(mo.to) + ': +' + fmtShort(mo.gained) + ' for ' + fmtMoney(mo.cost) }, [h('span', { text: name }), h('b', { text: (rough ? '~' : '') + fmtShort(total(mo.stats)) }), cur ? h('em', { text: 'you are here' }) : null]);
         });
-        const costs = sp.monthly.map((x) => x.cost).filter((x) => x > 0);
+        const costs = monthly.map((x) => x.cost).filter((x) => x > 0);
         const y = sp.year;
         const foot = [
             costs.length ? 'About ' + fmtMoney(Math.min(...costs)) + (Math.max(...costs) > Math.min(...costs) * 1.05 ? '–' + fmtMoney(Math.max(...costs)) : '') + ' a month' : null,
-            y && y.band && y.path ? 'whole plan ~+' + fmtShort(y.path.gained) + ' (range +' + fmtShort(y.band.low) + ' to +' + fmtShort(y.band.high) + ': the model’s own error; later months are rougher)' : null,
+            picked ? 'whole plan ~+' + fmtShort(picked.gained) + ' on ' + ((STRATEGIES[m.strategy] || {}).short || m.strategy).toLowerCase() + ', your pick' : y && y.band && y.path ? 'whole plan ~+' + fmtShort(y.path.gained) + ' (range +' + fmtShort(y.band.low) + ' to +' + fmtShort(y.band.high) + ': the model’s own error; later months are rougher)' : null,
             y && y.unlocks && y.unlocks.length ? 'gyms: ' + y.unlocks.slice(0, 3).map((u) => ((gymById(u.gymId) || {}).name || 'gym ' + u.gymId) + ' ~day ' + u.day).join(', ') : null,
         ].filter(Boolean);
         return h('div', {}, [
-            sectionHead('Your ' + sp.monthly.length + ' months', meta(['total stats planned at each month’s end'])),
-            h('div', { class: 'months num', style: 'grid-template-columns:repeat(' + Math.min(12, sp.monthly.length) + ',minmax(0,1fr))' }, cells),
+            sectionHead('Your ' + monthly.length + ' months', meta(['total stats planned at each month’s end'])),
+            h('div', { class: 'months num', style: 'grid-template-columns:repeat(' + Math.min(12, monthly.length) + ',minmax(0,1fr))' }, cells),
             foot.length ? h('div', { class: 'note2 num', text: foot.join(' · ') }) : null,
         ]);
     }
@@ -13701,631 +15868,6 @@
 
     function refillWords() {
         return REFILL_POINTS + ' a day for the refill';
-    }
-
-    /* ===== src/core/gymlog.js ===== */
-    /*
-     * Your trains from Torn's own log (owner, 2026-09-30: "how about tracking of
-     * stats such as training on phone since laptop was closed"). The log has one
-     * line per TRAIN click: the stat, trains, energy, the gym, happy used, and
-     * the stat before and after. With the Full key (the log is Full only), the
-     * leader tab reads what's new; Progress' "Last trains" shows the sessions no
-     * read of ours saw. Pure. Research: docs/research-gym-log.md.
-     *
-     * Not a gain-model check: the log doesn't say the happy a click started at,
-     * so these sessions have no "Plan said" (Your gains already count them, from
-     * Torn's stats).
-     */
-
-
-
-
-
-    /** Torn's log types for a train, by stat [code: factionops probe; snippet: logtypes dumps]. */
-    const GYM_LOG_TYPES = { 5300: 'str', 5301: 'def', 5302: 'spd', 5303: 'dex' };
-
-    /** Lines kept (one a TRAIN click, ~120 bytes each: a few months for a heavy trainer), and for how long. */
-    const GYM_LOG_KEEP = 600;
-    const GYM_LOG_DAYS = 120;
-
-    /** How often the leader reads it, and how far back the first read goes. */
-    const GYM_LOG_EVERY_MS = 15 * 60 * 1000;
-    const GYM_LOG_FIRST_DAYS = 7;
-
-    const logNum = (v) => {
-        const n = Number(v);
-        return Number.isFinite(n) ? n : null;
-    };
-
-    /**
-     * Torn's log lines (v2 `log` array) as trains: {id, at (ms), stat, trains,
-     * energy, happy, gymId, before, after, gain}. Lines that aren't a train, or
-     * carry no trains or energy, are left out. The stat comes from the log type,
-     * or from the title ("Gym train defense") when the type is missing.
-     * `before` is a string in the one real sample seen [snippet]: numbers are read with Number().
-     */
-    function parseGymLog(rows) {
-        const out = [];
-        for (const e of Array.isArray(rows) ? rows : []) {
-            if (!e || !e.data) continue;
-            const type = Number(e.details && e.details.id);
-            const title = String((e.details && e.details.title) || '').toLowerCase();
-            const stat = GYM_LOG_TYPES[type] || (/^gym train /.test(title) ? { strength: 'str', defense: 'def', defence: 'def', speed: 'spd', dexterity: 'dex' }[title.slice(10).trim()] : null);
-            if (!stat) continue;
-            const trains = logNum(e.data.trains);
-            const energy = logNum(e.data.energy_used);
-            const at = logNum(e.timestamp);
-            if (!(trains > 0) || !(energy > 0) || !(at > 0)) continue;
-            const name = STAT_API[stat];
-            const before = logNum(e.data[name + '_before']);
-            const after = logNum(e.data[name + '_after']);
-            let gain = logNum(e.data[name + '_increased']);
-            if (gain === null && before !== null && after !== null) gain = after - before;
-            out.push({ id: String(e.id || at + ':' + type), at: at * 1000, stat, trains, energy, happy: logNum(e.data.happy_used), gymId: logNum(e.data.gym), before, after, gain });
-        }
-        return out;
-    }
-
-    /**
-     * Add new lines to the kept ones: deduped by id (pages overlap at the edge), oldest first, the last GYM_LOG_DAYS
-     * and GYM_LOG_KEEP. `gap` ({from, to} in unix seconds, or null): what a read couldn't reach yet (it stopped at its
-     * page limit), read next; the newest line can be newer than the gap, so `newest` alone would skip it.
-     */
-    function mergeGymLog(kept, lines, now, gap = null) {
-        const byId = new Map();
-        for (const x of [...((kept && kept.lines) || []), ...(lines || [])]) if (x && x.id) byId.set(x.id, x);
-        const since = now - GYM_LOG_DAYS * 86400e3;
-        const all = [...byId.values()].filter((x) => x.at >= since).sort((a, b) => a.at - b.at);
-        // A gap older than what's kept doesn't need filling.
-        const g = gap && gap.to > gap.from && gap.to * 1000 > since ? { from: Math.max(gap.from, Math.floor(since / 1000)), to: gap.to } : null;
-        return { lines: all.slice(-GYM_LOG_KEEP), at: now, newest: all.length ? all[all.length - 1].at : (kept && kept.newest) || null, gap: g };
-    }
-
-    /** Where the next read starts (unix seconds): after the newest line kept, or GYM_LOG_FIRST_DAYS back. */
-    function gymLogFrom(kept, now) {
-        const newest = kept && kept.newest;
-        return Math.floor((newest ? newest : now - GYM_LOG_FIRST_DAYS * 86400e3) / 1000);
-    }
-
-    /**
-     * The log's lines as sessions (clicks within SESSION_GAP_MS of each other),
-     * like gains.js' sessionsOf: {at, end, trains:{stat: n}, gyms:[names], actual, energy, fromLog: true}. Newest first.
-     */
-    function logSessions(lines, table) {
-        const list = (lines || []).filter((x) => x && x.at).slice().sort((a, b) => a.at - b.at);
-        const out = [];
-        for (const x of list) {
-            let s = out[out.length - 1];
-            if (!s || x.at - s.end > SESSION_GAP_MS) out.push((s = { at: x.at, end: x.at, trains: {}, gyms: [], actual: 0, gained: false, energy: 0, reads: 0, predicted: null, fromLog: true }));
-            s.end = x.at;
-            s.trains[x.stat] = (s.trains[x.stat] || 0) + x.trains;
-            const g = x.gymId ? gymById(x.gymId, table) : null;
-            const name = g ? g.name : x.gymId ? 'Gym ' + x.gymId : null;
-            if (name && !s.gyms.includes(name)) s.gyms.push(name);
-            // A gain Torn didn't give (a field name we haven't seen) is unknown, not zero: a session with none shows "—".
-            if (x.gain !== null && x.gain !== undefined) {
-                s.actual = (s.actual || 0) + x.gain;
-                s.gained = true;
-            }
-            s.energy += x.energy;
-            s.reads++;
-        }
-        for (const s of out) if (!s.gained) s.actual = null;
-        return out.reverse();
-    }
-
-    /**
-     * "Last trains": the sessions our reads saw (with the plan's prediction) and
-     * the ones only Torn's log has (a phone, another device, the laptop closed).
-     * A log session that overlaps a read session is the same session: the read's
-     * one is kept. Newest first.
-     */
-    function mergeSessions(readSessions, logList) {
-        const reads = readSessions || [];
-        const overlaps = (l) => reads.some((r) => l.at <= r.end + SESSION_GAP_MS && l.end >= r.at - SESSION_GAP_MS);
-        return [...reads, ...(logList || []).filter((l) => !overlaps(l))].sort((a, b) => b.at - a.at);
-    }
-
-    /* ===== src/ui/app/progress.js ===== */
-    /*
-     * Progress (mockups/round3/V-progress.html): one question, "am I on the
-     * line?". Total stats against the plan's line, one chart per stat on its own
-     * scale, gained against plan each day, and the last trains (what the plan
-     * said, what Torn showed). Before any history: the planned line and today,
-     * never a "come back tomorrow" paragraph (owner).
-     */
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const dayLabel = (d) => new Date(d).getUTCDate() + ' ' + MONTH_NAMES[new Date(d).getUTCMonth()];
-
-    /** Plan-vs-actual colour: green within ±20%, yellow 50–79% or 121–150%, red further off. */
-    function planColor(ratio) {
-        if (ratio >= 0.8 && ratio <= 1.2) return 'good';
-        if ((ratio >= 0.5 && ratio < 0.8) || (ratio > 1.2 && ratio <= 1.5)) return 'warn';
-        return 'bad';
-    }
-
-    /** Days from the plan's start to show (14, 30 or all), with the plan's cumulative line under them. */
-    function seriesFor(m, ctx, range) {
-        const hist = ctx.history || {};
-        const today = tornDayStart(m.now);
-        const line = ctx.planProjection && ctx.planProjection.start <= today ? ctx.planProjection : null;
-        let days = Object.keys(hist).map(Number).filter((d) => d <= today).sort((a, b) => a - b);
-        if (line) days = days.filter((d) => d >= line.start);
-        if (range !== 'all') days = days.slice(-range);
-        if (!days.length || days[days.length - 1] !== today) days.push(today);
-        const actual = days.map((d) => (d === today ? m.total : hist[d] ? hist[d].total : null));
-        const first = days[0];
-        // The plan line: from the day it was set; before any history, the line from today forward (planned + today).
-        const start = line ? line.start : today;
-        const base = line ? line.total : m.total;
-        const planAt = (d) => {
-            const i = Math.round((d - start) / DAY);
-            if (i < 0) return null;
-            const daily = line ? line.daily : m.compare && m.compare[ctx.plan.strategy] ? m.compare[ctx.plan.strategy].daily : [];
-            return i === 0 ? base : daily[Math.min(i - 1, daily.length - 1)] !== undefined ? base + daily[Math.min(i - 1, daily.length - 1)] : null;
-        };
-        return { days, actual, planAt, first, start, line };
-    }
-
-    function totalChart(m, ctx, s) {
-        const onlyToday = s.days.length === 1;
-        // With only today, show the plan's line ahead (planned + today).
-        const ahead = onlyToday ? 14 : 0;
-        const xs = s.days.concat(Array.from({ length: ahead }, (_, i) => s.days[s.days.length - 1] + (i + 1) * DAY));
-        const plan = xs.map((d) => s.planAt(d));
-        const you = s.actual.concat(Array(ahead).fill(null));
-        const lbl = (i) => (onlyToday && i === 0 ? 'today' : dayLabel(xs[i]));
-        const labels = [[0, lbl(0)], [xs.length - 1, lbl(xs.length - 1)]];
-        const vals = plan.concat(you).filter((v) => v !== null);
-        const lo = Math.min(...vals);
-        const hi = Math.max(...vals);
-        return h('div', {}, [
-            h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('lab', 'Total stats against the plan'), h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), 'you']), h('span', {}, [h('i', { class: 'dash', style: 'color:var(--muted)' }), 'plan'])])]),
-            lineChart(
-                [
-                    { name: 'plan', color: 'var(--muted)', dash: '5 4', width: 1.5, values: plan, label: 'plan' },
-                    { name: 'you', color: 'var(--chalk)', width: 2.5, values: you, label: 'you ' + fmtShort(m.total) },
-                ],
-                { w: 1000, h: 200, left: 50, right: 110, yMin: lo - (hi - lo) * 0.08, yMax: hi + (hi - lo) * 0.08 || hi * 1.01, grid: [lo, hi], xLabels: labels, n: xs.length, today: onlyToday ? 0 : undefined, label: 'Total stats against the plan' },
-            ),
-            onlyToday ? h('div', { class: 'note2', text: 'Your line starts today; the dashed line is where the plan takes you. Each day adds a point.' }) : null,
-        ]);
-    }
-
-    function statCharts(m, ctx, s) {
-        const hist = ctx.history || {};
-        const today = tornDayStart(m.now);
-        const trains = {};
-        for (const st of m.steps) for (const [k, n] of Object.entries(st.trains || {})) trains[k] = (trains[k] || 0) + n;
-        const cells = STATS.map((k) => {
-            const vals = s.days.map((d) => (d === today ? m.pc.stats[k] : hist[d] ? hist[d][k] : null));
-            const known = vals.filter((v) => v !== null);
-            const gained = known.length > 1 ? known[known.length - 1] - known[0] : 0;
-            const row = m.statRows.find((r) => r.stat === k);
-            const what = trains[k] ? trains[k] + ' trains today' : row && row.over ? 'over target, skipped' : 'no trains today';
-            // The plan's line for this stat: its share of the plan's gains, over the same days (and 14 ahead on day one).
-            const ahead = s.days.length === 1 ? 14 : 0;
-            const r = s.line ? { perStat: s.line.perStatGain, gained: s.line.daily[s.line.daily.length - 1], daily: s.line.daily, base: s.line.perStat[k] } : m.compare && m.compare[ctx.plan.strategy] ? { ...m.compare[ctx.plan.strategy], base: m.pc.stats[k] } : null;
-            const share = r && r.gained > 0 ? (r.perStat[k] || 0) / r.gained : 0;
-            const planVals = r ? s.days.concat(Array.from({ length: ahead }, (_, i) => s.days[s.days.length - 1] + (i + 1) * DAY)).map((d) => {
-                const i = Math.round((d - s.start) / DAY);
-                return i < 0 ? null : r.base + (i === 0 ? 0 : (r.daily[Math.min(i - 1, r.daily.length - 1)] || 0) * share);
-            }) : [];
-            const youVals = vals.concat(Array(ahead).fill(null));
-            const all = known.concat(planVals.filter((v) => v !== null));
-            const lo = Math.min(...all);
-            const hi = Math.max(...all);
-            const series = [];
-            if (share > 0) series.push({ name: 'plan', color: 'var(--muted)', dash: '5 4', width: 1.2, values: planVals, label: false });
-            series.push({ name: k, color: STAT_COLOR[k], width: 2, values: youVals.length > 1 ? youVals : [youVals[0], youVals[0]], label: false });
-            return h('div', {}, [
-                h('div', { class: 't' }, [h('b', { class: 's-' + k, text: STAT_LABEL[k] }), h('span', { text: fmtInt(m.pc.stats[k]) + (gained ? ' · ' + fmtSigned(gained) : '') + ' · ' + what })]),
-                lineChart(series, { w: 460, h: 90, left: 4, right: 4, yMin: lo - (hi - lo || hi * 0.01) * 0.1, yMax: hi + (hi - lo || hi * 0.01) * 0.1, n: youVals.length > 1 ? youVals.length : 2, label: STAT_LABEL[k] + ' over the days shown' }),
-            ]);
-        });
-        return h('div', {}, [h('div', { class: 'lab', style: 'margin-bottom:8px', text: 'Each stat · own scale' }), h('div', { class: 'mult num' }, cells)]);
-    }
-
-    function dayBars(m, ctx) {
-        const totals = ctx.dayTotals || {};
-        const today = tornDayStart(m.now);
-        const days = Object.keys(totals).map(Number).filter((d) => d <= today).sort((a, b) => a - b).slice(-14);
-        if (!days.includes(today)) days.push(today);
-        const pct = days.map((d) => {
-            const r = d === today ? { gained: m.gainedToday, planned: m.plannedGain } : totals[d];
-            return r && r.planned > 0 ? (100 * (r.gained || 0)) / r.planned : null;
-        });
-        const labels = days.map((d, i) => (d === today ? 'today' : i === 0 || i % 3 === 0 ? dayLabel(d) : ''));
-        const done = days.filter((d) => d < today);
-        const onPlan = done.filter((d) => totals[d] && totals[d].planned > 0 && totals[d].gained / totals[d].planned >= 0.95).length;
-        return h('div', {}, [
-            h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [
-                h('span', {}, [t('lab', 'Gained against plan, each day'), done.length ? h('span', { class: 'muted', style: 'margin-left:10px;font-size:12px', text: onPlan + ' of ' + done.length + ' days on plan' }) : null]),
-                h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--good)' }), 'on plan']), h('span', {}, [h('i', { style: 'background:var(--spd)' }), '75–95%']), h('span', {}, [h('i', { style: 'background:var(--bad)' }), 'under 75%']), h('span', {}, [h('i', { style: 'background:var(--line2)' }), 'today so far'])]),
-            ]),
-            planBars(pct, labels, { w: 1000, h: 110, partial: days.length - 1, label: 'Stats gained each day as a share of the plan' }),
-        ]);
-    }
-
-    function lastTrains(m, ctx) {
-        // One row a session (owner: "my 15 trains = +305,123 showed as three rows"), its reads added up. Sessions only
-        // Torn's log saw (your phone, the laptop closed; Full key) join them, without a prediction.
-        const reads = sessionsOf((ctx.calibration && ctx.calibration.samples) || []);
-        const logged = logSessions((ctx.gymLog && ctx.gymLog.lines) || [], m.pc && m.pc.table);
-        const sessions = mergeSessions(reads, logged).slice(0, 6);
-        const offOf = (p, a) => (p > 0 ? (100 * (a - p)) / p : 0);
-        const rows = sessions.map((x) => {
-            const checked = x.predicted !== null && x.predicted !== undefined;
-            const off = offOf(x.predicted, x.actual);
-            const stats = Object.keys(x.trains);
-            return h('tr', {}, [
-                h('td', { class: 't', text: clock(x.at, ctx.settings) }),
-                h('td', { class: stats.length === 1 ? 's-' + stats[0] : null, text: stats.map((k) => STAT_LABEL[k] + ' × ' + x.trains[k]).join(' · ') }),
-                h('td', {}, [x.gyms.join(' / '), x.fromLog ? h('span', { class: 'muted', title: 'From Torn’s own log: Pumping Iron had no clean read of this session (you trained elsewhere, e.g. on your phone, or a drug, booster or refill came between two reads), so there’s no plan figure to check it against', text: ' · Torn log' }) : null]),
-                h('td', { class: 'r', text: checked ? fmtSigned(x.predicted) : '—' }),
-                h('td', { class: 'r', text: x.actual === null || x.actual === undefined ? '—' : fmtSigned(x.actual) }),
-                h('td', { class: checked ? 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn') : 'r muted', text: checked ? fmtPct(off, 1) : '—' }),
-            ]);
-        });
-        if (rows.length > 1) {
-            // "Plan said" and "Off by" add up only when every row has a plan figure (the log's sessions have none).
-            const all = sessions.every((x) => x.predicted !== null && x.predicted !== undefined);
-            const p = all ? sessions.reduce((s, x) => s + x.predicted, 0) : 0;
-            const a = sessions.reduce((s, x) => s + (x.actual || 0), 0);
-            const off = offOf(p, a);
-            rows.push(h('tr', { class: 'total' }, [h('td'), h('td', {}, [h('b', { text: 'Total' })]), h('td'), h('td', { class: 'r', text: all ? fmtSigned(p) : '—' }), h('td', { class: 'r' }, [h('b', { text: fmtSigned(a) })]), h('td', { class: all ? 'r ' + (Math.abs(off) <= 1 ? 'c-good' : 'c-warn') : 'r muted', text: all ? fmtPct(off, 1) : '—' })]));
-        }
-        return h('div', {}, [
-            sectionHead('Last trains', meta(['what the plan said, what Torn showed']), null, 'h3'),
-            rows.length
-                ? h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Session' }), h('th', { text: 'Gym' }), h('th', { class: 'r', text: 'Plan said' }), h('th', { class: 'r', text: 'You got' }), h('th', { class: 'r', style: 'width:80px', text: 'Off by' })])]), h('tbody', {}, rows)])
-                : null,
-            h('p', { class: 'muted', style: rows.length ? 'margin:6px 0 0;font-size:12px' : 'margin:0', text: 'Only the reads with one stat trained and nothing taken in between (no drug, booster or refill): they check the gain maths, so a session’s total here can be less than what you really gained. Your real gains are under “Your gains”.' + (ctx.gymLog ? ' Sessions marked “Torn log” are from Torn’s own log (your Full key): trains while Pumping Iron wasn’t open, e.g. on your phone.' : ' With a Full key (Settings), trains on your phone show here too, from Torn’s log.') }),
-        ]);
-    }
-
-    function weekFacts(m, ctx) {
-        const totals = ctx.dayTotals || {};
-        const today = tornDayStart(m.now);
-        const days = Object.keys(totals).map(Number).filter((d) => d > today - 7 * DAY && d <= today);
-        const sum = (k) => days.reduce((a, d) => a + ((totals[d] && totals[d][k]) || 0), 0);
-        const g = sum('gained');
-        const p = sum('planned');
-        const xp = unitPrice((ctx.prices || {})[XANAX]) || 0;
-        const pp = unitPrice((ctx.prices || {})[POINTS], 300) || 0;
-        // Money really spent this week (receipts: every item and refill at that day's price); before receipts, Xanax and refills.
-        const spent = spentOverDays(ctx.receipts, days, { priceHistory: ctx.priceHistory, prices: ctx.prices || {} }, (d) => ((totals[d] && totals[d].xanax) || 0) * xp + ((totals[d] && totals[d].refills) || 0) * REFILL_POINTS * pp);
-        const first = new Date(today - 6 * DAY);
-        return h('div', {}, [
-            sectionHead('This week', meta([DAY_NAMES[first.getUTCDay()] + '–' + DAY_NAMES[new Date(today).getUTCDay()] + ' · ' + days.length + ' of 7 days']), null, 'h3'),
-            h('dl', { class: 'facts num' }, [
-                h('dt', { text: 'Gained' }),
-                h('dd', {}, [fmtSigned(g) + (p ? ' of ' + fmtShort(p) : ''), h('div', { class: 'mini' }, [h('i', { style: 'width:' + (p ? Math.min(100, (100 * g) / p) : 0).toFixed(0) + '%' })])]),
-                h('dt', { text: 'Xanax' }),
-                h('dd', { text: sum('xanax') + ' of ' + sum('xanaxPlanned') }),
-                h('dt', { text: 'Refills' }),
-                h('dd', { text: sum('refills') + ' of ' + days.length }),
-                h('dt', { text: 'Spent' }),
-                h('dd', { text: xp || pp ? 'about ' + fmtMoney(spent) : '—' }),
-            ]),
-        ]);
-    }
-
-    function budgetFacts(m, ctx, s) {
-        const days = m.planDays || ctx.settings.horizonDays || 30;
-        // Auto mode: the budget is what your income affords over the horizon.
-        const auto = m.auto && m.auto.ready && ctx.plan && ctx.plan.pickBy === 'auto' ? m.auto : null;
-        const budget = auto ? auto.budget : ctx.settings.budget || 0;
-        const line = s.line;
-        const dayN = line ? Math.min(days, Math.floor((tornDayStart(m.now) - line.start) / DAY) + 1) : 1;
-        const perDay = line ? line.cost / days : m.spend ? m.spend.perDay : 0;
-        const spent = perDay * dayN;
-        return h('div', {}, [
-            sectionHead('Budget', meta([fmtMoney(budget) + ' for ' + days + ' days' + (auto ? ' · Auto, from your income' : '')]), null, 'h3'),
-            h('dl', { class: 'facts num' }, [
-                h('dt', { text: 'At the plan’s pace' }),
-                h('dd', {}, ['about ' + fmtMoney(spent) + ' · day ' + dayN + ' of ' + days, h('div', { class: 'mini' }, [h('i', { style: 'width:' + (budget ? Math.min(100, (100 * spent) / budget) : 0).toFixed(0) + '%;background:var(--muted)' })])]),
-                h('dt', { text: 'On pace for' }),
-                h('dd', { text: fmtMoney(perDay * days) }),
-                m.spend && m.spend.cash !== null ? h('dt', { text: 'Cash on hand' }) : null,
-                m.spend && m.spend.cash !== null ? h('dd', { text: fmtMoney(m.spend.cash) + (m.spend.lastsDays !== null ? (m.spend.lastsDays < 1 ? ' · lasts under a day' : ' · lasts ~' + Math.round(m.spend.lastsDays) + ' days') : '') }) : null,
-            ]),
-        ]);
-    }
-
-    /** The stat furthest behind the build, how far, and when it gets there at the recent pace. */
-    function buildFacts(m, ctx, s) {
-        const behind = m.statRows.filter((r) => !r.over && r.gap > 0).sort((a, b) => b.target - b.share - (a.target - a.share))[0];
-        const hist = ctx.history || {};
-        const firstDay = s.days.find((d) => hist[d]);
-        const pace = firstDay !== undefined && behind ? (m.pc.stats[behind.stat] - hist[firstDay][behind.stat]) / Math.max(1, (tornDayStart(m.now) - firstDay) / DAY) : 0;
-        return h('div', {}, [
-            sectionHead('Build', meta([m.build.name]), null, 'h3'),
-            behind
-                ? h('dl', { class: 'facts num' }, [
-                      h('dt', { text: STAT_LABEL[behind.stat] + ' share' }),
-                      h('dd', {}, [(behind.share * 100).toFixed(1) + '% of ' + (behind.target * 100).toFixed(1) + '%', h('div', { class: 'mini' }, [h('i', { style: 'width:' + Math.min(100, (100 * behind.share) / behind.target).toFixed(0) + '%;background:' + STAT_COLOR[behind.stat] })])]),
-                      h('dt', { text: 'To go' }),
-                      h('dd', { text: '+' + fmtShort(behind.gap) }),
-                      h('dt', { text: 'At this pace' }),
-                      h('dd', { text: pace > 0 ? 'about ' + Math.max(1, Math.round(behind.gap / pace)) + ' days' : m.reachedDay !== null && m.reachedDay !== undefined ? 'about ' + m.reachedDay + ' days (plan)' : 'more than 30 days' }),
-                  ])
-                : h('p', { class: 'muted', style: 'margin:0', text: 'On build: every stat at or over its share.' }),
-        ]);
-    }
-
-    /** Round-number milestones ahead for the stat the plan trains most, and the total. */
-    function milestones(m, ctx) {
-        const r = ctx.compare && ctx.compare[ctx.plan.strategy];
-        if (!r) return null;
-        const days = m.planDays || ctx.settings.horizonDays || 30;
-        const out = [];
-        const main = STATS.filter((k) => r.perStat && r.perStat[k] > 0).sort((a, b) => r.perStat[b] - r.perStat[a])[0];
-        const when = (target, cur, daily) => {
-            const i = daily.findIndex((v) => cur + v >= target);
-            return i < 0 ? null : i + 1;
-        };
-        const inDays = (d) => 'in ~' + d + ' day' + (d === 1 ? '' : 's');
-        const step = (v) => Math.pow(10, Math.floor(Math.log10(Math.max(10, v))));
-        const total = m.total;
-        const tStep = step(total) / 2;
-        const tTarget = Math.ceil((total + 1) / tStep) * tStep;
-        const tDay = when(tTarget, total, r.daily);
-        if (tDay) out.push([fmtShort(tTarget) + ' total', inDays(tDay)]);
-        if (main) {
-            const cur = m.pc.stats[main];
-            const share = r.perStat[main] / Math.max(1, r.gained);
-            const daily = r.daily.map((v) => v * share);
-            const st = step(cur);
-            for (const target of [Math.ceil((cur + 1) / st) * st, Math.ceil((cur + 1) / st) * st + st]) {
-                const d = when(target, cur, daily);
-                if (d) out.push([STAT_LABEL[main] + ' ' + fmtShort(target), inDays(d)]);
-            }
-        }
-        if (m.nextGym && m.nextGym.gym) out.push([m.nextGym.gym.name, m.nextGym.known ? 'in ~' + Math.max(1, Math.round(m.nextGym.days)) + ' days' : 'open the gym page once to track it']);
-        if (!out.length) return null;
-        return h('div', {}, [sectionHead('Next milestones', meta(['at the plan’s pace, ' + days + ' days']), null, 'h3'), h('dl', { class: 'facts num' }, out.flatMap(([a, b]) => [h('dt', { text: a }), h('dd', { text: b })]))]);
-    }
-
-    function gymFacts(m) {
-        const top = Math.max(0, ...m.pc.unlocked.filter((id) => id <= GEORGES));
-        const specs = (m.pc.table || GYMS).filter((g) => g.id > GEORGES);
-        const lines = [h('dt', { text: 'Ladder' }), h('dd', { text: top >= GEORGES ? 'George’s ✓ (all ' + GEORGES + ')' : ((gymById(top, m.pc.table) || {}).name || 'gym ' + top) + ' · ' + (GEORGES - top) + ' to go' })];
-        for (const g of specs) {
-            const have = m.pc.unlocked.includes(g.id);
-            const acc = gymAccess(g, m.pc.stats);
-            if (!have && top < GEORGES) continue;
-            lines.push(h('dt', { text: g.name }), h('dd', { text: have && acc.ok ? '✓ open to you' : acc.reason || 'not unlocked' }));
-        }
-        return h('div', {}, [sectionHead('Gyms', null, null, 'h3'), h('dl', { class: 'facts num' }, lines)]);
-    }
-
-    /* ---------- Receipts ---------- */
-
-    /** Items, then refills, in words: "Xanax × 3 · EDVD × 5 · Refill × 1". */
-    function usedWords(x) {
-        const parts = [itemsWords(x.items)];
-        if (x.refills > 0) parts.push('Refill × ' + x.refills);
-        if (x.special > 0) parts.push('Special refill × ' + x.special);
-        return parts.filter(Boolean).join(' · ');
-    }
-
-    /** Energy per 1,000 stats: "5.5", "1,480". */
-    function rcPerK(v) {
-        return v === null ? '—' : v >= 100 ? fmtInt(v) : v.toFixed(v >= 10 ? 1 : 2);
-    }
-
-    /**
-     * Today / 7 days / 30 days, and the last 14 days, from the stored receipts.
-     * @returns {{cols: [label, summary][], days: {day, s, d}[], any: boolean}}
-     */
-    function receiptsView(receipts, now, sources = {}) {
-        const today = tornDayStart(now);
-        const cols = [
-            ['Today', today],
-            ['7 days', today - 6 * DAY],
-            ['30 days', today - 29 * DAY],
-        ].map(([label, from]) => [label, summarizeReceipts(receipts, from, today, sources)]);
-        const r = readReceipts(receipts);
-        const days = receiptDays(receipts)
-            .filter((d) => d <= today)
-            .slice(-14)
-            .reverse()
-            .map((d) => ({ day: d, s: summarizeReceipts(receipts, d, d, sources), d: r.days[d] }));
-        return { cols, days, any: days.length > 0 };
-    }
-
-    const rcMoney = (s) => (s.cost > 0 ? (s.est ? '~' : '') + fmtMoney(s.cost) : '$0');
-
-    function receiptDetail(row, m) {
-        const d = row.d;
-        const table = (m.pc && m.pc.table) || GYMS;
-        const by = Object.entries(d.by || {}).map(([k, [n, e]]) => {
-            const [stat, gid] = k.split('@');
-            return ((gymById(Number(gid), table) || {}).name || 'Gym ' + gid) + ' · ' + STAT_LABEL[stat] + ' × ' + fmtInt(n) + ' (' + fmtInt(e) + ' E)';
-        });
-        const gains = STATS.filter((k) => d.gain && d.gain[k] > 0).map((k) => fmtSigned(d.gain[k]) + ' ' + STAT_LABEL[k]);
-        const prices = Object.entries(d.px || {}).map(([id, p]) => (id === POINTS ? 'points' : itemsWords({ [id]: 1 }).replace(/ × 1$/, '')) + ' ' + fmtMoney(p));
-        const notes = [];
-        if (Object.keys(d.guess || {}).length) notes.push(itemsWords(d.guess) + ' not seen in your inventory yet (the plan’s step)');
-        if (d.catchUp) notes.push('includes ' + d.catchUp + ' catch-up after Torn Trading ran');
-        if (d.est) notes.push('energy worked out around a drug, booster or refill');
-        if (row.s.est) notes.push('a price wasn’t seen that day: nearest known price');
-        return h('dl', { class: 'facts num', style: 'grid-template-columns:auto 1fr;padding:6px 0 10px' }, [
-            h('dt', { text: 'Trained' }),
-            h('dd', { style: 'text-align:left', text: by.length ? by.join(' · ') : fmtInt(d.e) + ' E' }),
-            h('dt', { text: 'Gained' }),
-            h('dd', { style: 'text-align:left', text: gains.join(' · ') || '+0' }),
-            prices.length ? h('dt', { text: 'Cheapest that day' }) : null,
-            prices.length ? h('dd', { style: 'text-align:left', text: prices.join(' · ') }) : null,
-            notes.length ? h('dt', { text: 'Notes' }) : null,
-            notes.length ? h('dd', { style: 'text-align:left', text: notes.join('; ') }) : null,
-        ]);
-    }
-
-    function receiptsCard(m, ctx) {
-        const v = receiptsView(ctx.receipts, m.now, { priceHistory: ctx.priceHistory, prices: ctx.prices || {} });
-        const line = (label, fn) => h('tr', {}, [h('td', { class: 'muted', text: label }), ...v.cols.map(([, s]) => h('td', { class: 'r', text: fn(s) }))]);
-        const summary = h('table', { class: 'tbl num rc-sum' }, [
-            h('thead', {}, [h('tr', {}, [h('th', { text: '' }), ...v.cols.map(([l]) => h('th', { class: 'r', text: l }))])]),
-            h('tbody', {}, [
-                line('Energy trained', (s) => fmtInt(s.e) + ' E'),
-                line('Trains', (s) => fmtInt(s.n)),
-                h('tr', {}, [h('td', { class: 'muted', text: 'Items used' }), ...v.cols.map(([, s]) => h('td', { class: 'r', style: 'white-space:normal', text: usedWords(s) || '—' }))]),
-                line('Money spent', rcMoney),
-                line('Stats gained', (s) => fmtSigned(s.gained)),
-                line('$ per 1,000 stats', (s) => (s.perK === null ? '—' : fmtMoney(s.perK))),
-                line('Energy per 1,000 stats', (s) => rcPerK(s.ePerK)),
-            ]),
-        ]);
-        const open = ctx.ui.receiptOpen;
-        const rows = [];
-        for (const row of v.days) {
-            const toggle = () => {
-                ctx.ui.receiptOpen = open === row.day ? null : row.day;
-                ctx.rerender();
-            };
-            rows.push(
-                h('tr', { class: 'click' + (open === row.day ? ' sel' : ''), tabindex: '0', 'aria-expanded': String(open === row.day), onclick: toggle, onkeydown: (e) => { if (e.key === 'Enter') toggle(); } }, [
-                    h('td', { class: 't', text: row.day === tornDayStart(m.now) ? 'today' : dayLabel(row.day) }),
-                    h('td', { class: 'r', text: fmtInt(row.s.e) }),
-                    h('td', { class: 'r', text: fmtInt(row.s.n) }),
-                    h('td', { text: usedWords(row.s) || '—' }),
-                    h('td', { class: 'r', text: rcMoney(row.s) }),
-                    h('td', { class: 'r', text: fmtSigned(row.s.gained) }),
-                    h('td', { class: 'r', text: row.s.perK === null ? '—' : fmtMoney(row.s.perK) }),
-                ]),
-            );
-            if (open === row.day) rows.push(h('tr', { class: 'sub' }, [h('td', { colspan: '7' }, [receiptDetail(row, m)])]));
-        }
-        const any = v.cols.some(([, s]) => s.est);
-        return h('div', {}, [
-            sectionHead('Receipts', meta(['energy, items and money you trained with']), null, 'h3'),
-            summary,
-            v.any
-                ? h('table', { class: 'tbl num', style: 'margin-top:14px' }, [
-                      h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'Day' }), h('th', { class: 'r', text: 'Energy' }), h('th', { class: 'r', text: 'Trains' }), h('th', { text: 'Used' }), h('th', { class: 'r', text: 'Spent' }), h('th', { class: 'r', text: 'Gained' }), h('th', { class: 'r', text: '$ / 1k' })])]),
-                      h('tbody', {}, rows),
-                  ])
-                : null,
-            h('div', { class: 'note2', text: v.any ? 'Click a day for its gyms, prices and notes.' + (any ? ' ~ a price that day wasn’t seen: the nearest known one.' : '') : 'Receipts start today: each train, drug, booster and refill is added here as Torn shows it.' }),
-        ]);
-    }
-
-    /* ---------- What if you'd done another plan ---------- */
-
-    /** One colour per plan (never the stat colours); "you" is chalk. */
-    const WHAT_IF_COLOR = { steady: '#8fb8e8', dailyChoco: '#e8a33d', chocoJump: '#c79bf0', edvdJump: '#e98fb5', happy99k: '#f06f9f', blissSteady: '#5cc8c0', steadyBoost: '#a6e08a', steadyMax: '#d7d06a', candyXanax: '#f0c8a0', consoleJump: '#9aa8ff', consoleJumpToy: '#9aa8ff', edvdJumpAN: '#e98fb5' };
-
-    const whatIfMemo = { key: '', value: null };
-
-    /** The plans re-run for the period (heavy: kept until the period or the player's setup changes). */
-    function whatIfFor(m, ctx, period) {
-        // The plan runs depend on the start, the days and (for the budget) the money; a new train only moves the lines.
-        const key = JSON.stringify([period.start, period.days.length, Number((period.money || 0).toPrecision(2)), m.shares, m.pc.unlocked, m.pc.perks && m.pc.perks.mult, m.state.happy.maximum, m.state.energy.maximum, ctx.settings.boosterCapH || 24]);
-        if (key !== whatIfMemo.key) {
-            whatIfMemo.key = key;
-            whatIfMemo.value = runWhatIf({ state: m.state, pc: m.pc, shares: m.shares, settings: ctx.settings, prices: ctx.prices || {} }, period).results;
-        }
-        return whatIfLines(period, whatIfMemo.value);
-    }
-
-    /** The plans switched on: what the user picked, else the recommended plan. */
-    function whatIfShown(ui, recommended, ids) {
-        const want = Array.isArray(ui.whatIfOn) ? ui.whatIfOn : [recommended];
-        return ids.filter((id) => want.includes(id));
-    }
-
-    /** "Steady would have given +1.2M, Choco jump +1.5M over these 14 days". */
-    function whatIfSummary(plans, shown, nDays) {
-        const parts = shown.filter((id) => plans[id]).map((id) => ((STRATEGIES[id] || {}).short || id) + ' ' + fmtSigned(plans[id].gained));
-        if (!parts.length) return '';
-        return parts[0].replace(/ ([+−])/, ' would have given $1') + (parts.length > 1 ? ', ' + parts.slice(1).join(', ') : '') + ' over these ' + nDays + ' days';
-    }
-
-    function whatIfCard(m, ctx) {
-        const head = sectionHead('What if you’d done another plan', meta(['your energy, at most your money']), null, 'h3');
-        const rangeKey = ctx.ui.progressRange || 14;
-        const today = tornDayStart(m.now);
-        let days = receiptDays(ctx.receipts).filter((d) => d <= today);
-        if (rangeKey !== 'all') days = days.filter((d) => d > today - rangeKey * DAY);
-        const sources = { priceHistory: ctx.priceHistory, prices: ctx.prices || {} };
-        const period = days.length >= 2 ? whatIfPeriod(ctx.receipts, days, sources) : null;
-        if (!period || !m.state || !m.pc) return h('div', {}, [head, h('p', { class: 'muted', style: 'margin:0', text: 'Receipts start today; the comparison appears after two days.' })]);
-        const w = whatIfFor(m, ctx, period);
-        const ids = Object.keys(w.plans).sort((a, b) => w.plans[b].gained - w.plans[a].gained);
-        const rec = m.recommendation && w.plans[m.recommendation.recommended] ? m.recommendation.recommended : ids.includes('steady') ? 'steady' : ids[0];
-        const shown = whatIfShown(ctx.ui, rec, ids);
-        const toggle = (id) => {
-            const cur = whatIfShown(ctx.ui, rec, ids);
-            ctx.ui.whatIfOn = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
-            ctx.rerender();
-        };
-        const series = [{ name: 'you', color: 'var(--chalk)', width: 2.5, values: w.real, label: 'you ' + fmtSigned(period.gained) }];
-        for (const id of shown) series.push({ name: id, color: WHAT_IF_COLOR[id] || 'var(--muted)', dash: '5 4', width: id === rec ? 2 : 1.5, values: w.plans[id].values, label: ((STRATEGIES[id] || {}).short || id) + ' ' + fmtSigned(w.plans[id].gained) });
-        const vals = series.flatMap((s) => s.values);
-        const lo = Math.min(...vals);
-        const hi = Math.max(...vals);
-        const n = period.days.length;
-        const lastDay = period.days[n - 1].day;
-        const chips = ids.map((id) =>
-            h('button', { type: 'button', class: 'tk', 'aria-pressed': String(shown.includes(id)), onclick: () => toggle(id) }, [
-                h('i'),
-                h('span', { style: 'display:inline-block;width:14px;height:2px;background:' + (WHAT_IF_COLOR[id] || 'var(--muted)') }),
-                ((STRATEGIES[id] || {}).short || id) + (id === rec ? ' (recommended)' : '') + ' ' + fmtSigned(w.plans[id].gained),
-            ]),
-        );
-        const summary = whatIfSummary(w.plans, shown, n);
-        return h('div', {}, [
-            head,
-            h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [
-                h('span', { class: 'muted', style: 'font-size:12px', text: 'You: ' + fmtSigned(period.gained) + ' from ' + fmtInt(period.energy) + ' E and ' + fmtMoney(period.money) }),
-                h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), 'you']), h('span', {}, [h('i', { class: 'dash', style: 'color:var(--muted)' }), 'another plan'])]),
-            ]),
-            lineChart(series, { w: 1000, h: 180, left: 50, right: 150, yMin: lo - (hi - lo || hi * 0.01) * 0.08, yMax: hi + (hi - lo || hi * 0.01) * 0.08, grid: [lo, hi], xLabels: [[0, dayLabel(period.days[0].day)], [n, lastDay === today ? 'today' : dayLabel(lastDay)]], n: n + 1, label: 'Total stats: you against other plans with your energy' }),
-            h('div', { class: 'ticks', role: 'group', 'aria-label': 'Plans on the graph', style: 'margin-top:8px' }, chips),
-            summary ? h('div', { class: 'note2', text: summary + '. Each plan trains the energy you trained, with its own happy and boosters; one that costs more than you spent only counts what your money covers.' }) : null,
-        ]);
-    }
-
-    function renderProgress(m, ctx) {
-        const rangeKey = ctx.ui.progressRange || 14;
-        const s = seriesFor(m, ctx, rangeKey === 'all' ? 'all' : rangeKey);
-        const hist = ctx.history || {};
-        const firstVal = s.days.map((d) => hist[d]).find(Boolean);
-        const gained = firstVal ? m.total - firstVal.total : m.gainedToday;
-        const planned = s.planAt(tornDayStart(m.now));
-        const pct = s.line && planned && planned > s.line.total ? Math.round((100 * (m.total - s.line.total)) / (planned - s.line.total)) : null;
-        const strat = STRATEGIES[ctx.plan.strategy] || STRATEGIES.steady;
-        const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Show' }, [14, 30, 'all'].map((n) => h('button', { type: 'button', 'aria-pressed': String(n === rangeKey), onclick: () => { ctx.ui.progressRange = n; ctx.rerender(); }, text: n === 'all' ? 'All' : n + ' days' })));
-        const ctl = [
-            t('lab', 'Show'),
-            seg,
-            h('span', { class: 'muted', text: (s.line ? 'since ' + dayLabel(s.line.start) : 'from today') + ' · plan: ' + strat.short + ' · ' + m.build.name }),
-            h('span', { class: 'grow' }),
-            h('span', { class: pct === null || pct >= 95 ? 'c-good' : 'c-warn' }, [h('b', { text: fmtSigned(gained) }), ' gained' + (pct !== null ? ' · ' + pct + '% of plan' : '')]),
-        ];
-        const lead = totalChart(m, ctx, s);
-        lead.classList.add('lead');
-        return {
-            ctl: [ctl],
-            main: [lead, statCharts(m, ctx, s), dayBars(m, ctx), receiptsCard(m, ctx), whatIfCard(m, ctx), lastTrains(m, ctx)],
-            pane: [gainsCard(m), weekFacts(m, ctx), budgetFacts(m, ctx, s), buildFacts(m, ctx, s), milestones(m, ctx), gymFacts(m)].filter(Boolean),
-        };
     }
 
     /* ===== src/ui/mask.js ===== */
@@ -15029,6 +16571,34 @@
         ];
     }
 
+    /**
+     * Money log fields (round 7, C.0): your money log by Torn's log type, with
+     * the names of each type's data fields and which one was read as the amount.
+     * Names and counts only, never an amount: the money accounts are written
+     * from this, not from guesses. It is also in the report zip, for everyone.
+     */
+    function moneyFieldsBlock(dev) {
+        const mf = dev.moneyFields ? dev.moneyFields() : { at: null, list: [] };
+        const head = sectionHead('Money log fields', meta([mf.list.length ? mf.list.length + ' log types · read ' + new Date(mf.at).toISOString().slice(0, 16).replace('T', ' ') + ' UTC · names only, never an amount' : 'names only, never an amount']), null, 'h3');
+        if (!mf.list.length) return h('div', {}, [head, h('p', { class: 'muted', style: 'margin:0', text: 'Nothing read yet: the money log needs the Full key (Settings), and is read every 6 hours. A log read before this version has no field names: save the Full key again, or wait for the next read.' })]);
+        const amountWords = (a) => Object.entries(a || {}).sort((x, y) => y[1] - x[1]).map(([k, n]) => k + ' × ' + n).join(', ');
+        const rows = mf.list.map((r) =>
+            h('tr', {}, [
+                h('td', {}, [h('b', { class: 'w', text: r.title || '(no title)' }), h('br'), h('small', { class: 'muted', text: r.category || '' })]),
+                h('td', { class: 'r', text: r.type === null ? '—' : String(r.type) }),
+                h('td', { class: 'r', text: fmtInt(r.lines) }),
+                h('td', { class: 'r', text: String(r.days) }),
+                h('td', { style: 'white-space:normal', text: r.fields.map((f) => f.name + ' (' + f.is + ')').join(', ') || 'no data fields' }),
+                h('td', { class: /none read/.test(amountWords(r.amount)) ? 'c-warn' : '', style: 'white-space:normal', text: amountWords(r.amount) }),
+            ]),
+        );
+        return h('div', {}, [
+            head,
+            h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'Log line' }), h('th', { class: 'r', style: 'width:60px', text: 'Type' }), h('th', { class: 'r', style: 'width:56px', text: 'Lines' }), h('th', { class: 'r', style: 'width:52px', text: 'Days' }), h('th', { text: 'Data fields' }), h('th', { style: 'width:180px', text: 'Read as the amount' })])]), h('tbody', {}, rows)]),
+            h('div', { class: 'note2', text: 'A line listed under two of Torn’s categories counts once. “(none read)”: no field of that line was taken as its amount today.' }),
+        ]);
+    }
+
     function renderDeveloper(m, ctx) {
         const dev = ctx.dev;
         const mine = dev.data();
@@ -15157,10 +16727,117 @@
                 ]),
             ]),
         ];
-        return { ctl: [ctl], main: [learned, scat, errChart, eye], pane };
+        return { ctl: [ctl], main: [learned, scat, errChart, eye, moneyFieldsBlock(dev)], pane };
     }
 
     void fmtPct;
+
+    /* ===== src/ui/app/report.js ===== */
+    /*
+     * Settings › Report a problem (round 7; Torn Trading's "Report a problem"
+     * in Pumping Iron's own Settings look): say what happened and what you
+     * expected, add screenshots, see what goes in the zip before anything is
+     * made, then download one file to send. Nothing is sent by this page.
+     */
+
+
+
+
+
+
+
+    /**
+     * What you typed and attached lives here, not in the page's `ui` (that one is
+     * compared on every redraw; screenshots are megabytes).
+     */
+    const reportFormState = { happened: '', expected: '', shots: [], showLog: false, status: '', lastZip: null };
+
+    const reportStamp = (ms) => new Date(ms).toISOString().slice(0, 16).replace(/[-:]/g, '').replace('T', '-');
+
+    function saveReportZip(zip) {
+        const url = URL.createObjectURL(new Blob([zip.data], { type: 'application/zip' }));
+        const a = h('a', { href: url, download: zip.name, style: 'display:none' });
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+            URL.revokeObjectURL(url);
+            a.remove();
+        }, 10000);
+    }
+
+    /** The zip's files from what the page holds now (also used by the browser check). */
+    function buildReport(ctx, now = Date.now()) {
+        const r = ctx.report.data();
+        const learning = exportFiles({ samples: r.learn.samples, fights: r.learn.fights, gymLog: r.learn.gymLog, learned: r.learn.learned, version: r.state.version, now });
+        return reportFiles({ happened: reportFormState.happened, expected: reportFormState.expected, shots: reportFormState.shots, log: r.log, state: r.state, player: r.player, saved: r.saved, learning, moneyFields: r.moneyFields, statsHistory: r.statsHistory, env: r.env, now });
+    }
+
+    function downloadReport(ctx) {
+        const now = Date.now();
+        reportFormState.lastZip = { data: makeZip(buildReport(ctx, now), now), name: 'pumping-iron-report-' + reportStamp(now) + '.zip' };
+        saveReportZip(reportFormState.lastZip);
+        // One file, then a clean form: the words, the screenshots and the log go, so the next report starts empty.
+        for (const s of reportFormState.shots) URL.revokeObjectURL(s.url);
+        reportFormState.happened = '';
+        reportFormState.expected = '';
+        reportFormState.shots = [];
+        ctx.report.clearLog();
+        reportFormState.status = 'Saved ' + reportFormState.lastZip.name + ' to your downloads. Send that file: nothing was sent by this page. The form and the log are cleared for your next report.';
+        ctx.rerender();
+    }
+
+    /** The Settings card. */
+    function reportSection(m, ctx) {
+        if (!ctx.report) return null;
+        const r = ctx.report.data();
+        const errors = r.log.filter((e) => e.kind === 'error').length;
+        const happened = h('textarea', { class: 'inp ta', rows: '4', 'aria-label': 'What happened', placeholder: 'For example: I pressed Re-plan for 12 months, the bar stopped at "month 5" and nothing changed.' });
+        happened.value = reportFormState.happened;
+        happened.addEventListener('input', () => (reportFormState.happened = happened.value));
+        const expected = h('textarea', { class: 'inp ta', rows: '2', 'aria-label': 'What you expected', placeholder: 'For example: the new plan in a few seconds.' });
+        expected.value = reportFormState.expected;
+        expected.addEventListener('input', () => (reportFormState.expected = expected.value));
+        const file = h('input', { type: 'file', accept: 'image/*', multiple: true, style: 'display:none' });
+        file.addEventListener('change', () => {
+            const files = [...(file.files || [])];
+            file.value = '';
+            Promise.all(files.map((f) => f.arrayBuffer().then((b) => ({ name: f.name, data: new Uint8Array(b), url: URL.createObjectURL(f) })))).then((got) => {
+                reportFormState.shots.push(...got);
+                ctx.rerender();
+            });
+        });
+        const shots = reportFormState.shots.map((s, i) =>
+            h('span', { class: 'shot' }, [
+                h('img', { src: s.url, alt: s.name }),
+                h('button', { type: 'button', class: 'x', 'aria-label': 'Remove ' + s.name, onclick: () => { URL.revokeObjectURL(s.url); reportFormState.shots.splice(i, 1); ctx.rerender(); }, text: '×' }),
+            ]),
+        );
+        const includes = reportIncludes({ shots: reportFormState.shots.length, log: r.log, player: r.player, saved: r.saved, gymLog: r.learn.gymLog.length, moneyTypes: (r.moneyFields || []).length });
+        const state = h('span', { class: 'state ' + (errors ? 'bad' : 'off') }, [h('i'), errors ? errors + (errors === 1 ? ' error logged' : ' errors logged') : 'Nothing logged as an error']);
+        return h('div', { class: 'sec' }, [
+            h('div', {}, [h('h3', { text: 'Report a problem' }), state]),
+            h('div', { class: 'secbody' }, [
+                h('p', { text: 'Found a bug, or something slow? Say what happened, add screenshots, and download one .zip to send. It also holds the problem log (what failed, what you clicked just before, how long each plan took) and your stats, gym log and saved plan, so the cause is found without guessing. Nothing is sent anywhere by this page.' }),
+                h('label', { class: 'field' }, [h('span', { class: 'lab', text: 'What happened?' }), happened]),
+                h('label', { class: 'field' }, [h('span', { class: 'lab', text: 'What did you expect?' }), expected]),
+                h('div', { class: 'row', style: 'flex-wrap:wrap' }, [h('button', { class: 'btn sm', type: 'button', onclick: () => file.click(), text: 'Add screenshots' }), h('span', { class: 'muted', style: 'font-size:12px', text: 'Win + Shift + S takes one; save it, then add it here.' }), file]),
+                shots.length ? h('div', { class: 'shots' }, shots) : null,
+                h('div', {}, [h('span', { class: 'lab', text: 'What goes in the zip' }), h('ul', { class: 'incl' }, includes.map((x) => h('li', { text: x })))]),
+                h('div', { class: 'row', style: 'flex-wrap:wrap' }, [
+                    h('button', { class: 'btn primary', type: 'button', onclick: () => downloadReport(ctx), text: 'Download report (.zip)' }),
+                    reportFormState.lastZip ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => saveReportZip(reportFormState.lastZip), text: 'Download it again' }) : null,
+                    h('button', { class: 'btn sm ghost', type: 'button', 'aria-expanded': String(reportFormState.showLog), onclick: () => { reportFormState.showLog = !reportFormState.showLog; ctx.rerender(); }, text: reportFormState.showLog ? 'Hide the log' : 'Show the log' }),
+                    h('button', { class: 'btn sm ghost', type: 'button', title: 'Start the log again (after sending a report)', onclick: () => { ctx.report.clearLog(); reportFormState.status = 'Log cleared.'; ctx.rerender(); }, text: 'Clear the log' }),
+                ]),
+                reportFormState.status ? h('span', { class: 'msg ok', role: 'status', text: reportFormState.status }) : null,
+                reportFormState.showLog ? h('pre', { class: 'logbox num', text: logAsText(r.log.slice(-40)).trim() || 'Nothing logged yet.' }) : null,
+                h('details', { class: 'dis' }, [h('summary', { text: 'What is and isn’t in the file' }), h('p', { text: 'In it: what you wrote, your screenshots, the problem log, your stats (the four numbers), happy and energy maximum, gym and gyms unlocked, build, the perk lines Torn lists for you, your saved plan in short, the last plan runs with their time, your stats history, your trains from Torn’s log, and your money log by type with the names of its fields. Not in it: any API key, your player id or name, other players’ ids or names, any money log amount.' })]),
+            ]),
+        ]);
+    }
+
+    /** For tests: the form's state. */
+    const reportForm = reportFormState;
 
     /* ===== src/ui/app/settings.js ===== */
     /*
@@ -15170,6 +16847,7 @@
      * learning data for everyone, the developer key unlocks the rest);
      * Diagnostics against Torn Trading's limits (the two take turns).
      */
+
 
 
 
@@ -15572,6 +17250,7 @@
         const d = ctx.diagnostics();
         const diagSec = h('div', {}, [sectionHead('Diagnostics', null, null, 'h3'), h('dl', { class: 'facts num' }, [h('dt', { text: 'Torn API, last minute' }), h('dd', { text: d.torn + ' of ' + (d.tornMax || 85) + (d.focus ? ' · first: ' + d.focus : '') }), h('dt', { text: 'FFScouter, last minute' }), h('dd', { text: d.ffs + ' of 60' }), h('dt', { text: 'TornW3B, last minute' }), h('dd', { text: d.w3b + ' of 80' }), h('dt', { text: 'Last error' }), h('dd', { text: d.lastError || 'none' }), h('dt', { text: 'Perk lines not understood' }), h('dd', { text: String(d.unknownPerks) }), h('dt', { text: 'Version' }), h('dd', { text: d.version })])]);
         const devSec = developerSection(m, ctx);
+        const reportSec = reportSection(m, ctx);
 
         const dataRows = [
             ['keys', 'Keys', 'Torn, Full, FFScouter, TornStats, Discord service', 'Forget keys'],
@@ -15587,7 +17266,7 @@
             h('div', {}, [sectionHead('What it never does', null, null, 'h3'), headsList([{ tone: 'plain', text: 'Train, buy, use or attack', sub: 'Fill only types a number' }, { tone: 'plain', text: 'Load a Torn page by itself' }, { tone: 'plain', text: 'Ping from a Torn tab', sub: 'only your Discord service does' }])]),
         ];
         // One card per section, ordered by use.
-        return { main: [tornSec, fullSec, discordSec, ffsSec, tsSec, bandsSec, overlaySec, displaySec, devSec].filter(Boolean), pane };
+        return { main: [tornSec, fullSec, discordSec, ffsSec, tsSec, bandsSec, overlaySec, displaySec, reportSec, devSec].filter(Boolean), pane };
     }
 
     /* ===== src/ui/app/app.js ===== */
@@ -15674,6 +17353,19 @@
             this.host.scrollTop = 0;
         }
 
+        /**
+         * A plan being worked out (round 7, R7.3b): the Plan card's bar, words and seconds follow the run without a
+         * redraw of the page (width and text only: nothing here needs a GPU).
+         * @param {object} busy - {done: 0..1, words, at}
+         */
+        planProgress(busy) {
+            if (!this.root || !busy) return;
+            const bar = this.root.querySelector('[data-plan-bar]');
+            const words = this.root.querySelector('[data-plan-words]');
+            if (bar) bar.style.width = Math.round(100 * Math.max(0.02, busy.done || 0)) + '%';
+            if (words) words.textContent = planRunWords(busy);
+        }
+
         /** The box being typed in: which one (its label), what's in it and where the cursor is. */
         focusedInput() {
             const a = this.shadow && this.shadow.activeElement;
@@ -15717,7 +17409,9 @@
             ctx.go = (tab) => this.go(tab);
             ctx.rerender = () => this.render(true);
             const m = ctx.model;
-            const sig = [this.tab, m && m.ready ? m.state.at : 'x', ctx.sig || '', JSON.stringify(this.ui), ctx.paused ? 'paused' : ''].join('|');
+            // A plan run starting or ending redraws too (the bar and Cancel appear with it; planProgress then moves the bar).
+            const runSig = m && m.ready && m.planBusy ? 'run:' + m.planBusy.at : '';
+            const sig = [this.tab, m && m.ready ? m.state.at : 'x', ctx.sig || '', JSON.stringify(this.ui), ctx.paused ? 'paused' : '', runSig].join('|');
             if (!force && (sig === this.sig || this.typing())) return;
             this.sig = sig;
             const s = ctx.settings;
@@ -15749,6 +17443,8 @@
             try {
                 out = fn(m && m.ready ? m : { ready: false, now: Date.now(), statRows: [], steps: [], heads: [] }, ctx);
             } catch (error) {
+                // Into the problem log too (Settings › Report a problem), with the tab it happened on.
+                if (ctx.logError) ctx.logError('The ' + tab + ' tab', error);
                 out = { main: [h('div', { class: 'warnb' }, [h('b', { text: 'This tab hit a problem' }), h('p', { text: String((error && error.message) || error) })])], pane: [] };
             }
             // A page's control bars (the inputs that drive every number on it), then the status strip where the page wants it.
@@ -17804,6 +19500,7 @@
 
 
 
+
     /** How often the money log is read, how far back, and how many categories at most (one call each). */
     const MONEY_LOG_EVERY_MS = 6 * 60 * 60 * 1000;
     const MONEY_LOG_DAYS = 30;
@@ -17876,7 +19573,10 @@
      */
     function gymLogTick() {
         if (pi.where !== 'app' || typeof document === 'undefined' || document.visibilityState === 'hidden') return;
-        refreshGymLog().catch((error) => set(K.lastError, { at: Date.now(), where: 'gym log', code: error && error.code, message: String((error && error.message) || error) }));
+        refreshGymLog().catch((error) => {
+            set(K.lastError, { at: Date.now(), where: 'gym log', code: error && error.code, message: String((error && error.message) || error) });
+            logError('Reading your gym log', error);
+        });
     }
 
     /**
@@ -17894,7 +19594,8 @@
         // Only the lines from when every category is complete count (a busy category's page may not reach back 30 days).
         const since = log.coveredFrom || now - MONEY_LOG_DAYS * 86400e3;
         const kept = log.filter((e) => e.at >= since);
-        const row = { at: now, days: Math.max(1, (now - since) / 86400e3), cats: cats.map((c) => c.title), log: kept.slice(0, 1500).map((e) => ({ at: e.at, title: e.title, money: e.money })) };
+        // `fields` (round 7, C.0): the log by type with its data field names, for Settings › Developer and the report zip.
+        const row = { at: now, days: Math.max(1, (now - since) / 86400e3), cats: cats.map((c) => c.title), log: kept.slice(0, 1500).map((e) => ({ at: e.at, title: e.title, money: e.money })), fields: log.fields || [] };
         pageSet(K.moneyLog, row);
         return row;
     }
@@ -17934,6 +19635,9 @@
      * only for items the Buy list needs (plus a few tracked ones), at most once
      * every 5 minutes, and only while this tab is visible.
      */
+
+
+
 
 
 
@@ -18293,6 +19997,65 @@
         setEyeForSync({ war: fid && warRows.length ? { factionId: fid, members: warRows } : null, watch: watchRows });
     }
 
+    /** Settings the report carries: the switches and limits, never a key, a faction or a player id. */
+    const REPORT_SETTINGS = ['timeFormat', 'pill', 'gymMarks', 'marketMarks', 'eyeChips', 'budget', 'horizonDays', 'buyWindow', 'w3b', 'warReserve', 'boosterCapH', 'npcShops', 'npcShopsOff'];
+
+    /**
+     * What Settings › Report a problem puts in its zip (core/report.js), read
+     * when asked: the problem log, your stats and gym set-up, the saved plan,
+     * the plan runs with their time, the money log's field names. No key, no
+     * player id, no name.
+     */
+    function reportData() {
+        const s = get(K.userState, null);
+        const state = s && s.api ? normalizeState(s.api, s.at) : null;
+        const statics = get(K.userStatic, {}) || {};
+        const m = pi.model && pi.model.ready ? pi.model : null;
+        const plan = getPlan();
+        const settings = getSettings();
+        const pk = m ? m.pc.perks : null;
+        const job = m && m.job ? { type: m.job.type, stars: m.job.stars, days: m.job.days, jp: m.job.jp } : null;
+        const player =
+            state && m
+                ? {
+                      stats: { ...m.pc.stats },
+                      happyMax: state.happy.maximum,
+                      energyMax: state.energy.maximum,
+                      energyEvery: state.energy.interval,
+                      gymId: state.gymId,
+                      unlocked: [...m.pc.unlocked],
+                      build: plan.build,
+                      buildPicked: Boolean(plan.buildPicked),
+                      goal: plan.goal || null,
+                      specialRefills: state.specialRefills,
+                      property: (statics.property && statics.property.property && statics.property.property.name) || null,
+                      job,
+                      perks: { mult: pk.mult, bliss: pk.bliss, happyLossMult: pk.happyLossMult, gymExpMult: pk.gymExpMult, canMult: pk.canMult, candyMult: pk.candyMult, consumableCdMult: pk.consumableCdMult, boosterCapExtraH: pk.boosterCapExtraH, lines: (pk.lines || []).map((l) => ({ source: l.source, stat: l.stat, pct: l.pct, text: l.text })), unknown: pk.unknown || [] },
+                  }
+                : null;
+        const nav = typeof navigator !== 'undefined' ? navigator : {};
+        const mem = typeof performance !== 'undefined' && performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null;
+        return {
+            log: problemLogNow(),
+            player,
+            saved: pi.saved,
+            moneyFields: (pageGet(K.moneyLog, null) || {}).fields || [],
+            statsHistory: archived(K.statsHistory, {}) || {},
+            learn: { samples: ((archived('calibration', null) || {}).samples) || [], gymLog: ((pageGet(K.gymLog, null) || {}).lines) || [], fights: joinFights(pageGet(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], archived(K.eyePredictions, []) || []), learned: get(K.learned, null) },
+            state: {
+                version: PI_BUILD_VERSION,
+                build: BUILD,
+                settings: Object.fromEntries(REPORT_SETTINGS.filter((k) => settings[k] !== undefined).map((k) => [k, settings[k]])),
+                plan: { pickBy: plan.pickBy, strategy: plan.strategy, strategyPicked: Boolean(plan.strategyPicked), build: plan.build, goal: plan.goal || null, specialUse: plan.specialUse || 0, following: m ? m.strategy : null },
+                runs: planRuns(),
+                diagnostics: diagnostics(),
+                keys: { torn: Boolean(getKey(K.apiKey)), tornRefused: Boolean(get(K.apiKeyDead, false)), full: Boolean(getKey(K.fullKey)), ffscouter: Boolean(getKey(K.ffsKey)), tornstats: Boolean(getKey(K.tsKey)), discord: Boolean(discordRaw()) },
+                paused: isPaused(),
+            },
+            env: { userAgent: nav.userAgent || '', screen: typeof window !== 'undefined' && window.screen ? window.screen.width + 'x' + window.screen.height : '', cores: nav.hardwareConcurrency || null, memoryGB: nav.deviceMemory || null, pageHeapMB: mem },
+        };
+    }
+
     /** A Create plan or Recalibrate click: the page shows it working, then the new plan (or why it couldn't). */
     function runPlan(fn) {
         page.app.ui.planError = null;
@@ -18325,14 +20088,15 @@
             gymProgress: get(K.gymProgress, null),
             calibration: archived('calibration', null),
             gymLog: pageGet(K.gymLog, null),
-            planProjection: pageGet(K.planLine, null),
+            // The plan's lines, read by time (core/planline.js): Progress, the Plan card, Home.
+            planLines: readLines(pageGet(K.planLine, null)),
             receipts: archived(K.receipts, null),
             priceHistory: archived(K.priceHistory, null),
             flags: { hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)), hasFfs: Boolean(getKey(K.ffsKey)), ffsDead: Boolean(ffsState && ffsState.registered === false), hasTs: Boolean(getKey(K.tsKey)) },
             keyProblem: keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: statics.keyInfo || null }),
             planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
             fullKey: fullKeyView(),
-            sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (pageGet(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), (pageGet(K.planLine, null) || {}).key || ''].join('|'),
+            sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (pageGet(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), readLines(pageGet(K.planLine, null)).map((l) => l.at).join(',')].join('|'),
             setSettings: (p) => {
                 setSettings(p);
                 refresh();
@@ -18353,6 +20117,8 @@
             // Create plan (1, 3, 6 or 12 months) and Recalibrate: the only things that work a plan out (round 6).
             createPlan: (months) => runPlan(() => createPlan({ months })),
             recalibratePlan: () => runPlan(() => recalibratePlan()),
+            // The Plan card's Cancel while a plan is being worked out: nothing is saved, the old plan stays.
+            cancelPlan: () => cancelPlan(),
             wantPrices: (ids, slim = []) => {
                 if (isVisible()) setTimeout(() => loadPrices(ids, slim).catch(() => {}), 0);
             },
@@ -18400,6 +20166,15 @@
                 page.app.render(true);
             },
             diagnostics,
+            logError,
+            // Settings › Report a problem: the zip's data, read when the section is drawn or the button pressed.
+            report: {
+                data: reportData,
+                clearLog: () => {
+                    clearProblemLog();
+                    logAction('Report downloaded or log cleared');
+                },
+            },
             discord: {
                 state: discordRaw,
                 connect: (f) => connectDiscord(f, pi.model),
@@ -18416,6 +20191,8 @@
                 unlocked: () => Boolean(get(K.devUnlocked, false)),
                 setUnlocked: (v) => (v ? set(K.devUnlocked, true) : del(K.devUnlocked)),
                 log: () => pageGet(K.learnLog, []) || [],
+                // The money log by type with its field names (round 7, C.0), and when it was read.
+                moneyFields: () => ({ at: (pageGet(K.moneyLog, null) || {}).at || null, list: (pageGet(K.moneyLog, null) || {}).fields || [] }),
                 sizes: () => Object.fromEntries(['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions, K.prices, K.priceHistory, K.statsHistory].map((k) => [k, JSON.stringify(get(k, null) || '').length])),
             },
             eye: {
@@ -18494,6 +20271,8 @@
         window.addEventListener('hashchange', eyeTab);
         loadArchives().then(eyeTab).catch(() => {});
         onModel(() => page.app.render());
+        // A plan being worked out: its card's bar and words follow the run without a redraw.
+        onPlanProgress((busy) => page.app.planProgress(busy));
         // The webpage keeps the older history and its own data in its IndexedDB (GM stays small for Torn's pages).
         loadArchives()
             .then(() => {
@@ -18916,6 +20695,34 @@
         return m ? { current: Number(m[1]), max: Number(m[2]) } : null;
     }
 
+    /**
+     * Torn's sidebar happy bar ("4,965/5,025"), like the energy bar [check live: the selector follows the energy bar's].
+     * @returns {{current:number, max:number}|null}
+     */
+    function readHappyBar(doc = document) {
+        const bar = doc.getElementById('barHappy') || doc.querySelector('[class*="bar___"][class*="happy___"]');
+        const v = bar && bar.querySelector('[class*="bar-value___"]');
+        const m = v && String(v.textContent || '').replace(/,/g, '').match(/(\d+)\s*\/\s*(\d+)/);
+        return m ? { current: Number(m[1]), max: Number(m[2]) } : null;
+    }
+
+    /**
+     * Did the player do something between two looks at the sidebar bars (round 7, D.4)? Energy that dropped (trained),
+     * or rose by more than a regeneration tick (a Xanax, a refill, a can); happy that moved by more than a tick's worth
+     * (trains use it, boosters add it). Natural regeneration alone is not an action.
+     * @param {{energy, happy}} a - {current} each, or null
+     * @param {{energy, happy}} b
+     */
+    function barsActed(a, b) {
+        const num = (x) => (x && Number.isFinite(x.current) ? x.current : null);
+        const e0 = num(a && a.energy);
+        const e1 = num(b && b.energy);
+        const h0 = num(a && a.happy);
+        const h1 = num(b && b.happy);
+        if (e0 !== null && e1 !== null && (e1 < e0 || e1 - e0 > 10)) return true;
+        return h0 !== null && h1 !== null && Math.abs(h1 - h0) > 10;
+    }
+
     /** Unlocked gym ids (usable now), the gym you're in, and the one being unlocked. */
     function gymListSummary(buttons) {
         const unlocked = buttons.filter((b) => b.state === 'active' || b.state === 'selected').map((b) => b.id);
@@ -19215,7 +21022,10 @@
         const next = m.next;
         const later = m.steps.slice(1, 3).map((x) => tornClock(x.at) + ' · ' + x.label + (trainsText(x.trains) ? ', ' + trainsText(x.trains) : ''));
         const v = { energy: m.strip.energy, happy: m.strip.happy, later };
-        if (page === PAGE_GYM && tp.lastGymPlan && tp.lastGymPlan.pill) {
+        // On the gym page the bar follows the walk-through. Round 7: once the session is done and the next step is still
+        // ahead, it moves on to that step and its countdown (it stayed on "Now · Session done").
+        const sessionOver = page === PAGE_GYM && tp.lastGymPlan && tp.lastGymPlan.done && next && next.at > Date.now();
+        if (page === PAGE_GYM && tp.lastGymPlan && tp.lastGymPlan.pill && !sessionOver) {
             v.pillNow = 'Now';
             v.pillText = tp.lastGymPlan.pill;
         }
@@ -19230,7 +21040,7 @@
                     v.pillText = next.label.split(' · ')[0];
                 }
             } else if (!due) v.cdAt = next.at;
-            v.cardStep = stepWords(next);
+            v.cardStep = (sessionOver ? 'Session done. Next: ' : '') + stepWords(next);
             v.cardSub = next.gain ? 'about +' + fmtInt(next.gain) + (next.energy ? ' · ' + fmtInt(next.energy) + ' energy' : '') : null;
             if (next.strict && next.warnAt !== null && Date.now() >= next.warnAt) v.warn = 'Strict: ' + (next.note || 'on the tick');
         } else {
@@ -19340,6 +21150,48 @@
             }, 150);
         });
         tp.observer.observe(root, { childList: true, subtree: true });
+    }
+
+    /* ------------------------------------------------ the sidebar's bars */
+
+    /**
+     * Round 7 (D.4): the panel moved to the next step only at the next 30 s read. Torn's own sidebar shows an action the
+     * moment it happens (energy drops on a train, jumps on a Xanax or refill; happy moves on a booster): when it does,
+     * the state is read about two seconds after the last change (runtime readSoon). Read-only: two numbers are looked
+     * at, nothing on Torn's page is touched. Regeneration ticks alone ask for nothing.
+     */
+    function watchBars() {
+        if (tp.barsTimer) return;
+        const look = () => ({ energy: readEnergyBar(), happy: readHappyBar() });
+        let last = look();
+        let observed = null;
+        let seen = 0;
+        const check = () => {
+            if (isPaused() || !isVisible()) return;
+            const now = look();
+            if (barsActed(last, now)) readSoon();
+            last = now;
+        };
+        const attach = () => {
+            const node = document.getElementById('sidebarroot') || (document.getElementById('barEnergy') || {}).parentNode || null;
+            if (!node || node === observed) return;
+            if (tp.barsObserver) tp.barsObserver.disconnect();
+            observed = node;
+            tp.barsObserver = new MutationObserver(() => {
+                // Torn's sidebar ticks its own timers every second: look at most every 300 ms.
+                const t = Date.now();
+                if (t - seen < 300) return;
+                seen = t;
+                check();
+            });
+            tp.barsObserver.observe(node, { childList: true, subtree: true, characterData: true });
+        };
+        attach();
+        // Torn may replace the sidebar (page changes without a load): find it again, and look once in case a change was skipped.
+        tp.barsTimer = setInterval(() => {
+            attach();
+            check();
+        }, 5000);
     }
 
     /* -------------------------------------------------- items and markets */
@@ -19481,7 +21333,9 @@
             const p = detectPage(location.href);
             // The saved plan (made, recalibrated or another picked on the webpage) redraws the marks too.
             const planSig = m && m.ready && m.saved ? m.saved.createdAt + ':' + (m.saved.recalibratedAt || 0) : '';
-            const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), JSON.stringify(getPlan()), planSig, Object.values(getPrices()).map((x) => x.at).join(), pageRowsCount(p)].join('|');
+            // What you hold is read after the first draw (the slow data): the marks take it off, so it redraws them.
+            const heldSig = JSON.stringify((get(K.userStatic, {}) || {}).inventory || {});
+            const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), JSON.stringify(getPlan()), planSig, heldSig, Object.values(getPrices()).map((x) => x.at).join(), pageRowsCount(p)].join('|');
             if (sig !== lastSig) {
                 lastSig = sig;
                 if (p === PAGE_GYM) {
@@ -19493,6 +21347,7 @@
             tp.showView(m);
         });
         setInterval(() => tp.overlay.tick(), 1000);
+        watchBars();
         // Torn's pages change the hash without a load (Item Market search, items tabs).
         window.addEventListener('hashchange', () => {
             lastSig = '';
@@ -20185,6 +22040,7 @@
 
 
 
+
     function menus() {
         gmMenu('Open Pumping Iron', () => gmOpenTab(APP_PAGE_URL));
         gmMenu('Diagnostics', () => gmOpenTab(APP_PAGE_URL + '#settings'));
@@ -20207,6 +22063,8 @@
         dropOldKeys();
         // The webpage holds the whole saved plan; Torn's pages only follow it.
         setWhere(where === 'app' ? 'app' : 'torn');
+        // The problem log (Settings › Report a problem): script errors of ours, and on the webpage its own freezes.
+        startProblemLog({ where: where === 'app' ? 'app' : 'torn' });
         if (where === 'app') bootAppPage();
         else {
             bootTornPage();
@@ -20223,7 +22081,7 @@
             setInterval(gymLogTick, 60000);
         }
         // Off torn.com (the harness), expose the model for checks. On torn.com the sandbox keeps it private anyway.
-        if (/^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed, createPlan, recalibratePlan, followStrategy };
+        if (/^https?:\/\/(127\.0\.0\.1|localhost)[:/]/.test(href)) window.__pi = { model: () => pi.model, refresh, feed: () => pi.feed, createPlan, recalibratePlan, followStrategy, cancelPlan, extras: () => pi.planExtras || Promise.resolve(null), busy: () => pi.planBusy };
     }
 
     boot();

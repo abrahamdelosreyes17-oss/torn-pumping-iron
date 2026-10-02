@@ -29,6 +29,32 @@ export const REFILL_WARN_MS = 2 * HOUR;
 /** A refill the plan couldn't place earlier goes this long before midnight. */
 export const REFILL_LAST_CALL_MS = 30 * MIN;
 
+/**
+ * Round 7 (review 2.6): in the middle of a boost or jump. Happy this far above the maximum (a share of what the
+ * plan's boosters add, at least MID_BOOST_MIN) means the boosters are eaten: the step stays, and what is left of it
+ * (the drug, the trains, the refill) is due before the quarter tick that resets the happy.
+ */
+export const MID_BOOST_SHARE = 0.25;
+export const MID_BOOST_MIN = 300;
+
+/**
+ * A boost or jump as its actions in order (round 7, D.1), each with what proves it done from Torn's bars:
+ * the boosters (the booster cooldown goes up, happy goes above the maximum), job points, the drug (the drug
+ * cooldown goes up), the trains (energy goes down), the refill and its trains. `now` is the action of the moment.
+ * @param {object} o - {eat: words|null, eaten, jp: words|null, drug: 'Ecstasy'|'Xanax'|null, drugDone, trained, refill}
+ * @returns {{list:{id, text, proof, done}[], now:number}}
+ */
+export function boostActions({ eat = null, eaten = false, jp = null, drug = null, drugDone = false, trained = false, refill = false }) {
+    const list = [];
+    if (eat) list.push({ id: 'eat', text: 'Eat ' + eat, proof: 'the booster cooldown goes up and happy goes above your maximum', done: eaten });
+    if (jp) list.push({ id: 'jp', text: jp, proof: 'happy goes up', done: eaten && drugDone });
+    if (drug) list.push({ id: 'drug', text: 'Take the ' + drug, proof: 'the drug cooldown starts', done: drugDone });
+    list.push({ id: 'train', text: 'Train it all', proof: 'energy goes down', done: trained });
+    if (refill) list.push({ id: 'refill', text: 'Refill, then train again', proof: 'the refill shows as used', done: false });
+    const now = list.findIndex((a) => !a.done);
+    return { list, now: now < 0 ? list.length - 1 : now };
+}
+
 /** The plan type a strategy belongs to. */
 export function planTypeOf(strategyId, goal = null) {
     if (goal) return 'goal';
@@ -129,7 +155,7 @@ function partsOf(split) {
  *   xanaxCdMin, ecstasyCdMin, candyId, candyCount, edvdCount, boosterCapH, stackedSoFar, drugsToday,
  *   specialLeft (special refills the plan may still use), energyBooster {id, perDay} (steadyBoost),
  *   holdBooster (an event that needs the booster cooldown is near: no boosters), candyMult, canMult,
- *   toyShop5, adultNovelties10}
+ *   toyShop5, adultNovelties10, xanaxPerDay (the small-budget plan: at most this many Xanax a Torn day)}
  *   held: {[id]: qty} boosters in the inventory (used first: candy and energy drinks as a pool)
  * @param {number} [o.until] - end of the window (default: the next Torn midnight; later: the look-ahead, days rolling on)
  * @returns {object[]} steps {id, at, kind, label, items:[{id,qty}], trains:{}, gyms:{}, parts:[] (train steps: the session in gym parts), gain, energy, strict, warnAt, note}
@@ -157,6 +183,8 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     // While specials are held the day's refill is a special: one already used today counts as it.
     let refillLeft = refillAvailable(state, now) && !(ctx.specialHeld > 0 && (ctx.specialToday || 0) >= 1);
     let xanN = (ctx.drugsToday || 0) + 1;
+    // The small-budget plan: at most this many Xanax a Torn day (the simulator keeps the same count: strategies.js).
+    const xanCap = Number.isFinite(ctx.xanaxPerDay) ? Math.max(0, Math.floor(ctx.xanaxPerDay)) : Infinity;
     const steps = [];
     let n = 0;
     let curDay = tornDayStart(now);
@@ -304,6 +332,16 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     let holding = Boolean(ctx.holding);
     let naturalOk = true;
 
+    // What this plan's boosters add to happy (for telling a boost under way from the bars).
+    const boostPlan = isJump || s === 'dailyChoco' || s === 'candyXanax';
+    const boostHappy = () => {
+        const candy = candyQty() * ITEMS[candyId].happy * candyMult;
+        if (isConsole) return CONSOLE_USES * CONSOLE_HAPPY_EACH * (s === 'consoleJumpToy' || ctx.toyShop5 ? 2 : 1) + candy;
+        if (s === 'chocoJump' || s === 'dailyChoco' || s === 'candyXanax') return candy;
+        return (ctx.edvdCount || 5) * ITEMS[EDVD].happy * (ctx.adultNovelties10 || s === 'edvdJumpAN' ? 2 : 1);
+    };
+    let midDone = false;
+
     // A new Torn day: its refill (today's, if unused, goes in before midnight), Xanax count, boost and share.
     const rollDay = (at) => {
         while (tornDayStart(at) > curDay) {
@@ -323,9 +361,50 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         }
     };
 
+    // Mid-step (round 7, review 2.6): the boosters of this plan's boost are in (happy is above the maximum by a boost's
+    // worth, now). The step stays until it is finished: the drug if its cooldown is clear, train it all, the refill,
+    // train; all before the next quarter tick, which resets the happy. Before, the plan was worked out again from the
+    // bars as if nothing had started: after 5 EDVD it said the jump was in 30 hours (the booster cooldown it had just
+    // filled), and after the day's candy it planned a plain Xanax and a second candy boost.
+    if (boostPlan && H >= happyMax + Math.max(MID_BOOST_MIN, MID_BOOST_SHARE * boostHappy())) {
+        const tick = nextQuarterTick(now);
+        const keep = Math.max(0, Math.min(E, ctx.keepEnergy || 0));
+        const drugName = s === 'candyXanax' ? 'Xanax' : 'Ecstasy';
+        // The cooldown is clear: the step's drug is still to take. Running, and ending before the tick: an earlier
+        // Xanax, the drug waits for it. Running past the tick: the drug is in.
+        const drugDue = drugAt <= now;
+        const drugSoon = !drugDue && drugAt < tick - MIN;
+        const at = drugSoon ? drugAt : now;
+        if (drugDue || drugSoon) {
+            if (drugSoon) advance(at);
+            if (s === 'candyXanax') {
+                E += ITEMS[XANAX].energy;
+                H = Math.min(HAPPY_CAP, H + ITEMS[XANAX].happy);
+            } else H = Math.min(HAPPY_CAP, H * ITEMS[ECSTASY].happyMult);
+        }
+        const takes = drugDue || drugSoon;
+        const canTrain = E - keep >= minTrain;
+        if (canTrain || refillLeft) {
+            const label = takes ? (s === 'candyXanax' ? 'Xanax #' + xanN++ : 'Ecstasy') + (drugSoon ? ' at ' + clockOf(at) : ' now') + ', then train it all' : 'Train it all now';
+            const note = (takes ? 'The boosters are in' : 'Your happy is boosted') + ': finish before the ' + clockOf(tick) + ' tick, when the happy resets';
+            const acts = boostActions({ eat: 'the boosters', eaten: true, drug: drugName, drugDone: !takes, refill: refillLeft });
+            if (canTrain) train(at, isJump ? 'jump' : 'boost', label, takes ? [{ id: s === 'candyXanax' ? XANAX : ECSTASY, qty: 1 }] : [], { strict: true, warnAt: now, tick, deadline: tick, mid: true, actions: acts.list, actionNow: acts.now, note });
+            if (refillLeft) {
+                refill(at + MIN, canTrain ? {} : { strict: true, warnAt: now, tick, deadline: tick, mid: true, note });
+                refillLeft = false;
+            }
+            special(at + 2 * MIN);
+            if (takes) drugAt = at + (s === 'candyXanax' ? xanCD : ecsCD);
+            boosted = true;
+            holding = false;
+            midDone = true;
+        }
+    }
+
     if (isJump) {
         const stackTo = isConsole ? CONSOLE_STACK : JUMP_STACK;
-        let stacked = Math.min(stackTo, ctx.stackedSoFar || 0);
+        // After a jump finished from the middle (above), the next stack starts from nothing.
+        let stacked = midDone ? 0 : Math.min(stackTo, ctx.stackedSoFar || 0);
         for (let jumps = 0; jumps < 20; jumps++) {
             // Today's plan always shows the next jump in full; the look-ahead runs on to its end.
             if (jumps > 0 && (drugAt >= end || !lookAhead)) break;
@@ -390,7 +469,8 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             }
             H = Math.min(HAPPY_CAP, H * ITEMS[ECSTASY].happyMult);
             items.push({ id: ECSTASY, qty: 1 });
-            const jump = train(at, 'jump', label, items, { strict: true, warnAt: tick - STRICT_WARN_MS, note });
+            const acts = boostActions({ eat: label.split(' + Ecstasy')[0], jp: jp.happy ? jp.words : null, drug: 'Ecstasy', refill: refillLeft });
+            const jump = train(at, 'jump', label, items, { strict: true, warnAt: tick - STRICT_WARN_MS, note, deadline: tick + 15 * MIN, actions: acts.list, actionNow: acts.now });
             jump.tick = tick;
             if (refillLeft) {
                 refill(at + MIN);
@@ -422,7 +502,8 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             const jp = jobPoints();
             H = Math.min(HAPPY_CAP, (H + c.happy + jp.happy) * ITEMS[ECSTASY].happyMult);
             if (qty > 0) addBooster(candyId, qty, at);
-            train(at, 'boost', (c.words ? c.words + ' + ' : '') + 'Ecstasy, then train it all', [...c.items, { id: ECSTASY, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, note: joinNote(jp.happy ? 'Before the Ecstasy: ' + jp.words : null, c.note) });
+            const acts = boostActions({ eat: c.words || null, jp: jp.happy ? jp.words : null, drug: 'Ecstasy', refill: refillLeft });
+            train(at, 'boost', (c.words ? c.words + ' + ' : '') + 'Ecstasy, then train it all', [...c.items, { id: ECSTASY, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, deadline: tick + 15 * MIN, actions: acts.list, actionNow: acts.now, note: joinNote(jp.happy ? 'Before the Ecstasy: ' + jp.words : null, c.note) });
             if (refillLeft) {
                 refill(at + MIN);
                 refillLeft = false;
@@ -442,12 +523,24 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             if (!st.energy) {
                 steps.pop();
                 naturalOk = false;
+            } else if (refillLeft && xanN > xanCap && full + 5 * MIN < Math.min(end, curDay + DAY)) {
+                // No Xanax left today (the small-budget plan): the day's refill goes right after this session, when energy is near zero.
+                advance(full + 5 * MIN);
+                refill(t);
+                refillLeft = false;
             }
             continue;
         }
         if (drugAt >= end && steps.length) break;
         rollDay(drugAt);
         advance(drugAt);
+        // The day's Xanax are taken (the small-budget plan): the next one waits for the next Torn day; natural
+        // energy is trained as it fills meanwhile (the branch above).
+        if (xanN > xanCap) {
+            drugAt = curDay + DAY;
+            if (drugAt >= end && !(naturalOk && fullAt() < end)) break;
+            continue;
+        }
         // A daily boost waits for room under the booster cap: until then its Xanax is a plain session.
         let waitNote = null;
         if (daily && !boosted) {
@@ -484,7 +577,8 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
                 const jp = jobPoints();
                 H = Math.min(HAPPY_CAP, H + c.happy + jp.happy);
                 addBooster(candyId, qty, at);
-                train(at, 'boost', c.words + ' + Xanax #' + xanN++ + ', then train it all', [...c.items, { id: XANAX, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, note: joinNote('Right after the ' + clockOf(tick) + ' tick' + (jp.happy ? '; with it: ' + jp.words : ''), c.note) });
+                const acts = boostActions({ eat: c.words, jp: jp.happy ? jp.words : null, drug: 'Xanax', refill: refillLeft });
+                train(at, 'boost', c.words + ' + Xanax #' + xanN++ + ', then train it all', [...c.items, { id: XANAX, qty: 1 }], { strict: true, warnAt: tick - STRICT_WARN_MS, tick, deadline: tick + 15 * MIN, actions: acts.list, actionNow: acts.now, note: joinNote('Right after the ' + clockOf(tick) + ' tick' + (jp.happy ? '; with it: ' + jp.words : ''), c.note) });
                 if (refillLeft) {
                     refill(at + MIN);
                     refillLeft = false;
@@ -620,10 +714,20 @@ export function logFromDiff(log, diff, { at, nextStep = null, catchUp = false })
         out.push({ at, kind: 'catchup', label: catchUpLabel(trained, { drug: diff.drugTaken, booster: diff.boosterUsed, refill: diff.refillUsed }), trained: { ...trained }, gain, drug: Boolean(diff.drugTaken) });
         return out;
     }
+    // Round 7: a boost or jump is logged when it is finished (its drug taken), not at its first sign. Its boosters eaten
+    // with the drug still to take is noted as that ("boosting"), which is neither the boost done nor a drug taken: the
+    // day plan keeps the step from the bars meanwhile. (It was logged as done at the candy, so the plan moved on.)
+    const stepDrug = nextStep && (nextStep.kind === 'boost' || nextStep.kind === 'jump') && (nextStep.items || []).some((it) => it.id === XANAX || it.id === ECSTASY);
+    if (diff && diff.boosterUsed && !diff.drugTaken && !diff.refillUsed && stepDrug && !nextStep.mid) {
+        out.push({ at, kind: 'boosting', label: 'Boosters eaten · ' + nextStep.label, trained: { ...trained }, gain });
+        return out;
+    }
     if (diff && (diff.drugTaken || diff.refillUsed || diff.boosterUsed)) {
         const kind = diff.refillUsed && !diff.drugTaken ? 'refill' : nextStep && nextStep.kind !== 'natural' ? nextStep.kind : 'xanax';
         const label = diff.refillUsed && !diff.drugTaken ? 'Refill · ' + REFILL_POINTS + ' points' : nextStep && nextStep.kind !== 'natural' ? nextStep.label : 'Xanax';
-        out.push({ at, kind, label, trained: { ...trained }, gain });
+        // `xanax`: this step's drug was a Xanax (a candy + Xanax boost carries one): it counts in the day's Xanax.
+        const xanax = Boolean(diff.drugTaken && nextStep && (nextStep.items || []).some((it) => it.id === XANAX));
+        out.push({ at, kind, label, trained: { ...trained }, gain, ...(xanax && kind !== 'xanax' && kind !== 'stack' && kind !== 'hold' ? { xanax: true } : {}) });
         return out;
     }
     if (gain > 0) {
@@ -640,5 +744,5 @@ export function logFromDiff(log, diff, { at, nextStep = null, catchUp = false })
 
 /** Drugs taken so far today, from the log (numbers the next Xanax; a held Xanax counts too). */
 export function drugsToday(log, now) {
-    return (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(now) && (e.kind === 'xanax' || e.kind === 'stack' || e.kind === 'hold' || (e.kind === 'catchup' && e.drug))).length;
+    return (log || []).filter((e) => tornDayStart(e.at) === tornDayStart(now) && (e.kind === 'xanax' || e.kind === 'stack' || e.kind === 'hold' || e.xanax === true || (e.kind === 'catchup' && e.drug))).length;
 }

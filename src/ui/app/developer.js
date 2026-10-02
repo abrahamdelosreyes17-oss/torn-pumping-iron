@@ -129,6 +129,34 @@ function selfCheck() {
     ];
 }
 
+/**
+ * Money log fields (round 7, C.0): your money log by Torn's log type, with
+ * the names of each type's data fields and which one was read as the amount.
+ * Names and counts only, never an amount: the money accounts are written
+ * from this, not from guesses. It is also in the report zip, for everyone.
+ */
+export function moneyFieldsBlock(dev) {
+    const mf = dev.moneyFields ? dev.moneyFields() : { at: null, list: [] };
+    const head = sectionHead('Money log fields', meta([mf.list.length ? mf.list.length + ' log types · read ' + new Date(mf.at).toISOString().slice(0, 16).replace('T', ' ') + ' UTC · names only, never an amount' : 'names only, never an amount']), null, 'h3');
+    if (!mf.list.length) return h('div', {}, [head, h('p', { class: 'muted', style: 'margin:0', text: 'Nothing read yet: the money log needs the Full key (Settings), and is read every 6 hours. A log read before this version has no field names: save the Full key again, or wait for the next read.' })]);
+    const amountWords = (a) => Object.entries(a || {}).sort((x, y) => y[1] - x[1]).map(([k, n]) => k + ' × ' + n).join(', ');
+    const rows = mf.list.map((r) =>
+        h('tr', {}, [
+            h('td', {}, [h('b', { class: 'w', text: r.title || '(no title)' }), h('br'), h('small', { class: 'muted', text: r.category || '' })]),
+            h('td', { class: 'r', text: r.type === null ? '—' : String(r.type) }),
+            h('td', { class: 'r', text: fmtInt(r.lines) }),
+            h('td', { class: 'r', text: String(r.days) }),
+            h('td', { style: 'white-space:normal', text: r.fields.map((f) => f.name + ' (' + f.is + ')').join(', ') || 'no data fields' }),
+            h('td', { class: /none read/.test(amountWords(r.amount)) ? 'c-warn' : '', style: 'white-space:normal', text: amountWords(r.amount) }),
+        ]),
+    );
+    return h('div', {}, [
+        head,
+        h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'Log line' }), h('th', { class: 'r', style: 'width:60px', text: 'Type' }), h('th', { class: 'r', style: 'width:56px', text: 'Lines' }), h('th', { class: 'r', style: 'width:52px', text: 'Days' }), h('th', { text: 'Data fields' }), h('th', { style: 'width:180px', text: 'Read as the amount' })])]), h('tbody', {}, rows)]),
+        h('div', { class: 'note2', text: 'A line listed under two of Torn’s categories counts once. “(none read)”: no field of that line was taken as its amount today.' }),
+    ]);
+}
+
 export function renderDeveloper(m, ctx) {
     const dev = ctx.dev;
     const mine = dev.data();
@@ -257,7 +285,7 @@ export function renderDeveloper(m, ctx) {
             ]),
         ]),
     ];
-    return { ctl: [ctl], main: [learned, scat, errChart, eye], pane };
+    return { ctl: [ctl], main: [learned, scat, errChart, eye, moneyFieldsBlock(dev)], pane };
 }
 
 void fmtPct;

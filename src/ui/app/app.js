@@ -8,7 +8,7 @@
 import { h, t, fill } from '../dom.js';
 import { APP_CSS } from '../styles.js';
 import { countdown } from '../../core/bars.js';
-import { clock, statusStrip } from './common.js';
+import { clock, statusStrip, planRunWords } from './common.js';
 import { renderHome } from './home.js';
 import { renderPlan } from './plan.js';
 import { renderBuy } from './buy.js';
@@ -81,6 +81,19 @@ export class PiApp {
         this.host.scrollTop = 0;
     }
 
+    /**
+     * A plan being worked out (round 7, R7.3b): the Plan card's bar, words and seconds follow the run without a
+     * redraw of the page (width and text only: nothing here needs a GPU).
+     * @param {object} busy - {done: 0..1, words, at}
+     */
+    planProgress(busy) {
+        if (!this.root || !busy) return;
+        const bar = this.root.querySelector('[data-plan-bar]');
+        const words = this.root.querySelector('[data-plan-words]');
+        if (bar) bar.style.width = Math.round(100 * Math.max(0.02, busy.done || 0)) + '%';
+        if (words) words.textContent = planRunWords(busy);
+    }
+
     /** The box being typed in: which one (its label), what's in it and where the cursor is. */
     focusedInput() {
         const a = this.shadow && this.shadow.activeElement;
@@ -124,7 +137,9 @@ export class PiApp {
         ctx.go = (tab) => this.go(tab);
         ctx.rerender = () => this.render(true);
         const m = ctx.model;
-        const sig = [this.tab, m && m.ready ? m.state.at : 'x', ctx.sig || '', JSON.stringify(this.ui), ctx.paused ? 'paused' : ''].join('|');
+        // A plan run starting or ending redraws too (the bar and Cancel appear with it; planProgress then moves the bar).
+        const runSig = m && m.ready && m.planBusy ? 'run:' + m.planBusy.at : '';
+        const sig = [this.tab, m && m.ready ? m.state.at : 'x', ctx.sig || '', JSON.stringify(this.ui), ctx.paused ? 'paused' : '', runSig].join('|');
         if (!force && (sig === this.sig || this.typing())) return;
         this.sig = sig;
         const s = ctx.settings;
@@ -156,6 +171,8 @@ export class PiApp {
         try {
             out = fn(m && m.ready ? m : { ready: false, now: Date.now(), statRows: [], steps: [], heads: [] }, ctx);
         } catch (error) {
+            // Into the problem log too (Settings › Report a problem), with the tab it happened on.
+            if (ctx.logError) ctx.logError('The ' + tab + ' tab', error);
             out = { main: [h('div', { class: 'warnb' }, [h('b', { text: 'This tab hit a problem' }), h('p', { text: String((error && error.message) || error) })])], pane: [] };
         }
         // A page's control bars (the inputs that drive every number on it), then the status strip where the page wants it.

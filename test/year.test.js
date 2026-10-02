@@ -67,7 +67,7 @@ test('the year path for the friend: re-picked plans, gyms opening, a band around
     const state = normalizeState(api, T);
     const pc = playerContext(state, {}, { unlockedKnown: Array.from({ length: 18 }, (_, i) => i + 1) });
     const shares = targetShares({ build: 'balanced' }, pc.stats, buildOf('balanced').shares);
-    const g = yearSteps({ compare: compareSteps, inputs: simInputs, args: { state, pc, shares, settings: { horizonDays: 30, budget: 150e6 }, prices: {}, special: 0, statics: {}, pickBy: 'most' }, start: T, end: T + 182 * DAY, budgetPerDay: 5e6, events: eventsBetween(null, T, T + 182 * DAY, { startTime: '12:00' }) });
+    const g = yearSteps({ compare: compareSteps, inputs: simInputs, args: { state, pc, shares, settings: { horizonDays: 30, budget: 150e6 }, prices: {}, special: 0, statics: {}, pickBy: 'most' }, start: T, end: T + 182 * DAY, budgetPerDay: 5e6, events: eventsBetween(null, T, T + 182 * DAY, { startTime: '12:00' }), centre: true });
     let r = g.next();
     while (!r.done) r = g.next();
     const y = r.value;

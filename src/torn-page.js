@@ -7,11 +7,11 @@
 import { gmMenu, gmOpenTab } from './platform/gm.js';
 import { K, get, set, getKey, getSettings, getPlan, getPrices } from './platform/store.js';
 import { keyProblem } from './ui/key-status.js';
-import { onModel, isVisible, refresh, pi, beatFocus } from './runtime.js';
+import { onModel, isVisible, refresh, pi, beatFocus, readSoon } from './runtime.js';
 import { isPaused, onPauseChange } from './turns.js';
 import { Overlay } from './ui/overlay.js';
 import { ensureMarkCss, clearMarks, drawGymMarks, outline } from './ui/marks/marks.js';
-import { gymRoot, gymLoading, readStatBoxes, readGymButtons, gymListSummary, readEnergyBar } from './sources/dom/gym.js';
+import { gymRoot, gymLoading, readStatBoxes, readGymButtons, gymListSummary, readEnergyBar, readHappyBar, barsActed } from './sources/dom/gym.js';
 import { readItemRows, readBazaarCards, readItemMarketRows, readPointsRows } from './sources/dom/market.js';
 import { planGymPage, pageReading, nextSession } from './core/gympage.js';
 import { unlockEnergyAfter } from './core/gyms.js';
@@ -64,7 +64,10 @@ function overlayView(m, page) {
     const next = m.next;
     const later = m.steps.slice(1, 3).map((x) => tornClock(x.at) + ' · ' + x.label + (trainsText(x.trains) ? ', ' + trainsText(x.trains) : ''));
     const v = { energy: m.strip.energy, happy: m.strip.happy, later };
-    if (page === PAGE_GYM && tp.lastGymPlan && tp.lastGymPlan.pill) {
+    // On the gym page the bar follows the walk-through. Round 7: once the session is done and the next step is still
+    // ahead, it moves on to that step and its countdown (it stayed on "Now · Session done").
+    const sessionOver = page === PAGE_GYM && tp.lastGymPlan && tp.lastGymPlan.done && next && next.at > Date.now();
+    if (page === PAGE_GYM && tp.lastGymPlan && tp.lastGymPlan.pill && !sessionOver) {
         v.pillNow = 'Now';
         v.pillText = tp.lastGymPlan.pill;
     }
@@ -79,7 +82,7 @@ function overlayView(m, page) {
                 v.pillText = next.label.split(' · ')[0];
             }
         } else if (!due) v.cdAt = next.at;
-        v.cardStep = stepWords(next);
+        v.cardStep = (sessionOver ? 'Session done. Next: ' : '') + stepWords(next);
         v.cardSub = next.gain ? 'about +' + fmtInt(next.gain) + (next.energy ? ' · ' + fmtInt(next.energy) + ' energy' : '') : null;
         if (next.strict && next.warnAt !== null && Date.now() >= next.warnAt) v.warn = 'Strict: ' + (next.note || 'on the tick');
     } else {
@@ -189,6 +192,48 @@ function watchGym() {
         }, 150);
     });
     tp.observer.observe(root, { childList: true, subtree: true });
+}
+
+/* ------------------------------------------------ the sidebar's bars */
+
+/**
+ * Round 7 (D.4): the panel moved to the next step only at the next 30 s read. Torn's own sidebar shows an action the
+ * moment it happens (energy drops on a train, jumps on a Xanax or refill; happy moves on a booster): when it does,
+ * the state is read about two seconds after the last change (runtime readSoon). Read-only: two numbers are looked
+ * at, nothing on Torn's page is touched. Regeneration ticks alone ask for nothing.
+ */
+function watchBars() {
+    if (tp.barsTimer) return;
+    const look = () => ({ energy: readEnergyBar(), happy: readHappyBar() });
+    let last = look();
+    let observed = null;
+    let seen = 0;
+    const check = () => {
+        if (isPaused() || !isVisible()) return;
+        const now = look();
+        if (barsActed(last, now)) readSoon();
+        last = now;
+    };
+    const attach = () => {
+        const node = document.getElementById('sidebarroot') || (document.getElementById('barEnergy') || {}).parentNode || null;
+        if (!node || node === observed) return;
+        if (tp.barsObserver) tp.barsObserver.disconnect();
+        observed = node;
+        tp.barsObserver = new MutationObserver(() => {
+            // Torn's sidebar ticks its own timers every second: look at most every 300 ms.
+            const t = Date.now();
+            if (t - seen < 300) return;
+            seen = t;
+            check();
+        });
+        tp.barsObserver.observe(node, { childList: true, subtree: true, characterData: true });
+    };
+    attach();
+    // Torn may replace the sidebar (page changes without a load): find it again, and look once in case a change was skipped.
+    tp.barsTimer = setInterval(() => {
+        attach();
+        check();
+    }, 5000);
 }
 
 /* -------------------------------------------------- items and markets */
@@ -330,7 +375,9 @@ export function bootTornPage() {
         const p = detectPage(location.href);
         // The saved plan (made, recalibrated or another picked on the webpage) redraws the marks too.
         const planSig = m && m.ready && m.saved ? m.saved.createdAt + ':' + (m.saved.recalibratedAt || 0) : '';
-        const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), JSON.stringify(getPlan()), planSig, Object.values(getPrices()).map((x) => x.at).join(), pageRowsCount(p)].join('|');
+        // What you hold is read after the first draw (the slow data): the marks take it off, so it redraws them.
+        const heldSig = JSON.stringify((get(K.userStatic, {}) || {}).inventory || {});
+        const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), JSON.stringify(getPlan()), planSig, heldSig, Object.values(getPrices()).map((x) => x.at).join(), pageRowsCount(p)].join('|');
         if (sig !== lastSig) {
             lastSig = sig;
             if (p === PAGE_GYM) {
@@ -342,6 +389,7 @@ export function bootTornPage() {
         tp.showView(m);
     });
     setInterval(() => tp.overlay.tick(), 1000);
+    watchBars();
     // Torn's pages change the hash without a load (Item Market search, items tabs).
     window.addEventListener('hashchange', () => {
         lastSig = '';

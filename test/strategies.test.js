@@ -83,7 +83,7 @@ test('a non-donator bar (15 min) trains less', () => {
 });
 
 test('strategy list and feasibility', () => {
-    assert.equal(STRATEGY_IDS.length, 12);
+    assert.equal(STRATEGY_IDS.length, 13);
     for (const id of STRATEGY_IDS) assert.ok(STRATEGIES[id].name);
     assert.equal(feasibleStrategies({ bliss: false }).includes('blissSteady'), false);
     assert.equal(feasibleStrategies({ bliss: true }).includes('blissSteady'), true);

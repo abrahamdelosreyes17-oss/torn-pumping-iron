@@ -6,7 +6,7 @@
 
 import { gmOnChange } from './platform/gm.js';
 import { K, get, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup, DATA_GROUPS, getPrices, PRICE_LISTINGS_KEPT, loadLocalPrices, localPrices, setLocalPrices, clearLocalPrices } from './platform/store.js';
-import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE, beatFocus, apiFocus, createPlan, recalibratePlan, followStrategy, followPath } from './runtime.js';
+import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE, beatFocus, apiFocus, createPlan, recalibratePlan, followStrategy, followPath, cancelPlan, onPlanProgress } from './runtime.js';
 import { forgetSavedPlan } from './platform/plan-store.js';
 import { archived, pageGet, loadArchives, drainArchives, clearArchived } from './platform/archive.js';
 import { PiApp } from './ui/app/app.js';
@@ -31,7 +31,10 @@ import { redactKey } from './api/client.js';
 import { keyProblem } from './ui/key-status.js';
 import { isPaused, onPauseChange } from './turns.js';
 import { joinFights } from './core/learndata.js';
-import { maybeLearn } from './runtime.js';
+import { maybeLearn, BUILD } from './runtime.js';
+import { normalizeState } from './core/bars.js';
+import { readLines } from './core/planline.js';
+import { problemLogNow, clearProblemLog, planRuns, logAction, logError } from './problem-log.js';
 
 /** What Settings shows about the Full key (never the key itself). */
 function fullKeyView() {
@@ -362,6 +365,65 @@ function syncEye(force = false) {
     setEyeForSync({ war: fid && warRows.length ? { factionId: fid, members: warRows } : null, watch: watchRows });
 }
 
+/** Settings the report carries: the switches and limits, never a key, a faction or a player id. */
+const REPORT_SETTINGS = ['timeFormat', 'pill', 'gymMarks', 'marketMarks', 'eyeChips', 'budget', 'horizonDays', 'buyWindow', 'w3b', 'warReserve', 'boosterCapH', 'npcShops', 'npcShopsOff'];
+
+/**
+ * What Settings › Report a problem puts in its zip (core/report.js), read
+ * when asked: the problem log, your stats and gym set-up, the saved plan,
+ * the plan runs with their time, the money log's field names. No key, no
+ * player id, no name.
+ */
+function reportData() {
+    const s = get(K.userState, null);
+    const state = s && s.api ? normalizeState(s.api, s.at) : null;
+    const statics = get(K.userStatic, {}) || {};
+    const m = pi.model && pi.model.ready ? pi.model : null;
+    const plan = getPlan();
+    const settings = getSettings();
+    const pk = m ? m.pc.perks : null;
+    const job = m && m.job ? { type: m.job.type, stars: m.job.stars, days: m.job.days, jp: m.job.jp } : null;
+    const player =
+        state && m
+            ? {
+                  stats: { ...m.pc.stats },
+                  happyMax: state.happy.maximum,
+                  energyMax: state.energy.maximum,
+                  energyEvery: state.energy.interval,
+                  gymId: state.gymId,
+                  unlocked: [...m.pc.unlocked],
+                  build: plan.build,
+                  buildPicked: Boolean(plan.buildPicked),
+                  goal: plan.goal || null,
+                  specialRefills: state.specialRefills,
+                  property: (statics.property && statics.property.property && statics.property.property.name) || null,
+                  job,
+                  perks: { mult: pk.mult, bliss: pk.bliss, happyLossMult: pk.happyLossMult, gymExpMult: pk.gymExpMult, canMult: pk.canMult, candyMult: pk.candyMult, consumableCdMult: pk.consumableCdMult, boosterCapExtraH: pk.boosterCapExtraH, lines: (pk.lines || []).map((l) => ({ source: l.source, stat: l.stat, pct: l.pct, text: l.text })), unknown: pk.unknown || [] },
+              }
+            : null;
+    const nav = typeof navigator !== 'undefined' ? navigator : {};
+    const mem = typeof performance !== 'undefined' && performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null;
+    return {
+        log: problemLogNow(),
+        player,
+        saved: pi.saved,
+        moneyFields: (pageGet(K.moneyLog, null) || {}).fields || [],
+        statsHistory: archived(K.statsHistory, {}) || {},
+        learn: { samples: ((archived('calibration', null) || {}).samples) || [], gymLog: ((pageGet(K.gymLog, null) || {}).lines) || [], fights: joinFights(pageGet(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], archived(K.eyePredictions, []) || []), learned: get(K.learned, null) },
+        state: {
+            version: PI_BUILD_VERSION,
+            build: BUILD,
+            settings: Object.fromEntries(REPORT_SETTINGS.filter((k) => settings[k] !== undefined).map((k) => [k, settings[k]])),
+            plan: { pickBy: plan.pickBy, strategy: plan.strategy, strategyPicked: Boolean(plan.strategyPicked), build: plan.build, goal: plan.goal || null, specialUse: plan.specialUse || 0, following: m ? m.strategy : null },
+            runs: planRuns(),
+            diagnostics: diagnostics(),
+            keys: { torn: Boolean(getKey(K.apiKey)), tornRefused: Boolean(get(K.apiKeyDead, false)), full: Boolean(getKey(K.fullKey)), ffscouter: Boolean(getKey(K.ffsKey)), tornstats: Boolean(getKey(K.tsKey)), discord: Boolean(discordRaw()) },
+            paused: isPaused(),
+        },
+        env: { userAgent: nav.userAgent || '', screen: typeof window !== 'undefined' && window.screen ? window.screen.width + 'x' + window.screen.height : '', cores: nav.hardwareConcurrency || null, memoryGB: nav.deviceMemory || null, pageHeapMB: mem },
+    };
+}
+
 /** A Create plan or Recalibrate click: the page shows it working, then the new plan (or why it couldn't). */
 function runPlan(fn) {
     page.app.ui.planError = null;
@@ -394,14 +456,15 @@ function getCtx() {
         gymProgress: get(K.gymProgress, null),
         calibration: archived('calibration', null),
         gymLog: pageGet(K.gymLog, null),
-        planProjection: pageGet(K.planLine, null),
+        // The plan's lines, read by time (core/planline.js): Progress, the Plan card, Home.
+        planLines: readLines(pageGet(K.planLine, null)),
         receipts: archived(K.receipts, null),
         priceHistory: archived(K.priceHistory, null),
         flags: { hasKey: Boolean(getKey(K.apiKey)), keyDead: Boolean(get(K.apiKeyDead, false)), hasFfs: Boolean(getKey(K.ffsKey)), ffsDead: Boolean(ffsState && ffsState.registered === false), hasTs: Boolean(getKey(K.tsKey)) },
         keyProblem: keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: statics.keyInfo || null }),
         planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
         fullKey: fullKeyView(),
-        sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (pageGet(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), (pageGet(K.planLine, null) || {}).key || ''].join('|'),
+        sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (pageGet(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), readLines(pageGet(K.planLine, null)).map((l) => l.at).join(',')].join('|'),
         setSettings: (p) => {
             setSettings(p);
             refresh();
@@ -422,6 +485,8 @@ function getCtx() {
         // Create plan (1, 3, 6 or 12 months) and Recalibrate: the only things that work a plan out (round 6).
         createPlan: (months) => runPlan(() => createPlan({ months })),
         recalibratePlan: () => runPlan(() => recalibratePlan()),
+        // The Plan card's Cancel while a plan is being worked out: nothing is saved, the old plan stays.
+        cancelPlan: () => cancelPlan(),
         wantPrices: (ids, slim = []) => {
             if (isVisible()) setTimeout(() => loadPrices(ids, slim).catch(() => {}), 0);
         },
@@ -469,6 +534,15 @@ function getCtx() {
             page.app.render(true);
         },
         diagnostics,
+        logError,
+        // Settings › Report a problem: the zip's data, read when the section is drawn or the button pressed.
+        report: {
+            data: reportData,
+            clearLog: () => {
+                clearProblemLog();
+                logAction('Report downloaded or log cleared');
+            },
+        },
         discord: {
             state: discordRaw,
             connect: (f) => connectDiscord(f, pi.model),
@@ -485,6 +559,8 @@ function getCtx() {
             unlocked: () => Boolean(get(K.devUnlocked, false)),
             setUnlocked: (v) => (v ? set(K.devUnlocked, true) : del(K.devUnlocked)),
             log: () => pageGet(K.learnLog, []) || [],
+            // The money log by type with its field names (round 7, C.0), and when it was read.
+            moneyFields: () => ({ at: (pageGet(K.moneyLog, null) || {}).at || null, list: (pageGet(K.moneyLog, null) || {}).fields || [] }),
             sizes: () => Object.fromEntries(['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions, K.prices, K.priceHistory, K.statsHistory].map((k) => [k, JSON.stringify(get(k, null) || '').length])),
         },
         eye: {
@@ -563,6 +639,8 @@ export function bootAppPage({ renderers = {} } = {}) {
     window.addEventListener('hashchange', eyeTab);
     loadArchives().then(eyeTab).catch(() => {});
     onModel(() => page.app.render());
+    // A plan being worked out: its card's bar and words follow the run without a redraw.
+    onPlanProgress((busy) => page.app.planProgress(busy));
     // The webpage keeps the older history and its own data in its IndexedDB (GM stays small for Torn's pages).
     loadArchives()
         .then(() => {

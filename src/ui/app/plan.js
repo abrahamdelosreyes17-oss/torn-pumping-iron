@@ -10,7 +10,7 @@
 
 import { h, t } from '../dom.js';
 import { STATS, STAT_LABEL } from '../../core/gain.js';
-import { fmtInt, fmtShort, fmtMoney, fmtPct } from '../../core/format.js';
+import { fmtInt, fmtShort, fmtMoney, fmtPct, fmtSigned } from '../../core/format.js';
 import { STRATEGIES, SPECIAL, planWhat } from '../../core/strategies.js';
 import { tierWords } from '../../core/candy.js';
 import { pickWarning, perMillion, PICK_BY } from '../../core/recommend.js';
@@ -19,8 +19,10 @@ import { BUILDS, BUILD_ORDER, BUILD_ALIASES, resolveBuild, highStatOf } from '..
 import { GEORGES, gymById } from '../../core/gyms.js';
 import { XANAX, EDVD, FHC, POINTS, REFILL_POINTS, ITEMS, CANDY_KISSES, CANDY_IDS, itemName } from '../../core/items.js';
 import { lineChart, chartNum } from '../charts.js';
-import { sectionHead, meta, STAT_COLOR } from './common.js';
+import { sectionHead, meta, STAT_COLOR, planRunWords } from './common.js';
 import { trainInText, whyOneStat, whyMix } from '../../core/gympage.js';
+import { progressOf } from '../../core/planline.js';
+import { monthlyOf } from '../../core/saved-plan.js';
 
 const KIND_TAG = { steady: 'Steady', boost: 'Boost', jump: 'Jump' };
 
@@ -151,11 +153,12 @@ function controls(m, ctx) {
         h('span', { class: 'sep' }),
         t('lab', 'Train toward'),
         goalChip,
+        goal && goal.kind === 'unlockGym' ? openByInput(goal, ctx) : null,
         goal
             ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.setPlan({ goal: null }), text: 'Back to the build' })
             : h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.goalForm = !ctx.ui.goalForm; ctx.rerender(); }, text: '+ Stat numbers' }),
         !goal && m.nextGym && m.nextGym.gym ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.setPlan({ goal: { kind: 'unlockGym', gymId: m.nextGym.gym.id } }), text: '+ Unlock ' + m.nextGym.gym.name }) : null,
-        h('span', { class: 'muted', text: 'used by the next Create plan or Recalibrate' }),
+        h('span', { class: 'muted', text: 'used by the next Create plan or Re-plan' }),
     ];
     const bar2 = [];
     const sp = m.special || {};
@@ -175,6 +178,21 @@ function controls(m, ctx) {
     const bliss = m.pc && m.pc.perks.bliss;
     bar2.push(t('lab', 'Ignorance Is Bliss'), h('span', { class: 'tag' + (bliss ? ' good' : ''), text: bliss ? 'Active' + (m.pc.perks.blissDays ? ' · ' + m.pc.perks.blissDays + ' days' : '') : 'Not active' }), h('span', { class: 'info', title: 'Read from your perks: the book’s line shows while it is active (31 days). The plan counts it the day it shows.', text: 'i' }));
     return [bar1, bar2];
+}
+
+/**
+ * "Open it by" (round 7, optional): a date for the gym to unlock. With one, the next Create plan or Re-plan leaves
+ * out the plans that open it later; without one the gym is only shown on every plan. It never outranks stats.
+ */
+function openByInput(goal, ctx) {
+    const value = goal.by ? new Date(goal.by - 1).toISOString().slice(0, 10) : '';
+    const inp = h('input', { class: 'inp num', type: 'date', 'aria-label': 'Open it by', title: 'Optional: plans that open the gym after this day are left out of the next Create plan or Re-plan. The gym never outranks stats otherwise.', style: 'width:138px', value });
+    inp.addEventListener('change', () => {
+        const day = Date.parse(inp.value + 'T00:00:00Z');
+        // Through that Torn day: its end.
+        ctx.setPlan({ goal: { ...goal, by: Number.isFinite(day) ? day + 86400e3 : null } });
+    });
+    return h('span', { class: 'row', style: 'gap:6px' }, [t('lab', 'by'), inp]);
 }
 
 function goalForm(m, ctx) {
@@ -213,7 +231,8 @@ function recommendedCard(m, ctx, rec, compare, days) {
         h('div', { class: 'fig' }, [t('lab', pickBy === 'max' ? 'A day' : 'Per day'), h('b', { text: pickBy === 'max' ? fmtMoney(best.cost / days) : planPerDay(best, days) })]),
     ];
     const reasons = rec.reasons.length ? rec.reasons.join(' ') : 'It gains the most stats inside your budget.';
-    const spend = m.spend && m.spend.lastsDays !== null && m.spend.cash !== null ? ' Your ' + fmtMoney(m.spend.cash) + ' on hand lasts about ' + Math.round(m.spend.lastsDays) + ' days at ' + fmtMoney(m.spend.perDay) + ' a day.' : '';
+    // Cash on hand against the plan's pace: under a day of it is said as that, never "lasts about 0 days".
+    const spend = m.spend && m.spend.lastsDays !== null && m.spend.cash !== null ? (m.spend.lastsDays < 1 ? ' You have ' + fmtMoney(m.spend.cash) + ' on hand: less than a day of this plan (' + fmtMoney(m.spend.perDay) + ' a day).' : ' Your ' + fmtMoney(m.spend.cash) + ' on hand lasts about ' + Math.round(m.spend.lastsDays) + ' days at ' + fmtMoney(m.spend.perDay) + ' a day.') : '';
     const a = m.auto;
     // What the saved plan was made with (round 6: its budget and income are the ones it saw, until you recalibrate).
     const snap = m.savedPlan ? m.savedPlan.snapshot : null;
@@ -237,6 +256,7 @@ function recommendedCard(m, ctx, rec, compare, days) {
         autoOn && a.breakdown && a.breakdown.lines.length ? incomeLines(a.breakdown) : null,
         m.unlock ? unlockBlock(m, ctx, days) : null,
         refillLine(best, days),
+        gymWorthLines(m, days),
         h('div', { class: 'note2', text: 'If you’re late: steady and goal plans re-time by themselves. Jump plans warn 5 min before the tick, then re-time.' }),
     ];
     if (ctx.ui.goalForm) kids.push(goalForm(m, ctx));
@@ -257,6 +277,20 @@ function recommendedCard(m, ctx, rec, compare, days) {
     return h('div', { class: 'lead' }, kids);
 }
 
+/**
+ * Is each gym the plan opens worth its fee (round 7, the friend's question)? The plan was run with and without it:
+ * "Racing Fitness opens on day 3: +12k stats by the plan's end for its $1M fee."
+ */
+function gymWorthLines(m, days) {
+    const list = (m.savedPlan && m.savedPlan.gymWorth) || [];
+    if (!list.length) return null;
+    return h('div', { class: 'note2 num' }, [
+        h('b', { class: 'white', text: 'Gyms this plan opens: ' }),
+        list.map((g) => g.name + (g.day ? ' on day ' + g.day : '') + ': ' + (g.gain >= 0 ? '+' + fmtShort(g.gain) : '−' + fmtShort(-g.gain)) + ' stats by day ' + days + ' for its ' + fmtMoney(g.fee) + ' fee').join(' · ') + '.',
+        ' Each is the plan run with and without that gym; the fees are in the plan’s cost.',
+    ]);
+}
+
 /** Is the daily points refill worth it in this plan? (The comparison ran it with and without when it mattered.) */
 function refillLine(r, days) {
     if (!r || r.refill === undefined) return null;
@@ -272,23 +306,36 @@ function incomeLines(b) {
     return h('div', { class: 'note2 num', style: 'margin-top:8px' }, ['Coming in (your money log, ' + Math.round(b.days) + ' days): ', top.map((l) => l.title + ' ' + fmtMoney(Math.round(l.perDay)) + '/day').join(' · ')]);
 }
 
-/** Unlock goal: when the gym opens on each plan, and what each costs in stats against the plan that gains most. */
+/**
+ * The gym to unlock: when each plan opens it, with its stats and cost against the recommended plan (the same
+ * baseline as Other plans). Round 7: information, plus an optional date; it never changes the pick by itself.
+ */
 function unlockBlock(m, ctx, days) {
     const u = m.unlock;
+    const when = (r) => (r.day ? 'day ' + r.day + ' \u00b7 ' + new Date(r.at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }) : r.days !== null && r.days !== undefined ? (r.days < 1 ? 'today' : 'in about ' + Math.ceil(r.days) + ' days') : 'not in these ' + days + ' days');
+    const order = (r) => (r.day ? r.day : r.days !== null && r.days !== undefined ? r.days + 1 : Infinity);
+    const rec = u.rows[u.best] || null;
     const rows = Object.entries(u.rows)
-        .filter(([, r]) => r.days !== null)
-        .sort((x, y) => x[1].days - y[1].days)
-        .slice(0, 6)
-        .map(([id, r]) =>
-            h('tr', { class: id === ctx.plan.strategy ? 'sel' : '' }, [
-                h('td', {}, [h('b', { class: 'w', text: (STRATEGIES[id] || {}).name || id })]),
-                h('td', { class: 'r', text: r.days < 1 ? 'today' : 'in ' + Math.ceil(r.days) + ' days' }),
-                h('td', { class: 'r ' + (r.statsPct < -0.5 ? 'c-bad' : 'muted'), text: r.statsPct < -0.5 ? fmtPct(r.statsPct) + ' stats' : 'most stats' }),
-            ]),
-        );
+        .filter(([, r]) => !r.blocked)
+        .sort((x, y) => order(x[1]) - order(y[1]) || y[1].gained - x[1].gained)
+        .slice(0, 8)
+        .map(([id, r]) => {
+            const late = u.byDay > 0 && (!r.day || r.day > u.byDay);
+            return h('tr', { class: id === ctx.plan.strategy ? 'sel' : '' }, [
+                h('td', {}, [h('b', { class: 'w', text: (STRATEGIES[id] || {}).name || id }), id === u.best ? h('span', { class: 'tag chalk', style: 'margin-left:6px', text: 'recommended' }) : null]),
+                h('td', { class: 'r ' + (late ? 'c-bad' : ''), text: when(r) + (late ? ' \u00b7 after your date' : '') }),
+                h('td', { class: 'r', text: '+' + fmtShort(r.gained) }),
+                h('td', { class: 'r ' + (id === u.best ? 'muted' : r.statsPct < -0.5 ? 'c-bad' : r.statsPct > 0.5 ? 'c-good' : 'muted'), text: id === u.best ? '\u2014' : fmtPct(r.statsPct) }),
+                h('td', { class: 'r', text: fmtMoney(r.cost) }),
+            ]);
+        });
+    // Rushing it: the plan that opens the gym soonest against the recommended one.
+    const fastest = Object.entries(u.rows).filter(([, r]) => !r.blocked && r.day).sort((x, y) => x[1].day - y[1].day || y[1].gained - x[1].gained)[0];
+    const rush = fastest && rec && rec.day && fastest[0] !== u.best && fastest[1].day < rec.day ? ((STRATEGIES[fastest[0]] || {}).short || fastest[0]) + ' opens it ' + (rec.day - fastest[1].day) + ' day' + (rec.day - fastest[1].day === 1 ? '' : 's') + ' sooner for ' + (fastest[1].cost - rec.cost >= 0 ? fmtMoney(fastest[1].cost - rec.cost) + ' more' : fmtMoney(rec.cost - fastest[1].cost) + ' less') + ' and ' + (fastest[1].gained >= rec.gained ? fmtShort(fastest[1].gained - rec.gained) + ' more stats' : fmtShort(rec.gained - fastest[1].gained) + ' fewer stats') + ' over the ' + days + ' days.' : null;
     return h('div', { style: 'margin-top:12px' }, [
-        sectionHead('Unlock ' + u.gym.name, meta([fmtInt(u.energyLeft) + ' energy through the gym to go · stats against the plan that gains most in ' + days + ' days']), null, 'h3'),
-        h('table', { class: 'tbl num' }, [h('tbody', {}, rows)]),
+        sectionHead('Unlock ' + u.gym.name, meta([fmtInt(u.energyLeft) + ' energy through the gym to go \u00b7 ' + (u.byDay > 0 ? 'open it by day ' + u.byDay : 'no date set: shown on every plan, never a reason to pick fewer stats')]), null, 'h3'),
+        h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'Plan' }), h('th', { class: 'r', text: 'Opens' }), h('th', { class: 'r', text: 'Stats' }), h('th', { class: 'r', title: 'Against the recommended plan', text: 'vs pick' }), h('th', { class: 'r', text: 'Cost' })])]), h('tbody', {}, rows)]),
+        rush ? h('div', { class: 'note2 num', text: rush }) : null,
     ]);
 }
 
@@ -330,8 +377,8 @@ function otherPlans(m, ctx, rec, compare, days) {
                 h('td', {}, [h('small', { text: kindOf(a.id) })]),
                 h('td', {}, [h('b', { class: 'w', text: st.name }), current ? h('span', { class: 'tag chalk', style: 'margin-left:6px', text: 'current plan' }) : null, pending ? h('span', { class: 'tag warn', style: 'margin-left:6px', text: 'picked · see the warning' }) : null]),
                 h('td', { class: 'muted', title: compare[a.id] && compare[a.id].candy ? tierWords(compare[a.id].candy.id) || null : null, text: planWhat(a.id, compare[a.id]) }),
-                h('td', { class: 'r ' + (a.deltaStatsPct >= 0 ? 'c-good' : 'c-bad'), text: fmtPct(a.deltaStatsPct) }),
-                h('td', { class: 'r ' + (a.deltaCost > 0 ? 'c-bad' : 'c-good'), text: (a.deltaCost >= 0 ? '+' : '−') + fmtMoney(Math.abs(a.deltaCost)) }),
+                h('td', { class: 'r' }, ['+' + fmtShort(a.gained), h('br'), h('span', { class: a.deltaStatsPct >= 0 ? 'c-good' : 'c-bad', style: 'white-space:nowrap', text: fmtPct(a.deltaStatsPct) })]),
+                h('td', { class: 'r' }, [fmtMoney(a.cost), h('br'), h('span', { class: a.deltaCost > 0 ? 'c-bad' : 'c-good', style: 'white-space:nowrap', text: (a.deltaCost >= 0 ? '+' : '−') + fmtMoney(Math.abs(a.deltaCost)) })]),
                 h('td', { class: 'r', text: a.cost > 0 ? chartNum(a.perM) : '—' }),
                 h('td', { class: 'why', title: a.why, text: shortWhy(a.why) }),
             ]),
@@ -372,11 +419,13 @@ function otherPlans(m, ctx, rec, compare, days) {
     const tick = hiddenAlts.length
         ? h('button', { type: 'button', class: 'tk', 'aria-pressed': String(showAll), onclick: () => { ctx.ui.planShowAll = !showAll; ctx.rerender(); } }, [h('i'), 'Show plans that don’t fit you (' + hiddenAlts.length + ')'])
         : null;
-    const note = hiddenAlts.length && !showAll ? h('div', { class: 'note2', text: 'Hidden: ' + hiddenAlts.map((a) => STRATEGIES[a.id].name).join(', ') + ' — they lose more than half your stats at ' + fmtShort(m.total) + ' total. They come back on their own if that changes.' }) : null;
+    // Hidden: only plans that gain under half of the best plan inside your limit, or don't fit you; the cheapest plan always shows.
+    const one = hiddenAlts.length === 1;
+    const note = hiddenAlts.length && !showAll ? h('div', { class: 'note2', text: 'Hidden: ' + hiddenAlts.map((a) => STRATEGIES[a.id].name).join(', ') + ' — ' + (one ? 'it gains' : 'they gain') + ' under half of what the best plan in your limit does at ' + fmtShort(m.total) + ' total, or ' + (one ? 'doesn’t' : 'don’t') + ' fit you. ' + (one ? 'It comes' : 'They come') + ' back on ' + (one ? 'its' : 'their') + ' own if that changes.' }) : null;
     return h('div', {}, [
         sectionHead('Other plans', meta(['against ' + STRATEGIES[rec.recommended].short.toLowerCase() + ' · click a row to pick it']), tick),
         h('table', { class: 'tbl num' }, [
-            h('thead', {}, [h('tr', {}, [h('th', { style: 'width:52px', text: 'Kind' }), h('th', { style: 'width:190px', text: 'Plan' }), h('th', { style: 'width:230px', text: 'What you do' }), h('th', { class: 'r', style: 'width:66px', text: 'Stats' }), h('th', { class: 'r', style: 'width:84px', text: 'Cost' }), h('th', { class: 'r', style: 'width:70px', title: 'Stats gained for each $1M spent over the ' + days + ' days', text: 'Per $1M' }), h('th', { text: 'Why it isn’t the pick' })])]),
+            h('thead', {}, [h('tr', {}, [h('th', { style: 'width:52px', text: 'Kind' }), h('th', { style: 'width:190px', text: 'Plan' }), h('th', { style: 'width:230px', text: 'What you do' }), h('th', { class: 'r', style: 'width:76px', title: 'Stats gained over the ' + days + ' days, and the difference from the recommended plan', text: 'Stats' }), h('th', { class: 'r', style: 'width:88px', title: 'What it costs over the ' + days + ' days, and the difference from the recommended plan', text: 'Cost' }), h('th', { class: 'r', style: 'width:70px', title: 'Stats gained for each $1M spent over the ' + days + ' days', text: 'Per $1M' }), h('th', { text: 'Why it isn’t the pick' })])]),
             h('tbody', {}, rows.length ? rows : [h('tr', {}, [h('td', { colspan: '7', class: 'muted', text: 'No other plan fits you.' })])]),
         ]),
         note,
@@ -479,6 +528,7 @@ function blissCard(m, ctx, rec, compare, days) {
     const lines = [];
     if (bliss) lines.push(h('b', { text: 'Now' }), h('span', { text: 'Active' + (m.pc.perks.blissDays ? ' for ' + m.pc.perks.blissDays + ' days' : '') + ': happy keeps climbing above ' + happyMax + ', so the plans above already count it.' }));
     lines.push(h('b', { text: 'Changes' }), h('span', { text: 'Happy stops resetting to ' + happyMax + ' at :00/:15/:30/:45 and keeps climbing (to 99,999), so boosters and candy keep paying for 31 days.' }));
+    if (!bliss && !w.blissSteady && m.savedPlan && m.savedPlan.extras === 'pending') lines.push(h('b', { text: 'For you' }), h('span', { class: 'muted', text: 'Working it out… (the what-ifs come a moment after the plan)' }));
     if (!bliss && w.blissSteady) {
         const pct = (x) => Math.round((100 * (x.gained - best.gained)) / Math.max(1, best.gained));
         lines.push(h('b', { text: 'For you' }), h('span', { text: 'Steady with Bliss +' + fmtShort(w.blissSteady.gained) + ' in ' + days + ' days (' + fmtPct(pct(w.blissSteady)) + ') for ' + fmtMoney(w.blissSteady.cost) + (w.dailyChoco ? '; Daily choco with Bliss +' + fmtShort(w.dailyChoco.gained) + ' (' + fmtPct(pct(w.dailyChoco)) + ') for ' + fmtMoney(w.dailyChoco.cost) : '') + '.' }));
@@ -501,6 +551,22 @@ function lengthChoice(ctx, fallback = 3) {
         { class: 'seg', role: 'group', 'aria-label': 'Plan length' },
         PLAN_LENGTHS.map((n) => h('button', { type: 'button', 'aria-pressed': String(n === cur), onclick: () => { ctx.ui.planMonths = n; ctx.ui.replaceAsk = false; ctx.rerender(); }, text: monthsWord(n) })),
     );
+}
+
+/**
+ * A plan being worked out (round 7, R7.3b): a bar that fills, where the run is, the seconds so far, and Cancel. The
+ * page stays usable meanwhile (other tabs too), and you can leave it: it finishes in a tab you are not looking at.
+ * The bar is the card's own day line (its width only). app.js planProgress moves it without redrawing the page.
+ */
+function planRun(busy, ctx) {
+    if (!busy) return null;
+    return h('div', { class: 'planrun', role: 'status', 'aria-live': 'polite' }, [
+        h('div', { class: 'dayline', role: 'progressbar', 'aria-label': busy.recalibrate ? 'Re-planning' : 'Working out your plan' }, [h('i', { 'data-plan-bar': '1', style: 'width:' + Math.round(100 * Math.max(0.02, busy.done || 0)) + '%' })]),
+        h('div', { class: 'row', style: 'justify-content:space-between;margin-top:6px' }, [
+            h('span', { class: 'pc-sub num', 'data-plan-words': '1', text: planRunWords(busy) }),
+            h('span', { class: 'row', style: 'gap:10px' }, [h('span', { class: 'muted', style: 'font-size:12px', text: 'You can keep using the page, or leave it: your plan stays as it is until this is done.' }), h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.cancelPlan && ctx.cancelPlan(), text: 'Cancel' })]),
+        ]),
+    ]);
 }
 
 /** A Create plan / Recalibrate click: the page shows it working, then the new plan (or why it couldn't). */
@@ -528,6 +594,7 @@ function planCard(m, ctx) {
                 lengthChoice(ctx, 3),
                 h('button', { class: 'btn primary', type: 'button', disabled: Boolean(busy), onclick: () => startPlan(ctx, months), text: busy ? 'Working out your plan…' : 'Create plan' }),
             ]),
+            planRun(busy, ctx),
             err,
         ]);
     }
@@ -535,16 +602,25 @@ function planCard(m, ctx) {
     const p = sv.progress || { day: 1, of: sv.days, ended: false };
     const last = m.savedPlan && m.savedPlan.history && m.savedPlan.history.length ? m.savedPlan.history[m.savedPlan.history.length - 1] : null;
     const incomeMove = last && last.from.budgetPerDay !== null && last.to.budgetPerDay !== null && Math.round(last.from.budgetPerDay) !== Math.round(last.to.budgetPerDay) ? ' on ' + fmtMoney(Math.round(last.to.budgetPerDay)) + ' a day (was ' + fmtMoney(Math.round(last.from.budgetPerDay)) + ')' : '';
-    const sub = [dayWord(sv.start) + ' → ' + dayWord(sv.end), p.ended ? 'ended' : 'day ' + p.day + ' of ' + p.of, 'made ' + dayWord(sv.createdAt), sv.recalibratedAt ? 'recalibrated ' + dayWord(sv.recalibratedAt) + incomeMove : null, ctx.plan.strategyPicked ? 'following ' + S.short.toLowerCase() + ', your pick' : null].filter(Boolean).join(' · ');
+    const sub = [dayWord(sv.start) + ' → ' + dayWord(sv.end), p.ended ? 'ended' : 'day ' + p.day + ' of ' + p.of, 'made ' + dayWord(sv.createdAt), sv.recalibratedAt ? 're-planned ' + dayWord(sv.recalibratedAt) + incomeMove : null, ctx.plan.strategyPicked ? 'following ' + S.short.toLowerCase() + ', your pick' : null].filter(Boolean).join(' · ');
+    // The line above is time (day N of M). Beside it: what you gained against what the plan said by now, since the
+    // line you follow began (round 7: the card's line never said whether you were on the plan).
+    const pr = progressOf(ctx.planLines || [], m.now, m.total);
+    const soFar = pr && !p.ended ? h('div', { class: 'pc-sub num' }, ['The line is time: day ' + p.day + ' of ' + p.of + '. Stats: ', h('b', { class: 'white', text: fmtSigned(pr.gained) }), ' of ' + fmtSigned(pr.planned) + ' planned so far' + (pr.pct !== null ? ' (' + Math.round(pr.pct) + '%)' : '') + ', +' + fmtShort(pr.whole) + ' by the end · ', h('a', { href: '#progress', onclick: (e) => { e.preventDefault(); ctx.go('progress'); }, text: 'Progress' })]) : null;
+    // A build picked after the plan was made: today's steps follow it at once, the plan's numbers don't until a Re-plan.
+    const madeFor = m.savedPlan && m.savedPlan.snapshot ? m.savedPlan.snapshot.build : null;
+    const buildMoved = madeFor && ctx.plan.build && madeFor !== ctx.plan.build ? h('div', { class: 'pc-sub' }, [h('span', { class: 'tag warn', text: 'Build changed' }), ' Today’s steps already train toward ' + resolveBuild(ctx.plan.build).name + '; this plan’s numbers are for ' + resolveBuild(madeFor).name + '. ', h('b', { class: 'white', text: 'Re-plan to use it.' })]) : null;
     const kids = [
         h('div', { class: 'pc-top' }, [
             h('div', { class: 'pc-what' }, [
                 h('div', { class: 'pc-title', text: monthsWord(sv.months).replace(' months', '-month').replace(' month', '-month') + ' plan · ' + S.name }),
                 h('div', { class: 'pc-sub num', text: sub }),
                 h('div', { class: 'dayline', role: 'img', 'aria-label': 'Day ' + p.day + ' of ' + p.of }, [h('i', { style: 'width:' + Math.min(100, (100 * p.day) / Math.max(1, p.of)).toFixed(1) + '%' })]),
+                soFar,
+                buildMoved,
             ]),
             h('div', { class: 'acts' }, [
-                h('button', { class: 'btn primary', type: 'button', disabled: Boolean(busy) || p.ended, title: 'Re-reads your stats, income, prices and gyms now and re-plans the days left; the end date stays', onclick: () => { ctx.ui.newPlan = false; ctx.ui.replaceAsk = false; ctx.recalibratePlan(); }, text: busy && busy.recalibrate ? 'Recalibrating…' : 'Recalibrate' }),
+                h('button', { class: 'btn primary', type: 'button', disabled: Boolean(busy) || p.ended, title: 'Re-reads your stats, income, prices and gyms now and re-plans the days left; the end date stays', onclick: () => { ctx.ui.newPlan = false; ctx.ui.replaceAsk = false; ctx.recalibratePlan(); }, text: busy && busy.recalibrate ? 'Re-planning…' : 'Re-plan' }),
                 h('button', { class: 'btn ghost', type: 'button', disabled: Boolean(busy), 'aria-expanded': String(Boolean(ctx.ui.newPlan)), onclick: () => { ctx.ui.newPlan = !ctx.ui.newPlan; ctx.ui.replaceAsk = false; ctx.rerender(); }, text: busy && !busy.recalibrate ? 'Working out…' : 'New plan…' }),
             ]),
         ]),
@@ -566,6 +642,8 @@ function planCard(m, ctx) {
             ]),
         );
     }
+    const running = planRun(busy, ctx);
+    if (running) kids.push(running);
     if (err) kids.push(err);
     return h('div', { class: 'lead plancard' }, kids);
 }
@@ -573,26 +651,31 @@ function planCard(m, ctx) {
 /** The plan's months (mockup C): total stats planned at each month's end, "you are here", the rough ones marked "~". */
 function monthsRow(m, ctx) {
     const sp = m.savedPlan;
-    if (!sp || !Array.isArray(sp.monthly) || sp.monthly.length < 2) return null;
+    if (!sp || !Array.isArray(sp.monthly)) return null;
+    // The plan you follow: the saved path's months, or (a plan you picked yourself) that plan's, counted in the plan's
+    // own months (round 7: the row showed the path whatever you followed).
+    const picked = ctx.plan.strategyPicked && sp.compare && sp.compare[m.strategy] ? sp.compare[m.strategy] : null;
+    const monthly = picked ? monthlyOf(picked, { start: sp.from, days: sp.days, stats: sp.snapshot.stats, anchor: sp.start }) : sp.monthly;
+    if (monthly.length < 2) return null;
     const now = m.now;
     const total = (st) => Object.values(st || {}).reduce((a, v) => a + (Number(v) || 0), 0);
-    const cells = sp.monthly.map((mo, i) => {
+    const cells = monthly.map((mo, i) => {
         const past = mo.to <= now;
         const cur = now >= mo.from && now < mo.to;
         const rough = i >= 3;
         const name = new Date(mo.to - 1).toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' });
         return h('div', { class: 'mo' + (past ? ' past' : '') + (cur ? ' now' : ''), title: dayWord(mo.from) + ' → ' + dayWord(mo.to) + ': +' + fmtShort(mo.gained) + ' for ' + fmtMoney(mo.cost) }, [h('span', { text: name }), h('b', { text: (rough ? '~' : '') + fmtShort(total(mo.stats)) }), cur ? h('em', { text: 'you are here' }) : null]);
     });
-    const costs = sp.monthly.map((x) => x.cost).filter((x) => x > 0);
+    const costs = monthly.map((x) => x.cost).filter((x) => x > 0);
     const y = sp.year;
     const foot = [
         costs.length ? 'About ' + fmtMoney(Math.min(...costs)) + (Math.max(...costs) > Math.min(...costs) * 1.05 ? '–' + fmtMoney(Math.max(...costs)) : '') + ' a month' : null,
-        y && y.band && y.path ? 'whole plan ~+' + fmtShort(y.path.gained) + ' (range +' + fmtShort(y.band.low) + ' to +' + fmtShort(y.band.high) + ': the model’s own error; later months are rougher)' : null,
+        picked ? 'whole plan ~+' + fmtShort(picked.gained) + ' on ' + ((STRATEGIES[m.strategy] || {}).short || m.strategy).toLowerCase() + ', your pick' : y && y.band && y.path ? 'whole plan ~+' + fmtShort(y.path.gained) + ' (range +' + fmtShort(y.band.low) + ' to +' + fmtShort(y.band.high) + ': the model’s own error; later months are rougher)' : null,
         y && y.unlocks && y.unlocks.length ? 'gyms: ' + y.unlocks.slice(0, 3).map((u) => ((gymById(u.gymId) || {}).name || 'gym ' + u.gymId) + ' ~day ' + u.day).join(', ') : null,
     ].filter(Boolean);
     return h('div', {}, [
-        sectionHead('Your ' + sp.monthly.length + ' months', meta(['total stats planned at each month’s end'])),
-        h('div', { class: 'months num', style: 'grid-template-columns:repeat(' + Math.min(12, sp.monthly.length) + ',minmax(0,1fr))' }, cells),
+        sectionHead('Your ' + monthly.length + ' months', meta(['total stats planned at each month’s end'])),
+        h('div', { class: 'months num', style: 'grid-template-columns:repeat(' + Math.min(12, monthly.length) + ',minmax(0,1fr))' }, cells),
         foot.length ? h('div', { class: 'note2 num', text: foot.join(' · ') }) : null,
     ]);
 }

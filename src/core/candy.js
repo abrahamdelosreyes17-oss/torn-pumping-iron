@@ -51,7 +51,14 @@ export function candyCount({ capH = BOOSTER_CAP_H, cdH = 0, cdMult = 1 } = {}) {
 }
 
 /**
- * The candy that gives the most stats under the Plan's rule.
+ * The candy a plan takes.
+ *
+ * Round 7: when `evaluate` gives the whole plan's stats and cost (the engine
+ * always does), the pick is by cost per stat: start from the candy with the
+ * best cost per stat; a stronger one replaces it only when the stats rise by
+ * at least as much, in percent, as the cost (no tolerance). The owner:
+ * "+151k for $176M vs +176k for $616M... I would take 176k if it costs let's
+ * say 200".
  *
  * Without `evaluate`, each candy is scored by the happy it adds (a stand-in
  * for stats: more happy, more stats) and the cost of `boosts` boosts. With
@@ -105,7 +112,10 @@ export function bestCandy({ prices = {}, npc = {}, capH = BOOSTER_CAP_H, cdH = 0
     const pool = options.filter((o) => o.fits);
     let best;
     if (!pool.length) best = options.reduce((a, b) => (b.cost < a.cost ? b : a));
-    else if (pickBy === 'value') best = pool.reduce((a, b) => (perM(b) > perM(a) || (perM(b) === perM(a) && b.gained > a.gained) ? b : a));
+    // Round 7 (the owner's rule, D6): with the whole plan's real stats and money (`evaluate`), a stronger candy is
+    // taken only at an equal or better cost per stat, under every Plan rule ("Max gains" too): the candy with the best
+    // cost per stat that fits, and at the same cost per stat the one with more stats.
+    else if (evaluate || pickBy === 'value') best = pool.reduce((a, b) => (perM(b) > perM(a) || (perM(b) === perM(a) && b.gained > a.gained) ? b : a));
     else best = pool.reduce((a, b) => (b.gained > a.gained || (b.gained === a.gained && b.cost < a.cost) ? b : a));
     // Owner (2026-09-29): the candy named flipped between reloads (every +25 candy is interchangeable). Today's pick stays
     // unless the new one gives more happy or saves at least CANDY_SWITCH_PCT on the boost.

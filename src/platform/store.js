@@ -55,6 +55,11 @@ export const K = {
     planNow: 'planNow',
     // Your trains from Torn's log (Full key): the sessions no read of ours saw (core/gymlog.js).
     gymLog: 'gymLog',
+    // The problem log (core/errlog.js): the webpage keeps it; a Torn page's new lines wait in the small buffer.
+    problemLog: 'problemLog',
+    problemBuf: 'problemBuf',
+    // The last plan runs with their time (Settings › Report a problem).
+    planRuns: 'planRuns',
 };
 
 /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */

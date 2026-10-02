@@ -13,6 +13,7 @@ import { loadSavedPlan } from '../src/platform/plan-store.js';
 import { gainPerTrain, happyTerms, HAPPY_CAP, STAT_AB, effectiveStat, round4 } from '../src/core/gain.js';
 import { planWindow, daysLeft, addMonths, planProgress, makeSavedPlan, monthlyOf, planNowOf, usablePlanNow, slimResult, scheduleAt } from '../src/core/saved-plan.js';
 
+import { readLines } from '../src/core/planline.js';
 const scheduleAtNow = (saved) => scheduleAt(planNowOf(saved).schedule, Date.now()).strategy;
 import { DAY, tornDayStart } from '../src/core/bars.js';
 
@@ -80,7 +81,9 @@ test('Create plan (12 months): every plan over the year, saved with what it saw;
     assert.ok(saved.year.unlocks.length >= 1, 'the friend opens gyms over a year (Gun Shop → George\'s)');
     assert.ok(!('daily' in pn.slim.steady), 'Torn pages never get the day-by-day lines');
     assert.ok(JSON.stringify(pn).length < 6000, 'planNow stays small: ' + JSON.stringify(pn).length);
-    assert.ok(get(K.planLine, null).daily.length === saved.days, 'Progress has the plan line (the path)');
+    // Round 7: the plan's lines are read by time and kept; the newest is the path, from the moment the plan was made.
+    const lines = readLines(get(K.planLine, null));
+    assert.ok(lines.length >= 1 && lines[lines.length - 1].daily.length === saved.days && lines[lines.length - 1].strategy === 'path' && lines[lines.length - 1].at === saved.rev, 'Progress has the plan line (the path)');
     // In node there is no IndexedDB: the whole plan went to GM instead.
     assert.equal((await loadSavedPlan()).rev, saved.rev);
 });
@@ -113,7 +116,10 @@ test('Auto never rewrites the plan by itself any more (the old background re-pic
     for (let i = 0; i < 3; i++) refresh();
     assert.equal(get(K.plan, null).strategy, alt, 'your pick stays');
     assert.equal(get(K.plan, null).pickBy, 'auto', 'and the Plan rule is untouched');
-    assert.equal(get(K.planLine, null).key.split('|')[1], alt, 'Progress follows the pick');
+    const picks = readLines(get(K.planLine, null));
+    assert.equal(picks[picks.length - 1].strategy, alt, 'Progress follows the pick');
+    assert.equal(picks[picks.length - 1].why, 'pick');
+    assert.ok(picks.length >= 2, 'the line before the pick stays (round 7)');
 });
 
 test('Recalibrate keeps the end date and re-plans the days left from what is true now (2 months into a year)', async () => {
@@ -180,7 +186,7 @@ test('the saved plan shape: windows, months, progress, the slim part', () => {
     const pn = planNowOf(saved);
     assert.ok(usablePlanNow(pn));
     assert.equal(usablePlanNow({ ...pn, v: 0 }), null);
-    assert.deepEqual(Object.keys(slimResult(r)).sort(), ['cost', 'gained', 'id', 'perStat', 'used']);
+    assert.deepEqual(Object.keys(slimResult(r)).sort(), ['cost', 'energyTrained', 'gained', 'id', 'perStat', 'used']);
     assert.deepEqual(planProgress(saved, now), { day: 1, of: 91, left: 91, ended: false });
     assert.equal(planProgress(saved, w.end + 3600e3).ended, true);
 });
