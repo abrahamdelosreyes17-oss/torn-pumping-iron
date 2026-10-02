@@ -45,7 +45,7 @@ Links:
    - **Confirmed causes (the short list; the plan's §1 has all 16):**
      - the unlock-gym goal sorts by energy trained and overrides stats and cost; the page's reasons then contradict its own table;
      - steady's happy drains 4,000 → 250 in the simulator, so the ranking of steady, candy and FHC hangs on one uncalibrated constant;
-     - jumps train 1,120–1,150 E at jump happy (no cap), skip the stack days' refill, and count no overdose or rehab;
+     - jumps train 1,120–1,150 E at jump happy (no cap; Torn's cap is a hard 1,000, confirmed in `docs/research-addiction-rehab.md`), skip the stack days' refill, and count no overdose or rehab (an Ecstasy overdose wipes the whole stacked jump; rehab is $250k a session, about $1.7M–17M a week for 3 Xanax a day depending on lifetime rehabs [1 source]);
      - a received $2B reads as $66.7M a day of income, and bank profit ÷ term is counted daily (`income.mjs`);
      - Progress's plan line is a day off (a player who follows the plan exactly reads 151% of plan), re-bases on a pick, is wiped by Recalibrate; Home's "Next 7 days" is a fixed steady projection for every plan;
      - mid-jump the plan loses its place: after the 5 EDVD are eaten it says the jump is in 30 h (`midstep.mjs`); a jump is one step with no sub-steps;
