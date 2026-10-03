@@ -12,7 +12,14 @@ import { K, set, setKey } from '../src/platform/store.js';
 import { pumpStatuses, statusRead, onStatus, loadStatuses } from '../src/eye-service.js';
 
 import {
-    byRespect,
+    byStored,
+    cutTargets,
+    splitTargets,
+    dropHits,
+    ACTIVE_MAX,
+    RESERVE_MAX,
+    LIST_MAX,
+    GONE_KEEP_MS,
     byOrder,
     listTargets,
     isReadyNow,
@@ -37,17 +44,53 @@ const T0 = Date.parse('2026-10-03T12:00:00Z');
 const MIN = 60000;
 const row = (id, band, respect, keep, win, extra = {}) => ({ id, band, respect, forecast: { keep, pWin: win }, ...extra });
 
-test('one order everywhere: most respect, then most HP kept, then the highest win', () => {
-    const rows = [row(1, 'good', 3, 0.8, 1), row(2, 'stomp', 3, 1, 0.99), row(3, 'fair', 4, 0.5, 0.7), row(4, 'stomp', 3, 1, 1), row(5, 'good', 3, 0.8, 0.9)];
-    assert.deepEqual([...rows].sort(byOrder).map((r) => r.id), [3, 4, 2, 1, 5]);
+test('one order everywhere (the owner, 2026-10-03): band first (Stomp, Good, Fair), then respect, HP kept, win', () => {
+    const rows = [row(1, 'good', 3, 0.8, 1), row(2, 'stomp', 3, 1, 0.99), row(3, 'fair', 4, 0.5, 0.7), row(4, 'stomp', 3, 1, 1), row(5, 'good', 3, 0.8, 0.9), row(6, 'stomp', 2.5, 1, 1), row(7, 'good', 3.5, 0.75, 1)];
+    // A Fair with the most respect still comes after every Stomp and Good.
+    assert.deepEqual([...rows].sort(byOrder).map((r) => r.id), [4, 2, 6, 7, 1, 5, 3]);
     // The stored list (whole percents) the same way.
-    const stored = [{ id: 1, respect: 2, keep: 80, win: 100 }, { id: 2, respect: 2, keep: 90, win: 90 }, { id: 3, respect: 2.5, keep: 50, win: 60 }, { id: 4, respect: 2, keep: 90, win: 95 }];
-    assert.deepEqual([...stored].sort(byRespect).map((r) => r.id), [3, 4, 2, 1]);
+    const stored = [{ id: 1, band: 'good', respect: 2, keep: 80, win: 100 }, { id: 2, band: 'good', respect: 2, keep: 90, win: 90 }, { id: 3, band: 'fair', respect: 2.5, keep: 50, win: 60 }, { id: 4, band: 'good', respect: 2, keep: 90, win: 95 }, { id: 5, band: 'stomp', respect: 1.2, keep: 100, win: 100 }];
+    assert.deepEqual([...stored].sort(byStored).map((r) => r.id), [5, 4, 2, 1, 3]);
     // What is stored follows it, and only Stomp, Good and Fair are kept.
     const judge = (r) => ({ band: r.b, respect: r.respect, keep: r.keep, win: r.win });
-    const { kept, dropped } = selectTargets([{ playerId: 1, b: 'good', respect: 2, keep: 80, win: 100 }, { playerId: 2, b: 'low', respect: 9, keep: 30, win: 100 }, { playerId: 3, b: 'fair', respect: 2, keep: 55, win: 100 }, { playerId: 4, b: 'none' }], judge);
-    assert.deepEqual(kept.map((r) => r.playerId), [1, 3]);
+    const { kept, dropped } = selectTargets([{ playerId: 1, b: 'fair', respect: 3, keep: 55, win: 100 }, { playerId: 2, b: 'low', respect: 9, keep: 30, win: 100 }, { playerId: 3, b: 'good', respect: 2, keep: 80, win: 100 }, { playerId: 4, b: 'none' }], judge);
+    assert.deepEqual(kept.map((r) => r.playerId), [3, 1]);
     assert.deepEqual(dropped, { low: 1, none: 1, range: 0 });
+});
+
+test('100 + 100: an older stored list of 600 is cut to the active 100 and a reserve of 100, in the new order', () => {
+    const bands = ['fair', 'good', 'stomp'];
+    // 600 rows as round 7's first lists stored them (most respect first, bands mixed).
+    const old = Array.from({ length: 600 }, (_, i) => ({ playerId: 9000 + i, band: bands[i % 3], respect: 6 - i / 200, keep: 60 + (i % 3) * 20, win: 100 }));
+    const cut = cutTargets(old, { now: T0 });
+    assert.equal(cut.length, LIST_MAX);
+    assert.equal(LIST_MAX, ACTIVE_MAX + RESERVE_MAX);
+    assert.deepEqual([ACTIVE_MAX, RESERVE_MAX], [100, 100]);
+    // All 200 Stomps first (there are 200 of 600), most respect first.
+    assert.ok(cut.every((r) => r.band === 'stomp'), 'the 200 Stomps fill it');
+    assert.ok(cut.every((r, i) => i === 0 || r.respect <= cut[i - 1].respect));
+    // A player hit lately stays out.
+    const gone = { [cut[0].playerId]: T0 - 60000 };
+    assert.equal(cutTargets(old, { gone, now: T0 })[0].playerId, cut[1].playerId);
+    assert.equal(cutTargets(old, { gone: { [cut[0].playerId]: T0 - GONE_KEEP_MS - 1 }, now: T0 })[0].playerId, cut[0].playerId, 'not for ever');
+    // The live split: the first 100 shown, the next 100 the reserve; a row under 50% or one you hit is not listed.
+    const live = Array.from({ length: 230 }, (_, i) => row(i + 1, i === 0 ? 'low' : i < 120 ? 'stomp' : 'good', 5 - i / 100, 1, 1, i === 1 ? { hit: { kind: 'hit', at: T0 } } : i === 2 ? { hit: { kind: 'opened', at: T0 } } : {}));
+    const s = splitTargets(live);
+    assert.equal(s.active.length, 100);
+    assert.equal(s.reserve.length, 100);
+    assert.equal(s.active[0].id, 3, 'the low row and the one you hit are out; an attack page opened is not a hit');
+    assert.ok(s.active.every((r, i) => i === 0 || byOrder(s.active[i - 1], r) <= 0));
+    assert.equal(s.reserve[0].id, 103, 'the next one in the order is the first of the reserve');
+});
+
+test('hit → drop: a player you hit drops out of the stored list and is remembered, an opened attack page is not', () => {
+    const stored = { at: T0 - 3600e3, list: [{ playerId: 1, band: 'stomp' }, { playerId: 2, band: 'stomp' }, { playerId: 3, band: 'good' }], gone: { 77: T0 - GONE_KEEP_MS - 1, 78: T0 - 1000 } };
+    const hits = new Map([[2, { kind: 'hit', at: T0 - 60000, result: 'Hospitalized' }], [3, { kind: 'opened', at: T0 - 60000 }]]);
+    const out = dropHits(stored, hits, T0);
+    assert.deepEqual(out.list.map((r) => r.playerId), [1, 3]);
+    assert.deepEqual(Object.keys(out.gone).sort(), ['2', '78'], 'the hit remembered; an old one forgotten');
+    assert.equal(dropHits(stored, new Map([[3, { kind: 'opened', at: T0 }]]), T0), null, 'nothing to drop: nothing written');
+    assert.equal(dropHits(null, hits, T0), null);
 });
 
 test('the chips: counts of every listed row, one band, and "Ready now" hiding hospital, away, jail and your hits', () => {
@@ -68,9 +111,9 @@ test('the chips: counts of every listed row, one band, and "Ready now" hiding ho
     const all = listTargets(rows, { ready: false, now: T0 });
     assert.deepEqual(all.counts, { all: 9, stomp: 2, good: 4, fair: 3 });
     assert.equal(all.hidden, 0);
-    assert.deepEqual(all.rows.map((r) => r.id), [7, 6, 3, 4, 1, 2, 5, 8, 9]);
+    assert.deepEqual(all.rows.map((r) => r.id), [1, 2, 3, 4, 8, 9, 7, 6, 5], 'band first, then respect');
     const ready = listTargets(rows, { now: T0 });
-    assert.deepEqual(ready.rows.map((r) => r.id), [7, 1, 9], 'an opened attack page is not a hit; nothing read stays');
+    assert.deepEqual(ready.rows.map((r) => r.id), [1, 9, 7], 'an opened attack page is not a hit; nothing read stays');
     assert.equal(ready.hidden, 6);
     assert.deepEqual(ready.counts, all.counts, 'the chips count before "Ready now"');
     const good = listTargets(rows, { band: 'good', now: T0 });
@@ -138,13 +181,14 @@ test('the scheduler (Trading\'s updateSellPresence): 3 at once, 30 a minute, aga
     assert.deepEqual(statusesToAsk({ order, asked: full, now: T0 + 1001 }).ask, [1], 'one slot freed');
 });
 
-test('a full pass over 600 at 30 a minute is 20 minutes, and the line says so', () => {
-    const ids = Array.from({ length: 600 }, (_, i) => i + 1);
-    const p = statusProgress(ids, (id) => id <= 20);
-    assert.deepEqual(p, { checked: 20, total: 600, leftMin: 20 });
-    assert.equal(statusLine(p), 'Statuses: 20 of 600 checked · this page first · the rest in about 20 min');
-    assert.equal(statusLine(statusProgress(ids, () => true)), 'Statuses: all 600 checked · each again every 10 min');
-    assert.equal(statusLine(statusProgress(ids, (id) => id !== 5)), 'Statuses: 599 of 600 checked · this page first · the rest in about 1 min');
+test('a full pass over the active 100 at 30 a minute is under 4 minutes, and the line says so', () => {
+    const ids = Array.from({ length: ACTIVE_MAX }, (_, i) => i + 1);
+    const p = statusProgress(ids, (id) => id <= 37);
+    assert.deepEqual(p, { checked: 37, total: 100, leftMin: 3 });
+    assert.equal(statusLine(p), 'Statuses: 37 of 100 checked · this page first · the rest in about 3 min');
+    assert.equal(statusLine(statusProgress(ids, (id) => id <= 20)), 'Statuses: 20 of 100 checked · this page first · the rest in about 3 min');
+    assert.equal(statusLine(statusProgress(ids, () => true)), 'Statuses: all 100 checked · each again every 10 min');
+    assert.equal(statusLine(statusProgress(ids, (id) => id !== 5)), 'Statuses: 99 of 100 checked · this page first · the rest in about 1 min');
     assert.equal(statusLine(statusProgress([], () => false)), '');
 });
 
@@ -196,6 +240,6 @@ test('statuses kept across tabs and reloads: two tabs merged, the newest read wi
     const many = Object.fromEntries(Array.from({ length: 700 }, (_, i) => [i + 1, [{ state: 'Okay' }, T0 - i * 1000]]));
     const kept = mergeStatuses(many, null, T0);
     assert.equal(Object.keys(kept).length, STATUS_KEEP);
-    assert.ok(STATUS_KEEP >= 600, 'all 600 targets fit');
+    assert.ok(STATUS_KEEP >= LIST_MAX, 'the active list and the reserve that slides in all fit');
     assert.ok(kept[1] && !kept[700], 'the newest kept');
 });

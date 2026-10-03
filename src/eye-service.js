@@ -20,7 +20,7 @@ import { estimatePlayer } from './core/eye/estimate.js';
 import { forecast, respectFor, fairFight, bssOf, DEFAULT_GEAR } from './core/eye/fight.js';
 import { bandOf, chipFigures } from './core/eye/bands.js';
 import { gearSummary, myGear } from './core/eye/gear.js';
-import { lifeFromLevel, targetParams, targetQueries, listIgnoresFf, mergeTargetLists, inFfRange, selectTargets, listRowAsFfs, TARGETS_PER_MINUTE, statusesToAsk, mergeStatuses, STATUS_RETRY_MS, OWN_HIT_MS } from './core/eye/targets.js';
+import { lifeFromLevel, targetParams, needsRefetch, inFfRange, selectTargets, listRowAsFfs, TARGETS_PER_MINUTE, statusesToAsk, mergeStatuses, STATUS_RETRY_MS, OWN_HIT_MS, findEdges, fallbackEdges, askPlan, pickZone, nextAsk, noteAnswer, cutTargets, goneNow, dropHits, ownHits, ACTIVE_MAX, LIST_MAX, ASK_LIMIT, TARGET_ASKS_MAX } from './core/eye/targets.js';
 import { trackFlights, warBandOf } from './core/eye/war.js';
 import { makePause } from './core/slices.js';
 import { watchOf, addWatch, removeWatch, tagWatch, dismissOffer, isWatched, dueForRead, readEvents, watchOffers, EVENT_KEEP_MS } from './core/eye/watch.js';
@@ -565,7 +565,8 @@ function fightsSoon() {
  */
 export function warmFights(rows) {
     if (!eye.cache || !(pi.model && pi.model.ready)) return false;
-    for (const r of rows) if (!eye.todo.has(r.id)) eyeView(r.id, r.extra, { later: 'idle' });
+    // Only what is kept (the active list and the reserve): an older stored list of 600 is never worked out whole.
+    for (const r of (rows || []).slice(0, LIST_MAX)) if (!eye.todo.has(r.id)) eyeView(r.id, r.extra, { later: 'idle' });
     return true;
 }
 
@@ -657,59 +658,138 @@ function viewJudge(r) {
     };
 }
 
+/** The stomp, good and fair edges for your stats as they fight, worked out once per your-stats key (findEdges). */
+const edgeMemo = { key: '', edges: null };
+
 /**
- * Load Torn Eye's targets: FFScouter asked in slices, merged, the fair
- * fight range checked, every player judged by the fight model, and only
- * the ones you beat stored (most respect first). Throws on a refused key,
- * a pause or an FFScouter error; the stored list is then left as it was.
- * @param {object} input - {minLevel, maxLevel, inactiveOnly, factionless}
- * @param {object} [deps] - {client, judge, store, sleep, now} (tests)
+ * Your edges (core/eye/targets.js findEdges): your stats with merits, your life, your gear and what the fight learner
+ * kept, the same side every fight of the list is judged with. null until your stats are in.
  */
-export async function importTargets(input = {}, { client = null, judge = null, store = (v) => pageSet(TARGETS_KEY, v), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() } = {}) {
+export function myEdges({ minLevel = 1, maxLevel = 100 } = {}) {
+    const m = pi.model;
+    if (!m || !m.ready) return null;
+    const { meStats, gMe, myLife, meKey, fm } = yourSide(m);
+    const key = JSON.stringify([meKey, myLife, gMe, fm || null, minLevel, maxLevel]);
+    if (edgeMemo.key !== key) {
+        const adjust = fm ? (f) => applyFightModel(fm, { pWin: f.pWin, keep: f.keep }) : null;
+        edgeMemo.edges = findEdges({ me: meStats, myLife, gearMe: gMe, adjust, minLevel, maxLevel });
+        edgeMemo.key = key;
+    }
+    return edgeMemo.edges;
+}
+
+/** What is stored of a judged row. */
+function slimTarget(r) {
+    return { playerId: r.playerId, name: r.name, level: r.level, fairFight: r.fairFight, bsEstimate: r.bsEstimate, lastAction: r.lastAction, hospitalUntil: r.hospitalUntil, band: r.band, win: r.win, keep: r.keep, respect: r.respect, ours: r.ours, source: r.source, ageDays: r.ageDays };
+}
+
+/** One ask of FFScouter's finder, paced, then its new players' estimates and our judgement (each answer at once). */
+async function askOnce(ffs, q, { judge, seen, sleep, now }) {
+    if (isPaused()) throw takingTurnsError();
+    await paceTargets(sleep, now);
+    const rows = await fetchFfsTargets(ffs, { ...q, limit: ASK_LIMIT });
+    const fresh = (rows || []).filter((r) => r && r.playerId > 0 && !seen.has(r.playerId));
+    for (const r of fresh) seen.add(r.playerId);
+    await ensureFfsStats(fresh.filter(inFfRange), ffs);
+    return { rows, ...selectTargets(fresh, judge || viewJudge) };
+}
+
+function addDropped(a, b) {
+    return { low: (a.low || 0) + (b.low || 0), none: (a.none || 0) + (b.none || 0), range: (a.range || 0) + (b.range || 0) };
+}
+
+/**
+ * Load Torn Eye's targets (the owner, 2026-10-03): FFScouter asked just under your stomp edge, high levels first,
+ * then lower, each answer judged by the fight model at once; the asking stops once the list holds 100 Stomps and a
+ * full reserve, or after TARGET_ASKS_MAX asks; Good and Fair only once Stomps run short. Only the ones you beat are
+ * stored, at most LIST_MAX, in the one order, with the plan's cursors (a refill goes on from them). Throws on a
+ * refused key, a pause or an FFScouter error; the stored list is then left as it was.
+ * @param {object} input - {minLevel, maxLevel, inactiveOnly, factionless}
+ * @param {object} [deps] - {client, judge, edges, load, store, sleep, now} (tests)
+ */
+export async function importTargets(input = {}, { client = null, judge = null, edges = null, load = () => pageGet(TARGETS_KEY, null), store = (v) => pageSet(TARGETS_KEY, v), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() } = {}) {
     const ffs = client || sharedFfsClient();
     if (!judge && !(pi.model && pi.model.ready)) throw new Error('Waiting for your stats from Torn.');
     const params = targetParams(input);
-    const lists = [];
-    const skip = new Set();
+    const plan = askPlan(edges || myEdges(params) || fallbackEdges(params));
+    // Players you hit lately stay out (a reload doesn't bring them back).
+    const prev = load();
+    const gone = goneNow(prev && prev.gone, now());
+    const seen = new Set(Object.keys(gone).map(Number));
+    const kept = new Map();
+    let dropped = { low: 0, none: 0, range: 0 };
     let asked = 0;
-    let ffIgnored = false;
-    for (const q of targetQueries(params)) {
-        const band = q.minLevel + '-' + q.maxLevel;
-        if (skip.has(band)) continue;
-        if (isPaused()) throw takingTurnsError();
-        await paceTargets(sleep, now);
-        const rows = await fetchFfsTargets(ffs, { ...q, limit: 50 });
+    for (;;) {
+        const stomps = [...kept.values()].filter((r) => r.band === 'stomp').length;
+        const zone = asked < TARGET_ASKS_MAX ? pickZone(plan, { stomps, asked }) : null;
+        // Enough: 100 Stomps and a full reserve; or a full list once Stomps ran short.
+        if (!zone || (kept.size >= LIST_MAX && (stomps >= ACTIVE_MAX || zone !== 'stomp'))) break;
+        const q = nextAsk(plan, zone, params);
+        const got = await askOnce(ffs, q, { judge, seen, sleep, now });
         asked++;
-        lists.push(rows);
-        // FFScouter ignored the range: the other slices of this level band would be the same list.
-        if (listIgnoresFf(rows, q)) {
-            ffIgnored = true;
-            skip.add(band);
-        }
+        noteAnswer(plan, q, got.rows);
+        dropped = addDropped(dropped, got.dropped);
+        for (const r of got.kept) kept.set(r.playerId, slimTarget(r));
     }
-    const merged = mergeTargetLists(lists);
-    await ensureFfsStats(merged.filter(inFfRange), ffs);
-    const { kept, dropped } = selectTargets(merged, judge || viewJudge);
-    const list = kept.map((r) => ({
-        playerId: r.playerId,
-        name: r.name,
-        level: r.level,
-        fairFight: r.fairFight,
-        bsEstimate: r.bsEstimate,
-        lastAction: r.lastAction,
-        hospitalUntil: r.hospitalUntil,
-        band: r.band,
-        win: r.win,
-        keep: r.keep,
-        respect: r.respect,
-        ours: r.ours,
-        source: r.source,
-        ageDays: r.ageDays,
-    }));
-    const out = { at: now(), params, list, dropped, asked, found: merged.length, ffIgnored };
+    const list = cutTargets([...kept.values()], { gone, now: now() });
+    const out = { at: now(), params, list, dropped, asked, found: seen.size - Object.keys(gone).length, ffIgnored: plan.ffIgnored, plan, gone };
     store(out);
     notify();
     return out;
+}
+
+/**
+ * One more ask, quietly, when the reserve runs low (the owner: "hit → drop → refill"): the stored plan goes on from
+ * its cursors (Stomp first, then Good, then Fair), the answer is judged, and the new players join the list in the
+ * order (at most LIST_MAX kept). Marks the plan `done` when nothing is left to ask. Throws as importTargets does.
+ * @param {object} [deps] - {client, judge, load, store, sleep, now} (tests)
+ * @returns {Promise<{added: number, done: boolean}|null>} null when there is no list (or one asked the old way)
+ */
+export async function refillTargets({ client = null, judge = null, load = () => pageGet(TARGETS_KEY, null), store = (v) => pageSet(TARGETS_KEY, v), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() } = {}) {
+    const ffs = client || sharedFfsClient();
+    if (!judge && !(pi.model && pi.model.ready)) throw new Error('Waiting for your stats from Torn.');
+    const stored = load();
+    if (!stored || !Array.isArray(stored.list) || !stored.plan || needsRefetch(stored.params)) return null;
+    const plan = JSON.parse(JSON.stringify(stored.plan));
+    // Not short of Stomps here: the reserve wants the best that is left, Stomp first.
+    const zone = pickZone(plan, { stomps: ACTIVE_MAX });
+    if (!zone) {
+        store({ ...stored, plan: { ...plan, done: true }, refilledAt: now() });
+        return { added: 0, done: true };
+    }
+    const q = nextAsk(plan, zone, stored.params);
+    const seen = new Set([...stored.list.map((r) => r.playerId), ...Object.keys(goneNow(stored.gone, now())).map(Number)]);
+    const got = await askOnce(ffs, q, { judge, seen, sleep, now });
+    noteAnswer(plan, q, got.rows);
+    plan.done = !pickZone(plan, { stomps: ACTIVE_MAX });
+    // What is stored now (a hit may have dropped a row meanwhile), with the new players.
+    const latest = load() || stored;
+    const list = cutTargets([...(latest.list || []), ...got.kept.map(slimTarget)], { gone: latest.gone, now: now() });
+    store({ ...latest, list, plan, dropped: addDropped(latest.dropped || {}, got.dropped), asked: (latest.asked || 0) + 1, found: (latest.found || 0) + got.rows.length, ffIgnored: Boolean(latest.ffIgnored || plan.ffIgnored), refilledAt: now() });
+    notify();
+    return { added: got.kept.length, done: plan.done };
+}
+
+/**
+ * The players you hit drop out of the stored list at once (dropHits), from your attacks (read hourly, and 3 min after
+ * an attack page opened) — no call. The webpage's tab calls it every 2 s while it is open; safe to call often.
+ * @returns {number} how many dropped
+ */
+export function dropHitTargets(now = Date.now()) {
+    const stored = pageGet(TARGETS_KEY, null);
+    const hits = ownHits((getShared('myAttacks', null) || {}).list || [], getShared(K.eyePredictions, []) || [], now);
+    const out = dropHits(stored, hits, now);
+    if (!out) return 0;
+    pageSet(TARGETS_KEY, out);
+    notify();
+    return stored.list.length - out.list.length;
+}
+
+/** The stored targets as kept: in the order, without the players you hit, at most LIST_MAX (an old 600 list is cut). */
+export function storedTargets(now = Date.now()) {
+    const stored = pageGet(TARGETS_KEY, null);
+    if (!stored || !Array.isArray(stored.list)) return [];
+    return cutTargets(stored.list, { gone: stored.gone, now });
 }
 
 /* ------------------------------------------------------ flights (war and watch) */

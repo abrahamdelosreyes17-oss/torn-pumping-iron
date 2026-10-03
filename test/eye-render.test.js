@@ -52,10 +52,12 @@ function ctxFor(mode, extra = {}) {
     const view = (id) => ({ id, band: id % 3 === 0 ? 'low' : id % 3 === 1 ? 'stomp' : 'good', forecast: { pWin: 0.97, keep: id % 3 === 1 ? 1 : 0.8 }, respect: id > 2 ? 4 - id / 100 : 3.1, ours: 2.4, est: { source: 'ffscouter', sourceText: 'FFScouter 3 d', ageDays: 3, confidence: 'good' } });
     const n = extra.n || 2;
     const list = Array.from({ length: n }, (_, i) => ({ playerId: i + 1, name: i < 2 ? 'AB'[i] : 'P' + (i + 1), level: 60 + (i % 40), fairFight: 2.5 }));
-    const stored = { at: now - 60000, params: { v: 3 }, list, dropped: { low: 7, none: 0, range: 3 }, ffIgnored: false };
+    const stored = { at: now - 60000, params: { v: 3 }, list, dropped: { low: 7, none: 0, range: 3 }, ffIgnored: false, ...(extra.stored || {}) };
+    const refills = [];
     const shown = [];
     return {
         shown,
+        refills,
         ui: { eyeMode: mode, eyeOpen: 1, ...(extra.ui || {}) },
         settings: { timeFormat: 'torn' },
         paused: false,
@@ -67,6 +69,8 @@ function ctxFor(mode, extra = {}) {
             statuses: { show: (o) => shown.push(o), attack() {}, active: () => true },
             stored: () => stored,
             load: () => {},
+            refill: () => refills.push(Date.now()),
+            reserve: () => (extra.reserve === undefined ? 100 : extra.reserve),
             loading: () => false,
             error: () => extra.error || null,
             sources: () => ({ fights: 3, ffsFree: 50, gear: 1 }),
@@ -93,7 +97,7 @@ test('Targets: only listed bands, the dropped count, details open; no Sort, Leve
     assert.match(t, /7 players left out \(you’d keep under 50% HP\)/);
     assert.match(t, /About 52% as strong as you \(our estimate\) · 56% by FFScouter’s list · estimate 3 days old · from FFScouter 3 d/);
     assert.doesNotMatch(t, /Hide can.t win|Most respect|Easiest|Refresh|Stomp only|Keep over 50% HP|Not attacked by me today|Torn Eye colours/);
-    assert.match(t, /Order: respect › HP kept › win/);
+    assert.match(t, /Order: band › respect › HP kept › win/);
     assert.match(t, /All 2.*Stomp 1.*Good 1.*Fair 0.*Ready now/);
     const c = text(renderEye(model, ctxFor('chain')));
     assert.match(c, /Targets/, 'an old "chain" view opens Targets');
@@ -120,7 +124,7 @@ test('Targets: 20 a page, only those drawn, the pager, and the statuses told whi
     assert.match(t, /20 a page · page 1 of 2/);
     assert.match(t, /Statuses: 0 of 40 checked · this page first · the rest in about 2 min/);
     assert.match(t, /checking/);
-    // The one order: respect first (P4 has the most), then HP kept.
+    // The one order: band first (Stomp), then respect (P4 is the Stomp with the most), then HP kept.
     assert.equal(drawnNames(out)[0], 'P4');
     const s = ctx.shown.at(-1);
     assert.equal(s.page.length, 20);
@@ -177,6 +181,26 @@ test('Targets (round 7 review): no statuses asked without FFScouter; "checked" c
     const t = text(renderEye(model, ctxFor('targets', { n: 6, row, ui: { eyeFilters: { ready: false } } })));
     assert.match(t, /Statuses: 1 of 4 checked/);
     assert.doesNotMatch(t, /In jail/, 'a jail stay that has ended is not shown');
+});
+
+test('Targets: a low reserve asks once more by itself, quietly; a full one or a list asked the old way does not', async () => {
+    const { targetParams, askPlan, fallbackEdges, REFILL_GAP_MS } = await import('../src/core/eye/targets.js');
+    const fresh = { at: Date.now() - REFILL_GAP_MS - 1000, params: targetParams({}), plan: askPlan(fallbackEdges()) };
+    const low = ctxFor('targets', { stored: fresh, reserve: 5 });
+    const t = text(renderEye(model, low));
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal(low.refills.length, 1, 'one refill');
+    assert.doesNotMatch(t, /Asking FFScouter/, 'quiet: no loading line');
+    // The same page again within the gap: not again.
+    renderEye(model, low);
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal(low.refills.length, 1);
+    const full = ctxFor('targets', { stored: fresh, reserve: 60 });
+    renderEye(model, full);
+    const old = ctxFor('targets', { reserve: 5, ui: { eyeAutoLoaded: true } });
+    renderEye(model, old);
+    await new Promise((r) => setTimeout(r, 5));
+    assert.equal(full.refills.length + old.refills.length, 0);
 });
 
 test('War: found by itself, everyone with status, out-times, landings and the fallen', async () => {

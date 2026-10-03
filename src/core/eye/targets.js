@@ -1,47 +1,69 @@
 /*
- * Torn Eye's target list (ROUND4-PLAN §A). FFScouter's finder answers the
- * strongest accounts first, 50 at most, so one ask with no slices gave the
- * owner 50 level-100 players he can't beat. We ask in slices instead:
+ * Torn Eye's target list (ROUND4-PLAN §A; round 7, the owner, 2026-10-03). FFScouter's finder answers the strongest
+ * accounts inside the asked range first, 50 at most. We want Stomps with the most respect: respect grows with fair
+ * fight and level, and a Stomp (you keep 99% HP or more) is a much weaker player, so the best Stomps sit just under
+ * "the stomp edge", the strength at which you'd start losing HP.
  *
- *   - fair fight 1.0–1.5, 1.5–2.0, 2.0–2.5 and 2.5–3.0 (FFScouter's own
- *     figure against you). Strongest-first inside a slice is the top of that
- *     slice, so every difficulty shows up, from sure wins to the most respect;
- *   - the level range cut in up to 3 bands, so it isn't only level 100.
+ *   - The edges come from our own fight model (findEdges): for each level band (the level range in up to 3), the fair
+ *     fight at which a typical player of the band's top level stops being a Stomp, a Good and a Fair for you. Worked
+ *     out once per your-stats key (eye-service.js myEdges).
+ *   - Each ask is one level band and one zone: Stomp is fair fight 1.0 up to the stomp edge, Good from there to the
+ *     good edge, Fair to the fair edge. Strongest-first inside a zone is its top, so each answer is the most respect
+ *     that zone has; the next ask of that band starts just under the weakest player the last one gave (a cursor), or
+ *     the zone is done when an answer comes back short.
+ *   - Which ask next: the open band whose top could give the most respect (high levels first, then lower); Stomp
+ *     first, Good and Fair only once Stomps run short (the Stomp zone is done, or the Stomps so far won't reach 100
+ *     in the asks left).
+ *   - Every answer is judged at once, and the asking stops as soon as the list holds 100 Stomps and a full reserve
+ *     (200 in all), or after TARGET_ASKS_MAX asks (~300 players looked at). FFScouter allows 25 a minute on its
+ *     finder; we pace to 20. If FFScouter ignores the fair-fight range (an answer far outside itself), that level
+ *     band is not asked again: it'd be the same list.
  *
- * 4 × 3 = 12 asks at most (FFScouter allows 25 a minute on its target
- * finder; we pace to 20), then the estimates (≤ 205 per ask). If FFScouter
- * ignores the fair-fight range (a slice answers far outside itself), the
- * other slices of that level band are skipped: they'd be the same list.
- *
- * Then the owner's hard rule: every candidate goes through our fight model
- * and only players you beat keeping half your HP or more (Stomp, Good or
- * Fair, round 7) are ever stored. One order everywhere: most respect, then
- * most HP kept, then the highest win.
+ * Then the owner's hard rule: every candidate goes through our fight model and only players you beat keeping half
+ * your HP or more (Stomp, Good or Fair) are ever stored. At most 200 are kept: the active list (the first 100 in the
+ * order, the only ones shown and whose statuses are read) and a quiet reserve of up to 100 more. A player you hit
+ * drops out at once and the next one slides in; when the reserve runs low, one more ask follows (refillTargets).
+ * One order: band first (Stomp, Good, Fair), then the most respect, then the most HP kept, then the highest win.
  */
 
 import { estimatePlayer } from './estimate.js';
 import { forecast, respectFor, fairFight, bssOf } from './fight.js';
-import { bandOf, isListedBand } from './bands.js';
+import { bandOf, isListedBand, BAND_KEEP } from './bands.js';
 import { memberState, travelOf } from './war.js';
 
 /** The full range: no respect cap (owner). Torn caps fair fight at 3. */
 export const TARGET_FF = { min: 1.0, max: 3.0 };
 
-/** Bumped when the way lists are asked or judged changes: an older stored list is asked again once (3: round 7's bands). */
-export const TARGETS_VERSION = 3;
+/** Bumped when the way lists are asked or judged changes: an older stored list is asked again once (4: the stomp edge, 100 + 100). */
+export const TARGETS_VERSION = 4;
 
 /** What the list is asked with (round 7: the Level range and the Show ticks are gone; inactive players, any faction). */
 export const TARGET_LOAD = { minLevel: 1, maxLevel: 100, inactiveOnly: 1, factionless: null };
 
-/** [calibrate] The list is asked again by itself when the Torn Eye tab is open and the stored one is this old (no Refresh button). */
+/**
+ * [calibrate] The list is asked again by itself when the Torn Eye tab is open and the stored one is this old (no
+ * Refresh button). Kept as the fallback beside the refill: the refill only replaces players you hit, while your stats
+ * grow every day (the stored players' fair fight against you falls, so each gives less respect, and the best Stomps
+ * just under the edge are other players by then) and the inactive players change.
+ */
 export const TARGETS_REFRESH_MS = 6 * 60 * 60 * 1000;
 
-export const FF_SLICES = [
-    [1.0, 1.5],
-    [1.5, 2.0],
-    [2.0, 2.5],
-    [2.5, 3.0],
-];
+/** The active list: shown, statuses read (the owner: "at most 100 targets"). */
+export const ACTIVE_MAX = 100;
+/** The quiet reserve behind it: stored and fight-judged, never shown, no status reads. */
+export const RESERVE_MAX = 100;
+/** Everything stored. */
+export const LIST_MAX = ACTIVE_MAX + RESERVE_MAX;
+/** [calibrate] Fewer than this in reserve: one more FFScouter ask, quietly. */
+export const RESERVE_LOW = 20;
+/** [calibrate] A refill is not tried again sooner (one that found nobody new included). */
+export const REFILL_GAP_MS = 2 * 60 * 1000;
+/** A list load asks FFScouter's finder this many times at most (6 × 50: ~300 players looked at). */
+export const TARGET_ASKS_MAX = 6;
+/** FFScouter's finder answers 50 at most. */
+export const ASK_LIMIT = 50;
+/** [calibrate] A player you hit is not brought back by a refill or a reload for this long. */
+export const GONE_KEEP_MS = 24 * 60 * 60 * 1000;
 
 /** FFScouter's target finder: 25 a minute per IP; we keep to 20. */
 export const TARGETS_PER_MINUTE = 20;
@@ -76,15 +98,6 @@ export function levelBands(minLevel = 1, maxLevel = 100) {
     return out;
 }
 
-/** The asks for one load: each level band (highest first: more respect) × each fair-fight slice. */
-export function targetQueries({ minLevel = 1, maxLevel = 100, inactiveOnly = 1, factionless = null } = {}) {
-    const out = [];
-    for (const [a, b] of levelBands(minLevel, maxLevel).reverse()) {
-        for (const [f0, f1] of FF_SLICES) out.push({ minLevel: a, maxLevel: b, minFf: f0, maxFf: f1, inactiveOnly, factionless });
-    }
-    return out;
-}
-
 /** The params stored with a list; a list stored without this version is asked again once. */
 export function targetParams({ minLevel = 1, maxLevel = 100, inactiveOnly = 1, factionless = null } = {}) {
     return { v: TARGETS_VERSION, minLevel, maxLevel, inactiveOnly, factionless, minFf: TARGET_FF.min, maxFf: TARGET_FF.max };
@@ -102,13 +115,6 @@ export function listIgnoresFf(rows, q) {
     return out / known.length > 0.5;
 }
 
-/** One list from many asks, each player once (the first answer wins). */
-export function mergeTargetLists(lists) {
-    const seen = new Map();
-    for (const list of lists || []) for (const r of list || []) if (r && r.playerId > 0 && !seen.has(r.playerId)) seen.set(r.playerId, r);
-    return [...seen.values()];
-}
-
 /** FFScouter's own fair fight from the list: outside 1.0–3.0 it isn't a player we asked for. Unknown stays. */
 export function inFfRange(row) {
     const ff = row ? row.fairFight : null;
@@ -123,10 +129,228 @@ export function shownRespect(respect) {
     return Math.round((Number(respect) || 0) * 100);
 }
 
-/** The one order (round 7, the owner): most respect, then most HP kept, then the highest win. Rows {respect, keep, win} (0–100). */
-export function byRespect(a, b) {
+/** Where a band falls in the order: Stomp, Good, Fair, then anything else. */
+export function bandRank(band) {
+    const i = ['stomp', 'good', 'fair'].indexOf(band);
+    return i < 0 ? 3 : i;
+}
+
+/**
+ * The one order on stored rows (the owner, 2026-10-03): band first (Stomp, Good, Fair), then the most respect, then
+ * the most HP kept, then the highest win. Rows {band, respect, keep, win (0–100)}.
+ */
+export function byStored(a, b) {
     const pc = (v) => (Number.isFinite(v) ? Math.round(v) : -1);
-    return shownRespect(b.respect) - shownRespect(a.respect) || pc(b.keep) - pc(a.keep) || pc(b.win) - pc(a.win);
+    return bandRank(a.band) - bandRank(b.band) || shownRespect(b.respect) - shownRespect(a.respect) || pc(b.keep) - pc(a.keep) || pc(b.win) - pc(a.win);
+}
+
+/** Players you hit lately ({id: when}), without the ones older than GONE_KEEP_MS. */
+export function goneNow(gone, now = Date.now()) {
+    const out = {};
+    for (const [id, at] of Object.entries(gone || {})) if (Number(at) > 0 && now - Number(at) < GONE_KEEP_MS) out[id] = Number(at);
+    return out;
+}
+
+/**
+ * What is kept of a stored list: in the order, without the players you hit lately, at most LIST_MAX (the active 100
+ * and the reserve). A list stored by an older version (600 players) is cut the same way.
+ */
+export function cutTargets(list, { gone = null, now = Date.now() } = {}) {
+    const g = goneNow(gone, now);
+    return (list || []).filter((r) => r && r.playerId > 0 && !g[r.playerId]).sort(byStored).slice(0, LIST_MAX);
+}
+
+/**
+ * The live rows (judged again now, in byOrder) split: the active list (the first ACTIVE_MAX) and the reserve behind it.
+ * A row under 50% HP kept (your stats or colours changed) or one you hit is not listed: the next one slides in.
+ * @param {object[]} rows - {band, respect, forecast, hit}
+ */
+export function splitTargets(rows) {
+    const listed = (rows || []).filter((r) => r && isBeatable(r.band) && !(r.hit && r.hit.kind === 'hit')).sort(byOrder);
+    return { active: listed.slice(0, ACTIVE_MAX), reserve: listed.slice(ACTIVE_MAX, LIST_MAX) };
+}
+
+/**
+ * A player you hit drops out of the stored list at once (the owner: "hit → drop → refill"), remembered in `gone` so a
+ * refill or a reload doesn't bring them back for GONE_KEEP_MS.
+ * @param {object} stored - the stored list {list, gone, …}
+ * @param {Map<number, {kind}>} hits - ownHits(): only real hits (`kind: 'hit'`) drop a row, not an attack page opened
+ * @returns {object|null} the stored list without them, or null when nobody was hit
+ */
+export function dropHits(stored, hits, now = Date.now()) {
+    if (!stored || !Array.isArray(stored.list)) return null;
+    const out = [];
+    const gone = goneNow(stored.gone, now);
+    let n = 0;
+    for (const r of stored.list) {
+        const h = r && hits && hits.get(Number(r.playerId));
+        if (h && h.kind === 'hit') {
+            gone[r.playerId] = now;
+            n++;
+        } else out.push(r);
+    }
+    return n ? { ...stored, list: out, gone } : null;
+}
+
+/* ------------------------------------------------ the stomp edge (the owner, 2026-10-03) */
+
+/** The probe's id (it seeds the Monte Carlo, so the same stats give the same edges every time). */
+export const EDGE_PROBE_ID = 1000003;
+/** Bisection steps between fair fight 1 and 3: 2 / 2⁸ ≈ 0.008. */
+export const EDGE_STEPS = 8;
+/** [calibrate] Edges when your stats aren't known yet: roughly the old slices. */
+export const FALLBACK_EDGES = { stomp: 2.0, good: 2.5, fair: 3.0 };
+
+/**
+ * HP kept (whole percent, as bandOf reads it; 0 when you never win) against a typical player of this level whose
+ * strength is the given fair fight against you. The likely builds of fight.js at that battle-stat score.
+ * @param {object} o - {me: {str,spd,def,dex}, myLife, gearMe, level, ff, adjust: forecast => {pWin, keep} (what the fight learner kept)}
+ */
+export function keepAt({ me, myLife = 7500, gearMe, level = 100, ff, adjust = null }) {
+    const bss = (3 / 8) * (Math.max(1, ff) - 1) * bssOf(me);
+    let f = forecast({ me: { ...me, life: myLife }, target: { id: EDGE_PROBE_ID, life: lifeFromLevel(level), bss }, gearMe });
+    if (adjust) f = { ...f, ...adjust(f) };
+    if (!(f.pWin > 0) || !Number.isFinite(f.keep)) return 0;
+    return Math.round(f.keep * 100);
+}
+
+/**
+ * The fair fight at which you'd stop keeping `keep`% of your HP against a typical player of this level: the highest
+ * fair fight (1–3, two decimals) still at or over it. 3 when even the strongest keeps it; 1 when nobody does. Our fight
+ * model's HP kept falls as the other player gets stronger, so a bisection finds it.
+ */
+export function edgeFor(probe, keep) {
+    const at = (ff) => probe(ff) >= keep;
+    if (at(TARGET_FF.max)) return TARGET_FF.max;
+    if (!at(TARGET_FF.min)) return TARGET_FF.min;
+    let lo = TARGET_FF.min;
+    let hi = TARGET_FF.max;
+    for (let i = 0; i < EDGE_STEPS; i++) {
+        const mid = (lo + hi) / 2;
+        if (at(mid)) lo = mid;
+        else hi = mid;
+    }
+    return Math.floor(lo * 100) / 100;
+}
+
+/**
+ * The stomp, good and fair edges of each level band (the band's top level: its strongest players, the most life), in
+ * fair-fight terms, the figure FFScouter's finder is asked with.
+ * @param {object} o - {me, myLife, gearMe, adjust, minLevel, maxLevel}
+ * @returns {{minLevel, maxLevel, level, stomp, good, fair}[]} highest levels first
+ */
+export function findEdges({ me, myLife = 7500, gearMe, adjust = null, minLevel = 1, maxLevel = 100 }) {
+    return levelBands(minLevel, maxLevel)
+        .reverse()
+        .map(([a, b]) => {
+            const memo = new Map();
+            const probe = (ff) => {
+                const k = Math.round(ff * 1000);
+                if (!memo.has(k)) memo.set(k, keepAt({ me, myLife, gearMe, level: b, ff, adjust }));
+                return memo.get(k);
+            };
+            const stomp = edgeFor(probe, BAND_KEEP.stomp);
+            const good = Math.max(stomp, edgeFor(probe, BAND_KEEP.good));
+            const fair = Math.max(good, edgeFor(probe, BAND_KEEP.fair));
+            return { minLevel: a, maxLevel: b, level: b, stomp, good, fair };
+        });
+}
+
+/** The edges when your stats aren't known: FALLBACK_EDGES for every level band. */
+export function fallbackEdges({ minLevel = 1, maxLevel = 100 } = {}) {
+    return levelBands(minLevel, maxLevel)
+        .reverse()
+        .map(([a, b]) => ({ minLevel: a, maxLevel: b, level: b, ...FALLBACK_EDGES }));
+}
+
+/* ------------------------------------------------ the asks: zones under each edge, a cursor each */
+
+/** The zones, in the order they are asked: Stomp under the stomp edge, then Good, then Fair. */
+export const ZONES = ['stomp', 'good', 'fair'];
+
+const round2 = (v) => Math.round(v * 100) / 100;
+
+/** Where a band's zone starts (its weakest fair fight). */
+function zoneBottom(b, zone) {
+    return zone === 'stomp' ? TARGET_FF.min : zone === 'good' ? b.edges.stomp : b.edges.good;
+}
+
+/**
+ * A new plan from the edges (stored with the list, so a refill goes on where the load stopped). Each band's zone has a
+ * cursor (`top`: the next ask's highest fair fight) and is `dry` once an answer comes back short.
+ */
+export function askPlan(edges) {
+    return {
+        bands: (edges || []).map((e) => {
+            const b = { minLevel: e.minLevel, maxLevel: e.maxLevel, edges: { stomp: e.stomp, good: e.good, fair: e.fair }, top: { stomp: e.stomp, good: e.good, fair: e.fair }, dry: {}, skip: false };
+            for (const z of ZONES) b.dry[z] = !(b.top[z] > zoneBottom(b, z) + 0.005);
+            return b;
+        }),
+        asks: { stomp: 0, good: 0, fair: 0 },
+        ffIgnored: false,
+    };
+}
+
+/** Whether any band still has this zone to ask. */
+export function zoneOpen(plan, zone) {
+    return Boolean(plan && plan.bands.some((b) => !b.skip && !b.dry[zone]));
+}
+
+/**
+ * Which zone the next ask is in. Stomp first; Good and Fair only once Stomps run short: the Stomp zone is done, or
+ * (after two Stomp asks) the Stomps so far won't reach ACTIVE_MAX at this rate in the asks left. null: nothing left.
+ * @param {object} o - {stomps: Stomps kept so far, asked, cap}
+ */
+export function pickZone(plan, { stomps = 0, asked = 0, cap = TARGET_ASKS_MAX } = {}) {
+    const open = zoneOpen(plan, 'stomp');
+    const n = plan ? plan.asks.stomp : 0;
+    const short = !open || (n >= 2 && stomps + (cap - asked) * (stomps / n) < ACTIVE_MAX);
+    if (open && !short) return 'stomp';
+    for (const z of ['good', 'fair']) if (zoneOpen(plan, z)) return z;
+    return open ? 'stomp' : null;
+}
+
+/**
+ * The next ask in a zone: the open band whose top could give the most respect (respect is base(level) × fair fight,
+ * so high levels first, then lower), from the zone's bottom up to its cursor. null when the zone is done.
+ */
+export function nextAsk(plan, zone, { inactiveOnly = 1, factionless = null } = {}) {
+    let best = -1;
+    let worth = -Infinity;
+    (plan ? plan.bands : []).forEach((b, i) => {
+        if (b.skip || b.dry[zone]) return;
+        const w = (1 + b.maxLevel / 200) * b.top[zone];
+        if (w > worth) {
+            worth = w;
+            best = i;
+        }
+    });
+    if (best < 0) return null;
+    const b = plan.bands[best];
+    return { minLevel: b.minLevel, maxLevel: b.maxLevel, minFf: round2(zoneBottom(b, zone)), maxFf: round2(b.top[zone]), inactiveOnly, factionless, zone, band: best };
+}
+
+/**
+ * Move the plan on after an answer: FFScouter ignored the range (that band is not asked again), the zone ran out (a
+ * short answer), or the cursor goes just under the weakest player the answer gave.
+ */
+export function noteAnswer(plan, q, rows, limit = ASK_LIMIT) {
+    const b = plan.bands[q.band];
+    plan.asks[q.zone] = (plan.asks[q.zone] || 0) + 1;
+    if (listIgnoresFf(rows, q)) {
+        b.skip = true;
+        plan.ffIgnored = true;
+        return plan;
+    }
+    if ((rows || []).length < limit) {
+        b.dry[q.zone] = true;
+        return plan;
+    }
+    const ffs = rows.map((r) => r && r.fairFight).filter((v) => Number.isFinite(v) && v <= q.maxFf + 0.05);
+    const low = ffs.length ? Math.min(...ffs) : q.maxFf - 0.1;
+    b.top[q.zone] = round2(Math.min(low, q.maxFf) - 0.01);
+    if (!(b.top[q.zone] > zoneBottom(b, q.zone) + 0.005)) b.dry[q.zone] = true;
+    return plan;
 }
 
 /**
@@ -148,7 +372,7 @@ export function selectTargets(rows, judge) {
         else if (!isBeatable(j.band)) dropped.low++;
         else kept.push({ ...r, ...j });
     }
-    kept.sort(byRespect);
+    kept.sort(byStored);
     return { kept, dropped };
 }
 
@@ -206,11 +430,11 @@ export function targetDetails(row, view = null) {
 /* ------------------------------------------------ round 7: where a target is, from what was already read */
 
 /**
- * A status read is believed this long; a hospital stay until its own time, a flight until it lands. 25 min (round 7,
- * was 15): one pass over 600 targets at 30 a minute takes 20 min, so a row read in the last pass is still known when
- * the next one reaches it.
+ * A status read is believed this long; a hospital stay until its own time, a flight until it lands. 15 min: one pass
+ * over the active 100 at 30 a minute takes under 4 min and each player is read again every 10 min, so a row read in
+ * the last pass is still known when the next one reaches it (25 min while the list was 600).
  */
-export const STATUS_FRESH_MS = 25 * 60 * 1000;
+export const STATUS_FRESH_MS = 15 * 60 * 1000;
 
 /**
  * Where a player is, from reads already made, or null when nothing fresh is known. A stored target has no status of
@@ -275,8 +499,8 @@ export function targetStatus(reads, { listAt = 0, hospitalUntil = null, flight =
 export const HIT_RESULTS = ['Hospitalized', 'Attacked', 'Mugged'];
 
 /**
- * [calibrate] A player you beat is greyed this long. Torn's hospital times vary with the hit and aren't in the
- * attack row; the next list load brings the real out-time (FFScouter's `hospital_until`).
+ * [calibrate] An attack of yours counts as a hit this long (Torn's hospital times vary with the hit and aren't in the
+ * attack row): a target you hit inside it drops out of the list (dropHits) and is kept out for GONE_KEEP_MS.
  */
 export const OWN_HIT_MS = 60 * 60 * 1000;
 
@@ -342,12 +566,15 @@ export const PAGE_SIZE = 20;
 /** The band chips, in order. */
 export const BAND_CHIPS = ['all', 'stomp', 'good', 'fair'];
 
-/** The one order on the rows the tab draws (forecast 0..1): most respect, then most HP kept, then the highest win. */
+/**
+ * The one order on the rows the tab draws (forecast 0..1), and on the targets synced to Discord: band first (Stomp,
+ * Good, Fair), then the most respect, then the most HP kept, then the highest win.
+ */
 export function byOrder(a, b) {
     // Compared as the row shows them (respect to 2 decimals, HP kept and win in whole percents), so the tie-breaks apply.
     const k = (r) => (r.forecast && Number.isFinite(r.forecast.keep) ? Math.round(r.forecast.keep * 100) : -1);
     const w = (r) => (r.forecast && Number.isFinite(r.forecast.pWin) ? Math.round(r.forecast.pWin * 100) : -1);
-    return shownRespect(b.respect) - shownRespect(a.respect) || k(b) - k(a) || w(b) - w(a);
+    return bandRank(a.band) - bandRank(b.band) || shownRespect(b.respect) - shownRespect(a.respect) || k(b) - k(a) || w(b) - w(a);
 }
 
 /** A hospital or jail read whose own out-time has passed: they are out (or about to be), so it says nothing now. */
@@ -423,8 +650,8 @@ export const STATUS_PER_MIN = 30;
 export const STATUS_MAX_PENDING = 3;
 /** A failed read is not asked again sooner (Trading's PRESENCE_RETRY_MS). */
 export const STATUS_RETRY_MS = 2 * 60 * 1000;
-/** Statuses kept across reloads and tabs: 600 targets (FFScouter's finder asked 12 × 50) and a few more. */
-export const STATUS_KEEP = 640;
+/** Statuses kept across reloads and tabs: the active 100 and the reserve that slides in behind it, and a few more. */
+export const STATUS_KEEP = 240;
 
 /** Who is asked first: the player opened to attack, then the page on screen, then every other row in the list's order. */
 export function statusOrder({ open = [], page = [], all = [] } = {}) {
@@ -474,7 +701,7 @@ export function statusChecked(r, now = Date.now()) {
 /**
  * The progress line's numbers: how many of the list's players have a status known now, and about how long the rest
  * take at 30 a minute.
- * @param {number[]} ids - every row of the stored list
+ * @param {number[]} ids - every row of the active list (the reserve's statuses are never read)
  * @param {function} known - id => boolean
  */
 export function statusProgress(ids, known) {
@@ -483,7 +710,7 @@ export function statusProgress(ids, known) {
     return { checked, total, leftMin: Math.ceil((total - checked) / STATUS_PER_MIN) };
 }
 
-/** "Statuses: 40 of 600 checked · this page first · the rest in about 19 min" (the mockup's words). */
+/** "Statuses: 37 of 100 checked · this page first · the rest in about 3 min" (the mockup's words; the active list only). */
 export function statusLine({ checked, total, leftMin }) {
     if (!total) return '';
     if (checked >= total) return 'Statuses: all ' + total + ' checked · each again every 10 min';

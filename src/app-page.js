@@ -12,13 +12,13 @@ import { archived, pageGet, loadArchives, drainArchives, clearArchived, archives
 import { PiApp } from './ui/app/app.js';
 import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, fetchFactionMembers, fetchFactionWars, keyIsEnough } from './api/torn.js';
 import { outEarly, enemiesFromWars, warBandTable } from './core/eye/war.js';
-import { isBeatable, targetStatus, ownHits, statusOrder, byOrder, ATTACK_OPENED_MS } from './core/eye/targets.js';
+import { targetStatus, ownHits, statusOrder, splitTargets, cutTargets, ATTACK_OPENED_MS } from './core/eye/targets.js';
 import { normBand } from './core/eye/bands.js';
 import { isWatched } from './core/eye/watch.js';
 import { W3bClient, fetchW3bListings } from './api/w3b.js';
 import { checkFfsKey } from './api/ffscouter.js';
 import { renderEye, readsTargetStatuses } from './ui/app/eye-tab.js';
-import { wantPlayers, eyeView, warmFights, fightsPending, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient, importTargets, TARGETS_KEY, WAR_BANDS_KEY, rememberFlights, flightsSeen, getWatch, watchStates, toggleWatch, setWatchTag, dismissWatchOffer, watchOffersNow, pollWatch, pumpStatuses, statusRead, onStatus, loadStatuses, attacksAfterOpen } from './eye-service.js';
+import { wantPlayers, eyeView, warmFights, fightsPending, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient, importTargets, refillTargets, dropHitTargets, storedTargets, TARGETS_KEY, WAR_BANDS_KEY, rememberFlights, flightsSeen, getWatch, watchStates, toggleWatch, setWatchTag, dismissWatchOffer, watchOffersNow, pollWatch, pumpStatuses, statusRead, onStatus, loadStatuses, attacksAfterOpen } from './eye-service.js';
 import { discordState, discordRaw, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId, linkDiscord, setTargetsForSync, setEyeForSync, loginDiscord, cancelLogin, resumeLogin } from './discord.js';
 import { saveFullKey, forgetFullKey, refreshMoneyLog } from './income.js';
 import { WORKER_SETUP_URL } from './api/worker.js';
@@ -233,11 +233,11 @@ function diagnostics() {
 }
 
 /**
- * Targets for the Torn Eye tab: FFScouter asked in slices, each player
- * judged by the fight model, only the ones you beat stored (eye-service).
+ * Targets for the Torn Eye tab: FFScouter asked just under your stomp edge, each answer judged by the fight model,
+ * only the ones you beat stored, the active 100 and a reserve (eye-service).
  */
 async function loadTargets(params) {
-    if (!getKey(K.ffsKey) || isPaused() || page.eye.loading) return;
+    if (!getKey(K.ffsKey) || isPaused() || page.eye.loading || page.eye.refilling) return;
     page.eye.loading = true;
     page.eye.error = null;
     page.app.render(true);
@@ -249,6 +249,23 @@ async function loadTargets(params) {
     }
     page.eye.loading = false;
     page.app.render(true);
+}
+
+/**
+ * The reserve ran low (players you hit dropped out): one more FFScouter ask, quietly (no "loading", an error kept to
+ * itself; the tab tries again after REFILL_GAP_MS). Visible tab, an FFScouter key, never while Torn Trading runs or
+ * while a load or another refill is under way; paced with the loads (20 a minute).
+ */
+async function refillQuietly() {
+    if (!getKey(K.ffsKey) || isPaused() || !isVisible() || page.eye.loading || page.eye.refilling) return;
+    page.eye.refilling = true;
+    try {
+        await refillTargets({ client: ffsClient() });
+    } catch {
+        // Quiet: the list stays as it is; the 6 h reload or the next refill tries again.
+    } finally {
+        page.eye.refilling = false;
+    }
 }
 
 /*
@@ -342,8 +359,29 @@ function watchNow() {
     return watchMemo;
 }
 
-/** Stored targets, judged again now: only players you still beat show (your stats or colours may have changed). */
+/**
+ * Stored targets, judged again now, split into the active list (the first 100 in the order: shown, statuses read,
+ * synced to Discord) and the quiet reserve behind it. Only players you still beat are listed (your stats or colours
+ * may have changed) and a player you just hit is out at once: the next one slides in. Worked out once per draw.
+ */
+let listsMemo = null;
+function eyeLists() {
+    if (!listsMemo) {
+        listsMemo = splitTargets(judgedTargets());
+        Promise.resolve().then(() => {
+            listsMemo = null;
+        });
+    }
+    return listsMemo;
+}
+
+/** The active list (Targets, the bot's /targets). */
 function eyeRows() {
+    return eyeLists().active;
+}
+
+/** Every kept target (at most 200, an older 600 list cut in the order), judged again now. */
+function judgedTargets() {
     const stored = pageGet(TARGETS_KEY, null);
     if (!stored || !Array.isArray(stored.list)) return [];
     // Where each target is, from reads already made (round 7): the list itself asks Torn about nobody, so a row's
@@ -355,7 +393,7 @@ function eyeRows() {
     const warBy = new Map((war.membersFid === fid ? war.members || [] : []).map((mm) => [Number(mm.id), mm]));
     // Who you just hit: your attacks (read hourly) and the attack pages you opened since.
     const hits = ownHits((getShared('myAttacks', null) || {}).list || [], getShared(K.eyePredictions, []) || [], now);
-    const rows = stored.list.map((x) => {
+    return cutTargets(stored.list, { gone: stored.gone, now }).map((x) => {
         // A fight not worked out yet isn't simulated inside the draw: the row shows what the list stored until it is.
         const live = eyeView(x.playerId, { level: x.level, name: x.name }, { later: true });
         const v = live && !live.pending ? live : null;
@@ -371,7 +409,6 @@ function eyeRows() {
         const hit = hits.get(Number(x.playerId)) || null;
         return { ...base, name: x.name, level: x.level, hospitalUntil: ts.hospitalUntil, lastAction: x.lastAction, id: x.playerId, stored: x, status: ts.status, statusAt: ts.statusAt, hit };
     });
-    return rows.filter((r) => isBeatable(r.band));
 }
 
 /*
@@ -412,8 +449,8 @@ function syncEye(force = false) {
     if (fightsPending()) return;
     eyeSyncAt = Date.now();
     const row = (id, name, level, v, extra = {}) => ({ id, name: name || (v && v.name) || null, level: level || (v && v.level) || null, band: v ? v.band : 'none', win: v && v.forecast ? Math.round(v.forecast.pWin * 100) : null, keep: v && v.forecast && v.forecast.keep !== null && v.forecast.keep !== undefined ? Math.round(v.forecast.keep * 100) : null, ...extra });
-    // The bot's /targets: the first 50 in the one order (respect, HP kept, win).
-    const rows = eyeRows().sort(byOrder);
+    // The bot's /targets: the first 50 of the active list, in the one order (band, respect, HP kept, win).
+    const rows = eyeRows();
     const bands = {};
     for (const r of rows) if (r.band) bands[r.id] = r.band;
     const fid = warFid();
@@ -663,8 +700,12 @@ function getCtx() {
         },
         eye: {
             rows: eyeRows,
+            /** How many wait in the quiet reserve behind the active list. */
+            reserve: () => eyeLists().reserve.length,
             stored: () => pageGet(TARGETS_KEY, null),
             load: (params) => loadTargets(params).catch(() => {}),
+            /** The reserve ran low: one more ask, quietly. */
+            refill: () => refillQuietly().catch(() => {}),
             loading: () => page.eye.loading,
             error: () => page.eye.error,
             sources: () => ({ fights: ((get('myAttacks', null) || {}).list || []).length, ffsFree: page.ffs ? page.ffs.stats().remaining : 60, gear: page.eye.gear }),
@@ -765,8 +806,8 @@ export function bootAppPage({ renderers = {} } = {}) {
     const eyeTab = () => {
         const open = page.app.tab === 'eye';
         if (open && !eyeOpen) {
-            const stored = pageGet(TARGETS_KEY, null);
-            if (stored && Array.isArray(stored.list)) wantPlayers(stored.list.map((x) => x.playerId));
+            const kept = storedTargets();
+            if (kept.length) wantPlayers(kept.map((x) => x.playerId));
         }
         eyeOpen = open;
     };
@@ -778,10 +819,11 @@ export function bootAppPage({ renderers = {} } = {}) {
     // their fights are worked out while the page is idle. Local numbers only: nothing is asked unless the tab is open.
     let warmed = false;
     const warm = () => {
-        if (warmed || page.app.tab === 'eye') return;
-        const stored = pageGet(TARGETS_KEY, null);
-        if (!archivesReady() || !stored || !Array.isArray(stored.list)) return;
-        warmed = warmFights(stored.list.map((x) => ({ id: x.playerId, extra: { level: x.level, name: x.name } })));
+        if (warmed || page.app.tab === 'eye' || !archivesReady()) return;
+        // Only the kept targets (the active list and the reserve, at most 200): an older 600 list is cut first.
+        const kept = storedTargets();
+        if (!kept.length) return;
+        warmed = warmFights(kept.map((x) => ({ id: x.playerId, extra: { level: x.level, name: x.name } })));
     };
     Promise.all([loadArchives(), gearCount()]).then(() => setTimeout(warm, 1500)).catch(() => {});
     onModel(() => warm());
@@ -814,6 +856,8 @@ export function bootAppPage({ renderers = {} } = {}) {
         // Nothing of Torn Eye's runs unless its tab is open (owner, round 6: it only runs on the Torn Eye tab).
         eyeTab();
         if (page.app.tab !== 'eye') return;
+        // A target you hit is out of the stored list (the draw already leaves it out); a low reserve then refills.
+        dropHitTargets();
         pollOwnWars().catch(() => {});
         pollWarTab().catch(() => {});
         // The Watched view reads its players every 60 s while it shows (the war list just read costs nothing).

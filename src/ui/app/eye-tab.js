@@ -5,15 +5,17 @@
  * hospital out-times, landings, jail) and Watched (the players you chose to keep an eye on). Chain is gone (round 7:
  * it was the same list as Targets).
  *
- * Targets: the band chips (All / Stomp / Good / Fair, with counts) and "Ready now" (on by default); one order for
- * everything, most respect, then most HP kept, then the highest win; 20 rows a page, only those drawn; the statuses
- * read the Torn Trading way (eye-service.js `pumpStatuses`), this page first, then the rest quietly.
+ * Targets: the active list (at most 100; a quiet reserve of up to 100 more waits behind it, never shown), the band
+ * chips (All / Stomp / Good / Fair, with counts) and "Ready now" (on by default); one order (the owner, 2026-10-03):
+ * band first (Stomp, Good, Fair), then the most respect, then the most HP kept, then the highest win; 20 rows a page,
+ * only those drawn; the statuses read the Torn Trading way (eye-service.js `pumpStatuses`), this page first, then the
+ * rest of the active list quietly. A player you hit drops out and the next one slides in; a low reserve refills.
  */
 
 import { h, t } from '../dom.js';
 import { BAND_WORDS, BAND_COLORS } from '../../core/eye/bands.js';
 import { sortWar, warSummary, statusParts, activityOf, ACTIVITY_COLORS, ACTIVITY_WORDS, WAR_KIND_WORDS } from '../../core/eye/war.js';
-import { needsRefetch, targetDetails, targetsMessage, hitText, OLD_ESTIMATE_DAYS, TARGET_LOAD, TARGETS_REFRESH_MS, listTargets, pageOf, pagerItems, rowState, statusOver, statusChecked, statusProgress, statusLine, BAND_CHIPS, PAGE_SIZE } from '../../core/eye/targets.js';
+import { needsRefetch, targetDetails, targetsMessage, hitText, OLD_ESTIMATE_DAYS, TARGET_LOAD, TARGETS_REFRESH_MS, RESERVE_LOW, REFILL_GAP_MS, listTargets, pageOf, pagerItems, rowState, statusOver, statusChecked, statusProgress, statusLine, BAND_CHIPS, PAGE_SIZE } from '../../core/eye/targets.js';
 import { WATCH_TAGS, WATCH_MAX, TAG_MAX, headsUps } from '../../core/eye/watch.js';
 import { profileUrl, attackUrl } from '../../sources/route.js';
 import { FFS_SITE_URL } from '../../api/ffscouter.js';
@@ -58,6 +60,20 @@ export function shouldAutoLoad({ mode, hasFfs, paused, stored, loading, error, a
     if (!(ready && mode === 'targets' && Boolean(hasFfs) && !paused && !loading && !error)) return false;
     if (typeof autoLoaded === 'number' ? now - autoLoaded < TARGETS_REFRESH_MS : autoLoaded) return false;
     return !stored || needsRefetch(stored.params) || !(now - (Number(stored.at) || 0) < TARGETS_REFRESH_MS);
+}
+
+/**
+ * One more FFScouter ask, quietly, when the reserve behind the active list runs low (players you hit dropped out):
+ * same gates as a load (Targets showing, FFScouter connected, your stats in, not paused, no load or error), a list
+ * asked the current way with asks left in its plan, and not within REFILL_GAP_MS of the last try (this page's or the
+ * list's own, so two tabs don't both ask).
+ */
+export function shouldRefill({ mode, hasFfs, paused, stored, loading, error, reserve, refilledAt = 0, ready = true, now = Date.now() }) {
+    if (!(ready && mode === 'targets' && Boolean(hasFfs) && !paused && !loading && !error)) return false;
+    if (!stored || !Array.isArray(stored.list) || needsRefetch(stored.params) || !stored.plan || stored.plan.done) return false;
+    if (!Number.isFinite(reserve) || reserve >= RESERVE_LOW) return false;
+    const last = Math.max(Number(refilledAt) || 0, Number(stored.refilledAt) || 0, Number(stored.at) || 0);
+    return !(now - last < REFILL_GAP_MS);
 }
 
 /** Where a target row is (core/eye/targets.js rowState): 'hospital', 'travel', 'jail', 'okay', 'other' or 'unknown'. */
@@ -115,13 +131,12 @@ function ago(ts, now) {
 }
 
 /**
- * The status cell: what was read, your own hit, or "checking" while the statuses are being read. FFScouter's
- * out-time comes only while no read is newer than the list (app-page.js eyeRows, targetStatus), as in rowState.
+ * The status cell: what was read, the attack page you opened, or "checking" while the statuses are being read.
+ * FFScouter's out-time comes only while no read is newer than the list (app-page.js eyeRows, targetStatus), as in
+ * rowState. A player you hit isn't here: they dropped out of the list (core/eye/targets.js splitTargets).
  */
 function statusCell(r, now, checking) {
     if (r.hospitalUntil && r.hospitalUntil > now) return h('td', { class: 'cdn', text: 'Hospital · ' + countdown(r.hospitalUntil - now) });
-    // Your own hit: known without asking Torn.
-    if (r.hit && r.hit.kind === 'hit') return h('td', { class: 'cdn', text: hitText(r.hit, now) });
     // A hospital or jail read whose out-time has passed says nothing now (rowState: unknown).
     const st = r.status && !statusOver(r.status, now) ? r.status : {};
     const d = st.description || st.state;
@@ -203,7 +218,7 @@ function targetsTable(rows, { now, ctx, checking }) {
         const s = rowState(r, now);
         return s === 'hospital' || s === 'travel' || s === 'jail';
     };
-    // The bright Attack button goes to the first player known to be free now, never one you just put in hospital.
+    // The bright Attack button goes to the first player known to be free now, not one whose attack page you just opened.
     const firstUp = rows.find((r) => !r.hit && rowState(r, now) === 'okay') || null;
     const statuses = ctx.eye.statuses;
     const rowOf = (r) => {
@@ -229,8 +244,8 @@ function targetsTable(rows, { now, ctx, checking }) {
         ];
         const d = detailsText(targetDetails(r.stored || {}, r));
         const isOpen = open === r.id;
-        // A player you just hit, in hospital, away or in jail: greyed (still listed when "Ready now" is off).
-        const grey = (r.hit && r.hit.kind === 'hit') || down(r);
+        // In hospital, away or in jail: greyed (still listed when "Ready now" is off).
+        const grey = down(r);
         body.push(h('tr', { class: 'click' + (isOpen ? ' sel' : '') + (grey ? ' whatif' : ''), tabindex: '0', title: d, 'aria-expanded': String(isOpen), onclick: () => { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); }, onkeydown: (ev) => { if (ev.key === 'Enter') { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); } } }, cells));
         if (isOpen) body.push(h('tr', { class: 'sub' }, [h('td', { colspan: String(head.length), class: 'muted', style: 'font-size:12px' }, [d])]));
         return body;
@@ -266,8 +281,8 @@ function targetChips(ctx, f, list) {
         { class: 'eye-chips', role: 'group', 'aria-label': 'Band' },
         BAND_CHIPS.map((b) => h('button', { type: 'button', class: 'eye-chip', 'aria-pressed': String(f.band === b), onclick: () => set('band', b) }, [b === 'all' ? null : h('i', { style: 'background:' + BAND_COLORS[b] }), CHIP_WORDS[b], h('span', { text: ' ' + list.counts[b] })])),
     );
-    const ready = h('button', { type: 'button', class: 'eye-chip', 'data-act': 'ready', 'aria-pressed': String(f.ready), title: 'Hides hospital, abroad, traveling, jail and players you hit in the last hour', onclick: () => set('ready', !f.ready) }, ['Ready now', f.ready && list.hidden ? h('span', { text: ' · ' + list.hidden + ' hidden' }) : null]);
-    return [bands, h('div', { class: 'eye-chips' }, [ready]), h('span', { class: 'eye-rule' }, ['Order: ', h('b', { text: 'respect' }), ' › ', h('b', { text: 'HP kept' }), ' › ', h('b', { text: 'win' })])];
+    const ready = h('button', { type: 'button', class: 'eye-chip', 'data-act': 'ready', 'aria-pressed': String(f.ready), title: 'Hides hospital, abroad, traveling and jail (players you hit leave the list)', onclick: () => set('ready', !f.ready) }, ['Ready now', f.ready && list.hidden ? h('span', { text: ' · ' + list.hidden + ' hidden' }) : null]);
+    return [bands, h('div', { class: 'eye-chips' }, [ready]), h('span', { class: 'eye-rule' }, ['Order: ', h('b', { text: 'band' }), ' › ', h('b', { text: 'respect' }), ' › ', h('b', { text: 'HP kept' }), ' › ', h('b', { text: 'win' })])];
 }
 
 /** War and Watched rows share one layout: band edge, online dot, status with out-times and landings, win and HP kept. */
@@ -452,6 +467,10 @@ export function renderEye(m, ctx) {
     if (shouldAutoLoad({ mode, hasFfs: ctx.flags.hasFfs, paused: ctx.paused, stored, loading: e.loading(), error: e.error(), autoLoaded: ui.eyeAutoLoaded, ready: Boolean(m && m.ready), now })) {
         ui.eyeAutoLoaded = now;
         setTimeout(reload, 0);
+    } else if (e.refill && e.reserve && mode === 'targets' && shouldRefill({ mode, hasFfs: ctx.flags.hasFfs, paused: ctx.paused, stored, loading: e.loading(), error: e.error(), reserve: e.reserve(), refilledAt: ui.eyeRefillAt, ready: Boolean(m && m.ready), now })) {
+        // The reserve ran low (players you hit dropped out): one more ask, quietly.
+        ui.eyeRefillAt = now;
+        setTimeout(() => e.refill(), 0);
     }
 
     // Heads-ups for the watch list show in every mode.
@@ -536,7 +555,8 @@ export function renderEye(m, ctx) {
         const statuses = e.statuses || null;
         // Read only with FFScouter connected (readsTargetStatuses): without it no "checking" and no progress line.
         const checking = Boolean(statuses && ctx.flags.hasFfs && statuses.active());
-        // Statuses: the players opened to attack, then this page, then every other listed row in the one order.
+        // Statuses: the players opened to attack, then this page, then every other row of the active list in the one
+        // order (the reserve is never asked about).
         const everyone = listTargets(rowsAll, { band: 'all', ready: false, now }).rows;
         // Without FFScouter there is no list to read statuses for: nothing asked (round 7 review).
         if (statuses && ctx.flags.hasFfs) {
@@ -546,7 +566,7 @@ export function renderEye(m, ctx) {
         let body;
         if (!ctx.flags.hasFfs) body = h('p', { class: 'muted', style: 'margin:0' }, ['Targets come from FFScouter. ', h('a', { href: '#settings', onclick: (ev) => { ev.preventDefault(); ctx.go('settings'); }, text: 'Connect it in Settings' }), '; chips on Torn’s pages work without it (your fights and public stats).']);
         else if (!rows.length) {
-            const text = msg.kind !== 'none' ? msg.text : list.counts.all ? (f.ready && list.hidden ? 'Nobody ready now: ' + list.hidden + ' hidden (hospital, away, jail or just hit).' : 'Nobody in this band.') : 'No targets yet.';
+            const text = msg.kind !== 'none' ? msg.text : list.counts.all ? (f.ready && list.hidden ? 'Nobody ready now: ' + list.hidden + ' hidden (hospital, away or jail).' : 'Nobody in this band.') : 'No targets yet.';
             body = h('p', { class: msg.kind === 'dead' || msg.kind === 'error' ? 'c-bad' : 'muted', style: 'margin:0' }, [text, msg.kind === 'dead' ? h('span', {}, [' · ', h('a', { href: '#settings', onclick: (ev) => { ev.preventDefault(); ctx.go('settings'); }, text: 'check it in Settings' })]) : null]);
         } else body = targetsTable(pg.rows, { now, ctx, checking });
         const notes = [];
@@ -558,7 +578,7 @@ export function renderEye(m, ctx) {
         }
         // A load that failed still says so above an older list.
         const warnLine = rows.length && (msg.kind === 'error' || msg.kind === 'dead' || msg.kind === 'wait' || msg.kind === 'paused') ? h('div', { class: 'why', style: 'margin-bottom:8px', text: msg.text + (stored && stored.at ? ' · showing the list from ' + clock(stored.at, ctx.settings) : '') }) : null;
-        // "Statuses: 40 of 600 checked · this page first · the rest in about 19 min" (every listed row, whatever the chips).
+        // "Statuses: 37 of 100 checked · this page first · the rest in about 3 min" (the active list, whatever the chips).
         // Only rows with a status actually read count as checked (not the list's out-time or your own hit).
         const known = new Set(everyone.filter((r) => statusChecked(r, now)).map((r) => r.id));
         const prog = statusProgress(everyone.map((r) => r.id), (id) => known.has(id));

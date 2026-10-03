@@ -14,7 +14,7 @@ import { makeFfsClient, fetchFfsTargets } from '../src/api/ffscouter.js';
 import { fetchFactionWars } from '../src/api/torn.js';
 import { bssOf } from '../src/core/eye/fight.js';
 import { totalFromBss } from '../src/core/eye/estimate.js';
-import { judgeTarget, selectTargets, targetQueries, levelBands, needsRefetch, targetParams, mergeTargetLists, inFfRange, listIgnoresFf, targetsMessage, targetDetails, isBeatable, TARGET_FF, TARGETS_VERSION, OLD_ESTIMATE_DAYS } from '../src/core/eye/targets.js';
+import { judgeTarget, selectTargets, findEdges, askPlan, nextAsk, pickZone, bandRank, TARGET_ASKS_MAX, levelBands, needsRefetch, targetParams, inFfRange, listIgnoresFf, targetsMessage, targetDetails, isBeatable, TARGET_FF, TARGETS_VERSION, OLD_ESTIMATE_DAYS } from '../src/core/eye/targets.js';
 import { enemiesFromWars, activityOf, trackFlights, statusParts, statusText, sortWar, memberState, FLIGHT_MIN } from '../src/core/eye/war.js';
 import { addWatch, removeWatch, tagWatch, normTag, dueForRead, readEvents, headsUps, watchOffers, dismissOffer, WATCH_MAX, TAG_MAX, WATCH_POLL_MS, WATCH_SLOW_MS } from '../src/core/eye/watch.js';
 import { importTargets, TARGETS_KEY, WATCH_KEY, WATCH_STATE_KEY, slimAttacks, pollWatch, toggleWatch, getWatch, watchStates, rememberFlights, flightsSeen, setWatchTag, watchOffersNow } from '../src/eye-service.js';
@@ -100,23 +100,21 @@ test('the fight model is right for the owner: fair fight 2.0 at level 100 is a s
     assert.equal(at(3.0, 2).band, 'low');
 });
 
-test('asks: 4 fair-fight slices × up to 3 level bands, the full 1.0–3.0, highest levels first', () => {
+test('asks: up to 3 level bands, highest levels first, the first one just under the stomp edge of the top band', () => {
     assert.deepEqual(levelBands(1, 100), [[1, 33], [34, 67], [68, 100]]);
     assert.deepEqual(levelBands(40, 80), [[40, 60], [61, 80]]);
     assert.deepEqual(levelBands(45, 55), [[45, 55]]);
-    const q = targetQueries({ minLevel: 1, maxLevel: 100 });
-    assert.equal(q.length, 12);
-    assert.deepEqual([q[0].minLevel, q[0].maxLevel], [68, 100]);
-    assert.equal(Math.min(...q.map((x) => x.minFf)), TARGET_FF.min);
-    assert.equal(Math.max(...q.map((x) => x.maxFf)), TARGET_FF.max);
+    const edges = findEdges({ me: OWNER, myLife: OWNER_LIFE });
+    assert.deepEqual(edges.map((e) => [e.minLevel, e.maxLevel]), [[68, 100], [34, 67], [1, 33]]);
+    const plan = askPlan(edges);
+    const q = nextAsk(plan, pickZone(plan));
+    assert.deepEqual([q.zone, q.minLevel, q.maxLevel, q.minFf, q.maxFf], ['stomp', 68, 100, TARGET_FF.min, edges[0].stomp]);
     assert.deepEqual(TARGET_FF, { min: 1, max: 3 });
     assert.equal(targetParams({}).v, TARGETS_VERSION);
+    assert.equal(TARGETS_VERSION, 4, 'lists stored the 600 way are asked again once');
 });
 
-test('merge, range and "FFScouter ignored the range" checks', () => {
-    const a = [{ playerId: 1, fairFight: 1.2 }, { playerId: 2, fairFight: 2.5 }];
-    const b = [{ playerId: 2, fairFight: 9 }, { playerId: 3, fairFight: 31 }];
-    assert.deepEqual(mergeTargetLists([a, b]).map((r) => r.playerId), [1, 2, 3]);
+test('range and "FFScouter ignored the range" checks', () => {
     assert.equal(inFfRange({ fairFight: 31 }), false);
     assert.equal(inFfRange({ fairFight: 0.9 }), false);
     assert.equal(inFfRange({ fairFight: null }), true, 'unknown: the fight model decides');
@@ -124,25 +122,35 @@ test('merge, range and "FFScouter ignored the range" checks', () => {
     assert.equal(listIgnoresFf([{ fairFight: 1.1 }, { fairFight: 1.4 }, { fairFight: 1.5 }], { minFf: 1, maxFf: 1.5 }), false);
 });
 
-test('import (the owner, strongest-first FFScouter): only beatable players are stored, most respect first', async () => {
+test('import (the owner, strongest-first FFScouter): only beatable players are stored, band first, then most respect', async () => {
     ownerModel();
     const { client, calls } = fakeFfs();
     const clk = fakeClock(1e12);
     const out = await importTargets({ minLevel: 1, maxLevel: 100, inactiveOnly: 1 }, { client, ...clk });
     const stored = get(TARGETS_KEY, null);
     assert.deepEqual(stored.list.map((r) => r.playerId), out.list.map((r) => r.playerId), 'stored under eyeTargets');
-    assert.equal(out.asked, 12);
-    assert.equal(calls.filter((u) => u.pathname.endsWith('/get-targets')).length, 12);
+    // This made-up Torn is thin (~35 players under each band's stomp edge): every zone answers short, so the asks
+    // go Stomp, then Good, up to the cap.
+    assert.ok(out.asked <= TARGET_ASKS_MAX, out.asked + ' asks');
+    assert.equal(calls.filter((u) => u.pathname.endsWith('/get-targets')).length, out.asked);
     assert.ok(calls.filter((u) => u.pathname.endsWith('/get-stats')).length >= 1, 'estimates asked before judging');
     assert.ok(out.list.length >= 20, out.list.length + ' kept');
     assert.ok(out.list.every((r) => isBeatable(r.band)), 'never a row under 50% HP kept: ' + [...new Set(out.list.map((r) => r.band))]);
     assert.ok(out.list.every((r) => r.keep >= 50), 'every stored row keeps half your HP or more');
-    assert.ok(out.dropped.low > 0, 'the strong ones were dropped, not stored');
+    assert.ok(out.list.filter((r) => r.band === 'stomp').length >= 20, 'asked under the stomp edge: Stomps');
     // Compared as the row shows them (respect to 2 decimals: round 7 review, so the tie-breaks apply).
     const shown = (r) => Math.round((r.respect || 0) * 100);
-    assert.ok(out.list.every((r, i) => i === 0 || shown(r) <= shown(out.list[i - 1])), 'most respect first');
-    assert.ok(out.list.every((r, i) => i === 0 || shown(r) !== shown(out.list[i - 1]) || r.keep <= out.list[i - 1].keep), 'then most HP kept');
-    assert.ok(out.list[0].respect > 3, 'no respect cap: the best is above 3 (' + out.list[0].respect.toFixed(2) + ')');
+    assert.ok(out.list.every((r, i) => i === 0 || bandRank(r.band) >= bandRank(out.list[i - 1].band)), 'band first: Stomp, Good, Fair');
+    const same = (r, i) => i > 0 && r.band === out.list[i - 1].band;
+    assert.ok(out.list.every((r, i) => !same(r, i) || shown(r) <= shown(out.list[i - 1])), 'then most respect');
+    assert.ok(out.list.every((r, i) => !same(r, i) || shown(r) !== shown(out.list[i - 1]) || r.keep <= out.list[i - 1].keep), 'then most HP kept');
+    const best = Math.max(...out.list.map((r) => r.respect));
+    assert.ok(best > 3, 'no respect cap: the best is above 3 (' + best.toFixed(2) + ')');
+    // The best Stomp sits just under the edge: within a few hundredths of base(level) × the stomp edge.
+    const top = out.list[0];
+    const edge = out.plan.bands.find((b) => top.level >= b.minLevel && top.level <= b.maxLevel).edges.stomp;
+    assert.equal(top.band, 'stomp');
+    assert.ok(top.ours > edge - 0.3, 'the first Stomp is close under its band\'s edge (' + top.ours.toFixed(2) + ' vs ' + edge + ')');
     assert.ok(new Set(out.list.map((r) => r.level)).size > 5, 'not only level 100');
     assert.ok(out.list.every((r) => Number.isFinite(r.fairFight) && Number.isFinite(r.ours)), 'both fair fights kept for the details');
     assert.equal(out.params.v, TARGETS_VERSION);

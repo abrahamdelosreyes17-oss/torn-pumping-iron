@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { pi } from '../src/runtime.js';
 import { K, get, set, setKey } from '../src/platform/store.js';
 import { attacksDueAt, attacksAfterOpen, ATTACKS_AFTER_OPEN_MS } from '../src/eye-service.js';
-import { targetStatus, knownStatus, rowState, isReadyNow, listTargets, byOrder, byRespect, statusesToAsk, statusChecked, statusProgress, statusLine, STATUS_REFRESH_MS, OWN_HIT_MS } from '../src/core/eye/targets.js';
+import { targetStatus, knownStatus, rowState, isReadyNow, listTargets, byOrder, byStored, statusesToAsk, statusChecked, statusProgress, statusLine, STATUS_REFRESH_MS, OWN_HIT_MS } from '../src/core/eye/targets.js';
 import { sortWar } from '../src/core/eye/war.js';
 import { readsTargetStatuses, eyeModeOf } from '../src/ui/app/eye-tab.js';
 
@@ -56,8 +56,8 @@ test('2. the order compares what the row shows: respect to 2 decimals, then HP k
     // A real respect difference still comes first.
     assert.deepEqual([r(1, 3.0, 1, 1), r(2, 3.01, 0.5, 0.6)].sort(byOrder).map((x) => x.id), [2, 1]);
     // The stored list (whole percents) the same way.
-    assert.deepEqual([{ id: 1, respect: 2.004, keep: 70, win: 100 }, { id: 2, respect: 2.001, keep: 90, win: 90 }].sort(byRespect).map((x) => x.id), [2, 1]);
-    assert.deepEqual([{ id: 1, respect: 2.004, keep: 80, win: 90 }, { id: 2, respect: 2.001, keep: 80, win: 95 }, { id: 3, respect: 2.002, keep: null, win: 99 }].sort(byRespect).map((x) => x.id), [2, 1, 3]);
+    assert.deepEqual([{ id: 1, respect: 2.004, keep: 70, win: 100 }, { id: 2, respect: 2.001, keep: 90, win: 90 }].sort(byStored).map((x) => x.id), [2, 1]);
+    assert.deepEqual([{ id: 1, respect: 2.004, keep: 80, win: 90 }, { id: 2, respect: 2.001, keep: 80, win: 95 }, { id: 3, respect: 2.002, keep: null, win: 99 }].sort(byStored).map((x) => x.id), [2, 1, 3]);
     // War: within a band too.
     const members = [1, 2, 3].map((id) => ({ id, status: { state: 'Okay' } }));
     const order = sortWar(members, { bands: { 1: 'good', 2: 'good', 3: 'good' }, respect: { 1: 3.004, 2: 3.001, 3: 3.002 }, keep: { 1: 0.7, 2: 0.9, 3: 0.9 }, win: { 1: 1, 2: 0.95, 3: 0.951 }, nowS: S(T0) });

@@ -125,7 +125,7 @@ const TABS = {
     plan: ['Auto (from your income)', 'Auto mode needs a Full key', 'month plan ·', 'Re-plan', 'New plan…', 'Recommended', 'Steady training', 'Per $1M', 'Other plans', 'Why it isn’t the pick', 'Where your energy comes from', 'Natural energy', 'Build', 'High stat', "Hank's", 'pick yours', 'Ignorance Is Bliss', 'what-if'],
     buy: ['Buy for', 'Your list', 'Xanax', 'Iron_Monk', 'Points market', 'Deals', '7-day prices', 'You hold', 'TornW3B'],
     progress: ['Total stats against the plan', 'Each stat', 'Gained against plan', 'Receipts', 'Energy trained', '$ per 1,000 stats', 'What if you’d done another plan', 'the comparison appears after two days', 'Last trains', 'This week', 'Budget', 'Force Training'],
-    eye: ['Targets', 'War', 'Watched', 'Ready now', 'Order: respect › HP kept › win', 'How sure', 'FFScouter', 'Gear seen', 'Your side'],
+    eye: ['Targets', 'War', 'Watched', 'Ready now', 'Order: band › respect › HP kept › win', 'How sure', 'FFScouter', 'Gear seen', 'Your side'],
     settings: ['Torn API key', 'How this key is used', 'Full key (Auto mode)', 'Keep for war days', 'Discord pings', 'Log in with Discord', 'FFScouter', 'data policy', 'TornStats', 'On Torn’s pages', 'Report a problem', 'Download report (.zip)', 'Developer', 'Export as .zip', 'Your data', 'Diagnostics', 'of 85'],
 };
 
@@ -303,8 +303,9 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     ok(rows <= 20, 'eye: 20 rows a page at most, only those drawn (' + rows + ')');
     const bands = await o.page.evaluate(() => [...document.getElementById('pi-app').shadowRoot.querySelectorAll('.tbl tbody tr.click')].map((tr) => tr.cells[0].textContent.trim()));
     ok(bands.every((b) => b === 'Stomp' || b === 'Good' || b === 'Fair'), 'eye: every target is Stomp, Good or Fair (' + bands.join(',') + ')');
-    const order = await o.page.evaluate(() => [...document.getElementById('pi-app').shadowRoot.querySelectorAll('.tbl tbody tr.click')].map((tr) => Number(tr.cells[3].textContent)));
-    ok(order.every((r, i) => i === 0 || r <= order[i - 1]), 'eye: most respect first (' + order.slice(0, 5).join(',') + ')');
+    // The one order (the owner, 2026-10-03): band first (Stomp, Good, Fair), then the most respect.
+    const order = await o.page.evaluate(() => [...document.getElementById('pi-app').shadowRoot.querySelectorAll('.tbl tbody tr.click')].map((tr) => ({ band: ['Stomp', 'Good', 'Fair'].indexOf(tr.cells[0].textContent.trim()), resp: Number(tr.cells[3].textContent) })));
+    ok(order.every((r, i) => i === 0 || r.band > order[i - 1].band || (r.band === order[i - 1].band && r.resp <= order[i - 1].resp)), 'eye: band first, then most respect (' + order.slice(0, 5).map((r) => r.band + ':' + r.resp).join(',') + ')');
     ok(/Statuses: \d+ of \d+ checked · this page first|Statuses: all \d+ checked/.test(m.text), 'eye: the statuses progress line');
     // A row opens its details (both fair fights, the estimate's age and source), and closes again.
     await o.page.locator('#pi-app .tbl tbody tr.click').first().click();
