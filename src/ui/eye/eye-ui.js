@@ -1,8 +1,16 @@
 /*
- * Torn Eye on Torn's pages (DESIGN §6, mockup R): a one-line chip (band,
- * win, HP kept, respect, source), a hover card, the war list's column,
- * summary and order, and a side panel on the attack page. Never the words
- * FF or fair fight. FFScouter is credited wherever its numbers show.
+ * Torn Eye on Torn's pages (round 7, mockups/round7/overlays.html): one look
+ * for everything we draw there, an opaque near-black tag with the plate
+ * mark, a coloured edge, a 1 px border and (on the one thing per page that
+ * matters most) a soft glow in its colour. The numbers that decide a fight
+ * are big and always in the list's order: respect, HP kept, win.
+ *
+ * Never on top of Torn's content and never inside a cell other scripts
+ * restyle: the profile card and the list tags sit in the free space beside
+ * Torn's page (never a line on it: smaller type instead), the mini-profile
+ * gets one line of its own, the attack page's card sits beside the fight.
+ * Never the words FF or fair fight. FFScouter is credited wherever its
+ * numbers show. Segoe UI / system-ui only (Torn's page can't load fonts).
  */
 
 import { h, fill } from '../dom.js';
@@ -10,41 +18,287 @@ import { BAND_WORDS, BAND_COLORS } from '../../core/eye/bands.js';
 import { BUILD_WORDS } from '../../core/eye/fight.js';
 import { FFS_SITE_URL } from '../../api/ffscouter.js';
 
+const EYE_FONT = "'Segoe UI', system-ui, -apple-system, sans-serif";
+
 export const EYE_CSS = `
-.pi-chip { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px 0 8px; margin: 6px 0; border-radius: 14px; background: #1e2124; border: 1px solid #3a4046; font: 12px Arial, sans-serif; color: #e3e5e8; white-space: nowrap; cursor: default; vertical-align: middle; }
-.pi-chip .pi-dot { width: 12px; height: 12px; border-radius: 50%; box-shadow: inset 0 0 0 3px currentColor; background: #111; flex: none; }
-.pi-chip b { font-weight: bold; }
-.pi-chip .pi-src { color: #939aa1; font-size: 11px; }
-.pi-chip.pi-mini { height: 22px; margin: 0 0 0 6px; padding: 0 8px 0 6px; gap: 6px; font-size: 11px; }
-.pi-chip.pi-mini .pi-dot { width: 10px; height: 10px; }
-.pi-eyecard { position: fixed; z-index: 99991; width: 330px; background: #1c1f22; border: 1px solid #3a4046; border-radius: 10px; padding: 12px 14px; box-shadow: 0 8px 24px rgba(0,0,0,.45); display: flex; flex-direction: column; gap: 10px; font: 12px/1.4 Arial, sans-serif; color: #e3e5e8; pointer-events: none; }
-.pi-eyecard .pi-hh { display: flex; align-items: baseline; gap: 8px; }
-.pi-eyecard .pi-hh b.pi-name { color: #fff; font-size: 14px; }
-.pi-eyecard .pi-lab { font-size: 11px; font-weight: bold; letter-spacing: .5px; text-transform: uppercase; color: #939aa1; }
-.pi-kept { display: grid; grid-template-columns: 80px minmax(0,1fr) 40px; gap: 8px; align-items: center; }
-.pi-kept .pi-bar { height: 6px; border-radius: 3px; background: #24282c; overflow: hidden; }
-.pi-kept .pi-bar i { display: block; height: 100%; }
-.pi-eyecard .pi-foot { font-size: 11px; color: #939aa1; border-top: 1px solid #2c3136; padding-top: 8px; }
-.pi-eyecard .pi-warnline { color: #e8a33d; font-weight: bold; }
-.pi-warsum { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; padding: 7px 10px; margin: 6px 0 8px; background: #1b1e21; border: 1px solid #3a4046; border-radius: 6px; font: 12px Arial, sans-serif; color: #e3e5e8; }
-.pi-warsum b { color: #fff; font-size: 14px; }
-.pi-warsum .pi-muted { color: #939aa1; margin-left: auto; }
-.pi-early { background: #1f2a1d !important; }
+.pi-mark.pi-eye, .pi-mark.pi-eye *, .pi-hovercard, .pi-hovercard * { box-sizing: border-box; font-family: ${EYE_FONT}; letter-spacing: normal; text-transform: none; text-shadow: none; }
+.pi-eye { --b: #efebe2; color: #f2f3f5; font-size: 13px; line-height: 1.3; text-align: left; }
+#pi-eye-layer { position: absolute; left: 0; top: 0; width: 0; height: 0; overflow: visible; z-index: 9990; }
+#pi-eye-layer > *, #pi-eye-layer > * > * { position: absolute; }
+#pi-eye-layer .pi-tag { width: max-content; }
+.pi-eye .pi-edge { align-self: stretch; width: 5px; flex: none; background: var(--b); }
+.pi-eye .pi-mk { width: 14px; height: 14px; border-radius: 50%; background: #efebe2; box-shadow: inset 0 0 0 3px #efebe2, inset 0 0 0 4px #2a2d31; display: inline-grid; place-items: center; flex: none; }
+.pi-eye .pi-mk i { width: 4px; height: 4px; border-radius: 50%; background: #15171a; }
+.pi-eye .pi-band { font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: var(--b); white-space: nowrap; }
+.pi-eye .pi-sep { width: 1px; align-self: stretch; margin: 6px 0; background: #2f3439; flex: none; }
+.pi-eye .pi-fig { color: #c9cdd2; font-size: 12px; white-space: nowrap; }
+.pi-eye .pi-fig b { color: #fff; font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.pi-eye .pi-src, .pi-eye .pi-muted { color: #9aa1a8; font-size: 12px; }
+.pi-eye .pi-src { font-size: 11px; }
+.pi-eye .pi-muted a, .pi-eye .pi-src a { color: #8fb8e8; }
+.pi-eye.pi-tag { display: flex; align-items: center; gap: 8px; min-height: 26px; padding: 0 10px 0 0; border-radius: 6px; background: #101214; border: 1px solid color-mix(in srgb, var(--b) 55%, transparent); box-shadow: 0 2px 8px rgba(0,0,0,.4); overflow: hidden; white-space: nowrap; cursor: default; }
+.pi-eye.pi-tag .pi-band { font-size: 12px; }
+.pi-eye.pi-glow { box-shadow: 0 0 0 3px color-mix(in srgb, var(--b) 14%, transparent), 0 0 16px color-mix(in srgb, var(--b) 24%, transparent), 0 2px 8px rgba(0,0,0,.4); }
+.pi-eye.pi-dimmed { opacity: .5; }
+.pi-eye.pi-short { gap: 6px; padding-right: 7px; }
+.pi-eye.pi-short .pi-fig b { font-size: 12px; }
+.pi-eye.pi-sum { white-space: normal; padding: 4px 10px 4px 0; min-height: 30px; }
+.pi-eye.pi-sum .pi-sumtext { min-width: 0; }
+.pi-eye.pi-sum.pi-short { font-size: 11px; line-height: 1.25; }
+.pi-eye.pi-sum .pi-edge { align-self: stretch; margin: -4px 0; }
+.pi-eye.pi-sum b { color: #fff; font-weight: 700; }
+.pi-eye.pi-edgebar { width: 4px; border-radius: 2px; background: var(--b); pointer-events: none; }
+.pi-eye.pi-mini-line { display: block; width: 100%; max-width: 100%; margin: 8px 0 0; clear: both; }
+.pi-eye.pi-mini-line .pi-tag { width: 100%; }
+.pi-eye.pi-card { background: #101214; border: 1px solid color-mix(in srgb, var(--b) 45%, #3a4046); border-radius: 10px; box-shadow: 0 8px 26px rgba(0,0,0,.6); overflow: hidden; }
+.pi-eye.pi-card.pi-glow { box-shadow: 0 0 0 3px color-mix(in srgb, var(--b) 14%, transparent), 0 0 18px color-mix(in srgb, var(--b) 22%, transparent), 0 8px 26px rgba(0,0,0,.6); }
+.pi-card .pi-ribbon { height: 4px; background: var(--b); }
+.pi-card .pi-top { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid #262a2e; min-width: 0; }
+.pi-card .pi-top .pi-band { font-size: 16px; }
+.pi-card .pi-who { color: #fff; font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pi-card .pi-bd { padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+.pi-card .pi-big3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.pi-card .pi-big3 > div { background: #181b1e; border-radius: 6px; padding: 6px 8px; }
+.pi-card .pi-big3 small { display: block; color: #9aa1a8; font-size: 10px; letter-spacing: .5px; text-transform: uppercase; }
+.pi-card .pi-big3 b { font-size: 20px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
+.pi-card .pi-stack { display: grid; grid-template-columns: auto minmax(0, 1fr); row-gap: 2px; column-gap: 8px; align-items: baseline; }
+.pi-card .pi-stack span { color: #9aa1a8; font-size: 10px; letter-spacing: .5px; text-transform: uppercase; }
+.pi-card .pi-stack b { font-size: 17px; font-weight: 700; color: #fff; text-align: right; font-variant-numeric: tabular-nums; }
+.pi-card .pi-row2 { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; }
+.pi-card .pi-meter { height: 6px; border-radius: 3px; background: #2a2e33; overflow: hidden; }
+.pi-card .pi-meter i { display: block; height: 100%; background: var(--b); }
+.pi-card .pi-warnline { color: #e8a33d; font-weight: 700; font-size: 12px; }
+.pi-card .pi-good { color: #9bdc8a; font-weight: 700; font-size: 12px; }
+.pi-card.pi-mid .pi-top, .pi-card.pi-mid .pi-bd { padding: 8px 10px; }
+.pi-card.pi-mid .pi-top { gap: 6px; }
+.pi-card.pi-mid .pi-top .pi-band { font-size: 14px; }
+.pi-card.pi-mid .pi-who { font-size: 11px; font-weight: 400; color: #c9cdd2; }
+.pi-card.pi-mid .pi-muted { font-size: 11px; }
+.pi-card.pi-small .pi-top, .pi-card.pi-small .pi-bd { padding: 6px 8px; }
+.pi-card.pi-small .pi-top .pi-band { font-size: 13px; }
+.pi-card.pi-small .pi-stack b { font-size: 15px; }
+.pi-card.pi-small .pi-stack { column-gap: 6px; }
+.pi-eye.pi-card.pi-fixed { position: fixed; z-index: 9991; overflow: hidden auto; }
 .pi-warlist { display: flex !important; flex-direction: column; }
-.pi-warsum a { color: #8fb8e8; }
-.pi-earlytag { color: #9bdc8a; font-weight: bold; font-size: 11px; margin-left: 6px; }
-.pi-landtag { color: #8fb8e8; font-weight: bold; font-size: 11px; margin-left: 6px; }
-.pi-edge-stomp { box-shadow: inset 3px 0 0 #3fbf5a !important; }
-.pi-edge-good { box-shadow: inset 3px 0 0 #a6e08a !important; }
-.pi-edge-tough { box-shadow: inset 3px 0 0 #f0a040 !important; }
-.pi-edge-cant { box-shadow: inset 3px 0 0 #ff5a4e !important; }
-.pi-watch { display: inline-flex; align-items: center; gap: 6px; margin: 6px 0 6px 8px; vertical-align: middle; font: 12px Arial, sans-serif; }
-.pi-watch button, .pi-watch select, .pi-watch input { height: 24px; border-radius: 12px; border: 1px solid #3a4046; background: #1e2124; color: #e3e5e8; font: bold 11px Arial, sans-serif; padding: 0 10px; cursor: pointer; }
-.pi-watch input { cursor: text; width: 130px; border-radius: 5px; font-weight: normal; }
-.pi-watch select { border-radius: 5px; padding: 0 6px; }
-.pi-watch button[aria-pressed="true"] { color: #efebe2; border-color: #efebe2; }
-.pi-watch .pi-full { color: #e8a33d; font-size: 11px; }
+.pi-eye .pi-watch { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+.pi-eye .pi-watch button, .pi-eye .pi-watch select, .pi-eye .pi-watch input { height: 24px; border-radius: 5px; border: 1px solid color-mix(in srgb, #efebe2 45%, transparent); background: #1c1f22; color: #fff; font: 700 11px ${EYE_FONT}; padding: 0 9px; cursor: pointer; margin: 0; }
+.pi-eye .pi-watch input { cursor: text; width: 120px; font-weight: 400; }
+.pi-eye .pi-watch select { padding: 0 4px; max-width: 120px; }
+.pi-eye .pi-watch button[aria-pressed="true"] { color: #101214; background: #efebe2; border-color: #efebe2; }
+.pi-eye .pi-watch .pi-full { color: #e8a33d; font-size: 11px; }
+.pi-hovercard { position: fixed; z-index: 99991; width: 330px; background: #101214; border: 1px solid #3a4046; border-radius: 10px; padding: 12px 14px; box-shadow: 0 8px 24px rgba(0,0,0,.5); display: flex; flex-direction: column; gap: 10px; font-size: 12px; line-height: 1.4; color: #e3e5e8; pointer-events: none; text-align: left; }
+.pi-hovercard .pi-hh { display: flex; align-items: baseline; gap: 8px; }
+.pi-hovercard .pi-hh b.pi-name { color: #fff; font-size: 14px; }
+.pi-hovercard .pi-lab { font-size: 11px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: #939aa1; }
+.pi-hovercard .pi-kept { display: grid; grid-template-columns: 80px minmax(0,1fr) 40px; gap: 8px; align-items: center; }
+.pi-hovercard { max-height: calc(100vh - 16px); overflow: hidden; }
+.pi-hovercard.pi-mid, .pi-hovercard.pi-small { padding: 8px 10px; gap: 6px; font-size: 11px; }
+.pi-hovercard.pi-mid .pi-kept { grid-template-columns: minmax(0,1fr) 48px 32px; gap: 6px; }
+.pi-hovercard.pi-small .pi-kept { grid-template-columns: minmax(0,1fr) auto; gap: 6px; }
+.pi-hovercard.pi-small .pi-bar { display: none; }
+.pi-hovercard.pi-small .pi-hh { flex-wrap: wrap; }
+.pi-hovercard.pi-small .pi-hh b.pi-name { font-size: 12px; }
+.pi-hovercard .pi-bar { height: 6px; border-radius: 3px; background: #24282c; overflow: hidden; }
+.pi-hovercard .pi-bar i { display: block; height: 100%; }
+.pi-hovercard .pi-foot { font-size: 11px; color: #939aa1; border-top: 1px solid #2c3136; padding-top: 8px; }
+.pi-hovercard .pi-warnline { color: #e8a33d; font-weight: 700; }
 `;
+
+export function ensureEyeCss(doc = document) {
+    if (doc.getElementById('pi-eye-css')) return;
+    const st = doc.createElement('style');
+    st.id = 'pi-eye-css';
+    st.textContent = EYE_CSS;
+    (doc.head || doc.documentElement).appendChild(st);
+}
+
+/* ------------------------------------------------------------ bands and figures */
+
+const EYE_NO_BAND = '#6c737a';
+
+export function eyeBandColor(band) {
+    return BAND_COLORS[band] || EYE_NO_BAND;
+}
+
+export function eyeBandWord(band) {
+    return BAND_WORDS[band] || BAND_WORDS.none || 'No data';
+}
+
+/**
+ * Whether a list row gets a tag: a band that says something, and never a fight where you'd keep under half your HP
+ * (owner, round 7: "under 50% never listed"): bands.js's 'low' ("Under 50%") and 'none' are never drawn on a row;
+ * words and colours come from bands.js.
+ */
+export function eyeShown(v) {
+    if (!v || !v.band || v.band === 'none' || v.band === 'low' || !BAND_COLORS[v.band]) return false;
+    const f = v.forecast;
+    return !(f && Number.isFinite(f.keep) && f.keep < 0.5);
+}
+
+/**
+ * The three numbers, always in this order: respect, HP kept, win.
+ * @returns {{k: 'respect'|'keep'|'win', label: string, short: string, text: string}[]}
+ */
+export function eyeFigures(v) {
+    const f = v && v.forecast;
+    const respect = v && Number.isFinite(v.respect) && v.respect > 0 ? v.respect.toFixed(2) : '—';
+    const keep = f && f.pWin >= 0.05 && Number.isFinite(f.keep) ? Math.round(f.keep * 100) + '%' : '—';
+    const win = f && Number.isFinite(f.pWin) ? Math.round(f.pWin * 100) + '%' : '—';
+    return [
+        { k: 'respect', label: 'Respect', short: 'Resp', text: respect },
+        { k: 'keep', label: 'HP kept', short: 'HP', text: keep },
+        { k: 'win', label: 'Win', short: 'Win', text: win },
+    ];
+}
+
+/** "all 99%" / "70–74%": HP kept over their likely builds; '' when the stats are exact or there are none. */
+export function eyeBuildsText(f) {
+    if (!f || f.exact || !f.perBuild) return '';
+    const ks = Object.values(f.perBuild).filter((r) => r && r.pWin >= 0.05 && Number.isFinite(r.keep)).map((r) => Math.round(r.keep * 100));
+    if (!ks.length) return '';
+    const lo = Math.min(...ks);
+    const hi = Math.max(...ks);
+    return lo === hi ? 'all ' + lo + '%' : lo + '–' + hi + '%';
+}
+
+/** Hours and minutes: "1:17" (an hour and 17 minutes), "0:48". */
+export function eyeHmm(s) {
+    const m = Math.max(0, Math.ceil(Number(s) / 60));
+    return Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0');
+}
+
+/** Seconds left in a Torn status cell's clock ("Hospital 01:17:00", "42:10"); null when it shows none. */
+export function eyeStatusSeconds(text) {
+    const t = String(text || '');
+    let m = t.match(/(\d{1,3}):(\d{2}):(\d{2})/);
+    if (m) return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+    m = t.match(/(\d{1,2}):(\d{2})/);
+    return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+
+/* ------------------------------------------------------------ where things go */
+
+/** Free space thresholds (owner's pick): full card from 300 px, the narrower card from 160, the left side under 130. */
+export const EYE_FREE = { full: 300, mid: 160, left: 130, least: 80 };
+export const EYE_CARD_W = 300;
+
+function eyeSide(viewW, page) {
+    const right = Math.max(0, Math.floor(viewW - page.right));
+    const left = Math.max(0, Math.floor(page.left));
+    const useLeft = right < EYE_FREE.left && left > right;
+    return { side: useLeft ? 'left' : 'right', free: useLeft ? left : right };
+}
+
+/**
+ * Where a card goes in the free space beside Torn's page (never on it).
+ * @param {number} viewW - the window's width without its scrollbar
+ * @param {{left: number, right: number}} page - Torn's page (sidebar + content)
+ * @returns {{mode: 'full'|'mid'|'small'|'none', side: 'left'|'right', free: number, x: number, width: number}}
+ */
+export function eyeCardSpot(viewW, page) {
+    const { side, free } = eyeSide(viewW, page);
+    if (free < EYE_FREE.least) return { mode: 'none', side, free, x: 0, width: 0 };
+    const mode = free >= EYE_FREE.full ? 'full' : free >= EYE_FREE.mid ? 'mid' : 'small';
+    const pad = mode === 'full' ? 12 : mode === 'mid' ? 8 : 6;
+    const width = mode === 'full' ? Math.min(EYE_CARD_W, free - 2 * pad) : free - 2 * pad;
+    const x = side === 'right' ? page.right + pad : page.left - pad - width;
+    return { mode, side, free, x: Math.round(x), width: Math.round(width) };
+}
+
+/**
+ * Where list tags go, level with each row: 'full' (band word and the three numbers), 'short' (the three numbers;
+ * the edge carries the band), 'tiny' (HP kept), 'none' (no room: only the row edges).
+ */
+export function eyeRowSpot(viewW, page) {
+    const { side, free } = eyeSide(viewW, page);
+    const pad = free >= EYE_FREE.mid ? 10 : 6;
+    const w = Math.min(250, free - 2 * pad);
+    const mode = w >= 190 ? 'full' : w >= 118 ? 'short' : w >= 58 ? 'tiny' : 'none';
+    const x = side === 'right' ? page.right + pad : page.left - pad - Math.max(0, w);
+    return { mode, side, free, x: Math.round(x), width: Math.max(0, Math.round(w)) };
+}
+
+/* ------------------------------------------------------------ the pieces */
+
+function eyeMk() {
+    return h('span', { class: 'pi-mk', 'aria-hidden': 'true' }, [h('i')]);
+}
+
+function eyeSourceTitle(v) {
+    if (!v) return 'Torn Eye';
+    const parts = ['Torn Eye'];
+    if (v.est && v.est.source === 'ffscouter') parts.push('stats: FFScouter (ffscouter.com), ' + (v.est.ageDays ?? '?') + ' d old');
+    else if (v.source) parts.push('stats: ' + v.source);
+    const b = eyeBuildsText(v.plain || v.forecast);
+    if (b) parts.push('their likely builds: ' + b);
+    return parts.join(' · ');
+}
+
+function eyeFigSpans(v, mode) {
+    const fs = eyeFigures(v);
+    if (mode === 'tiny') return [h('span', { class: 'pi-fig' }, [h('b', { text: fs[1].text }), ' HP'])];
+    return [h('span', { class: 'pi-fig' }, [h('b', { text: fs[0].text })]), h('span', { class: 'pi-fig' }, [h('b', { text: fs[1].text }), ' HP']), h('span', { class: 'pi-fig' }, [h('b', { text: fs[2].text })])];
+}
+
+/**
+ * A list row's tag. `state` is the row's: ready rows show the numbers; a row in hospital (dimmed) when it is out.
+ * @param {object} v - eyeView()
+ * @param {object} o - {mode, state: 'okay'|'early'|'hospital'|'traveling'|'abroad'|'jail', outInS, landText, glow}
+ */
+export function eyeRowTag(v, { mode = 'full', state = 'okay', outInS = null, landText = null, glow = false } = {}) {
+    const ready = state === 'okay' || state === 'early';
+    const kids = [h('span', { class: 'pi-edge' })];
+    if (mode === 'full') kids.push(h('span', { class: 'pi-band', text: eyeBandWord(v.band) }));
+    if (ready) {
+        kids.push(...eyeFigSpans(v, mode));
+        if (state === 'early' && mode !== 'tiny') kids.push(h('span', { class: 'pi-src', text: 'out early' }));
+    } else {
+        const what = state === 'hospital' ? (Number.isFinite(outInS) ? 'out in ' + eyeHmm(outInS) : 'in hospital') : state === 'traveling' ? landText || 'traveling' : state === 'abroad' ? 'abroad' : state === 'jail' ? 'in jail' : state;
+        kids.push(h('span', { class: 'pi-fig', text: what }));
+    }
+    const cls = 'pi-mark pi-eye pi-tag pi-rowtag' + (mode !== 'full' ? ' pi-short' : '') + (ready ? '' : ' pi-dimmed') + (glow && ready ? ' pi-glow' : '');
+    return h('div', { class: cls, style: '--b:' + eyeBandColor(v.band), 'data-pi-player': String(v.id || ''), 'data-pi-hover': '1', title: eyeSourceTitle(v), tabindex: '0', role: 'button', 'aria-label': eyeBandWord(v.band) + ' · ' + eyeFigures(v).map((x) => x.label + ' ' + x.text).join(' · ') }, kids);
+}
+
+/** The 4 px band edge beside a row, on our own layer. */
+export function eyeEdgeBar(band, dim = false) {
+    return h('div', { class: 'pi-mark pi-eye pi-edgebar', style: '--b:' + eyeBandColor(band) + (dim ? ';opacity:.35' : ''), 'aria-hidden': 'true' });
+}
+
+/**
+ * The summary over a list, as numbers: ready (okay or out early), in hospital (and when the next one is out),
+ * traveling.
+ * @param {object[]} rows - sortWar() rows ({state, until})
+ */
+export function eyeSummary(rows, nowS) {
+    const ready = rows.filter((r) => r.state === 'okay' || r.state === 'early').length;
+    const hosp = rows.filter((r) => r.state === 'hospital');
+    const outs = hosp.filter((r) => r.until > nowS).map((r) => r.until - nowS);
+    return { ready, early: rows.filter((r) => r.state === 'early').length, hospital: hosp.length, nextOutS: outs.length ? Math.min(...outs) : null, traveling: rows.filter((r) => r.state === 'traveling').length };
+}
+
+/** "2 ready · 1 out in 1:17 · 0 traveling". */
+export function eyeSummaryText(s) {
+    const parts = [s.ready + ' ready' + (s.early ? ' (' + s.early + ' out early)' : '')];
+    if (s.nextOutS !== null && s.nextOutS !== undefined) parts.push('1 out in ' + eyeHmm(s.nextOutS));
+    else if (s.hospital) parts.push(s.hospital + ' in hospital');
+    parts.push(s.traveling + ' traveling');
+    return parts.join(' · ');
+}
+
+/** The summary tag on top of a list. `note` (where the numbers come from) goes in its title. */
+export function eyeSummaryTag(s, { note = '', fromFfs = false, short = false } = {}) {
+    const words = [];
+    eyeSummaryText(s).split(' · ').forEach((p, i) => {
+        if (i) words.push(' · ');
+        const m = p.match(/^(\d+)(.*)$/);
+        words.push(m ? h('span', {}, [h('b', { text: m[1] }), m[2]]) : h('span', { text: p }));
+    });
+    if (fromFfs) words.push(h('span', { class: 'pi-src' }, [' · stats: ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' })]));
+    return h('div', { class: 'pi-mark pi-eye pi-tag pi-sum' + (short ? ' pi-short' : ''), title: note || 'Torn Eye' }, [h('span', { class: 'pi-edge' }), short ? null : eyeMk(), h('span', { class: 'pi-sumtext' }, words)]);
+}
+
+/* ------------------------------------------------------------ watch */
 
 /** The watch reasons offered on Torn's pages (the webpage offers the same, plus your own words there). */
 export const WATCH_TAG_WORDS = ['hospitalize', 'mug', 'revenge', 'bounty'];
@@ -56,7 +310,7 @@ export const WATCH_TAG_WORDS = ['hospitalize', 'mug', 'revenge', 'bounty'];
  */
 export function watchControl(s, on) {
     const kids = [h('button', { type: 'button', 'aria-pressed': String(Boolean(s.watching)), title: s.watching ? 'Torn Eye is watching this player · click to stop' : 'Watch this player in Torn Eye (status, hospital, flights)', onclick: (e) => { e.preventDefault(); e.stopPropagation(); on.toggle(); }, text: s.watching ? '★ Watching' : '☆ Watch' })];
-    if (s.watching) {
+    if (s.watching && on.tag) {
         const tag = s.tag || '';
         const custom = tag && !WATCH_TAG_WORDS.includes(tag);
         const sel = h('select', { 'aria-label': 'Why you watch them', onchange: (e) => { if (e.target.value === '__custom') { const inp = h('input', { maxlength: '24', placeholder: 'your reason', 'aria-label': 'Your reason', onkeydown: (ev) => { if (ev.key === 'Enter') on.tag(ev.target.value); } }); inp.addEventListener('blur', () => on.tag(inp.value)); sel.replaceWith(inp); inp.focus(); } else on.tag(e.target.value || null); } }, [
@@ -68,50 +322,148 @@ export function watchControl(s, on) {
         sel.value = tag;
         kids.push(sel);
     }
-    if (s.full) kids.push(h('span', { class: 'pi-full', text: 'Watch list full (20)' }));
-    return h('span', { class: 'pi-mark pi-watch', 'data-pi-watch': [s.watching ? 1 : 0, s.tag || '', s.full ? 1 : 0].join('|') }, kids);
+    if (s.full) kids.push(h('span', { class: 'pi-full', text: 'Watch list full' }));
+    return h('span', { class: 'pi-watch', 'data-pi-watch': [s.watching ? 1 : 0, s.tag || '', s.full ? 1 : 0].join('|') }, kids);
 }
 
-export function ensureEyeCss(doc = document) {
-    if (doc.getElementById('pi-eye-css')) return;
-    const st = doc.createElement('style');
-    st.id = 'pi-eye-css';
-    st.textContent = EYE_CSS;
-    (doc.head || doc.documentElement).appendChild(st);
+/* ------------------------------------------------------------ cards */
+
+function eyeStatusLine(st) {
+    if (!st) return '';
+    return String(st.description || st.state || '').replace(/<[^>]*>/g, '').trim();
 }
 
-/** The short figure on a list row: HP kept where you'd win, else the win chance (or "rough"). */
-export function miniFigure(v) {
-    const f = v.forecast;
-    if (v.est && v.est.confidence === 'rough' && f.pWin < 0.6) return 'rough';
-    if (v.band === 'cant' || f.keep === null || f.keep === undefined) return 'win ' + Math.round(f.pWin * 100) + '%';
-    return 'keep ' + (v.est && v.est.confidence === 'exact' ? '' : '~') + Math.round(f.keep * 100) + '%';
+function eyeSourceLine(v, short) {
+    if (!v || !v.est) return h('div', { class: 'pi-muted', text: v && v.shared ? 'from war mode on the Torn Eye tab' : 'no estimate yet' });
+    const b = short ? '' : eyeBuildsText(v.plain || v.forecast);
+    if (v.est.source === 'ffscouter') return h('div', { class: 'pi-muted' }, [h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }), ' ' + (v.est.ageDays ?? '?') + ' d' + (b ? ' · their likely builds: ' + b : '')]);
+    return h('div', { class: 'pi-muted', text: (v.source || '') + (b ? ' · their likely builds: ' + b : '') });
 }
 
-/** The chip for one player view (eyeView()). */
-export function chipEl(v, { mini = false, id = null } = {}) {
+function eyeNumbers(v, mode) {
+    const fs = eyeFigures(v);
+    if (mode === 'full') return h('div', { class: 'pi-big3' }, fs.map((x) => h('div', { 'data-pi-fig': x.k }, [h('small', { text: x.label }), h('b', { text: x.text })])));
+    const kids = [];
+    for (const x of fs) kids.push(h('span', { text: mode === 'small' ? x.short : x.label }), h('b', { 'data-pi-fig': x.k, text: x.text }));
+    return h('div', { class: 'pi-stack' }, kids);
+}
+
+function eyeCardShell(v, mode, { id = null, who = '', hover = false } = {}) {
     const band = v ? v.band : 'none';
-    const color = BAND_COLORS[band];
-    const kids = [h('i', { class: 'pi-dot', style: 'color:' + color }), h('b', { style: 'color:' + color, text: BAND_WORDS[band] })];
-    if (v && v.forecast) kids.push(h('span', { text: mini ? miniFigure(v) : v.figures }));
-    else kids.push(h('span', { text: mini ? '' : 'no estimate yet' }));
-    if (!mini && v && v.source) kids.push(h('span', { class: 'pi-src', text: v.source }));
-    // The player id is always on the chip, estimate or not: redraw checks compare it.
-    const title = v && v.est ? 'Torn Eye · stats: ' + (v.est.source === 'ffscouter' ? 'FFScouter (ffscouter.com)' : v.source) : 'Torn Eye';
-    return h('span', { class: 'pi-mark pi-chip' + (mini ? ' pi-mini' : ''), 'data-pi-player': String(id || (v && v.id) || ''), title, tabindex: '0', role: 'button', 'aria-label': title + ' · ' + BAND_WORDS[band] }, kids);
+    const top = [];
+    if (mode === 'full') top.push(eyeMk());
+    top.push(h('span', { class: 'pi-band', text: v ? eyeBandWord(band) : 'Torn Eye' }));
+    if (who && mode !== 'small') top.push(h('span', { class: 'pi-who', text: who }));
+    const bd = h('div', { class: 'pi-bd' });
+    const el = h('div', { class: 'pi-mark pi-eye pi-card pi-' + mode, style: '--b:' + eyeBandColor(band), 'data-pi-player': String(id || (v && v.id) || ''), 'data-pi-mode': mode, title: mode === 'small' ? eyeSourceTitle(v) : null, 'data-pi-hover': hover ? '1' : null, tabindex: hover ? '0' : null }, [h('div', { class: 'pi-ribbon' }), h('div', { class: 'pi-top' }, top), bd]);
+    return { el, bd };
 }
+
+function eyeWhoText(v, mode) {
+    if (!v) return '';
+    const lvl = v.level ? '[' + v.level + ']' : '';
+    if (mode === 'mid') return lvl;
+    return ((v.name || '') + (lvl ? ' ' + lvl : '')).trim();
+}
+
+/**
+ * The profile card, in the free space beside Torn's page. Full: the three numbers in boxes, the source, ★ Watch and
+ * their status. Mid: the same narrower, the numbers stacked. Small: the band word and the three numbers (the rest
+ * in its title and the hover card).
+ * @param {object|null} v - eyeView() (null while reading)
+ * @param {'full'|'mid'|'small'} mode
+ * @param {object} o - {id, watch: {state, on}, glow}
+ */
+export function eyeProfileCard(v, mode, { id = null, watch = null, glow = true } = {}) {
+    const { el, bd } = eyeCardShell(v, mode, { id, who: eyeWhoText(v, mode), hover: mode === 'small' });
+    // The one Torn Eye card on a page (here or the attack page's): the training panel docks under #pi-eyecard.
+    el.id = 'pi-eyecard';
+    if (glow) el.classList.add('pi-glow');
+    if (!v) {
+        if (mode !== 'small') bd.appendChild(h('div', { class: 'pi-muted', text: 'Reading this player…' }));
+        return el;
+    }
+    bd.appendChild(eyeNumbers(v, mode));
+    if (mode === 'small') return el;
+    bd.appendChild(eyeSourceLine(v, mode === 'mid'));
+    const w = watch ? watchControl(watch.state, mode === 'full' ? watch.on : { toggle: watch.on.toggle }) : null;
+    if (mode === 'full') {
+        const st = eyeStatusLine(v.status);
+        bd.appendChild(h('div', { class: 'pi-row2' }, [w, st ? h('span', { class: 'pi-muted', text: st }) : null]));
+    } else if (w) bd.appendChild(w);
+    return el;
+}
+
+/**
+ * The attack page's fight card: band, the three numbers, turns and the gear note, HP kept per likely build. The
+ * training panel docks under it (#pi-eyecard), so its foot is left free.
+ * @param {object|null} v - eyeView()
+ * @param {'full'|'mid'|'small'} mode
+ * @param {object} s - {gearVisible, gearSaved, watch: {watching, tag, full, toggle}}
+ */
+export function eyeFightCard(v, mode, s = {}) {
+    const { el, bd } = eyeCardShell(v, mode, { who: eyeWhoText(v, mode), hover: mode === 'small' });
+    el.id = 'pi-eyecard';
+    el.classList.add('pi-glow', 'pi-fixed');
+    const watchBtn = () => (s.watch ? watchControl({ watching: s.watch.watching, tag: null, full: s.watch.full }, { toggle: s.watch.toggle }) : null);
+    if (!v) {
+        if (mode !== 'small') {
+            bd.appendChild(h('div', { class: 'pi-muted', text: 'Reading this player… (your fights, FFScouter, public stats)' }));
+            const w = watchBtn();
+            if (w) bd.appendChild(w);
+        }
+        return el;
+    }
+    bd.appendChild(eyeNumbers(v, mode));
+    if (mode === 'small') return el;
+    const f = v.forecast;
+    const gear = s.gearSaved ? 'their gear is saved for next time' : s.gearVisible ? '' : 'their gear shows once the fight starts';
+    const turns = f && f.turns ? 'About ' + f.turns + ' turns' : '';
+    const line = [turns, turns ? gear : gear.charAt(0).toUpperCase() + gear.slice(1)].filter(Boolean).join(' · ');
+    if (line) bd.appendChild(h('div', { class: s.gearSaved ? 'pi-good' : 'pi-muted', text: line }));
+    if (v.gear) bd.appendChild(h('div', { class: 'pi-muted', text: 'Last seen: ' + (v.gear.text || 'gear') + ' · ' + Math.max(0, Math.round((Date.now() - v.gear.seenAt) / 86400000)) + ' d ago' }));
+    if (v.withGear && mode === 'full') bd.appendChild(h('div', { class: 'pi-warnline', text: 'With their gear: win ' + Math.round(v.withGear.pWin * 100) + '% · HP kept ~' + Math.round((v.withGear.keep || 0) * 100) + '%' }));
+    const p = v.plain || f;
+    if (mode === 'full' && p && p.perBuild && !p.exact) {
+        const rows = Object.entries(p.perBuild).sort((a, b) => (b[1].keep || 0) - (a[1].keep || 0)).slice(0, 3);
+        for (const [k, r] of rows) {
+            const pct = Math.round((r.keep || 0) * 100);
+            bd.appendChild(h('div', { class: 'pi-row2' }, [h('span', { class: 'pi-muted', text: BUILD_WORDS[k] || k }), h('span', { text: r.pWin < 0.05 ? 'lose' : pct + '%' })]));
+            bd.appendChild(h('div', { class: 'pi-meter' }, [h('i', { style: 'width:' + (r.pWin < 0.05 ? 0 : pct) + '%' })]));
+        }
+    }
+    bd.appendChild(eyeSourceLine(v, true));
+    const w = watchBtn();
+    if (w) bd.appendChild(w);
+    return el;
+}
+
+/** The mini-profile's last line: one tag inside the popup's width. */
+export function eyeMiniLine(v, { id = null, glow = false } = {}) {
+    const band = v ? v.band : 'none';
+    const kids = [h('span', { class: 'pi-edge' }), eyeMk(), h('span', { class: 'pi-band', text: eyeBandWord(band) })];
+    if (v && v.forecast) {
+        kids.push(h('span', { class: 'pi-sep' }));
+        const fs = eyeFigures(v);
+        kids.push(h('span', { class: 'pi-fig' }, [h('b', { text: fs[0].text }), ' resp']), h('span', { class: 'pi-fig' }, [h('b', { text: fs[1].text }), ' HP']), h('span', { class: 'pi-fig' }, [h('b', { text: fs[2].text }), ' win']));
+    } else kids.push(h('span', { class: 'pi-src', text: 'no estimate yet' }));
+    const tag = h('div', { class: 'pi-eye pi-tag' + (glow ? ' pi-glow' : ''), style: '--b:' + eyeBandColor(band), 'data-pi-player': String(id || (v && v.id) || ''), 'data-pi-hover': '1', title: eyeSourceTitle(v), tabindex: '0', role: 'button' }, kids);
+    return h('div', { class: 'pi-mark pi-eye pi-mini-line', 'data-pi-player': String(id || (v && v.id) || '') }, [tag]);
+}
+
+/* ------------------------------------------------------------ hover card */
 
 /** The hover card: HP kept by likely build, gear, sources with credit. */
-export function cardEl(v) {
+export function cardEl(v, mode = 'full') {
     const band = v.band;
-    const kids = [h('div', { class: 'pi-hh' }, [h('b', { style: 'color:' + BAND_COLORS[band], text: BAND_WORDS[band] }), h('b', { class: 'pi-name', text: (v.name || 'Player') + (v.level ? ' [' + v.level + ']' : '') })])];
+    const kids = [h('div', { class: 'pi-hh' }, [h('b', { style: 'color:' + eyeBandColor(band), text: eyeBandWord(band) }), h('b', { class: 'pi-name', text: (v.name || 'Player') + (v.level ? ' [' + v.level + ']' : '') })])];
     const f = v.plain || v.forecast;
     if (f && f.perBuild && !f.exact) {
         kids.push(h('span', { class: 'pi-lab', text: 'HP you keep, by their likely build' }));
         const rows = Object.entries(f.perBuild).sort((a, b) => (b[1].keep || 0) - (a[1].keep || 0)).slice(0, 3);
         for (const [k, r] of rows) {
             const pct = Math.round((r.keep || 0) * 100);
-            kids.push(h('div', { class: 'pi-kept' }, [h('span', { text: BUILD_WORDS[k] || k }), h('div', { class: 'pi-bar' }, [h('i', { style: 'width:' + pct + '%;background:' + BAND_COLORS[band] })]), h('span', { text: r.pWin < 0.05 ? 'lose' : pct + '%' })]));
+            kids.push(h('div', { class: 'pi-kept' }, [h('span', { text: BUILD_WORDS[k] || k }), h('div', { class: 'pi-bar' }, [h('i', { style: 'width:' + pct + '%;background:' + eyeBandColor(band) })]), h('span', { text: r.pWin < 0.05 ? 'lose' : pct + '%' })]));
         }
     } else if (f && v.shared) {
         kids.push(h('span', { text: 'Win ' + Math.round(f.pWin * 100) + '%' + (f.keep === null || f.keep === undefined ? '' : ' · keep ~' + Math.round(f.keep * 100) + '%') }));
@@ -128,11 +480,15 @@ export function cardEl(v) {
     const foot = v.shared ? ['From war mode on Pumping Iron’s Torn Eye tab, ' + (mins < 1 ? 'just now' : mins < 90 ? mins + ' min ago' : Math.round(mins / 60) + ' h ago') + '. Open their profile for the full estimate.'] : src === 'ffscouter' ? ['Stats: ', h('b', { text: 'FFScouter' }), ' (' + FFS_SITE_URL.replace('https://', '').replace(/\/$/, '') + '), ' + (v.est.ageDays ?? '?') + ' days old.'] : src === 'spy' ? ['Stats: a spy, ' + v.est.ageDays + ' days old.'] : src === 'fight' ? ['Stats: from your own fight with them' + (v.est.lowerBound ? ' (at least this strong)' : '') + '.'] : src === 'public' ? ['Stats: rough, from public stats (' + v.est.range + ').'] : ['No estimate yet. Connect FFScouter or fight them once.'];
     if (v.forecast && v.forecast.turns) foot.push(' About ' + v.forecast.turns + ' turns.');
     kids.push(h('div', { class: 'pi-foot' }, foot));
-    return h('div', { class: 'pi-mark pi-eyecard' }, kids);
+    return h('div', { class: 'pi-mark pi-hovercard pi-' + mode }, kids);
 }
 
-/** One floating card for the page, shown next to the chip under the pointer. */
-export function bindCard(doc, getView) {
+/**
+ * One floating card for the page, shown next to the tag under the pointer (tags marked data-pi-hover). Like
+ * everything else it stays in the free space beside Torn's page, as wide as that allows (spotOf: eyeCardSpot);
+ * with no room there it isn't shown.
+ */
+export function bindCard(doc, getView, spotOf = null) {
     let card = null;
     let shownFor = null;
     const hide = () => {
@@ -142,21 +498,24 @@ export function bindCard(doc, getView) {
     };
     // Hover, keyboard focus or a tap shows the card; Escape or leaving hides it.
     const show = (e) => {
-        const chip = e.target && e.target.closest ? e.target.closest('.pi-chip[data-pi-player]') : null;
-        if (!chip) {
+        const tag = e.target && e.target.closest ? e.target.closest('[data-pi-hover][data-pi-player]') : null;
+        if (!tag) {
             if (card) hide();
             return;
         }
-        // Moving within the same chip (its dot, its words) keeps the card: it was rebuilt on every move (round 6).
-        if (card && shownFor === chip && e.type === 'mouseover') return;
-        const v = getView(Number(chip.getAttribute('data-pi-player')));
+        // Moving within the same tag (its edge, its words) keeps the card (round 6: it was rebuilt on every move).
+        if (card && shownFor === tag && e.type === 'mouseover') return;
+        const v = getView(Number(tag.getAttribute('data-pi-player')));
         if (!v) return;
+        const spot = spotOf ? spotOf() : null;
+        if (spot && spot.mode === 'none') return;
         hide();
-        card = cardEl(v);
-        shownFor = chip;
+        card = cardEl(v, spot ? spot.mode : 'full');
+        shownFor = tag;
         doc.body.appendChild(card);
-        const r = chip.getBoundingClientRect();
-        const x = Math.min(window.innerWidth - 340, Math.max(8, r.left));
+        const r = tag.getBoundingClientRect();
+        if (spot) card.style.width = spot.width + 'px';
+        const x = spot ? spot.x : Math.min(window.innerWidth - 340, Math.max(8, r.left));
         const below = r.bottom + 8 + card.offsetHeight < window.innerHeight;
         card.style.left = x + 'px';
         card.style.top = (below ? r.bottom + 6 : Math.max(8, r.top - card.offsetHeight - 6)) + 'px';
@@ -164,7 +523,7 @@ export function bindCard(doc, getView) {
     doc.addEventListener('mouseover', show);
     doc.addEventListener('focusin', show);
     doc.addEventListener('click', (e) => {
-        if (e.target && e.target.closest && e.target.closest('.pi-chip[data-pi-player]')) show(e);
+        if (e.target && e.target.closest && e.target.closest('[data-pi-hover][data-pi-player]')) show(e);
     });
     doc.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') hide();
@@ -172,65 +531,32 @@ export function bindCard(doc, getView) {
     doc.addEventListener('scroll', hide, true);
 }
 
-/** The war summary line: "5 attackable now · 0:48 until the next one is out · 1 traveling". */
-export function warSummaryEl(sum, updatedAgoS, fromFfs = false) {
-    const mmss = (s) => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
-    return h('div', { class: 'pi-mark pi-warsum' }, [
-        h('span', { class: 'pi-plate' }, [h('i')]),
-        h('span', {}, [h('b', { text: String(sum.attackable) }), ' attackable now' + (sum.early ? ' (' + sum.early + ' out early)' : '')]),
-        sum.nextOutS !== null ? h('span', {}, [h('b', { text: mmss(sum.nextOutS) }), ' until the next one is out']) : null,
-        h('span', {}, [h('b', { text: String(sum.traveling) }), ' traveling']),
-        // Torn's pages read nothing for the war (owner, round 6): what this page shows; the live read is on the Torn Eye tab.
-        h('span', { class: 'pi-muted' }, [updatedAgoS === null || updatedAgoS === undefined ? 'from this page · live war mode on Pumping Iron’s Torn Eye tab' : 'updated ' + updatedAgoS + 's ago · every 10 s while this tab is open', fromFfs ? ' · stats: ' : '', fromFfs ? h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }) : null]),
-    ]);
+/* ------------------------------------------------------------ our layer */
+
+/** Our own layer for everything placed beside Torn's page (absolute, in page coordinates). */
+export function eyeLayer(doc = document) {
+    let el = doc.getElementById('pi-eye-layer');
+    if (!el) {
+        el = h('div', { id: 'pi-eye-layer', class: 'pi-mark pi-eye' });
+        (doc.body || doc.documentElement).appendChild(el);
+    }
+    return el;
 }
 
-/**
- * The attack page's side panel (a shadow host beside Torn's layout).
- * @param {object} v - eyeView() or null
- * @param {object} s - {gearVisible, gearSaved}
- */
-export function attackPanelContent(v, s) {
-    const kids = [h('span', { class: 'row' }, [h('span', { class: 'plate' }, [h('i')]), h('b', { class: 'white', text: 'Torn Eye' })])];
-    if (!v) {
-        kids.push(h('span', { class: 'muted', text: 'Reading this player… (your fights, FFScouter, public stats)' }));
-        if (s.watch) kids.push(h('button', { class: 'watch', type: 'button', 'aria-pressed': String(Boolean(s.watch.watching)), onclick: () => s.watch.toggle(), text: s.watch.watching ? '★ Watching' : '☆ Watch' }));
-        return kids;
+/** One part of the layer (profile, war, faction), made on first use. */
+export function eyeLayerPart(name, doc = document) {
+    const layer = eyeLayer(doc);
+    let part = layer.querySelector(':scope > [data-pi-part="' + name + '"]');
+    if (!part) {
+        part = h('div', { 'data-pi-part': name, style: 'position:absolute;left:0;top:0;width:0;height:0' });
+        layer.appendChild(part);
     }
-    const f = v.forecast;
-    kids.push(h('span', { class: 'big', style: 'color:' + BAND_COLORS[v.band], text: BAND_WORDS[v.band] + (f && f.pWin >= 0.05 && f.keep !== null ? ' · keep ' + (v.est && v.est.confidence === 'exact' ? '' : '~') + Math.round(f.keep * 100) + '%' : '') }));
-    if (f) kids.push(h('span', { text: 'Win ' + Math.round(f.pWin * 100) + '%' + (v.respect ? ' · ' + v.respect.toFixed(2) + ' respect' : '') + (f.turns ? ' · about ' + f.turns + ' turns' : '') }));
-    if (s.gearSaved) kids.push(h('span', { class: 'good', text: 'Their gear is saved for next time.' }));
-    else if (!s.gearVisible) kids.push(h('span', { class: 'muted', text: 'Their gear isn’t shown yet. Torn shows it after Start Fight (earlier with the Gun Shop job perk). We’ll save it for next time.' }));
-    if (v.gear) kids.push(h('span', { class: 'muted', text: 'Last seen: ' + (v.gear.text || 'gear') + ' · ' + Math.max(0, Math.round((Date.now() - v.gear.seenAt) / 86400000)) + ' days ago' }));
-    if (v.source) kids.push(v.est && v.est.source === 'ffscouter' ? h('span', { class: 'muted' }, ['Stats: ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }), ', ' + (v.est.ageDays ?? '?') + ' days old']) : h('span', { class: 'muted', text: 'Stats: ' + v.source }));
-    if (s.watch) kids.push(h('button', { class: 'watch', type: 'button', 'aria-pressed': String(Boolean(s.watch.watching)), onclick: () => s.watch.toggle(), text: s.watch.watching ? '★ Watching' + (s.watch.tag ? ' · ' + s.watch.tag : '') : s.watch.full ? 'Watch list full (20)' : '☆ Watch' }));
-    return kids;
+    return part;
 }
 
-export const ATTACK_PANEL_CSS = `
-:host { all: initial; }
-* { box-sizing: border-box; font-family: Arial, Helvetica, sans-serif; }
-.panel { position: fixed; z-index: 99989; pointer-events: none; width: 250px; background: #1b1e21; border: 1px solid #3a4046; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: #e3e5e8; box-shadow: 0 6px 18px rgba(0,0,0,.4); }
-.row { display: flex; align-items: center; gap: 8px; }
-.plate { width: 18px; height: 18px; border-radius: 50%; background: #efebe2; display: inline-grid; place-items: center; box-shadow: inset 0 0 0 3px #efebe2, inset 0 0 0 4px #2a2d31; }
-.plate i { width: 4px; height: 4px; border-radius: 50%; background: #15171a; }
-.white { color: #fff; }
-.big { font: bold 22px "Arial Narrow", Arial, sans-serif; }
-.muted { color: #939aa1; }
-.good { color: #9bdc8a; font-weight: bold; }
-a { color: #8fb8e8; pointer-events: auto; }
-button.watch { pointer-events: auto; align-self: flex-start; height: 24px; padding: 0 10px; border-radius: 12px; border: 1px solid #3a4046; background: #1e2124; color: #e3e5e8; font: bold 11px Arial, sans-serif; cursor: pointer; }
-button.watch[aria-pressed="true"] { color: #efebe2; border-color: #efebe2; }
-`;
-
-export function attackPanel(doc = document) {
-    let host = doc.getElementById('pi-attack');
-    if (!host) {
-        host = h('div', { id: 'pi-attack' });
-        (doc.body || doc.documentElement).appendChild(host);
-        const sr = host.attachShadow({ mode: 'open' });
-        fill(sr, [h('style', { text: ATTACK_PANEL_CSS }), h('div', { class: 'panel' })]);
-    }
-    return host.shadowRoot.querySelector('.panel');
+/** Empty a part of the layer. */
+export function eyeClearPart(name, doc = document) {
+    const layer = doc.getElementById('pi-eye-layer');
+    const part = layer && layer.querySelector(':scope > [data-pi-part="' + name + '"]');
+    if (part) fill(part, []);
 }
