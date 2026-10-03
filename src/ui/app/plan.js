@@ -158,7 +158,6 @@ function controls(m, ctx) {
             ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.setPlan({ goal: null }), text: 'Back to the build' })
             : h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.goalForm = !ctx.ui.goalForm; ctx.rerender(); }, text: '+ Stat numbers' }),
         !goal && m.nextGym && m.nextGym.gym ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.setPlan({ goal: { kind: 'unlockGym', gymId: m.nextGym.gym.id } }), text: '+ Unlock ' + m.nextGym.gym.name }) : null,
-        h('span', { class: 'muted', text: 'used by the next Create plan or Re-plan' }),
     ];
     const bar2 = [];
     const sp = m.special || {};
@@ -177,6 +176,8 @@ function controls(m, ctx) {
     }
     const bliss = m.pc && m.pc.perks.bliss;
     bar2.push(t('lab', 'Ignorance Is Bliss'), h('span', { class: 'tag' + (bliss ? ' good' : ''), text: bliss ? 'Active' + (m.pc.perks.blissDays ? ' · ' + m.pc.perks.blissDays + ' days' : '') : 'Not active' }), h('span', { class: 'info', title: 'Read from your perks: the book’s line shows while it is active (31 days). The plan counts it the day it shows.', text: 'i' }));
+    // The note for the whole bar sits at the right of the second line, so the first never wraps for it.
+    bar2.push(h('span', { class: 'muted', style: 'margin-left:auto', text: 'Used by the next Create plan or Re-plan' }));
     return [bar1, bar2];
 }
 
@@ -241,7 +242,7 @@ function recommendedCard(m, ctx, rec, compare, days) {
     const kids = [
         sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + money + ' · ' + days + ' days'])),
         h('div', { class: 'prime num' }, [
-            h('div', {}, [h('span', { class: 'pill-tag chalk', text: kindOf(rec.recommended) }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: planWhat(rec.recommended, best) }), best && best.candy && tierWords(best.candy.id) ? h('div', { class: 'd muted', style: 'margin-top:2px;font-size:12px', text: 'Candy: ' + tierWords(best.candy.id) + '; what you hold goes first' }) : null]),
+            h('div', {}, [h('span', { class: 'pill-tag chalk', text: kindOf(rec.recommended) }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: planWhat(rec.recommended, best) }), best && best.candy && tierWords(best.candy.id) ? h('div', { class: 'd muted', style: 'margin-top:2px;font-size:13px', text: 'Candy: ' + tierWords(best.candy.id) + '; what you hold goes first' }) : null]),
             h('div', { class: 'figs' }, figs),
             h('div', { class: 'why' }, [
                 'Wins because: ' + reasons + (autoOn && a && a.afford ? ' ' + a.afford : spend) + ' ',
@@ -376,7 +377,7 @@ function otherPlans(m, ctx, rec, compare, days) {
             }, [
                 h('td', {}, [h('small', { text: kindOf(a.id) })]),
                 h('td', {}, [h('b', { class: 'w', text: st.name }), current ? h('span', { class: 'tag chalk', style: 'margin-left:6px', text: 'current plan' }) : null, pending ? h('span', { class: 'tag warn', style: 'margin-left:6px', text: 'picked · see the warning' }) : null]),
-                h('td', { class: 'muted', title: compare[a.id] && compare[a.id].candy ? tierWords(compare[a.id].candy.id) || null : null, text: planWhat(a.id, compare[a.id]) }),
+                h('td', { class: 'muted second', title: compare[a.id] && compare[a.id].candy ? tierWords(compare[a.id].candy.id) || null : null, text: planWhat(a.id, compare[a.id]) }),
                 h('td', { class: 'r' }, ['+' + fmtShort(a.gained), h('br'), h('span', { class: a.deltaStatsPct >= 0 ? 'c-good' : 'c-bad', style: 'white-space:nowrap', text: fmtPct(a.deltaStatsPct) })]),
                 h('td', { class: 'r' }, [fmtMoney(a.cost), h('br'), h('span', { class: a.deltaCost > 0 ? 'c-bad' : 'c-good', style: 'white-space:nowrap', text: (a.deltaCost >= 0 ? '+' : '−') + fmtMoney(Math.abs(a.deltaCost)) })]),
                 h('td', { class: 'r', text: a.cost > 0 ? chartNum(a.perM) : '—' }),
@@ -392,7 +393,7 @@ function otherPlans(m, ctx, rec, compare, days) {
             h('tr', { class: 'whatif' }, [
                 h('td', {}, [h('small', { text: 'Book' })]),
                 h('td', {}, [h('b', { class: 'w', text: st.name === 'Steady with Bliss' ? st.name : st.name + ' with Bliss' }), ' ', h('span', { class: 'tag', text: 'what-if' })]),
-                h('td', { text: planWhat(w.id, w) }),
+                h('td', { class: 'second', text: planWhat(w.id, w) }),
                 h('td', { class: 'r', text: fmtPct(d) }),
                 h('td', { class: 'r', text: (w.cost - best.cost >= 0 ? '+' : '−') + fmtMoney(Math.abs(w.cost - best.cost)) }),
                 h('td', { class: 'r', text: chartNum(perMillion(w)) }),
@@ -408,7 +409,7 @@ function otherPlans(m, ctx, rec, compare, days) {
             h('tr', { class: 'whatif job' }, [
                 h('td', {}, [h('small', { text: 'Job' })]),
                 h('td', {}, [h('b', { class: 'w', text: w.title }), ' ', h('span', { class: 'tag', text: 'what-if' })]),
-                h('td', { text: planWhat(w.strategy, r) }),
+                h('td', { class: 'second', text: planWhat(w.strategy, r) }),
                 h('td', { class: 'r', text: fmtPct(d) }),
                 h('td', { class: 'r', text: (r.cost - best.cost >= 0 ? '+' : '−') + fmtMoney(Math.abs(r.cost - best.cost)) }),
                 h('td', { class: 'r', text: r.cost > 0 ? chartNum(perMillion(r)) : '—' }),
@@ -425,7 +426,7 @@ function otherPlans(m, ctx, rec, compare, days) {
     return h('div', {}, [
         sectionHead('Other plans', meta(['against ' + STRATEGIES[rec.recommended].short.toLowerCase() + ' · click a row to pick it']), tick),
         h('table', { class: 'tbl num' }, [
-            h('thead', {}, [h('tr', {}, [h('th', { style: 'width:52px', text: 'Kind' }), h('th', { style: 'width:190px', text: 'Plan' }), h('th', { style: 'width:230px', text: 'What you do' }), h('th', { class: 'r', style: 'width:76px', title: 'Stats gained over the ' + days + ' days, and the difference from the recommended plan', text: 'Stats' }), h('th', { class: 'r', style: 'width:88px', title: 'What it costs over the ' + days + ' days, and the difference from the recommended plan', text: 'Cost' }), h('th', { class: 'r', style: 'width:70px', title: 'Stats gained for each $1M spent over the ' + days + ' days', text: 'Per $1M' }), h('th', { text: 'Why it isn’t the pick' })])]),
+            h('thead', {}, [h('tr', {}, [h('th', { style: 'width:60px', text: 'Kind' }), h('th', { style: 'width:150px', text: 'Plan' }), h('th', { style: 'width:180px', text: 'What you do' }), h('th', { class: 'r', style: 'width:76px', title: 'Stats gained over the ' + days + ' days, and the difference from the recommended plan', text: 'Stats' }), h('th', { class: 'r', style: 'width:88px', title: 'What it costs over the ' + days + ' days, and the difference from the recommended plan', text: 'Cost' }), h('th', { class: 'r', style: 'width:68px', title: 'Stats gained for each $1M spent over the ' + days + ' days', text: 'Per $1M' }), h('th', { text: 'Why it isn’t the pick' })])]),
             h('tbody', {}, rows.length ? rows : [h('tr', {}, [h('td', { colspan: '7', class: 'muted', text: 'No other plan fits you.' })])]),
         ]),
         note,
@@ -564,7 +565,7 @@ function planRun(busy, ctx) {
         h('div', { class: 'dayline', role: 'progressbar', 'aria-label': busy.recalibrate ? 'Re-planning' : 'Working out your plan' }, [h('i', { 'data-plan-bar': '1', style: 'width:' + Math.round(100 * Math.max(0.02, busy.done || 0)) + '%' })]),
         h('div', { class: 'row', style: 'justify-content:space-between;margin-top:6px' }, [
             h('span', { class: 'pc-sub num', 'data-plan-words': '1', text: planRunWords(busy) }),
-            h('span', { class: 'row', style: 'gap:10px' }, [h('span', { class: 'muted', style: 'font-size:12px', text: 'You can keep using the page, or leave it: your plan stays as it is until this is done.' }), h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.cancelPlan && ctx.cancelPlan(), text: 'Cancel' })]),
+            h('span', { class: 'row', style: 'gap:10px' }, [h('span', { class: 'muted', style: 'font-size:13px', text: 'You can keep using the page, or leave it: your plan stays as it is until this is done.' }), h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.cancelPlan && ctx.cancelPlan(), text: 'Cancel' })]),
         ]),
     ]);
 }

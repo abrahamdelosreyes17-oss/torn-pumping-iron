@@ -66,6 +66,11 @@ export function lineChart(series, o = {}) {
     // Direct labels at the line ends, nudged apart.
     ends.sort((a, b) => a.y - b.y);
     for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 13) ends[i].y = ends[i - 1].y + 13;
+    // ...and lifted back above the x axis when the stack ran past it (they fell onto the legend under the chart).
+    if (ends.length && ends[ends.length - 1].y > H - B) {
+        ends[ends.length - 1].y = H - B;
+        for (let i = ends.length - 2; i >= 0; i--) ends[i].y = Math.min(ends[i].y, ends[i + 1].y - 13);
+    }
     for (const e of ends) txt(svg, e.x + 6, e.y + 4, e.s.label || e.s.name, { style: 'fill:' + (e.s.labelColor || e.s.color) + ';font-weight:' + ((e.s.width || 1.5) > 2 ? 'bold' : 'normal') });
     return svg;
 }

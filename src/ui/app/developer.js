@@ -87,7 +87,7 @@ export function developerSection(m, ctx) {
             ]),
             unlocked
                 ? h('div', { class: 'row' }, [h('button', { class: 'btn sm primary', type: 'button', onclick: () => { ctx.ui.devPage = true; ctx.rerender(); }, text: 'Open the Developer page' }), h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.dev.setUnlocked(false); ctx.rerender(); }, text: 'Lock' })])
-                : h('div', { class: 'row', style: 'flex-wrap:wrap' }, [keyIn, h('button', { class: 'btn sm', type: 'button', onclick: unlock, text: 'Unlock' }), h('span', { class: 'muted', style: 'font-size:12px', text: 'For the owner only: what it learned (graphs, plain words), import a friend’s export, and the raw details.' }), msg]),
+                : h('div', { class: 'row', style: 'flex-wrap:wrap' }, [keyIn, h('button', { class: 'btn sm', type: 'button', onclick: unlock, text: 'Unlock' }), h('span', { class: 'muted', style: 'font-size:13px', text: 'For the owner only: what it learned (graphs, plain words), import a friend’s export, and the raw details.' }), msg]),
         ]),
     ]);
 }
@@ -278,7 +278,7 @@ export function renderDeveloper(m, ctx) {
         h('div', {}, [
             h('details', { class: 'dis' }, [
                 h('summary', { text: 'Raw for Claude · accept log, scores, storage' }),
-                h('pre', { style: 'white-space:pre-wrap;font-size:11px;color:var(--muted);margin:8px 0 0' }, [
+                h('pre', { style: 'white-space:pre-wrap;font-size:12px;color:var(--muted);margin:8px 0 0' }, [
                     log.slice(-12).map((r) => new Date(r.at).toISOString().slice(0, 16) + ' gym ' + (r.gym.candidates || []).map((c) => c.mode + ' ' + (c.error === null ? '—' : c.error.toFixed(2) + '%')).join(' / ') + ' · held-out ' + (r.gym.heldOut.current === null ? '—' : r.gym.heldOut.current.toFixed(2) + '% → ' + r.gym.heldOut.learned.toFixed(2) + '%') + ' · ' + (r.gym.accepted ? 'ACCEPT' : 'keep') + ' · eye ' + (r.fights.accepted ? 'ACCEPT' : 'keep') + ' (' + r.fights.fights + ')').join('\n') || 'no learning runs yet',
                     '\n\nstorage: ' + Object.entries(sizes).map(([k, v]) => k + ' ' + fmtInt(v) + ' B').join(' · '),
                 ]),

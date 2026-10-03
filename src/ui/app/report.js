@@ -85,7 +85,7 @@ export function reportSection(m, ctx) {
             h('p', { text: 'Found a bug, or something slow? Say what happened, add screenshots, and download one .zip to send. It also holds the problem log (what failed, what you clicked just before, how long each plan took) and your stats, gym log and saved plan, so the cause is found without guessing. Nothing is sent anywhere by this page.' }),
             h('label', { class: 'field' }, [h('span', { class: 'lab', text: 'What happened?' }), happened]),
             h('label', { class: 'field' }, [h('span', { class: 'lab', text: 'What did you expect?' }), expected]),
-            h('div', { class: 'row', style: 'flex-wrap:wrap' }, [h('button', { class: 'btn sm', type: 'button', onclick: () => file.click(), text: 'Add screenshots' }), h('span', { class: 'muted', style: 'font-size:12px', text: 'Win + Shift + S takes one; save it, then add it here.' }), file]),
+            h('div', { class: 'row', style: 'flex-wrap:wrap' }, [h('button', { class: 'btn sm', type: 'button', onclick: () => file.click(), text: 'Add screenshots' }), h('span', { class: 'muted', style: 'font-size:13px', text: 'Win + Shift + S takes one; save it, then add it here.' }), file]),
             shots.length ? h('div', { class: 'shots' }, shots) : null,
             h('div', {}, [h('span', { class: 'lab', text: 'What goes in the zip' }), h('ul', { class: 'incl' }, includes.map((x) => h('li', { text: x })))]),
             h('div', { class: 'row', style: 'flex-wrap:wrap' }, [

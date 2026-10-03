@@ -26,7 +26,9 @@ export const APP_TABS = [
 
 const RENDERERS = { home: renderHome, plan: renderPlan, buy: renderBuy, progress: renderProgress, settings: renderSettings };
 
-const FONT_URL = 'https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&display=swap';
+// Round 7 type pass: Source Serif 4 for titles and the one big number, Inter for the rest (webpage only; torn.com uses Segoe UI).
+// Loaded into the document: @font-face rules there reach the app's shadow root.
+const FONT_URL = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,600&display=swap';
 
 /** The warning while Torn Trading runs (Z-paused). */
 export function pausedBanner(m, settings) {

@@ -76,7 +76,7 @@ function totalChart(m, ctx, s) {
     const hi = Math.max(...vals);
     const old = plans.some((p) => !p.current && p.values.some((v) => v !== null));
     return h('div', {}, [
-        h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('lab', 'Total stats against the plan'), h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), 'you']), h('span', {}, [h('i', { class: 'dash', style: 'color:var(--muted)' }), 'plan']), old ? h('span', {}, [h('i', { class: 'dash', style: 'color:var(--dim)' }), 'earlier plan']) : null])]),
+        h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:16px' }, [t('ct', 'Total stats against the plan'), h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), 'you']), h('span', {}, [h('i', { class: 'dash', style: 'color:var(--muted)' }), 'plan']), old ? h('span', {}, [h('i', { class: 'dash', style: 'color:var(--dim)' }), 'earlier plan']) : null])]),
         lineChart(
             [
                 ...plans.filter((p) => p.values.some((v) => v !== null)).map((p) => ({ name: p.current ? 'plan' : 'earlier plan', color: p.current ? 'var(--muted)' : 'var(--dim)', dash: p.current ? '5 4' : '2 4', width: p.current ? 1.5 : 1.2, values: p.values, label: p.current ? 'plan' : false })),
@@ -116,7 +116,7 @@ function statCharts(m, ctx, s) {
             lineChart(series, { w: 460, h: 90, left: 4, right: 4, yMin: lo - (hi - lo || hi * 0.01) * 0.1, yMax: hi + (hi - lo || hi * 0.01) * 0.1, n: youVals.length > 1 ? youVals.length : 2, label: STAT_LABEL[k] + ' over the days shown' }),
         ]);
     });
-    return h('div', {}, [h('div', { class: 'lab', style: 'margin-bottom:8px', text: 'Each stat · own scale' }), h('div', { class: 'mult num' }, cells)]);
+    return h('div', {}, [h('div', { class: 'ct', style: 'margin-bottom:16px', text: 'Each stat · own scale' }), h('div', { class: 'mult num' }, cells)]);
 }
 
 /** One Torn day's gained and planned (core/planline.js dayNumbers), for the bars and "This week". */
@@ -137,8 +137,8 @@ function dayBars(m, ctx) {
     const done = days.filter((d) => d < today);
     const onPlan = days.filter((d, i) => d < today && nums[i].planned > 0 && nums[i].gained / nums[i].planned >= 0.95).length;
     return h('div', {}, [
-        h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [
-            h('span', {}, [t('lab', 'Gained against plan, each day'), done.length ? h('span', { class: 'muted', style: 'margin-left:10px;font-size:12px', text: onPlan + ' of ' + done.length + ' days on plan' }) : null]),
+        h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:16px' }, [
+            h('span', {}, [t('ct', 'Gained against plan, each day'), done.length ? h('span', { class: 'muted', style: 'margin-left:12px;font-size:13px', text: onPlan + ' of ' + done.length + ' days on plan' }) : null]),
             h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--good)' }), 'on plan']), h('span', {}, [h('i', { style: 'background:var(--spd)' }), '75–95%']), h('span', {}, [h('i', { style: 'background:var(--bad)' }), 'under 75%']), h('span', {}, [h('i', { style: 'background:var(--line2)' }), 'today so far'])]),
         ]),
         planBars(pct, labels, { w: 1000, h: 110, partial: days.length - 1, label: 'Stats gained each day as a share of the plan' }),
@@ -178,7 +178,7 @@ function lastTrains(m, ctx) {
         rows.length
             ? h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Session' }), h('th', { text: 'Gym' }), h('th', { class: 'r', title: 'The gain formula on the trains you did, at the happy and stat of the read before them. It checks the formula, not the plan.', text: 'Formula says' }), h('th', { class: 'r', text: 'You got' }), h('th', { class: 'r', style: 'width:80px', text: 'Off by' })])]), h('tbody', {}, rows)])
             : null,
-        h('p', { class: 'muted', style: rows.length ? 'margin:6px 0 0;font-size:12px' : 'margin:0', text: 'Only reads under two minutes apart with one stat trained and nothing taken in between (no drug, booster or refill, no happy reset): they check the gain maths, not your plan, so a session’s total here can be less than what you really gained. Your real gains are under “Your gains”.' + (ctx.gymLog ? ' Sessions marked “Torn log” are from Torn’s own log (your Full key): trains while Pumping Iron wasn’t open, e.g. on your phone.' : ' With a Full key (Settings), trains on your phone show here too, from Torn’s log.') }),
+        h('p', { class: 'muted', style: rows.length ? 'margin:6px 0 0;font-size:13px' : 'margin:0', text: 'Only reads under two minutes apart with one stat trained and nothing taken in between (no drug, booster or refill, no happy reset): they check the gain maths, not your plan, so a session’s total here can be less than what you really gained. Your real gains are under “Your gains”.' + (ctx.gymLog ? ' Sessions marked “Torn log” are from Torn’s own log (your Full key): trains while Pumping Iron wasn’t open, e.g. on your phone.' : ' With a Full key (Settings), trains on your phone show here too, from Torn’s log.') }),
     ]);
 }
 
@@ -478,7 +478,7 @@ export function whatIfCard(m, ctx) {
     return h('div', {}, [
         head,
         h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [
-            h('span', { class: 'muted', style: 'font-size:12px', text: 'You: ' + fmtSigned(period.gained) + ' from ' + fmtInt(period.energy) + ' E and ' + fmtMoney(period.money) }),
+            h('span', { class: 'muted', style: 'font-size:13px', text: 'You: ' + fmtSigned(period.gained) + ' from ' + fmtInt(period.energy) + ' E and ' + fmtMoney(period.money) }),
             h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), 'you']), h('span', {}, [h('i', { class: 'dash', style: 'color:var(--muted)' }), 'another plan'])]),
         ]),
         lineChart(series, { w: 1000, h: 180, left: 50, right: 150, yMin: lo - (hi - lo || hi * 0.01) * 0.08, yMax: hi + (hi - lo || hi * 0.01) * 0.08, grid: [lo, hi], xLabels: [[0, dayLabel(period.days[0].day)], [n, lastDay === today ? 'today' : dayLabel(lastDay)]], n: n + 1, label: 'Total stats: you against other plans with your energy' }),
