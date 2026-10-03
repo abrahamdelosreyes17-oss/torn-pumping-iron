@@ -23,6 +23,8 @@ const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PWPATH || 'playwright-core');
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const shots = process.env.SHOTS || tmpdir();
+// PORT=… when another check already serves 8783 (another worktree's run).
+const PORT = Number(process.env.PORT) || 8783;
 
 const types = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json' };
 const server = http.createServer(async (req, res) => {
@@ -35,7 +37,7 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(404);
         res.end();
     }
-}).listen(8783);
+}).listen(PORT);
 
 const browser = await chromium.launch({ channel: process.env.PWCHANNEL || 'msedge' });
 let failures = 0;
@@ -44,8 +46,8 @@ const ok = (cond, msg) => {
     if (!cond) failures++;
 };
 
-async function open(query, { wait = 4500, seed = null } = {}) {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+async function open(query, { wait = 4500, seed = null, width = 1280 } = {}) {
+    const page = await browser.newPage({ viewport: { width, height: 900 } });
     // What an earlier page stored (the next Torn page finds it): harness-live.html starts its store from it.
     if (seed) await page.addInitScript((s) => { window.__piSeed = s; }, seed);
     const errors = [];
@@ -55,8 +57,9 @@ async function open(query, { wait = 4500, seed = null } = {}) {
         tornHits++;
         r.abort();
     });
-    await page.goto('http://127.0.0.1:8783/test/harness-live.html?key=1&at=2026-09-29T10:48:00Z&wait=100000&plan=1&follow=steady&' + query);
-    await page.waitForTimeout(wait);
+    await page.goto('http://127.0.0.1:' + PORT + '/test/harness-live.html?key=1&at=2026-09-29T10:48:00Z&wait=100000&plan=1&follow=steady&' + query);
+    // SLOW=2 on a busy machine (other checks running): the page's first read and plan take longer than usual.
+    await page.waitForTimeout(wait * (Number(process.env.SLOW) || 1));
     return { page, errors, tornHits: () => tornHits };
 }
 
@@ -66,16 +69,27 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
 {
     const { page, errors, tornHits } = await open('page=gym&fixture=gym-friend&energy=275&build=balanced');
     const strip = (await text(page, '.pi-strip'))[0] || '';
-    ok(strip.includes('Balanced') && strip.includes('Gun Shop: DEX × 27'), 'gym: strip names the build and the session\'s parts (' + strip + ')');
-    const cur = (await text(page, '.pi-strip .pi-part.pi-cur'))[0] || '';
-    ok(cur === 'Gun Shop: DEX × 27', 'gym: the current part is the bright one (' + cur + ')');
+    ok(strip.includes('Train DEX × 27 here') && strip.includes('Gun Shop · Balanced'), 'gym: strip says what to train here, the gym and the build (' + strip + ')');
+    const stripState = await page.evaluate(() => { const s = document.querySelector('.pi-strip'); return s.getAttribute('data-pi-state') + ':' + s.classList.contains('pi-c-green'); });
+    ok(stripState === 'right:true', 'gym: state A, the right gym: a green strip (' + stripState + ')');
     ok(/Force Training in [\d,]+ E/.test(strip), 'gym: next gym from the page\'s 80% (' + strip + ')');
     const on = await page.evaluate(() => [...document.querySelectorAll('li.pi-on')].map((li) => li.className.match(/(strength|speed|defense|dexterity)/)[1]));
     ok(on.length === 1 && on[0] === 'dexterity', 'gym: DEX outlined, and only DEX (' + on + ')');
+    const mark = await page.evaluate(() => { const m = document.querySelector('li.pi-on .pi-statmark'); const t = document.querySelector('li.pi-on .pi-panel .pi-tab'); return m ? { cls: m.className, tab: t && t.textContent, color: getComputedStyle(m).borderTopColor, tabAbove: t ? t.getBoundingClientRect().top < m.getBoundingClientRect().top : null } : null; });
+    ok(mark && /pi-c-green/.test(mark.cls) && /pi-glow/.test(mark.cls) && mark.color === 'rgb(63, 191, 90)', 'gym: the stat to train is outlined green with a glow (' + JSON.stringify(mark) + ')');
+    ok(mark && /^Train this · 27 trains · about \+[\d,]+$/.test(mark.tab) && mark.tabAbove === false, 'gym: its tab "TRAIN THIS · 27 trains · about +…", inside the box, over nothing of Torn\'s (' + JSON.stringify(mark) + ')');
     const panel = (await text(page, 'li.pi-on .pi-panel'))[0] || '';
     ok(/27 trains/.test(panel) && /all your energy/.test(panel) && /Fill 27/.test(panel), 'gym: panel "27 trains · all your energy · Fill 27" (' + panel + ')');
-    const greys = await text(page, '.pi-grey');
-    ok(greys.some((g) => /over target/.test(g)), 'gym: over-target stats get a grey word (' + greys.join(' | ') + ')');
+    const fillBg = await page.evaluate(() => getComputedStyle(document.querySelector('li.pi-on .pi-fill')).backgroundColor);
+    ok(fillBg === 'rgb(63, 191, 90)', 'gym: Fill is green (' + fillBg + ')');
+    const corners = await text(page, '.pi-corner');
+    ok(corners.includes('skip · over target') && corners.includes('tomorrow'), 'gym: the other stats get a small dark tag (' + corners.join(' | ') + ')');
+    const here = await page.evaluate(() => [...document.querySelectorAll('[data-pi-gym]')].map((b) => b.getAttribute('data-pi-gym') + ':' + b.querySelector('[class*="gymIcon___"]').className.match(/gym-(\d+)/)[1] + ':' + getComputedStyle(b).outlineColor));
+    ok(here.length === 1 && here[0] === 'right:18:rgb(63, 191, 90)', 'gym: Gun Shop, the gym you\'re in, a steady green outline (' + here + ')');
+    const glows = await page.evaluate(() => ({ glow: document.querySelectorAll('.pi-glow').length, pulse: document.querySelectorAll('.pi-pulse').length }));
+    ok(glows.glow === 1 && glows.pulse === 0, 'gym: one thing glows, nothing pulses (' + JSON.stringify(glows) + ')');
+    const font = await page.evaluate(() => getComputedStyle(document.querySelector('.pi-strip b')).fontFamily);
+    ok(/Segoe UI/.test(font), 'gym: our marks in Segoe UI / system-ui (' + font + ')');
     await page.evaluate(() => {
         window.__trainClicks = 0;
         for (const b of document.querySelectorAll('button[aria-label^="Train "]')) b.addEventListener('click', () => window.__trainClicks++);
@@ -170,14 +184,18 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
 {
     const { page, errors } = await open('page=gym&fixture=gym-owner&who=owner&build=hank');
     const next = await page.evaluate(() => {
-        const b = document.querySelector('.gymButton___3OFdI.pi-outlined');
-        return b ? { icon: b.querySelector('[class*="gymIcon___"]').className, label: (b.querySelector('.pi-label') || {}).textContent } : null;
+        const b = document.querySelector('[data-pi-gym="go"]');
+        const ring = b && b.querySelector('.pi-ring.pi-pulse');
+        return b ? { icon: b.querySelector('[class*="gymIcon___"]').className, label: ring && ring.title, outline: getComputedStyle(b).outlineColor, anim: ring && getComputedStyle(ring, '::after').animationName } : null;
     });
-    ok(next && /gym-23/.test(next.icon) && /^Next: The Edge · SPD × \d+$/.test(next.label), 'gym (Hank\'s): The Edge\'s button is outlined with "Next: The Edge · SPD × N" (' + JSON.stringify(next) + ')');
+    ok(next && /gym-23/.test(next.icon) && /^Next: The Edge · SPD × \d+$/.test(next.label) && next.outline === 'rgb(63, 191, 90)', 'gym (Hank\'s): state B, The Edge\'s button is green and pulses (' + JSON.stringify(next) + ')');
+    ok(next && next.anim === 'pi-pulse', 'gym (Hank\'s): the pulse runs (Animations on) (' + (next && next.anim) + ')');
+    const wrong = await page.evaluate(() => { const b = document.querySelector('[data-pi-gym="wrong"]'); return b ? b.querySelector('[class*="gymIcon___"]').className.match(/gym-(\d+)/)[1] + ':' + getComputedStyle(b).outlineColor + ':' + b.querySelectorAll('.pi-pulse').length : null; });
+    ok(wrong === '27:rgb(255, 107, 94):0', 'gym (Hank\'s): Gym 3000, where you are, a steady red outline (' + wrong + ')');
     const dim = await page.evaluate(() => document.querySelectorAll('li.pi-dim, .pi-dim').length);
     ok(dim === 0, 'gym (Hank\'s): Torn\'s stat boxes are never greyed (round 6) (' + dim + ')');
-    const hint = await page.evaluate(() => [...document.querySelectorAll('.pi-strip .pi-hint')].map((e) => e.textContent).join(' '));
-    ok(/This session trains at The Edge: open it · then SPD × \d+/.test(hint), 'gym (Hank\'s): one line in the strip says where this session trains (' + hint + ')');
+    const hint = (await text(page, '.pi-strip'))[0] || '';
+    ok(/Wrong gym/.test(hint) && /you’re in Gym 3000 \(no SPD\) · switch to The Edge \(SPD [\d.]+\)/.test(hint), 'gym (Hank\'s): the strip says "Wrong gym · you\'re in Gym 3000 · switch to The Edge" (' + hint + ')');
     // Another script changing the gym page (not Torn's values): no redraw.
     const same = await page.evaluate(async () => {
         const strip = document.querySelector('.pi-strip');
@@ -192,12 +210,23 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
         return document.querySelector('.pi-strip') === strip;
     });
     ok(same, 'gym (Hank\'s): changes that are not Torn\'s values (another script) redraw nothing');
-    const fills = await page.evaluate(() => document.querySelectorAll('.pi-fill').length);
-    ok(fills === 0, 'gym (Hank\'s): no Fill in a gym the part isn\'t in');
+    const fills = await page.evaluate(() => document.querySelectorAll('.pi-fill:not(:disabled)').length);
+    ok(fills === 0, 'gym (Hank\'s): no Fill to press in a gym the part isn\'t in');
     const clicks = await page.evaluate(() => document.querySelectorAll('.gymButton___3OFdI.selected___2PmTc').length && document.querySelector('.gymButton___3OFdI.selected___2PmTc [class*="gym-27"]') !== null);
     ok(clicks, 'gym (Hank\'s): we never switched gyms (Gym 3000 is still the one selected)');
+    const card = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.textContent.replace(/\s+/g, ' '));
+    ok(/Wrong gym/.test(card) && /Switch to The Edge/.test(card), 'gym (Hank\'s): the panel says "Switch to The Edge" (' + card.slice(0, 120) + ')');
     ok(errors.length === 0, 'gym (Hank\'s): no page errors ' + JSON.stringify(errors));
     await page.screenshot({ path: resolve(shots, 'torn-gym-owner.png'), fullPage: true });
+    // Settings › Animations off: the pulse is held still.
+    await page.evaluate(() => {
+        window.GM_setValue('pumpingIron.v1.settings', JSON.stringify({ motion: false }));
+        // This tab's own write fires no change event here (Tampermonkey's are remote only): redraw as Settings' tab would.
+        window.__pi.refresh();
+    });
+    await page.waitForTimeout(1500);
+    const still = await page.evaluate(() => { const r = document.querySelector('[data-pi-gym="go"] .pi-ring'); return r ? r.classList.contains('pi-still') + ':' + getComputedStyle(r, '::after').animationName + ':' + getComputedStyle(r, '::after').opacity : null; });
+    ok(still === 'true:none:0.7', 'gym (Hank\'s): Animations off, the pulse held still (' + still + ')');
     await page.close();
 }
 
@@ -219,6 +248,9 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     ok(labels.some((l) => l === 'Take 3 · $2,479,500'), 'bazaar: Iron_Monk\'s Xanax outlined "Take 3 · $2,479,500" (' + labels.join(' | ') + ')');
     const pe = await page.evaluate(() => getComputedStyle(document.querySelector('.pi-label')).pointerEvents);
     ok(pe === 'none', 'bazaar: the label never takes the pointer');
+    const tab = await page.evaluate(() => { const l = document.querySelector('.pi-label'); const s = getComputedStyle(l); return { tt: s.textTransform, bg: s.backgroundColor, glows: document.querySelectorAll('.pi-glow').length }; });
+    ok(tab.tt === 'uppercase' && tab.bg === 'rgb(239, 235, 226)' && tab.glows === 1, 'bazaar: a chalk tab "TAKE 3 · $2,479,500", one thing glows (' + JSON.stringify(tab) + ')');
+    await page.screenshot({ path: resolve(shots, 'torn-bazaar.png') });
     ok(errors.length === 0, 'bazaar: no page errors');
     await page.close();
 }
@@ -238,14 +270,19 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
 
 /* The panel on any page: its bar, the body, Alt+` and a drag. */
 {
-    const { page, errors } = await open('page=other');
+    // 1600 wide: the free space beside Torn's page holds the full panel.
+    const { page, errors } = await open('page=other', { width: 1600 });
     const q = (sel) => `document.getElementById('pi-overlay').shadowRoot.querySelector('${sel}')`;
     const bar = await page.evaluate(`${q('.head')}.textContent`);
     ok(/3:[45]\d\s*Xanax #1/.test(bar.replace(/\s+/g, ' ')), 'panel: countdown and step in the bar (' + bar + ')');
     const box = await page.evaluate(`(() => { const r = ${q('.head')}.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })()`);
     ok(Math.abs(box.h - 36) <= 1, 'panel: bar 36 px tall (' + box.h + ')');
-    const body = await page.evaluate(`({ shown: getComputedStyle(${q('.body')}).display !== 'none', text: ${q('.body')}.textContent })`);
-    ok(body.shown && /Take Xanax #1, then train (STR|SPD|DEF|DEX)/.test(body.text) && /Open Pumping Iron/.test(body.text), 'panel: expanded by default with the step and the link');
+    const body = await page.evaluate(`({ shown: getComputedStyle(${q('.body')}).display !== 'none', text: ${q('.body')}.textContent, go: ${q('.cta.go')} && ${q('.cta.go')}.getAttribute('href'), goText: ${q('.cta')}.textContent, ctas: ${q('.body')}.querySelectorAll('.cta').length })`);
+    ok(body.shown && /Take Xanax #1, then train (STR|SPD|DEF|DEX)/.test(body.text), 'panel: expanded by default with the step');
+    ok(body.ctas === 1 && body.goText === 'Open Items' && body.go === 'https://www.torn.com/item.php', 'panel: one action button, "Open Items" for the Xanax (' + JSON.stringify(body) + ')');
+    const look = await page.evaluate(`(() => { const w = ${q('.wrap')}; const s = getComputedStyle(w); return { bg: s.backgroundColor, tone: w.getAttribute('data-tone'), font: s.fontFamily }; })()`);
+    ok(look.bg === 'rgb(16, 18, 20)' && /Segoe UI/.test(look.font), 'panel: near-black, Segoe UI (' + JSON.stringify(look) + ')');
+    ok(look.tone === '', 'panel: no chalk edge while the step is still ahead (' + look.tone + ')');
     await page.locator('#pi-overlay .open').click();
     const opened = await page.evaluate(() => window.__opened || []);
     ok(opened[0] === 'https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html', 'panel: Open Pumping Iron opens the webpage in a new tab');
@@ -267,7 +304,18 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     await page.mouse.up();
     const after = await page.evaluate(`(() => { const r = ${q('.wrap')}.getBoundingClientRect(); return { x: r.x, y: r.y, r: r.right, vw: innerWidth, vh: innerHeight, pos: JSON.parse(_store['pumpingIron.v1.overlayPos'] || 'null') }; })()`);
     ok(after.r <= after.vw && after.y + 36 <= after.vh && after.pos && after.pos.side, 'drag: stays on screen, spot saved (' + JSON.stringify(after) + ')');
+    ok(after.x >= 1288 || after.r <= 312, 'drag: still beside Torn\'s page, never over it (' + JSON.stringify(after) + ')');
     ok(errors.length === 0, 'panel: no page errors');
+    // Narrower windows: it sizes itself to the free space beside Torn's page instead of going over it (the owner).
+    for (const [w, tier] of [[1440, 'narrow'], [1280, 'compact'], [1100, 'mini']]) {
+        await page.setViewportSize({ width: w, height: 900 });
+        await page.waitForTimeout(400);
+        const fit = await page.evaluate(`(() => { const w = ${q('.wrap')}; const r = w.getBoundingClientRect(); return { fit: w.getAttribute('data-fit'), folded: w.classList.contains('collapsed'), l: Math.round(r.left), r: Math.round(r.right), t: Math.round(r.top), font: getComputedStyle(w).fontSize }; })()`);
+        const pageL = (w - 976) / 2;
+        const clear = fit.r <= pageL || fit.l >= pageL + 976 || (tier === 'mini' && fit.t <= 4 + 1);
+        ok(fit.fit === tier && clear && (tier === 'narrow' ? !fit.folded && fit.font === '12px' : fit.folded), 'fit at ' + w + ' px: ' + tier + ', never over Torn\'s page (' + JSON.stringify(fit) + ')');
+        await page.screenshot({ path: resolve(shots, 'torn-panel-' + w + '.png') });
+    }
     await page.close();
 }
 
@@ -320,9 +368,10 @@ const panelRect = (page) => page.evaluate(() => { const h = document.getElementB
         ok(side === 'right' ? c.left >= torn.right && c.right <= w : c.right <= torn.left && c.left >= 0, 'eye profile ' + w + ' px: in the free space on the ' + side + ', never on Torn’s page (' + Math.round(c.left) + '–' + Math.round(c.right) + ', Torn ' + Math.round(torn.left) + '–' + Math.round(torn.right) + ')');
         ok(Math.abs(c.top - c.titleTop) <= 2, 'eye profile ' + w + ' px: level with the profile title (' + Math.round(c.top) + ' vs ' + Math.round(c.titleTop) + ')');
         ok(/Segoe UI|system-ui/.test(c.font.split(',')[0]), 'eye profile: Segoe UI / system-ui (' + c.font + ')');
-        // Docking the panel under #pi-eyecard is the panel's side (src/ui/overlay.js): reported here, not failed.
+        // The panel folds under #pi-eyecard when the card took its margin (src/ui/overlay.js dockIfShared; its tick is 1 s).
+        await page.waitForTimeout(1300);
         const pr = await panelRect(page);
-        if (overlaps(c, pr)) console.log('NOTE eye profile ' + w + ' px: the training panel COVERS the card (panel ' + JSON.stringify(pr) + ')');
+        ok(!overlaps(c, pr), 'eye profile ' + w + ' px: the training panel never covers the card (panel ' + JSON.stringify(pr) + ')');
         if (mode === 'full' && side === 'right') {
             ok(/^Stomp/.test(c.text) && /FFScouter 3 d/.test(c.text) && /Watch/.test(c.text), 'eye profile: full card with the band, the source and Watch (' + c.text + ')');
             const i = [c.text.indexOf('Respect'), c.text.indexOf('HP kept'), c.text.indexOf('Win')];
@@ -365,7 +414,7 @@ const panelRect = (page) => page.evaluate(() => { const h = document.getElementB
     const warBands = { at: Date.parse('2026-09-29T10:40:00Z'), fid: 7777, p: { 515151: ['low', 3, null], 605123: ['stomp', 100, 97], 777001: ['good', 92, 81] } };
     const { page, errors } = await open('page=profile&XID=424242&fixture=profile&ffs=1&who=owner', { wait: 8000, seed: { 'pumpingIron.v1.eyeWarBands': JSON.stringify(warBands) } });
     await page.setViewportSize({ width: 1600, height: 900 });
-    await page.goto('http://127.0.0.1:8783/test/harness-live.html?key=1&at=2026-09-29T10:48:00Z&wait=100000&plan=1&follow=steady&page=faction&ID=7777&fixture=faction&ffs=1&who=owner');
+    await page.goto('http://127.0.0.1:' + PORT + '/test/harness-live.html?key=1&at=2026-09-29T10:48:00Z&wait=100000&plan=1&follow=steady&page=faction&ID=7777&fixture=faction&ffs=1&who=owner');
     await page.waitForTimeout(6500);
     await tornLayout(page);
     // Shown order (CSS order on Torn's rows; the DOM itself is untouched).
@@ -492,21 +541,60 @@ const panelRect = (page) => page.evaluate(() => { const h = document.getElementB
         return { paused: sh.querySelector('.wrap').classList.contains('paused'), head: sh.querySelector('.head').textContent, body: sh.querySelector('.body').textContent, marks: document.querySelectorAll('li.pi-on, .pi-strip, .pi-panel').length };
     });
     ok(state.paused && /Paused · Torn Trading is on/.test(state.head), 'turns: the panel shows the warning sign (' + state.head + ')');
-    ok(/turn off Torn Trading/.test(state.body), 'turns: the panel says how to switch');
+    ok(/Still seen in 1 tab: Gym\./.test(state.body) && /Reload or close it\. Pumping Iron starts again 60 s after the last one\./.test(state.body) && /Last seen\d+ s ago/.test(state.body), 'turns: the amber card says where Torn Trading is still seen, and when (' + state.body + ')');
     ok(state.marks === 0, 'turns: nothing of ours left on Torn’s page (' + state.marks + ')');
+    await page.screenshot({ path: resolve(shots, 'torn-paused.png') });
     await page.waitForTimeout(6000);
     const n2 = await page.evaluate(() => window.__calls.length);
     ok(n2 === n1, 'turns: no request while paused (' + (n2 - n1) + ')');
-    // Torn Trading turned off: its panel gone and last seen over a minute ago.
-    await page.evaluate(() => {
-        document.getElementById('ttv2-host').remove();
-        window.GM_setValue('pumpingIron.v1.tradingSeenAt', JSON.stringify(Date.now() - 61000));
-    });
+    // The open bug, its cause: Torn Trading turned off in Tampermonkey stays in a tab opened before (its host too),
+    // so that tab marks it seen again: last seen over a minute ago, and paused again within one look (5 s).
+    await page.evaluate(() => window.GM_setValue('pumpingIron.v1.tradingSeenAt', JSON.stringify(Date.now() - 61000)));
+    await page.waitForTimeout(5500);
+    const again = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.querySelector('.wrap').classList.contains('paused'));
+    ok(again, 'turns (cause): a tab that still has Torn Trading keeps the pause on; the card names it instead of promising a minute');
+    // That tab reloaded or closed: its host gone. The card counts down from the last time it was seen.
+    await page.evaluate(() => document.getElementById('ttv2-host').remove());
+    await page.waitForTimeout(6000);
+    const gone = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.querySelector('.body').textContent);
+    ok(/Torn Trading isn’t seen any more\. Starting again in \d:\d\d\./.test(gone), 'turns: once it is gone the card counts down (' + gone + ')');
+    // Last seen over a minute ago.
+    await page.evaluate(() => window.GM_setValue('pumpingIron.v1.tradingSeenAt', JSON.stringify(Date.now() - 61000)));
     await page.waitForTimeout(6000);
     const back = await page.evaluate(() => ({ paused: document.getElementById('pi-overlay').shadowRoot.querySelector('.wrap').classList.contains('paused'), marks: document.querySelectorAll('li.pi-on').length }));
     ok(!back.paused && back.marks === 1, 'turns: back by itself, marks drawn again (' + JSON.stringify(back) + ')');
     ok(errors.length === 0, 'turns: no page errors ' + JSON.stringify(errors));
-    await page.screenshot({ path: resolve(shots, 'torn-paused.png') });
+    await page.close();
+}
+
+/* The attack page: the panel folds to one line directly under Torn Eye's fight card (#pi-eyecard), never on top of it. */
+{
+    const { page, errors } = await open('page=attack&user2ID=424242&fixture=attack&ffs=1&who=owner', { wait: 5000 });
+    // Torn Eye's card (its builder's #pi-eyecard; a stand-in where this build has none).
+    await page.evaluate(() => {
+        if (document.getElementById('pi-eyecard')) return;
+        const d = document.createElement('div');
+        d.id = 'pi-eyecard';
+        d.style.cssText = 'position:fixed;right:20px;top:90px;width:300px;height:260px;background:#101214;border:1px solid #3a4046;border-radius:10px;z-index:2147482000';
+        document.body.appendChild(d);
+    });
+    await page.waitForTimeout(1600);
+    const dock = await page.evaluate(() => {
+        const c = document.getElementById('pi-eyecard').getBoundingClientRect();
+        const w = document.getElementById('pi-overlay').shadowRoot.querySelector('.wrap');
+        const r = w.getBoundingClientRect();
+        return { card: { l: Math.round(c.left), b: Math.round(c.bottom), w: Math.round(c.width) }, wrap: { l: Math.round(r.left), t: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }, folded: w.classList.contains('collapsed') };
+    });
+    const overlaps = dock.wrap.t < dock.card.b && dock.wrap.t + dock.wrap.h > dock.card.b - 260;
+    ok(dock.folded && dock.wrap.t >= dock.card.b && dock.wrap.t - dock.card.b <= 10 && !overlaps && dock.wrap.l === dock.card.l && dock.wrap.w === dock.card.w, 'attack: the panel folds to one line under the fight card, never over it (' + JSON.stringify(dock) + ')');
+    const saved = await page.evaluate(() => _store['pumpingIron.v1.overlayCollapsed'] || null);
+    ok(saved !== 'true', 'attack: folding there is not saved as your choice (' + saved + ')');
+    // No fight card: the usual panel.
+    await page.evaluate(() => document.getElementById('pi-eyecard').remove());
+    await page.waitForTimeout(1600);
+    const free = await page.evaluate(() => { const w = document.getElementById('pi-overlay').shadowRoot.querySelector('.wrap'); const r = w.getBoundingClientRect(); const c = (document.querySelector('.content-wrapper') || document.body).getBoundingClientRect(); return !w.classList.contains('docked') && (r.right <= c.left + 1 || r.left >= c.right - 1 || (w.getAttribute('data-fit') === 'mini' && r.top <= 5)); });
+    ok(free, 'attack: without the card the panel is back to normal');
+    ok(errors.length === 0, 'attack dock: no page errors ' + JSON.stringify(errors));
     await page.close();
 }
 

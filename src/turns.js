@@ -4,16 +4,21 @@
  * notes the time in GM storage; every tab and the webpage read it and pause
  * (core/turns.js). Read only: we look for Torn Trading's host element and
  * never touch it.
+ *
+ * Round 7: each such tab also notes itself (TRADING_TABS_KEY), so the paused
+ * card says where Torn Trading still runs. Turning it off in Tampermonkey
+ * leaves it running in the tabs already open (core/turns.js has the cause).
  */
 
 import { gmOnChange } from './platform/gm.js';
 import { get, set } from './platform/store.js';
-import { TRADING_SEEN_KEY, tradingRunning, shouldMarkSeen } from './core/turns.js';
+import { TRADING_SEEN_KEY, TRADING_TABS_KEY, tradingRunning, shouldMarkSeen, nextTradingTabs, tradingSeenWhere } from './core/turns.js';
+import { detectPage, isTradingPageUrl } from './sources/route.js';
 
 /** Torn Trading's own hosts: NPC Arbitrage on Torn's pages, Torn Bids on its page. */
 export const TRADING_HOST_IDS = ['ttv2-host', 'ttv2-sell-host'];
 
-const turns = { listeners: [], last: null, started: false };
+const turns = { listeners: [], last: null, started: false, tabId: Math.random().toString(36).slice(2, 10) };
 
 export function tradingSeenAt() {
     return Number(get(TRADING_SEEN_KEY, 0)) || 0;
@@ -24,15 +29,28 @@ export function isPaused(now = Date.now()) {
     return tradingRunning(tradingSeenAt(), now);
 }
 
+/** Where Torn Trading is still seen, for the paused card ({count, where, lastAt, resumesAt}). */
+export function tradingWhere(now = Date.now()) {
+    return tradingSeenWhere(get(TRADING_TABS_KEY, null), tradingSeenAt(), now);
+}
+
 /** Is Torn Trading on this page right now? */
 export function tradingOnThisPage(doc = document) {
     return TRADING_HOST_IDS.some((id) => doc.getElementById(id));
 }
 
-function look() {
-    if (typeof document === 'undefined' || !tradingOnThisPage()) return;
-    const now = Date.now();
-    if (shouldMarkSeen(tradingSeenAt(), now)) set(TRADING_SEEN_KEY, now);
+function whereAmI() {
+    const href = typeof location !== 'undefined' ? location.href : '';
+    return isTradingPageUrl(href) ? 'trading' : detectPage(href);
+}
+
+/** One look: mark Torn Trading seen (shared time, and this tab's entry), or take this tab's entry off. */
+export function lookOnce(doc = typeof document !== 'undefined' ? document : null, now = Date.now()) {
+    if (!doc) return;
+    const seen = tradingOnThisPage(doc);
+    if (seen && shouldMarkSeen(tradingSeenAt(), now)) set(TRADING_SEEN_KEY, now);
+    const tabs = nextTradingTabs(get(TRADING_TABS_KEY, null), turns.tabId, seen, whereAmI(), now);
+    if (tabs) set(TRADING_TABS_KEY, tabs);
 }
 
 function check() {
@@ -63,13 +81,13 @@ export function watchTrading() {
     if (turns.started) return;
     turns.started = true;
     turns.last = isPaused();
-    look();
+    lookOnce();
     check();
     if (typeof document !== 'undefined' && document.body && typeof MutationObserver === 'function') {
         // Torn Trading mounts its panel on the body, usually within a second or two of ours.
         const mo = new MutationObserver(() => {
             if (tradingOnThisPage()) {
-                look();
+                lookOnce();
                 check();
             }
         });
@@ -77,8 +95,15 @@ export function watchTrading() {
         setTimeout(() => mo.disconnect(), 10000);
     }
     setInterval(() => {
-        look();
+        lookOnce();
         check();
     }, 5000);
+    // A tab closed or reloaded is no longer one to name on the card.
+    if (typeof window !== 'undefined') {
+        window.addEventListener('pagehide', () => {
+            const tabs = nextTradingTabs(get(TRADING_TABS_KEY, null), turns.tabId, false, whereAmI(), Date.now());
+            if (tabs) set(TRADING_TABS_KEY, tabs);
+        });
+    }
     gmOnChange(TRADING_SEEN_KEY, () => check());
 }

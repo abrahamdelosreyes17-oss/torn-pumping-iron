@@ -13,7 +13,9 @@ import { STATS, STAT_LABEL, totalOf, gainPerTrain, HAPPY_LOSS_PER_ENERGY } from 
 import { splitSession, BUILDS } from './builds.js';
 import { gymById } from './gyms.js';
 import { fmtInt, fmtSigned } from './format.js';
-import { XANAX } from './items.js';
+import { XANAX, ECSTASY, ITEMS } from './items.js';
+import { tornClock } from './bars.js';
+import { MID_BOOST_MIN, MID_BOOST_SHARE } from './plan.js';
 
 /** A walk-through older than this is over (a session takes minutes; the next drug is hours away). */
 export const SESSION_MAX_MS = 3 * 60 * 60 * 1000;
@@ -42,6 +44,9 @@ export function partsText(parts) {
 export function currentTrainStep(m, now = m.now) {
     const due = (m.steps || []).find((s) => s.parts && s.parts.length && s.at <= now + DUE_SLACK_MS);
     if (due) return due;
+    // Xanax stacked for a jump (energy above the maximum on a jump plan): that energy waits for the jump, so the page
+    // never says to train it now (round 7: between stacks it said "Train DEX × 100" with the jump's energy).
+    if (m.strip && m.strip.refill && m.strip.refill.stacking) return null;
     const energy = m.strip.energy.current;
     const r = splitSession({
         stats: m.pc.stats,
@@ -183,13 +188,113 @@ export function nextSession(prev, m, reading, now, ctx = {}) {
     return step ? startSession(step, reading, m, now) : null;
 }
 
+/* ------------------------------------------- round 7: the gym page's states */
+
+/** Rehab in Switzerland after an overdose: about this much a session (the owner's own log, 2026-10-02). */
+export const REHAB_COST = 215000;
+export const TRAVEL_URL = 'https://www.torn.com/travelagency.php';
+
+/** A jump or a daily boost: candy or EDVD (or the console) with the drug, then train it all. Never FHC or cans. */
+export function isBoostStep(step) {
+    return Boolean(step) && (step.kind === 'jump' || step.kind === 'boost');
+}
+
+/** "EDVD × 5" from "Eat EDVD × 5"; the plan's mid-step words ("the boosters") read "Boosters". */
+function eatWordsOf(text) {
+    const w = String(text || '').replace(/^Eat /, '');
+    return w === 'the boosters' ? 'Boosters' : w;
+}
+
 /**
- * @param {object} m - buildModel() output
- * @param {object} page - {selectedId, boxes: [{stat, locked, energyPerTrain}]}
+ * A boost or jump step and how far it is, from the bars (round 7). Not eaten: happy not above its maximum (by the
+ * share of the boost the plan uses to tell a boost under way: plan.js MID_BOOST_*; a stack of Xanax adds a few hundred).
+ * Eaten: happy above it and the booster cooldown running. The drug (Ecstasy or Xanax): its cooldown running once the
+ * boosters are in, unless the plan still lists it to take (an earlier Xanax's cooldown that ends before the tick).
+ * @param {object} step - plan.js jump/boost step {items, actions, mid, deadline, gain, parts}
+ * @param {object} reads - {happy:{current,max}|null, boosterLeft:ms, drugLeft:ms, trained:boolean}
+ * @returns {{jump, eaten, drugIn, ready, eat, drug, deadline, gain, list:{id, text, done, next}[]}}
+ */
+export function boostProgress(step, { happy = null, boosterLeft = 0, drugLeft = 0, trained = false } = {}) {
+    const acts = Array.isArray(step.actions) ? step.actions : [];
+    const act = (id) => acts.find((a) => a.id === id) || null;
+    const eatA = act('eat');
+    const jpA = act('jp');
+    const drugA = act('drug');
+    const items = step.items || [];
+    const boostHappy = items.reduce((a, it) => a + (ITEMS[it.id] && ITEMS[it.id].kind === 'booster' ? (ITEMS[it.id].happy || 0) * (it.qty || 0) : 0), 0);
+    const over = Math.max(MID_BOOST_MIN, MID_BOOST_SHARE * boostHappy);
+    const live = happy && Number.isFinite(happy.current) && Number.isFinite(happy.max);
+    const eaten = live ? happy.current >= happy.max + over && (boosterLeft > 0 || Boolean(step.mid)) : Boolean(step.mid || (eatA && eatA.done));
+    const drugToTake = items.some((it) => it.id === XANAX || it.id === ECSTASY);
+    const drugIn = !drugA ? eaten : eaten && (Boolean(drugA.done) || (drugLeft > 0 && !(step.mid && drugToTake)));
+    const drug = drugA ? drugA.text.replace(/^Take the /, '') : null;
+    const trainWords = (() => {
+        const by = {};
+        for (const p of step.parts || []) by[p.stat] = (by[p.stat] || 0) + p.trains;
+        const t = Object.entries(by).map(([k, n]) => STAT_LABEL[k] + ' × ' + n).join(' + ');
+        return t ? 'Train it all: ' + t : 'Train it all';
+    })();
+    const list = [];
+    if (eatA) list.push({ id: 'eat', text: eatWordsOf(eatA.text), done: eaten });
+    if (jpA) list.push({ id: 'jp', text: jpA.text, done: drugIn });
+    if (drugA) list.push({ id: 'drug', text: drug, done: drugIn });
+    list.push({ id: 'train', text: trainWords, done: Boolean(trained) });
+    if (act('refill')) list.push({ id: 'refill', text: 'Refill, then train again', done: false });
+    const next = list.findIndex((x) => !x.done);
+    list.forEach((x, i) => (x.next = i === next));
+    return { jump: step.kind === 'jump', eaten, drugIn, ready: eaten && drugIn, eat: eatA ? eatWordsOf(eatA.text) : null, drug, deadline: step.deadline || null, gain: step.gain || 0, list };
+}
+
+/** An overdose seen on the bars: happy and energy at 0 right after a drug (its cooldown running). */
+export function isOverdose({ happy = null, energy = null, drugLeft = 0 } = {}) {
+    return Boolean(happy && energy) && happy.current === 0 && energy.current === 0 && drugLeft > 0;
+}
+
+/**
+ * The overdose kept across reads (the bars climb again a tick later): {at, until: the drug cooldown's end} once seen,
+ * until that cooldown is over; null otherwise.
+ */
+export function nextOverdose(prev, reads, now) {
+    if (prev && Number.isFinite(prev.until) && now < prev.until && now >= (prev.at || 0)) return prev;
+    return isOverdose(reads) ? { at: now, until: now + reads.drugLeft } : null;
+}
+
+/**
+ * Which of the gym page's states it is (owner's picks, 2026-10-03; overlays.html §6):
+ *   stacking  stacking energy for a chain: training paused, no train marks
+ *   overdose  every jump mark stops; fly to Switzerland
+ *   wrong     the part is in another gym: that gym pulses, Fill waits
+ *   eat       a jump or daily boost with the boosters or the drug still to take: the stat pulses red, Fill waits
+ *   ready     the boosters and the drug are in: steady green, train it all
+ *   right     the right gym, train now (steady green)
+ *   done      the session is done; idle: nothing to train now
+ */
+export function gymPageState({ step = null, cur = null, here = false, done = false, reads = {}, overdose = null, stacking = null, now = 0 } = {}) {
+    if (stacking) return { kind: 'stacking', since: Number(stacking.since) || null, boost: null };
+    if (overdose && now < overdose.until) return { kind: 'overdose', at: overdose.at, cost: REHAB_COST, boost: null };
+    const boost = isBoostStep(step) ? boostProgress(step, { ...reads, trained: done }) : null;
+    if (!cur) return { kind: done ? 'done' : 'idle', boost };
+    if (!here) return { kind: 'wrong', boost };
+    if (boost && !boost.ready) return { kind: 'eat', boost };
+    return { kind: boost ? 'ready' : 'right', boost };
+}
+
+/** "EDVD × 5, then the Ecstasy, then train it all" */
+function eatOrder(boost) {
+    const parts = [];
+    for (const x of boost.list) if (!x.done && x.id !== 'train' && x.id !== 'refill') parts.push(x.id === 'drug' ? 'the ' + x.text : x.text);
+    parts.push('train it all');
+    return parts.map((p, i) => (i ? 'then ' + p : p)).join(', ');
+}
+
+/**
+ * @param {object} m - buildModel() output (m.stacking: {since}|null while stacking for a chain)
+ * @param {object} page - {selectedId, boxes: [{stat, locked, energyPerTrain}], reading,
+ *   reads: {happy, energy, boosterLeft, drugLeft} (the sidebar's bars, the model's cooldowns), overdose: {at, until}|null}
  * @param {object|null} [session] - the walk-through (nextSession); null = the current step, nothing done yet
  * @param {number} [now]
- * @returns {{strip:string[], parts:object[], current:object|null, done:boolean, nextGym:{id, label}|null, switchHint:string|null,
- *   perStat:object, pill:string|null, gym:object|null}}
+ * @returns {{strip:string[], parts:object[], current:object|null, done:boolean, nextGym:{id, label, group}|null, switchHint:string|null,
+ *   perStat:object, pill:string|null, gym:object|null, hereGym:{id, wrong}|null, state:object, line:object}}
  */
 export function planGymPage(m, page = {}, session = null, now = m.now) {
     const table = m.pc.table;
@@ -199,35 +304,37 @@ export function planGymPage(m, page = {}, session = null, now = m.now) {
     const reading = page.reading || { stats, energy: m.strip.energy.current };
     const energy = reading.energy;
     const perStat = {};
-    const out = { strip: [], parts: [], current: null, done: false, nextGym: null, switchHint: null, perStat, pill: null, gym };
+    const out = { strip: [], parts: [], current: null, done: false, nextGym: null, switchHint: null, perStat, pill: null, gym, hereGym: null, state: { kind: 'idle', boost: null }, line: null };
     if (!gym) return out;
-    if (!session) {
-        const step = currentTrainStep(m, now);
-        session = step ? startSession(step, reading, m, now) : null;
-    }
+    const due = currentTrainStep(m, now);
+    if (!session) session = due ? startSession(due, reading, m, now) : null;
     const prog = session ? sessionProgress(session) : { parts: [], current: null, done: false };
     out.parts = prog.parts;
     out.current = prog.current;
     out.done = Boolean(session) && prog.done;
     const cur = prog.current;
-    const here = cur && cur.gymId === selectedId;
+    const here = Boolean(cur) && cur.gymId === selectedId;
+    const reads = page.reads || { happy: m.strip.happy ? { current: m.strip.happy.current, max: m.strip.happy.max } : null, energy: m.strip.energy, boosterLeft: m.strip.booster ? m.strip.booster.left : 0, drugLeft: m.strip.drug ? m.strip.drug.left : 0 };
+    const state = gymPageState({ step: due, cur, here, done: out.done, reads, overdose: page.overdose || null, stacking: m.stacking || null, now });
+    out.state = state;
+    const off = state.kind === 'stacking' || state.kind === 'overdose';
 
     const total = totalOf(stats);
     const tomorrow = (m.projection && m.projection[1]) || {};
     const boxes = new Map((page.boxes || []).map((b) => [b.stat, b]));
     const partsOfStat = (k) => prog.parts.filter((p) => p.stat === k);
-    // The grey word on a box that isn't trained now.
+    // The word on a box that isn't trained now: in full (hover), and its small corner tag.
     const greyWord = (stat, all, left, lockedHere) => {
-        if (all.length && !left.length) return 'Done ✓ · ' + STAT_LABEL[stat] + ' × ' + all.reduce((a, p) => a + p.trains, 0);
+        if (all.length && !left.length) return { text: 'Done ✓ · ' + STAT_LABEL[stat] + ' × ' + all.reduce((a, p) => a + p.trains, 0), tag: 'done ✓' };
         if (left.length) {
             const p = left[0];
-            return p.gymId === selectedId ? 'Next · ' + STAT_LABEL[stat] + ' × ' + p.left + ' after ' + (cur ? STAT_LABEL[cur.stat] : 'this') : 'Later · ' + STAT_LABEL[stat] + ' × ' + p.left + ' at ' + p.gymName;
+            return p.gymId === selectedId ? { text: 'Next · ' + STAT_LABEL[stat] + ' × ' + p.left + ' after ' + (cur ? STAT_LABEL[cur.stat] : 'this'), tag: 'next · after ' + (cur ? STAT_LABEL[cur.stat] : 'this') } : { text: 'Later · ' + STAT_LABEL[stat] + ' × ' + p.left + ' at ' + p.gymName, tag: 'later · ' + p.gymName };
         }
-        if (lockedHere) return 'Not trained here';
+        if (lockedHere) return { text: 'Not trained here', tag: 'not here' };
         const share = total > 0 ? stats[stat] / total : 0;
-        if (share > m.shares[stat] + 0.005) return 'Skip · ' + (share * 100).toFixed(0) + '% of total, over target';
-        if (tomorrow[stat] > 0) return 'Next · starts tomorrow';
-        return 'Skip · not in this session';
+        if (share > m.shares[stat] + 0.005) return { text: 'Skip · ' + (share * 100).toFixed(0) + '% of total, over target', tag: 'skip · over target' };
+        if (tomorrow[stat] > 0) return { text: 'Next · starts tomorrow', tag: 'tomorrow' };
+        return { text: 'Skip · not in this session', tag: 'skip' };
     };
 
     for (const k of STATS) {
@@ -235,51 +342,124 @@ export function planGymPage(m, page = {}, session = null, now = m.now) {
         const locked = (box && box.locked) || !(gym.dots[k] > 0);
         const mine = partsOfStat(k);
         const open = mine.filter((p) => p.left > 0);
-        if (here && k === cur.stat) {
+        if (off) {
+            // Stacking for a chain, or an overdose: no train or jump mark anywhere (the strip says why).
+            perStat[k] = { kind: 'off', text: '' };
+        } else if (here && k === cur.stat) {
             const n = cur.left;
             const canNow = Number.isFinite(energy) ? Math.max(0, Math.min(n, Math.floor(energy / cur.perTrain))) : n;
             const allEnergy = n * cur.perTrain > energy - cur.perTrain;
             const gain = cur.trains > 0 ? (cur.gain * n) / cur.trains : 0;
             const waitWord = canNow < n ? (canNow === 0 ? ' · energy ' + fmtInt(energy) + (session.drug ? ', take the Xanax first' : ', wait for more') : ' · ' + canNow + ' now, the rest after more energy') : '';
+            const b = state.boost;
+            const eat = state.kind === 'eat';
             perStat[k] = {
                 kind: 'train',
+                // right / ready: steady green; eat: pulses red, Fill waits.
+                mark: state.kind,
+                hold: eat,
                 trains: n,
-                fill: canNow,
+                fill: eat ? 0 : canNow,
+                fillN: n,
                 gain: Math.round(gain),
+                tab: eat ? 'Eat first' : state.kind === 'ready' ? 'Train it all · about ' + fmtSigned(Math.round(b.gain || gain)) : 'Train this · ' + fmtInt(n) + ' train' + (n === 1 ? '' : 's') + (cur.done > 0 ? ' left' : '') + ' · about ' + fmtSigned(gain),
                 text: fmtInt(n) + ' train' + (n === 1 ? '' : 's') + (cur.done > 0 ? ' left' : ''),
-                sub: (allEnergy ? 'all your energy' : fmtInt(n * cur.perTrain) + ' energy') + ' · about ' + fmtSigned(gain) + waitWord,
+                sub: eat ? b.list.filter((x) => !x.done && (x.id === 'eat' || x.id === 'drug' || x.id === 'jp')).map((x) => x.text).join(' + ') + ' first' : (allEnergy ? 'all ' + (state.kind === 'ready' ? fmtInt(energy) + ' ' : 'your ') + 'energy' : fmtInt(n * cur.perTrain) + ' energy') + ' · about ' + fmtSigned(gain) + waitWord,
                 warn: cur.stopAt !== undefined ? 'Stop at ' + n + ' trains. More puts you under the rule for ' + cur.stopReason + ' and you lose it.' : null,
             };
+        } else if (cur && !here && k === cur.stat && !locked) {
+            // The wrong gym: the stat the part trains is marked dashed grey, and Fill waits until you switch.
+            perStat[k] = { kind: 'wait', trains: cur.left, fill: 0, fillN: cur.left, tab: 'After you switch: ' + STAT_LABEL[k] + ' × ' + cur.left, text: 'switch gyms first', sub: '' };
         } else if (cur && !here) {
             // The current part is in another gym: the strip says so in one line; Torn's boxes are left as they are
-            // (owner, round 6: greying them read as "the gym is disabled").
-            // A part already done here still says so.
-            perStat[k] = { kind: 'away', text: mine.length && !open.length ? greyWord(k, mine, open, locked) : '' };
+            // (owner, round 6: greying them read as "the gym is disabled"). A part already done here still says so.
+            const w = mine.length && !open.length ? greyWord(k, mine, open, locked) : { text: '', tag: '' };
+            perStat[k] = { kind: 'away', text: w.text, tag: w.tag };
         } else {
-            const text = greyWord(k, mine, open, locked);
-            perStat[k] = { kind: open.length ? 'next' : mine.length ? 'done' : text === 'Not trained here' ? 'none' : text.startsWith('Next') ? 'next' : 'skip', text };
+            const w = greyWord(k, mine, open, locked);
+            perStat[k] = { kind: open.length ? 'next' : mine.length ? 'done' : w.text === 'Not trained here' ? 'none' : w.text.startsWith('Next') ? 'next' : 'skip', text: w.text, tag: w.tag };
         }
     }
 
-    if (cur && !here) {
-        const label = 'Next: ' + cur.gymName + ' · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
+    const target = cur ? gymById(cur.gymId, table) : null;
+    out.target = target;
+    if (cur && !here && !off) {
+        const k = cur.stat;
+        const label = 'Next: ' + cur.gymName + ' · ' + STAT_LABEL[k] + ' × ' + cur.left;
         out.nextGym = { id: cur.gymId, label, group: gymGroupWord(cur.gymId) };
-        out.switchHint = 'This session trains at ' + cur.gymName + ': open it · then ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
+        const dots = (g) => (g.dots[k] > 0 ? STAT_LABEL[k] + ' ' + g.dots[k] : 'no ' + STAT_LABEL[k]);
+        out.switchHint = 'you’re in ' + gym.name + ' (' + dots(gym) + ') · switch to ' + cur.gymName + (target ? ' (' + dots(target) + ')' : '');
     }
-    // In the right gym: its button is outlined too, so where to train is never a guess.
-    if (cur && here) out.hereGym = { id: cur.gymId, label: 'Train here · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left };
+    // The gym you're in: a steady outline, green when the part is here, red when it isn't.
+    if (cur && !off) out.hereGym = { id: selectedId, wrong: !here, label: here ? 'Train here · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left : 'Wrong gym' };
 
     out.strip.push(m.build.name);
+    let nextGymWords = null;
     if (m.nextGym && m.nextGym.gym) {
         const ng = m.nextGym.gym;
         const k = cur ? cur.stat : STATS.reduce((a, x) => (m.shares[x] - stats[x] / total > m.shares[a] - stats[a] / total ? x : a), 'str');
-        out.strip.push(ng.name + (m.nextGym.known ? ' in ' + fmtInt(m.nextGym.energyLeft) + ' E' : ' next') + ', ' + STAT_LABEL[k] + ' ' + ng.dots[k] + ' there');
+        nextGymWords = ng.name + (m.nextGym.known ? ' in ' + fmtInt(m.nextGym.energyLeft) + ' E' : ' next') + ', ' + STAT_LABEL[k] + ' ' + ng.dots[k] + ' there';
+        out.strip.push(nextGymWords);
     }
-    if (out.done) out.pill = 'Session done';
-    else if (cur && here) out.pill = 'Train ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
-    else if (cur) out.pill = out.switchHint;
-    else out.pill = energy < gym.energy ? 'Energy ' + fmtInt(energy) + ' · wait for the next step' : null;
+
+    // The strip's one line: its colour, a bold head, the words, a small source; a link for an overdose.
+    const b = state.boost;
+    const finish = b && b.deadline ? 'finish before ' + tornClock(b.deadline) : null;
+    const what = b ? (b.jump ? 'Jump' : 'Boost') : null;
+    if (state.kind === 'stacking') {
+        out.line = { tone: 'amber', head: 'Stacking for a chain', text: 'training paused · no train marks until you resume', src: null };
+        out.pill = 'Stacking for a chain · training paused';
+    } else if (state.kind === 'overdose') {
+        out.line = { tone: 'amber', head: 'Overdosed', text: 'happy and energy went to 0 · no training now · fly to Switzerland for rehab, about $' + fmtInt(REHAB_COST) + ' a session · the plan is worked out again after rehab', src: null, link: { text: 'Open Travel', href: TRAVEL_URL } };
+        out.pill = 'Overdosed · fly to Switzerland';
+    } else if (state.kind === 'wrong') {
+        out.line = { tone: 'red', head: 'Wrong gym', text: out.switchHint + (b && !b.ready ? ' · eat first: ' + eatOrder(b) : ''), src: null };
+        out.pill = 'Wrong gym · switch to ' + cur.gymName;
+    } else if (state.kind === 'eat') {
+        out.line = { tone: 'red', head: what + ': eat first', text: eatOrder(b), src: finish };
+        out.pill = 'Eat first · ' + (b.list.find((x) => x.next) || { text: 'the boosters' }).text;
+    } else if (state.kind === 'ready') {
+        out.line = { tone: 'green', head: what + ' ready' + (reads.happy && Number.isFinite(reads.happy.current) ? ' · happy ' + fmtInt(reads.happy.current) : ''), text: 'train it all' + (b.list.some((x) => x.id === 'refill') ? ', then the refill' : ''), src: finish };
+        out.pill = 'Train it all · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
+    } else if (state.kind === 'right') {
+        out.line = { tone: 'green', head: 'Train ' + STAT_LABEL[cur.stat] + ' × ' + cur.left + ' here', text: [gym.name, m.build.name].join(' · '), src: nextGymWords };
+        out.pill = 'Train ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
+    } else if (state.kind === 'done') {
+        out.line = { tone: 'plain', head: 'Session done', text: m.build.name, src: nextGymWords };
+        out.pill = 'Session done';
+    } else {
+        out.pill = energy < gym.energy ? 'Energy ' + fmtInt(energy) + ' · wait for the next step' : null;
+        out.line = { tone: 'plain', head: out.pill || 'Nothing to train now', text: m.build.name, src: nextGymWords };
+    }
     return out;
+}
+
+/**
+ * The panel on the gym page, from planGymPage's state (overlays.html §6): its colour, a small title, the big step,
+ * one muted line, a checklist on a jump or boost, and its one action.
+ * @returns {{tone, title, step, sub, checklist:{text, done, next}[]|null, action:{text, href}|null}|null} null: the usual panel
+ */
+export function gymPanel(plan) {
+    const st = plan && plan.state;
+    if (!st) return null;
+    const cur = plan.current;
+    const b = st.boost;
+    const when = b && b.deadline ? 'finish before ' + tornClock(b.deadline) : null;
+    const what = b ? (b.jump ? 'Jump' : 'Boost') : '';
+    if (st.kind === 'overdose') return { tone: 'amber', title: 'Overdosed', step: 'Fly to Switzerland', sub: 'Rehab there: about $' + fmtInt(st.cost) + ' a session. The plan is worked out again after rehab.', checklist: null, action: { text: 'Open Travel', href: TRAVEL_URL } };
+    if (st.kind === 'stacking') return { tone: 'amber', title: 'Stacking', step: 'Stacking for a chain', sub: 'Training paused · no train marks until you resume', checklist: null, action: null };
+    if (st.kind === 'wrong') {
+        const g = plan.gym;
+        const t = plan.target || gymById(cur.gymId);
+        const k = cur.stat;
+        const there = STAT_LABEL[k] + ' trains at ' + (t ? t.dots[k] : '?') + ' there';
+        const sub = g && t && g.dots[k] > 0 ? there + ', ' + g.dots[k] + ' here: ' + (t.dots[k] / g.dots[k]).toFixed(1) + '× the gain for the same energy' : there + ', not at all here';
+        return { tone: 'red', title: 'Wrong gym', step: 'Switch to ' + cur.gymName, sub, checklist: b && !b.ready ? b.list : null, action: null };
+    }
+    if (st.kind === 'eat') return { tone: 'red', title: what + (b.deadline ? ' · ' + tornClock(b.deadline) : ''), step: (b.list.find((x) => x.next) || { text: 'Eat first' }).text, sub: [when, 'seen from your bars'].filter(Boolean).join(' · '), checklist: b.list, action: null };
+    if (st.kind === 'ready') return { tone: 'green', title: what + ' · now', step: 'Train it all: ' + STAT_LABEL[cur.stat] + ' × ' + cur.left, sub: [when, 'about ' + fmtSigned(Math.round(b.gain))].filter(Boolean).join(' · '), checklist: b.list, action: null };
+    if (st.kind === 'right') return { tone: 'green', title: 'Now', step: 'Train ' + STAT_LABEL[cur.stat] + ' × ' + cur.left, sub: [cur.gymName, plan.perStat[cur.stat] && plan.perStat[cur.stat].gain ? 'about ' + fmtSigned(plan.perStat[cur.stat].gain) : null].filter(Boolean).join(' · '), checklist: null, action: null };
+    return null;
 }
 
 /* ------------------------------------------------ Home and Plan lines */
