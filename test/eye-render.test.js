@@ -90,7 +90,7 @@ const model = { ready: true, pc: { stats: { str: 1e8, spd: 1e8, def: 1e8, dex: 1
 
 test('Targets: only listed bands, the dropped count, details open; no Sort, Level, Refresh or Show ticks; Chain is gone', () => {
     const t = text(renderEye(model, ctxFor('targets')));
-    assert.match(t, /7 players you’d keep under 50% HP against dropped \(never kept\)/);
+    assert.match(t, /7 players left out \(you’d keep under 50% HP\)/);
     assert.match(t, /About 52% as strong as you \(our estimate\) · 56% by FFScouter’s list · estimate 3 days old · from FFScouter 3 d/);
     assert.doesNotMatch(t, /Hide can.t win|Most respect|Easiest|Refresh|Stomp only|Keep over 50% HP|Not attacked by me today|Torn Eye colours/);
     assert.match(t, /Order: respect › HP kept › win/);

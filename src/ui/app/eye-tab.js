@@ -532,9 +532,9 @@ export function renderEye(m, ctx) {
         const notes = [];
         const d = (stored && stored.dropped) || {};
         if (stored && stored.list && stored.list.length) {
-            if (d.low) notes.push(d.low + ' player' + (d.low === 1 ? '' : 's') + ' you’d keep under 50% HP against dropped (never kept)');
+            if (d.low) notes.push(d.low + ' player' + (d.low === 1 ? '' : 's') + ' left out (you’d keep under 50% HP)');
             if (d.none) notes.push(d.none + ' with no estimate dropped');
-            if (stored.ffIgnored) notes.push('FFScouter’s list ignored the strength range this time; our own fight check still decided');
+            if (stored.ffIgnored) notes.push('FFScouter ignored the strength range; our fight check decided');
         }
         // A load that failed still says so above an older list.
         const warnLine = rows.length && (msg.kind === 'error' || msg.kind === 'dead' || msg.kind === 'wait' || msg.kind === 'paused') ? h('div', { class: 'why', style: 'margin-bottom:8px', text: msg.text + (stored && stored.at ? ' · showing the list from ' + clock(stored.at, ctx.settings) : '') }) : null;
@@ -551,7 +551,6 @@ export function renderEye(m, ctx) {
                 rows.length > PAGE_SIZE || pg.page > 0 ? pager(pg, ctx) : null,
                 progress,
                 notes.length ? h('div', { class: 'note2', text: notes.join(' · ') + '.' }) : null,
-                h('div', { class: 'note2', text: 'Only players you beat keeping half your HP or more are kept: FFScouter is asked for players up to 75% of your strength (the most respect Torn gives), by levels, then each one is checked with the fight model. Click a row for its details.' }),
             ]),
         );
         if (heads.length) pane.push(headsUpBlock(heads, now, ctx.settings));
@@ -571,15 +570,15 @@ export function renderEye(m, ctx) {
                 h('dt', { text: 'Public stats (rough)' }),
                 h('dd', { text: 'always on' }),
                 h('dt', { text: 'Gear seen' }),
-                h('dd', { text: fmtInt(src.gear) + ' players · this computer only' }),
+                h('dd', { text: fmtInt(src.gear) + ' players' }),
             ]),
-            h('div', { class: 'note2' }, ['Estimates by ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }), '. Bands by the HP you keep over the fights you win: Stomp 99%+, Good 70–99%, Fair 50–69%.']),
+            h('div', { class: 'note2' }, ['Estimates by ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }), '. Bands: HP you keep · Stomp 99%+ · Good 70–99% · Fair 50–69%.']),
         ]),
     );
     if (m && m.ready) {
         const mods = m.state.statMods || {};
         const eff = Object.entries(m.pc.stats).reduce((a, [k, v]) => a + v * (1 + (mods[k] || 0) / 100), 0);
-        pane.push(h('div', {}, [sectionHead('Your side', meta(['what the fight uses']), null, 'h3'), h('dl', { class: 'facts num' }, [h('dt', { text: 'Stats as they fight' }), h('dd', { text: fmtShort(eff) + ' (merits and passives in)' }), h('dt', { text: 'Life' }), h('dd', { text: m.state.life ? fmtInt(m.state.life.maximum) : '—' })])]));
+        pane.push(h('div', {}, [sectionHead('Your side', meta(['merits and passives in']), null, 'h3'), h('dl', { class: 'facts num' }, [h('dt', { text: 'Stats as they fight' }), h('dd', { text: fmtShort(eff) }), h('dt', { text: 'Life' }), h('dd', { text: m.state.life ? fmtInt(m.state.life.maximum) : '—' })])]));
     }
     const upd = e.updatedAt && e.updatedAt() ? 'targets ' + Math.max(0, Math.round((now - e.updatedAt()) / 60000)) + ' min ago' : null;
     return { ctl: [bar1, bar2], main, pane, upd };
