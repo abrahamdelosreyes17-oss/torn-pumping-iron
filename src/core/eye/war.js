@@ -55,7 +55,10 @@ export function sortWar(members, { bands = {}, respect = {}, keep = {}, win = {}
         if (a.state === 'okay' || a.state === 'early') {
             const bd = BAND_ORDER.indexOf(a.band) - BAND_ORDER.indexOf(b.band);
             if (bd) return bd;
-            return b.respect - a.respect || b.keep - a.keep || b.win - a.win;
+            // Compared as the row shows them (respect to 2 decimals, HP kept and win in whole percents): unrounded,
+            // two rows both reading "3.00" were ordered by a third decimal and the tie-breaks never applied.
+            const r100 = (x) => Math.round((Number(x) || 0) * 100);
+            return r100(b.respect) - r100(a.respect) || r100(b.keep) - r100(a.keep) || r100(b.win) - r100(a.win);
         }
         if (a.state === 'hospital' || a.state === 'traveling') return (a.until || Infinity) - (b.until || Infinity);
         return a.id - b.id;

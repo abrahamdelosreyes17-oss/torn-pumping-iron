@@ -165,11 +165,12 @@ export function watchListOf(user) {
     return w && Array.isArray(w.list) ? w.list.filter((x) => x && posInt(x.id)) : [];
 }
 
-function estimateText(t) {
+/** "**Good** (win 97%, keeps 81% life)"; a band stored before round 7's deploy (Tough, Can't win) reads as under 50%. */
+export function estimateText(t) {
     const bits = [];
     if (t.win !== undefined && t.win !== null) bits.push('win ' + Math.round(t.win) + '%');
     if (t.keep !== undefined && t.keep !== null) bits.push('keeps ' + Math.round(t.keep) + '% life');
-    return '**' + (BAND_WORDS[t.band] || 'No data') + '**' + (bits.length ? ' (' + bits.join(', ') + ')' : '');
+    return '**' + BAND_WORDS[normBand(t.band)] + '**' + (bits.length ? ' (' + bits.join(', ') + ')' : '');
 }
 
 export async function targetsCmd(user, i, env, fetchImpl, ctx, nowS) {

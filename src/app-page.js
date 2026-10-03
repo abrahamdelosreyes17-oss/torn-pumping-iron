@@ -12,13 +12,13 @@ import { archived, pageGet, loadArchives, drainArchives, clearArchived, archives
 import { PiApp } from './ui/app/app.js';
 import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, fetchFactionMembers, fetchFactionWars, keyIsEnough } from './api/torn.js';
 import { outEarly, enemiesFromWars, warBandTable } from './core/eye/war.js';
-import { isBeatable, knownStatus, ownHits, statusOrder, byOrder, STATUS_REFRESH_MS, ATTACK_OPENED_MS } from './core/eye/targets.js';
+import { isBeatable, targetStatus, ownHits, statusOrder, byOrder, ATTACK_OPENED_MS } from './core/eye/targets.js';
 import { normBand } from './core/eye/bands.js';
 import { isWatched } from './core/eye/watch.js';
 import { W3bClient, fetchW3bListings } from './api/w3b.js';
 import { checkFfsKey } from './api/ffscouter.js';
-import { renderEye } from './ui/app/eye-tab.js';
-import { wantPlayers, eyeView, warmFights, fightsPending, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient, importTargets, TARGETS_KEY, WAR_BANDS_KEY, rememberFlights, flightsSeen, getWatch, watchStates, toggleWatch, setWatchTag, dismissWatchOffer, watchOffersNow, pollWatch, pumpStatuses, statusRead, onStatus, loadStatuses } from './eye-service.js';
+import { renderEye, readsTargetStatuses } from './ui/app/eye-tab.js';
+import { wantPlayers, eyeView, warmFights, fightsPending, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient, importTargets, TARGETS_KEY, WAR_BANDS_KEY, rememberFlights, flightsSeen, getWatch, watchStates, toggleWatch, setWatchTag, dismissWatchOffer, watchOffersNow, pollWatch, pumpStatuses, statusRead, onStatus, loadStatuses, attacksAfterOpen } from './eye-service.js';
 import { discordState, discordRaw, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId, linkDiscord, setTargetsForSync, setEyeForSync, loginDiscord, cancelLogin, resumeLogin } from './discord.js';
 import { saveFullKey, forgetFullKey, refreshMoneyLog } from './income.js';
 import { WORKER_SETUP_URL } from './api/worker.js';
@@ -365,12 +365,11 @@ function eyeRows() {
         // The free reads first (the watch list, the war list, a flight first seen), then the statuses read one by one.
         const sr = statusRead(x.playerId);
         const reads = [ws ? { status: ws.status, at: ws.readAt } : null, wm ? { status: wm.status, at: war.readAt } : null, live && live.statusAt ? { status: live.status, at: live.statusAt } : null, sr];
-        const known = knownStatus(reads, { flight: flights[x.playerId] || null, now });
+        // The newest read believed now; asked again 10 min after the last read (a hospital stay too: a revive shows);
+        // the list's hospital out-time only while no read is newer than the list (targetStatus, round 7 review).
+        const ts = targetStatus(reads, { listAt: stored.at, hospitalUntil: x.hospitalUntil, flight: flights[x.playerId] || null, now });
         const hit = hits.get(Number(x.playerId)) || null;
-        // When it is worth asking again: after the newest read, or a little before a known hospital stay ends.
-        const until = known && known.state === 'hospital' && Number(known.status.until) > 0 ? Number(known.status.until) * 1000 : 0;
-        const statusAt = Math.max(0, ...reads.filter((r) => r && r.status && r.at > 0).map((r) => r.at), until ? until - STATUS_REFRESH_MS : 0);
-        return { ...base, name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId, stored: x, status: known ? known.status : null, statusAt, hit };
+        return { ...base, name: x.name, level: x.level, hospitalUntil: ts.hospitalUntil, lastAction: x.lastAction, id: x.playerId, stored: x, status: ts.status, statusAt: ts.statusAt, hit };
     });
     return rows.filter((r) => isBeatable(r.band));
 }
@@ -392,8 +391,13 @@ function showStatuses({ page = [], all = [], opened = [], readAt = new Map() } =
     pumpTargetStatuses();
 }
 
+/** Targets shows, with FFScouter connected: the only time target statuses are read or redrawn for (round 7 review). */
+function targetsShowing() {
+    return Boolean(page.app) && readsTargetStatuses({ tab: page.app.tab, ui: page.app.ui, hasFfs: Boolean(getKey(K.ffsKey)) });
+}
+
 function pumpTargetStatuses() {
-    if (!page.app || page.app.tab !== 'eye' || !statusPlan.order.length) return;
+    if (!targetsShowing() || !statusPlan.order.length) return;
     pumpStatuses({ order: statusPlan.order, open: statusPlan.open, readAt: (id) => statusPlan.readAt.get(id) || 0 });
 }
 
@@ -740,7 +744,8 @@ export function bootAppPage({ renderers = {} } = {}) {
     let statusDrawAt = 0;
     let statusDrawTimer = null;
     onStatus((id) => {
-        if (page.app.tab !== 'eye') return;
+        // Only the Targets view shows statuses: War, Watched and the other tabs aren't redrawn for them (round 7 review).
+        if (!targetsShowing()) return;
         if (statusPlan.page.has(Number(id))) {
             statusDrawAt = Date.now();
             page.app.render(true);
@@ -750,7 +755,7 @@ export function bootAppPage({ renderers = {} } = {}) {
         statusDrawTimer = setTimeout(() => {
             statusDrawTimer = null;
             statusDrawAt = Date.now();
-            if (page.app.tab === 'eye') page.app.render(true);
+            if (targetsShowing()) page.app.render(true);
         }, Math.max(0, 5000 - (Date.now() - statusDrawAt)));
     });
     loadStatuses().catch(() => {});
@@ -816,6 +821,8 @@ export function bootAppPage({ renderers = {} } = {}) {
         syncEye();
         shareWarBands();
         pumpTargetStatuses();
+        // An attack page opened 3 min ago: your attacks once more, so the players you just hit grey (round 7 review).
+        attacksAfterOpen().catch(() => {});
     }, 2000);
     // A Log in with Discord that was under way when the page reloaded: keep waiting for it.
     setTimeout(() => {

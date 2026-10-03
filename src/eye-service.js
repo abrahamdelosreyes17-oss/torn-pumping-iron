@@ -20,7 +20,7 @@ import { estimatePlayer } from './core/eye/estimate.js';
 import { forecast, respectFor, fairFight, bssOf, DEFAULT_GEAR } from './core/eye/fight.js';
 import { bandOf, chipFigures } from './core/eye/bands.js';
 import { gearSummary, myGear } from './core/eye/gear.js';
-import { lifeFromLevel, targetParams, targetQueries, listIgnoresFf, mergeTargetLists, inFfRange, selectTargets, listRowAsFfs, TARGETS_PER_MINUTE, statusesToAsk, mergeStatuses, STATUS_RETRY_MS } from './core/eye/targets.js';
+import { lifeFromLevel, targetParams, targetQueries, listIgnoresFf, mergeTargetLists, inFfRange, selectTargets, listRowAsFfs, TARGETS_PER_MINUTE, statusesToAsk, mergeStatuses, STATUS_RETRY_MS, OWN_HIT_MS } from './core/eye/targets.js';
 import { trackFlights, warBandOf } from './core/eye/war.js';
 import { makePause } from './core/slices.js';
 import { watchOf, addWatch, removeWatch, tagWatch, dismissOffer, isWatched, dueForRead, readEvents, watchOffers, EVENT_KEEP_MS } from './core/eye/watch.js';
@@ -73,21 +73,57 @@ async function cache() {
     return eye.loading;
 }
 
+/**
+ * [calibrate] A status answer (30 a minute while Targets shows) changes only a player's level, life and status here:
+ * the whole cache is written at most this often for those (round 7 review: it was rewritten about 30 times a minute).
+ * A hidden or closing tab writes what is waiting at once.
+ */
+export const STATUS_SAVE_MS = 30 * 1000;
+
 let saveTimer = null;
+
+function writeEye() {
+    saveTimer = null;
+    const c = eye.cache;
+    if (!c) return;
+    // Keep the newest 3,000 players.
+    const ids = Object.keys(c.players);
+    if (ids.length > 3000) {
+        ids.sort((a, b) => (c.players[a].seen || 0) - (c.players[b].seen || 0));
+        for (const id of ids.slice(0, ids.length - 3000)) delete c.players[id];
+    }
+    c.savedAt = Date.now();
+    idbSet('eye', c).catch(() => {});
+}
+
 function saveSoon() {
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-        const c = eye.cache;
-        if (!c) return;
-        // Keep the newest 3,000 players.
-        const ids = Object.keys(c.players);
-        if (ids.length > 3000) {
-            ids.sort((a, b) => (c.players[a].seen || 0) - (c.players[b].seen || 0));
-            for (const id of ids.slice(0, ids.length - 3000)) delete c.players[id];
-        }
-        c.savedAt = Date.now();
-        idbSet('eye', c).catch(() => {});
-    }, 1500);
+    saveTimer = setTimeout(writeEye, 1500);
+}
+
+/** A save that can wait (status answers): one write per STATUS_SAVE_MS at most; a sooner save already due covers it. */
+function saveLater() {
+    if (saveTimer) return;
+    saveTimer = setTimeout(writeEye, STATUS_SAVE_MS);
+    writeOnHide();
+}
+
+let hideHooked = false;
+/** What is waiting is written when the tab is hidden or closed, so the long delay loses nothing on unload. */
+function writeOnHide() {
+    if (hideHooked || typeof window === 'undefined' || !window || typeof window.addEventListener !== 'function') return;
+    hideHooked = true;
+    const now = () => {
+        if (!saveTimer) return;
+        clearTimeout(saveTimer);
+        writeEye();
+    };
+    window.addEventListener('pagehide', now);
+    if (typeof document !== 'undefined' && document && typeof document.addEventListener === 'function') {
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') now();
+        });
+    }
 }
 
 /**
@@ -169,11 +205,14 @@ export function slimAttacks(list, myId, nowS = Math.floor(Date.now() / 1000)) {
     return { list: out, incoming };
 }
 
-/** Your attacks (for the "your fight" layer), refreshed hourly by whichever tab needs them. */
-async function myAttacks() {
+/**
+ * Your attacks (for the "your fight" layer), refreshed hourly by whichever tab needs them.
+ * @param {object} [o] - {after: a read older than this (ms) is not fresh enough, whatever its age}
+ */
+async function myAttacks({ after = 0 } = {}) {
     const stored = get('myAttacks', null);
-    if (stored && Date.now() - stored.at < ATTACKS_FRESH_MS) return stored.list;
-    if (!isVisible() || !getKey(K.apiKey)) return stored ? stored.list : [];
+    if (stored && Date.now() - stored.at < ATTACKS_FRESH_MS && stored.at >= after) return stored.list;
+    if (!isVisible() || !getKey(K.apiKey) || get(K.apiKeyDead, false)) return stored ? stored.list : [];
     try {
         const list = await fetchAttacks(tornClient(), { limit: 100 });
         const me = (get(K.userStatic, {}) || {}).keyInfo;
@@ -183,6 +222,55 @@ async function myAttacks() {
     } catch {
         return stored ? stored.list : [];
     }
+}
+
+/**
+ * [calibrate] An attack page opened this long ago: your attacks are read again once (round 7 review), so "hit by you
+ * in the last hour" doesn't wait for the hourly read (the "attack opened" mark lasts only ATTACK_OPENED_MS).
+ */
+export const ATTACKS_AFTER_OPEN_MS = 3 * 60 * 1000;
+
+/**
+ * When your attacks are due to be read again for the attack pages opened (pure): the earliest open in the last hour
+ * that no read made ATTACKS_AFTER_OPEN_MS after it covers, once that time has come; null when none is due.
+ * @param {{at: number}[]} predictions - the attack pages opened (eyePredictions)
+ * @param {number} readAt - when your attacks were last read (ms)
+ */
+export function attacksDueAt(predictions, readAt, now = Date.now()) {
+    let due = null;
+    for (const p of predictions || []) {
+        const at = Number(p && p.at);
+        if (!(at > 0) || at > now || !(now - at < OWN_HIT_MS)) continue;
+        const d = at + ATTACKS_AFTER_OPEN_MS;
+        if ((Number(readAt) || 0) >= d) continue;
+        if (due === null || d < due) due = d;
+    }
+    return due !== null && due <= now ? due : null;
+}
+
+const attacksRun = { busy: false, at: 0 };
+
+/**
+ * Read your attacks again once an attack page opened is ATTACKS_AFTER_OPEN_MS old, once per open (a read covers every
+ * open before it; never again within ATTACKS_AFTER_OPEN_MS, a failed read included). One /user/attacks call through the
+ * shared Torn client and its lanes; visible tab, a key, not while Torn Trading runs. Another tab's read (GM storage)
+ * counts. Safe to call often.
+ * @returns {Promise<boolean>} whether a read was made
+ */
+export async function attacksAfterOpen(now = Date.now()) {
+    if (attacksRun.busy || now - attacksRun.at < ATTACKS_AFTER_OPEN_MS) return false;
+    if (!isVisible() || isPaused() || !getKey(K.apiKey) || get(K.apiKeyDead, false)) return false;
+    const stored = get('myAttacks', null);
+    const due = attacksDueAt(getShared(K.eyePredictions, []) || [], stored ? Number(stored.at) || 0 : 0, now);
+    if (due === null) return false;
+    attacksRun.busy = true;
+    attacksRun.at = now;
+    try {
+        await myAttacks({ after: due });
+    } finally {
+        attacksRun.busy = false;
+    }
+    return true;
 }
 
 async function myEquipment() {
@@ -854,7 +942,8 @@ export function pumpStatuses({ order = [], open = new Set(), readAt = () => 0, n
                     const r = (c.players[id] = c.players[id] || {});
                     r.profile = { ...(r.profile || {}), level: p.level || null, rank: p.rank || null, life: (p.life && p.life.maximum) || null, status: p.status, name: p.name || null, faction: p.faction_id || null };
                     r.profileAt = t;
-                    saveSoon();
+                    // The status itself is kept in `eyeStatus` (saveStatusesSoon): this cache can wait (STATUS_SAVE_MS).
+                    saveLater();
                 }
             })
             .catch((error) => {

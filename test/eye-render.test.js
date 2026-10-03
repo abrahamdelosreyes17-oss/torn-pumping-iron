@@ -154,6 +154,31 @@ test('Targets: "Ready now" hides hospital, away and jail and says how many; a ba
     assert.match(old, /Statuses: 0 of 4 checked/);
 });
 
+test('Targets (round 7 review): no statuses asked without FFScouter; "checked" counts only rows read; an old jail read says nothing', () => {
+    const now = Date.now();
+    // Without FFScouter: the list isn't drawn and nobody is asked about.
+    const noFfs = ctxFor('targets', { n: 6 });
+    noFfs.flags.hasFfs = false;
+    const nt = text(renderEye(model, noFfs));
+    assert.match(nt, /Connect it in Settings/);
+    assert.doesNotMatch(nt, /Statuses:/, 'no progress line for reads that never happen');
+    assert.equal(noFfs.shown.length, 0, 'statuses.show not called');
+    // Row 1 read Okay; row 2 only the list's out-time; row 4 only your own hit; row 5 a jail read past its time.
+    const row = (id) =>
+        id === 1
+            ? { status: { state: 'Okay', description: 'Okay' } }
+            : id === 2
+              ? { hospitalUntil: now + 30 * 60000 }
+              : id === 4
+                ? { hit: { kind: 'hit', at: now - 60000, result: 'Hospitalized' } }
+                : id === 5
+                  ? { status: { state: 'Jail', description: 'In jail', until: Math.floor(now / 1000) - 60 } }
+                  : {};
+    const t = text(renderEye(model, ctxFor('targets', { n: 6, row, ui: { eyeFilters: { ready: false } } })));
+    assert.match(t, /Statuses: 1 of 4 checked/);
+    assert.doesNotMatch(t, /In jail/, 'a jail stay that has ended is not shown');
+});
+
 test('War: found by itself, everyone with status, out-times, landings and the fallen', async () => {
     const { members } = await fixture('faction-members-war.json');
     const t = text(renderEye(model, ctxFor('war', { members })));

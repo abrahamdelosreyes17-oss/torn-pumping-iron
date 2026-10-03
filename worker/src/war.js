@@ -187,7 +187,7 @@ export function playerEvents(prev, cur, nowS, leadS, { early = true } = {}) {
 const mins = (at, nowS) => Math.max(1, Math.ceil((at - nowS) / 60));
 
 function estimateBits(est) {
-    const b = est && est.band && est.band !== 'none' ? '**' + BAND_WORDS[est.band] + '**' : 'No estimate';
+    const b = est && normBand(est.band) !== 'none' ? '**' + BAND_WORDS[normBand(est.band)] + '**' : 'No estimate';
     const bits = [b];
     if (est && est.win !== null && est.win !== undefined && est.band !== 'none') bits.push('win ' + Math.round(est.win) + '%');
     return bits.join(' · ');
@@ -240,7 +240,8 @@ const byPriority = (a, b) => EVENT_ORDER.indexOf(a.event) - EVENT_ORDER.indexOf(
  */
 export function estimator(warList, enemyId, bands) {
     const byId = new Map();
-    if (warList && Array.isArray(warList.members) && (!warList.factionId || !enemyId || Number(warList.factionId) === Number(enemyId))) for (const m of warList.members) byId.set(Number(m.id), m);
+    // A war list stored before round 7's deploy still says Tough or Can't win: read as under 50% like any synced band.
+    if (warList && Array.isArray(warList.members) && (!warList.factionId || !enemyId || Number(warList.factionId) === Number(enemyId))) for (const m of warList.members) if (m) byId.set(Number(m.id), { ...m, band: normBand(m.band) });
     return (id) => {
         const m = byId.get(Number(id)) || null;
         if (m && BEATABLE.has(m.band)) return m;
@@ -253,7 +254,7 @@ export function estimator(warList, enemyId, bands) {
 
 /* ---------- /war: the whole faction, page by page ---------- */
 
-const who = (p, est) => '**' + BAND_WORDS[(est && est.band) || 'none'] + '** · ' + p.name + (p.level ? ' · Lv ' + p.level : '') + (est && est.win !== null && est.win !== undefined && est.band !== 'none' ? ' · win ' + Math.round(est.win) + '%' : '');
+const who = (p, est) => '**' + BAND_WORDS[normBand(est && est.band)] + '** · ' + p.name + (p.level ? ' · Lv ' + p.level : '') + (est && est.win !== null && est.win !== undefined && est.band !== 'none' ? ' · win ' + Math.round(est.win) + '%' : '');
 
 function onlineBit(p, nowS) {
     if (p.online === 'online') return 'online';
@@ -274,7 +275,7 @@ export function travelText(p, entry, nowS) {
 
 /** Split an enemy faction into groups, in the order /war shows them. */
 export function warGroups(players, est, nowS) {
-    const rank = (p) => BAND_ORDER.indexOf(est(p.id).band);
+    const rank = (p) => BAND_ORDER.indexOf(normBand(est(p.id).band));
     const groups = { hit: [], hospital: [], away: [], jail: [], other: [], fallen: [] };
     for (const p of players) {
         if (p.state === 'Okay') groups.hit.push(p);

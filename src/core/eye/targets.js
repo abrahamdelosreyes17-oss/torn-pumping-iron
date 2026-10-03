@@ -115,9 +115,18 @@ export function inFfRange(row) {
     return !Number.isFinite(ff) || (ff >= TARGET_FF.min && ff <= TARGET_FF.max);
 }
 
+/**
+ * Respect as the row shows it (two decimals), in hundredths: the order compares what is on screen, so two rows that
+ * both read "3.00" fall to HP kept, not to a third decimal nobody sees.
+ */
+export function shownRespect(respect) {
+    return Math.round((Number(respect) || 0) * 100);
+}
+
 /** The one order (round 7, the owner): most respect, then most HP kept, then the highest win. Rows {respect, keep, win} (0–100). */
 export function byRespect(a, b) {
-    return (b.respect || 0) - (a.respect || 0) || (b.keep ?? -1) - (a.keep ?? -1) || (b.win ?? -1) - (a.win ?? -1);
+    const pc = (v) => (Number.isFinite(v) ? Math.round(v) : -1);
+    return shownRespect(b.respect) - shownRespect(a.respect) || pc(b.keep) - pc(a.keep) || pc(b.win) - pc(a.win);
 }
 
 /**
@@ -231,8 +240,33 @@ export function knownStatus(reads, { flight = null, now = Date.now() } = {}) {
         if (!fresh && !(lands && lands > now)) return null;
         return { status: r.status, at: r.at, state: 'travel' };
     }
+    // Jail like hospital (round 7 review): until its own out-time, and no longer once that has passed.
+    if (st === 'jail') {
+        const until = Number(r.status.until) > 0 ? Number(r.status.until) * 1000 : null;
+        if (until ? until <= now : !fresh) return null;
+        return { status: r.status, at: r.at, state: 'jail' };
+    }
     if (!fresh) return null;
     return { status: r.status, at: r.at, state: st === 'abroad' ? 'travel' : st };
+}
+
+/**
+ * One stored target's status, from the reads already made (round 7 review):
+ *   - `status`: the newest one still worth believing (knownStatus), or null;
+ *   - `statusAt`: when the player was last read, by anything. The scheduler asks again STATUS_REFRESH_MS after it, a
+ *     hospital stay included (a player revived early is seen within 10 minutes, not at the stay's end);
+ *   - `hospitalUntil`: FFScouter's out-time from the list, only while no read is newer than the list. The list can be
+ *     6 hours old: a player revived since and read "Okay" was still shown in hospital and hidden by "Ready now".
+ * @param {{status, at}[]} reads - Torn's statuses and when each was read (ms); nulls are skipped
+ * @param {object} o - {listAt: when the list was asked (ms), hospitalUntil: the list's out-time (ms), flight, now}
+ * @returns {{status: object|null, statusAt: number, hospitalUntil: number|null}}
+ */
+export function targetStatus(reads, { listAt = 0, hospitalUntil = null, flight = null, now = Date.now() } = {}) {
+    const real = (reads || []).filter((r) => r && r.status && r.at > 0);
+    const statusAt = real.reduce((a, r) => Math.max(a, r.at), 0);
+    const known = knownStatus(real, { flight, now });
+    const fromList = Number(hospitalUntil) > 0 && !(statusAt > (Number(listAt) || 0)) ? Number(hospitalUntil) : null;
+    return { status: known ? known.status : null, statusAt, hospitalUntil: fromList };
 }
 
 /* ------------------------------------------------ round 7: a player you just hit */
@@ -310,9 +344,17 @@ export const BAND_CHIPS = ['all', 'stomp', 'good', 'fair'];
 
 /** The one order on the rows the tab draws (forecast 0..1): most respect, then most HP kept, then the highest win. */
 export function byOrder(a, b) {
-    const k = (r) => (r.forecast && Number.isFinite(r.forecast.keep) ? r.forecast.keep : -1);
-    const w = (r) => (r.forecast && Number.isFinite(r.forecast.pWin) ? r.forecast.pWin : -1);
-    return (b.respect || 0) - (a.respect || 0) || k(b) - k(a) || w(b) - w(a);
+    // Compared as the row shows them (respect to 2 decimals, HP kept and win in whole percents), so the tie-breaks apply.
+    const k = (r) => (r.forecast && Number.isFinite(r.forecast.keep) ? Math.round(r.forecast.keep * 100) : -1);
+    const w = (r) => (r.forecast && Number.isFinite(r.forecast.pWin) ? Math.round(r.forecast.pWin * 100) : -1);
+    return shownRespect(b.respect) - shownRespect(a.respect) || k(b) - k(a) || w(b) - w(a);
+}
+
+/** A hospital or jail read whose own out-time has passed: they are out (or about to be), so it says nothing now. */
+export function statusOver(status, now = Date.now()) {
+    const st = status || {};
+    const s = String(st.state || st.description || '').toLowerCase();
+    return (s.includes('hospital') || s.includes('jail')) && Number(st.until) > 0 && Number(st.until) * 1000 <= now;
 }
 
 /**
@@ -321,7 +363,7 @@ export function byOrder(a, b) {
  */
 export function rowState(r, now = Date.now()) {
     const st = (r && r.status) || {};
-    const s = String(st.state || st.description || '').toLowerCase();
+    const s = statusOver(st, now) ? '' : String(st.state || st.description || '').toLowerCase();
     if ((r.hospitalUntil && r.hospitalUntil > now) || s.includes('hospital') || (r.hit && r.hit.kind === 'hit')) return 'hospital';
     if (s.includes('travel') || s.includes('abroad') || s.startsWith('in ')) return 'travel';
     if (s.includes('jail') || s.includes('federal')) return 'jail';
@@ -419,6 +461,14 @@ export function statusesToAsk({ order = [], open = new Set(), readAt = () => 0, 
         busy++;
     }
     return { ask, asked: minute };
+}
+
+/**
+ * Whether a row's status was actually read (round 7 review): a status from a read, not FFScouter's out-time from the
+ * list nor your own hit, which are known without asking Torn and left "checked" counting rows never read.
+ */
+export function statusChecked(r, now = Date.now()) {
+    return Boolean(r && r.status && (r.status.state || r.status.description) && !statusOver(r.status, now));
 }
 
 /**

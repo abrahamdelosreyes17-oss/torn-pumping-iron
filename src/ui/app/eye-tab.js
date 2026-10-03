@@ -13,7 +13,7 @@
 import { h, t } from '../dom.js';
 import { BAND_WORDS, BAND_COLORS } from '../../core/eye/bands.js';
 import { sortWar, warSummary, statusParts, activityOf, ACTIVITY_COLORS, ACTIVITY_WORDS, WAR_KIND_WORDS } from '../../core/eye/war.js';
-import { needsRefetch, targetDetails, targetsMessage, hitText, OLD_ESTIMATE_DAYS, TARGET_LOAD, TARGETS_REFRESH_MS, listTargets, pageOf, pagerItems, rowState, statusProgress, statusLine, BAND_CHIPS, PAGE_SIZE } from '../../core/eye/targets.js';
+import { needsRefetch, targetDetails, targetsMessage, hitText, OLD_ESTIMATE_DAYS, TARGET_LOAD, TARGETS_REFRESH_MS, listTargets, pageOf, pagerItems, rowState, statusOver, statusChecked, statusProgress, statusLine, BAND_CHIPS, PAGE_SIZE } from '../../core/eye/targets.js';
 import { WATCH_TAGS, WATCH_MAX, TAG_MAX, headsUps } from '../../core/eye/watch.js';
 import { profileUrl, attackUrl } from '../../sources/route.js';
 import { FFS_SITE_URL } from '../../api/ffscouter.js';
@@ -63,6 +63,20 @@ export function shouldAutoLoad({ mode, hasFfs, paused, stored, loading, error, a
 /** Where a target row is (core/eye/targets.js rowState): 'hospital', 'travel', 'jail', 'okay', 'other' or 'unknown'. */
 export const stateOf = rowState;
 
+/** The view showing ('targets', 'war' or 'watched'): anything else kept from an older version shows Targets. */
+export function eyeModeOf(ui) {
+    const m = ui && ui.eyeMode;
+    return EYE_MODES.some(([k]) => k === m) ? m : 'targets';
+}
+
+/**
+ * Whether target statuses are read now (round 7 review): only while Targets shows, and only with FFScouter connected
+ * (no key, no list to read statuses for). War, Watched and other tabs neither ask nor redraw for them.
+ */
+export function readsTargetStatuses({ tab, ui, hasFfs }) {
+    return tab === 'eye' && eyeModeOf(ui) === 'targets' && Boolean(hasFfs);
+}
+
 /**
  * How strong they are next to you, from Torn's fight modifier (the owner:
  * never the words "FF" or "fair fight" on screen): 3 means 75% or more of
@@ -100,12 +114,16 @@ function ago(ts, now) {
     return d < 1 ? 'today' : d + ' d';
 }
 
-/** The status cell: what was read, your own hit, or "checking" while the statuses are being read. */
+/**
+ * The status cell: what was read, your own hit, or "checking" while the statuses are being read. FFScouter's
+ * out-time comes only while no read is newer than the list (app-page.js eyeRows, targetStatus), as in rowState.
+ */
 function statusCell(r, now, checking) {
     if (r.hospitalUntil && r.hospitalUntil > now) return h('td', { class: 'cdn', text: 'Hospital · ' + countdown(r.hospitalUntil - now) });
     // Your own hit: known without asking Torn.
     if (r.hit && r.hit.kind === 'hit') return h('td', { class: 'cdn', text: hitText(r.hit, now) });
-    const st = r.status || {};
+    // A hospital or jail read whose out-time has passed says nothing now (rowState: unknown).
+    const st = r.status && !statusOver(r.status, now) ? r.status : {};
     const d = st.description || st.state;
     if (d && /hospital/i.test(d) && Number(st.until) * 1000 > now) return h('td', { class: 'cdn', text: 'Hospital · ' + countdown(Number(st.until) * 1000 - now) });
     if (d && !/^okay$/i.test(st.state || d)) return h('td', { class: 'st-wait', text: d });
@@ -399,7 +417,7 @@ export function renderEye(m, ctx) {
     const e = ctx.eye;
     const now = Date.now();
     const ui = ctx.ui;
-    const mode = EYE_MODES.some(([k]) => k === ui.eyeMode) ? ui.eyeMode : 'targets';
+    const mode = eyeModeOf(ui);
     // Kept filters of older versions (sort, level range, the seven Show ticks) are ignored.
     const f = eyeFilters(ui.eyeFilters);
     const reload = () => e.load({ ...TARGET_LOAD });
@@ -516,10 +534,12 @@ export function renderEye(m, ctx) {
         const pg = pageOf(rows, ui.eyePage || 0);
         if ((ui.eyePage || 0) !== pg.page) ui.eyePage = pg.page;
         const statuses = e.statuses || null;
-        const checking = Boolean(statuses && statuses.active());
+        // Read only with FFScouter connected (readsTargetStatuses): without it no "checking" and no progress line.
+        const checking = Boolean(statuses && ctx.flags.hasFfs && statuses.active());
         // Statuses: the players opened to attack, then this page, then every other listed row in the one order.
         const everyone = listTargets(rowsAll, { band: 'all', ready: false, now }).rows;
-        if (statuses) {
+        // Without FFScouter there is no list to read statuses for: nothing asked (round 7 review).
+        if (statuses && ctx.flags.hasFfs) {
             statuses.show({ page: pg.rows.map((r) => r.id), all: everyone.map((r) => r.id), opened: everyone.filter((r) => r.hit && r.hit.kind === 'opened').map((r) => r.id), readAt: new Map(everyone.map((r) => [Number(r.id), r.statusAt || 0])) });
         }
         const msg = targetsMessage({ paused: ctx.paused, error: e.error(), loading: e.loading(), stored });
@@ -539,7 +559,8 @@ export function renderEye(m, ctx) {
         // A load that failed still says so above an older list.
         const warnLine = rows.length && (msg.kind === 'error' || msg.kind === 'dead' || msg.kind === 'wait' || msg.kind === 'paused') ? h('div', { class: 'why', style: 'margin-bottom:8px', text: msg.text + (stored && stored.at ? ' · showing the list from ' + clock(stored.at, ctx.settings) : '') }) : null;
         // "Statuses: 40 of 600 checked · this page first · the rest in about 19 min" (every listed row, whatever the chips).
-        const known = new Set(everyone.filter((r) => rowState(r, now) !== 'unknown').map((r) => r.id));
+        // Only rows with a status actually read count as checked (not the list's out-time or your own hit).
+        const known = new Set(everyone.filter((r) => statusChecked(r, now)).map((r) => r.id));
         const prog = statusProgress(everyone.map((r) => r.id), (id) => known.has(id));
         const progress = checking && prog.total ? h('div', { class: 'eye-bg' }, [h('div', { class: 'track' }, [h('div', { class: 'fill', style: 'width:' + Math.round((100 * prog.checked) / prog.total) + '%' })]), h('span', { 'data-eye-progress': '1', text: statusLine(prog) })]) : null;
         main.push(

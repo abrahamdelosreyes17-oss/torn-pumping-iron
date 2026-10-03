@@ -138,8 +138,10 @@ test('import (the owner, strongest-first FFScouter): only beatable players are s
     assert.ok(out.list.every((r) => isBeatable(r.band)), 'never a row under 50% HP kept: ' + [...new Set(out.list.map((r) => r.band))]);
     assert.ok(out.list.every((r) => r.keep >= 50), 'every stored row keeps half your HP or more');
     assert.ok(out.dropped.low > 0, 'the strong ones were dropped, not stored');
-    assert.ok(out.list.every((r, i) => i === 0 || (r.respect || 0) <= (out.list[i - 1].respect || 0)), 'most respect first');
-    assert.ok(out.list.every((r, i) => i === 0 || r.respect !== out.list[i - 1].respect || r.keep <= out.list[i - 1].keep), 'then most HP kept');
+    // Compared as the row shows them (respect to 2 decimals: round 7 review, so the tie-breaks apply).
+    const shown = (r) => Math.round((r.respect || 0) * 100);
+    assert.ok(out.list.every((r, i) => i === 0 || shown(r) <= shown(out.list[i - 1])), 'most respect first');
+    assert.ok(out.list.every((r, i) => i === 0 || shown(r) !== shown(out.list[i - 1]) || r.keep <= out.list[i - 1].keep), 'then most HP kept');
     assert.ok(out.list[0].respect > 3, 'no respect cap: the best is above 3 (' + out.list[0].respect.toFixed(2) + ')');
     assert.ok(new Set(out.list.map((r) => r.level)).size > 5, 'not only level 100');
     assert.ok(out.list.every((r) => Number.isFinite(r.fairFight) && Number.isFinite(r.ours)), 'both fair fights kept for the details');
