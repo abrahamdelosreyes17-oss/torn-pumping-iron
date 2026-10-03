@@ -4,7 +4,7 @@
  * The owner's rule: the two scripts never run together. While Torn Trading
  * is seen (its panel on a Torn page, or its Torn Bids tab), Pumping Iron
  * makes no Torn calls and draws nothing on Torn's pages; it starts again by
- * itself about a minute after Torn Trading was last seen. Because only one
+ * itself about two minutes after Torn Trading was last seen. Because only one
  * runs at a time, Pumping Iron may use Torn Trading's own limits.
  */
 
@@ -14,8 +14,12 @@ import { fmtShort } from './format.js';
 /** GM key every tab and the webpage read: when Torn Trading was last seen. */
 export const TRADING_SEEN_KEY = 'tradingSeenAt';
 
-/** Pumping Iron starts again this long after Torn Trading was last seen. */
-export const TRADING_GRACE_MS = 60 * 1000;
+/**
+ * Pumping Iron starts again this long after Torn Trading was last seen. Two minutes, not one (round 7 review): Chrome's
+ * intensive throttling runs a hidden tab's timers about once a minute, so a tab that still runs Torn Trading can mark
+ * it seen only every ~60 s; a 60 s grace let the pause flicker off between two of its marks.
+ */
+export const TRADING_GRACE_MS = 120 * 1000;
 
 /** A tab that sees Torn Trading notes it at most this often (one small GM write). */
 export const TRADING_MARK_EVERY_MS = 15 * 1000;

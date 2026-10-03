@@ -98,9 +98,26 @@ export function sharesMargin(card, x, y, width, height = 340) {
     return card.left < x + width && card.right > x && card.top < y + height && card.bottom > y;
 }
 
-export function dockUnder(card, viewW, viewH, height = 36, gap = DOCK_GAP) {
-    const width = Math.max(160, Math.round(Math.min(card.width, viewW - 8)));
-    const x = Math.round(Math.min(Math.max(4, card.left), Math.max(4, viewW - width - 4)));
+/**
+ * Round 7 review: the dock forced 160 px although the card can be about 100 (its smallest size), so in a narrow margin
+ * the panel reached over Torn's page (52 px of the fight at 1200 px). It is now the card's width, kept in the card's
+ * margin when Torn's page (`page`: {left, right}) is known; null when that margin can't hold the smallest tag (the
+ * panel then takes its own place: a margin, else the window's corner).
+ * @returns {{x:number, y:number, width:number, side:'below'|'above'}|null}
+ */
+export function dockUnder(card, viewW, viewH, height = 36, gap = DOCK_GAP, page = null) {
+    let lo = 4;
+    let hi = viewW - 4;
+    if (page && Number.isFinite(page.left) && Number.isFinite(page.right)) {
+        const mid = card.left + card.width / 2;
+        if (mid >= page.right) lo = Math.max(lo, Math.ceil(page.right) + 1);
+        else if (mid <= page.left) hi = Math.min(hi, Math.floor(page.left) - 1);
+        // A card over Torn's page itself: nothing of ours docks there.
+        else return null;
+    }
+    const width = Math.round(Math.min(card.width, hi - lo));
+    if (width < MINI_W) return null;
+    const x = Math.round(Math.min(Math.max(lo, card.left), hi - width));
     const below = card.bottom + gap;
     if (below + height > viewH - 4 && card.top - gap - height >= 4) return { x, y: Math.round(card.top - gap - height), width, side: 'above' };
     return { x, y: Math.round(below), width, side: 'below' };
@@ -153,8 +170,23 @@ export function spots(viewW, page, want = PANEL_W, min = FIT_COMPACT_W) {
         }
     }
     out.sort((a, b) => TIER_RANK[b.tier] - TIER_RANK[a.tier]);
-    if (!out.length) out.push({ side: 'corner', from: 4, to: 4 + MINI_W, width: MINI_W, ...fitTier(0) });
+    if (!out.length) out.push(cornerSpot());
     return out;
+}
+
+/** The smallest tag's spot in the window's top corner (over Torn's header, never its content). */
+export function cornerSpot() {
+    return { side: 'corner', from: 4, to: 4 + MINI_W, width: MINI_W, ...fitTier(0) };
+}
+
+/**
+ * The spots that don't share a column with `col` ({left, right} on screen: Torn Eye's list tags; round 7 review: the
+ * panel covered them when both took the same margin). None left: the corner tag.
+ */
+export function spotsClearOf(list, col) {
+    if (!col || !Number.isFinite(col.left) || !Number.isFinite(col.right)) return list;
+    const free = list.filter((s) => s.side === 'corner' || !(col.left < s.to && col.right > s.from));
+    return free.length ? free : [cornerSpot()];
 }
 
 /** A saved spot ({side, off, y}: off = distance from the margin's outer edge) as a point on screen. */
@@ -213,8 +245,9 @@ export class Overlay {
      * @param {function} [o.avoidRect] - () => DOMRect|null: a panel to stay above (NPC Arbitrage)
      * @param {function} [o.dockTo] - () => Element|null: dock folded under it (Torn Eye's fight card on the attack page)
      * @param {function} [o.dockIfShared] - () => Element|null: dock under it only when it sits in the panel's margin (the profile card)
+     * @param {function} [o.avoidColumn] - () => {left, right}|null: a column it never shares (Torn Eye's list tags)
      */
-    constructor({ onOpen, loadPos, savePos, loadCollapsed, saveCollapsed, pageRect, avoidRect = () => null, dockTo = () => null, dockIfShared = () => null }) {
+    constructor({ onOpen, loadPos, savePos, loadCollapsed, saveCollapsed, pageRect, avoidRect = () => null, dockTo = () => null, dockIfShared = () => null, avoidColumn = () => null }) {
         this.onOpen = onOpen;
         this.loadPos = loadPos;
         this.savePos = savePos;
@@ -224,6 +257,7 @@ export class Overlay {
         this.avoidRect = avoidRect;
         this.dockTo = dockTo;
         this.dockIfShared = dockIfShared;
+        this.avoidColumn = avoidColumn;
         this.docked = null;
         this.off = false;
     }
@@ -340,7 +374,9 @@ export class Overlay {
     }
 
     spotList() {
-        return spots(window.innerWidth, this.pageRect());
+        const col = this.avoidColumn ? this.avoidColumn() : null;
+        this.colKey = col ? col.left + ',' + col.right : '';
+        return spotsClearOf(spots(window.innerWidth, this.pageRect()), col);
     }
 
     /** Put it where it was left (or the default), inside its margin, above NPC Arbitrage when they share one; on the attack page under the fight card. */
@@ -352,8 +388,9 @@ export class Overlay {
         const card = this.dockCard();
         const r = card && card.getBoundingClientRect ? card.getBoundingClientRect() : null;
         const was = Boolean(this.docked);
-        if (r && r.width > 0 && r.height > 0) {
-            const d = dockUnder(r, window.innerWidth, window.innerHeight, 36);
+        // Under the card, in its margin only; a margin too narrow for a tag: the panel's own place instead.
+        const d = r && r.width > 0 && r.height > 0 ? dockUnder(r, window.innerWidth, window.innerHeight, 36, DOCK_GAP, this.pageRect()) : null;
+        if (d) {
             this.docked = { key: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height), window.innerWidth, window.innerHeight].join(',') };
             if (!was) this.showFolded();
             this.wrap.style.left = d.x + 'px';
@@ -363,6 +400,7 @@ export class Overlay {
             return;
         }
         this.docked = null;
+        this.noDockKey = r && r.width > 0 && r.height > 0 ? [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height), window.innerWidth, window.innerHeight].join(',') : null;
         if (was) this.showFolded();
         const list = this.spotList();
         const stored = this.loadPos();
@@ -453,7 +491,7 @@ export class Overlay {
             const s = v.seen;
             if (s.count > 0) {
                 kids.push(h('span', {}, ['Still seen in ', h('b', { style: 'color:#fff', text: s.count + ' tab' + (s.count === 1 ? '' : 's') }), ': ' + s.where.join(', ') + '.']));
-                kids.push(h('span', { class: 'sub', text: 'Reload or close ' + (s.count === 1 ? 'it' : 'them') + '. Pumping Iron starts again 60 s after the last one.' }));
+                kids.push(h('span', { class: 'sub', text: 'Reload or close ' + (s.count === 1 ? 'it' : 'them') + '. Pumping Iron starts again 2 min after the last one.' }));
             } else {
                 kids.push(h('span', {}, ['Torn Trading isn’t seen any more. Starting again in ', h('b', { style: 'color:#fff', 'data-cd': String(s.resumesAt), text: countdown(s.resumesAt - now) }), '.']));
             }
@@ -480,10 +518,18 @@ export class Overlay {
         for (const el of this.shadow.querySelectorAll('[data-cd]')) el.textContent = countdown(Number(el.getAttribute('data-cd')) - now);
         for (const el of this.shadow.querySelectorAll('[data-ago]')) el.textContent = agoWords(now - Number(el.getAttribute('data-ago')));
         if (this.off || !this.wrap) return;
+        // Torn Eye's list tags took (or left) a column: out of it (one attribute read, no layout).
+        const col = this.docked ? null : this.avoidColumn ? this.avoidColumn() : null;
+        if (!this.docked && (col ? col.left + ',' + col.right : '') !== (this.colKey || '')) {
+            this.place();
+            return;
+        }
         const card = this.dockCard();
         if (!card && !this.docked) return;
         const r = card && card.getBoundingClientRect ? card.getBoundingClientRect() : null;
         const key = r ? [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height), window.innerWidth, window.innerHeight].join(',') : '';
+        // A card whose margin can't hold the docked tag: placed once on its own for it, not again every second.
+        if (!this.docked && key && this.noDockKey === key) return;
         if (!this.docked || this.docked.key !== key) this.place();
     }
 }

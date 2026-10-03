@@ -158,13 +158,13 @@ test('#8 "Refill unused" shows only in the last 2 hours before Torn midnight', (
 
 /* Taking turns with Torn Trading */
 
-test('turns: paused within a minute of Torn Trading being seen, then back by itself', () => {
+test('turns: paused while Torn Trading is seen, back by itself 2 min after (a hidden tab marks it only about once a minute)', () => {
     const seen = 1_790_000_000_000;
     assert.equal(tradingRunning(0, seen), false);
     assert.equal(tradingRunning(seen, seen + 1000), true);
     assert.equal(tradingRunning(seen, seen + TRADING_GRACE_MS - 1), true);
     assert.equal(tradingRunning(seen, seen + TRADING_GRACE_MS), false);
-    assert.equal(resumesAt(seen), seen + 60000);
+    assert.equal(resumesAt(seen), seen + 120000);
     assert.equal(shouldMarkSeen(0, seen), true);
     assert.equal(shouldMarkSeen(seen, seen + 5000), false);
     assert.equal(shouldMarkSeen(seen, seen + 15000), true);

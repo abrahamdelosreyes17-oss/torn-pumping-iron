@@ -21,14 +21,14 @@ import { installAttackHook } from './platform/page-hook.js';
 import { wantPlayers, eyeView, sharedView, eyeReady, loadEyeCache, onEye, saveGear, getWatch, toggleWatch, setWatchTag } from './eye-service.js';
 import { WATCH_MAX } from './core/eye/watch.js';
 import { parseAttackData } from './core/eye/gear.js';
-import { sortWar, outEarly, memberState } from './core/eye/war.js';
+import { sortWar, memberState } from './core/eye/war.js';
 import { profileLevel, profileAnchor, readFactionRows, readWarRows, miniProfileId, attackRoot } from './sources/dom/eye.js';
-import { ensureEyeCss, bindCard, eyeCardSpot, eyeRowSpot, eyeProfileCard, eyeFightCard, eyeMiniLine, eyeRowTag, eyeEdgeBar, eyeSummary, eyeSummaryTag, eyeStatusSeconds, eyeShown, eyeLayer, eyeLayerPart, eyeClearPart } from './ui/eye/eye-ui.js';
+import { ensureEyeCss, bindCard, eyeCardSpot, eyeRowSpot, eyeProfileCard, eyeFightCard, eyeMiniLine, eyeRowTag, eyeEdgeBar, eyeSummary, eyeSummaryTag, eyeStatusSeconds, eyeShown, eyeLayer, eyeLayerPart, eyeClearPart, eyeTickOut, eyeNextEarly, eyeRowsSig, eyeUntilMoved } from './ui/eye/eye-ui.js';
 import { ensureMarkCss } from './ui/marks/marks.js';
 import { fill } from './ui/dom.js';
 import { detectPage, profileIdOf, attackTargetOf, PAGE_PROFILE, PAGE_FACTION, PAGE_ATTACK } from './sources/route.js';
 
-const ep = { extras: new Map(), war: { prev: null }, attack: { gearVisible: false, gearSaved: false }, drawing: false, sig: {}, lists: {}, layoutSig: '' };
+const ep = { extras: new Map(), war: { prev: null, early: new Map() }, drawn: { war: null, faction: null }, attack: { gearVisible: false, gearSaved: false }, drawing: false, sig: {}, lists: {}, layoutSig: '' };
 
 function view(id) {
     const x = ep.extras.get(id) || {};
@@ -52,6 +52,33 @@ function eyeTornPage() {
 /** The window's width without its scrollbar. */
 function eyeViewW() {
     return (document.documentElement && document.documentElement.clientWidth) || window.innerWidth;
+}
+
+/**
+ * The training panel on screen (our own, in its shadow root; null when hidden). Round 7 review: the list tags and the
+ * hover card leave its margin when the other one has room, and the panel leaves the tags' column (data-pi-col).
+ */
+function eyePanelRect() {
+    const host = document.getElementById('pi-overlay');
+    const w = host && host.shadowRoot && host.shadowRoot.querySelector('.wrap');
+    if (!w) return null;
+    const r = w.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 ? r : null;
+}
+
+/** Where list tags go now (eyeRowSpot, clear of the panel). */
+function eyeListSpot() {
+    return eyeRowSpot(eyeViewW(), eyeTornPage(), eyePanelRect());
+}
+
+/** Note the tags' column on our layer (x from, x to, on screen) for the panel to keep out of; none: no tags. */
+function eyeMarkColumn(spot) {
+    const layer = document.getElementById('pi-eye-layer');
+    if (!layer) return;
+    const v = spot && spot.mode !== 'none' && Object.keys(ep.lists).length ? Math.round(spot.x) + ',' + Math.round(spot.x + spot.width) : null;
+    if (v === layer.getAttribute('data-pi-col')) return;
+    if (v) layer.setAttribute('data-pi-col', v);
+    else layer.removeAttribute('data-pi-col');
 }
 
 /** Where our layer's (0, 0) is on screen: its children are placed in page coordinates from there. */
@@ -137,7 +164,7 @@ function eyeRowMember(r, nowS) {
  */
 function eyeDrawList(name, rows, byId, nowS, { glow, note }) {
     const part = eyeLayerPart(name);
-    const spot = eyeRowSpot(eyeViewW(), eyeTornPage());
+    const spot = eyeListSpot();
     const items = [];
     let glowed = !glow;
     let fromFfs = false;
@@ -151,7 +178,7 @@ function eyeDrawList(name, rows, byId, nowS, { glow, note }) {
         const on = ready && !glowed;
         if (on) glowed = true;
         const edge = eyeEdgeBar(v.band, !ready);
-        const tag = spot.mode === 'none' ? null : eyeRowTag(v, { mode: spot.mode, state: s.state, outInS: s.until > nowS ? s.until - nowS : null, glow: on });
+        const tag = spot.mode === 'none' ? null : eyeRowTag(v, { mode: spot.mode, state: s.state, outInS: s.until > nowS ? s.until - nowS : null, outAt: s.until > nowS ? s.until : null, glow: on });
         items.push({ row: r.el, edge, tag });
     }
     const summary = spot.mode === 'none' ? null : eyeSummaryTag(eyeSummary(rows, nowS), { note, fromFfs, short: spot.mode !== 'full' });
@@ -166,7 +193,8 @@ function eyeDrawList(name, rows, byId, nowS, { glow, note }) {
 function eyePlaceList(name) {
     const L = ep.lists[name];
     if (!L) return;
-    const spot = eyeRowSpot(eyeViewW(), eyeTornPage());
+    const spot = eyeListSpot();
+    eyeMarkColumn(spot);
     const o = eyeOrigin();
     let topRow = Infinity;
     for (const el of L.rowsEl) {
@@ -196,6 +224,18 @@ function eyePlaceList(name) {
     }
 }
 
+/**
+ * The war list as it is now, and who is out early: kept from reading to reading (eyeNextEarly) until the hospital end
+ * they left before passes or their state changes. Called every second and on each draw; the same reading twice
+ * changes nothing.
+ */
+function eyeWarReading(rows, nowS) {
+    const members = rows.map((r) => eyeRowMember(r, nowS));
+    ep.war.early = eyeNextEarly(ep.war.early, ep.war.prev, members, nowS, memberState);
+    ep.war.prev = members;
+    return { members, early: ep.war.early };
+}
+
 function drawWar() {
     const rows = readWarRows(document, 'enemy');
     if (!rows.length) {
@@ -208,7 +248,8 @@ function drawWar() {
     // with an estimate but no profile read was fought with a level 1's life and came out Stomp).
     for (const r of rows) ep.extras.set(r.id, { ...(ep.extras.get(r.id) || {}), level: r.level, name: r.name });
     const nowS = Math.floor(Date.now() / 1000);
-    const members = rows.map((r) => eyeRowMember(r, nowS));
+    const { members, early } = eyeWarReading(rows, nowS);
+    ep.drawn.war = members;
     const bands = {};
     const respect = {};
     for (const m of members) {
@@ -218,9 +259,7 @@ function drawWar() {
             respect[m.id] = v.respect || 0;
         }
     }
-    const early = ep.war.prev ? outEarly(ep.war.prev, members, nowS) : new Set();
-    ep.war.prev = members;
-    const sorted = sortWar(members, { bands, respect, early, nowS });
+    const sorted = sortWar(members, { bands, respect, early: new Set(early.keys()), nowS });
     ep.drawing = true;
     try {
         const byId = new Map(rows.map((r) => [r.id, r]));
@@ -246,10 +285,9 @@ function drawFaction(glow) {
     }
     for (const r of rows) ep.extras.set(r.id, { ...(ep.extras.get(r.id) || {}), level: r.level, name: r.name });
     const nowS = Math.floor(Date.now() / 1000);
-    const list = rows.map((r) => {
-        const m = eyeRowMember(r, nowS);
-        return { id: r.id, state: memberState(m), until: m.status.until };
-    });
+    const members = rows.map((r) => eyeRowMember(r, nowS));
+    ep.drawn.faction = members;
+    const list = members.map((m) => ({ id: m.id, state: memberState(m), until: m.status.until }));
     eyeDrawList('faction', list, new Map(rows.map((r) => [r.id, r])), nowS, { glow, note: 'Torn Eye · from what is already known (nothing is asked on this page)' });
 }
 
@@ -311,6 +349,7 @@ function eyeClearAll() {
     for (const el of document.querySelectorAll('#pi-eye-layer, #pi-eyecard, .pi-mini-line')) el.remove();
     ep.sig = {};
     ep.lists = {};
+    ep.drawn = { war: null, faction: null };
     // Torn's war rows back in their own order.
     for (const list of document.querySelectorAll('.pi-warlist')) {
         list.classList.remove('pi-warlist');
@@ -336,6 +375,7 @@ function drawAll() {
     }
     if (p === PAGE_ATTACK) drawAttack();
     drawMini();
+    if (!Object.keys(ep.lists).length) eyeMarkColumn(null);
     ep.layoutSig = eyeLayoutSig();
 }
 
@@ -348,7 +388,7 @@ function eyePlaceAll() {
         return;
     }
     // A list whose tags need another size is drawn again; otherwise they only move.
-    const mode = eyeRowSpot(eyeViewW(), eyeTornPage()).mode;
+    const mode = eyeListSpot().mode;
     if (Object.values(ep.lists).some((L) => L.spotMode !== mode)) {
         drawAll();
         return;
@@ -371,13 +411,16 @@ function eyeLayoutSig() {
     } else {
         y = Object.values(ep.lists).map((L) => (L.first ? Math.round(L.first.el.getBoundingClientRect().top + window.scrollY) + ':' + L.rowsEl.length : '')).join(',');
     }
-    return [eyeViewW(), Math.round(pg.left), Math.round(pg.right), y].join('|');
+    // The panel's side too: the list tags leave its margin (eyeListSpot).
+    const pr = p === PAGE_FACTION ? eyePanelRect() : null;
+    return [eyeViewW(), Math.round(pg.left), Math.round(pg.right), y, pr ? Math.round(pr.left) + ':' + Math.round(pr.right) : ''].join('|');
 }
 
 export function bootEyePage() {
     ensureMarkCss();
     ensureEyeCss();
-    bindCard(document, (id) => view(id), () => eyeCardSpot(eyeViewW(), eyeTornPage()));
+    // The hover card: in the free space, and on faction and war pages clear of the panel like the tags beside it.
+    bindCard(document, (id) => view(id), () => eyeCardSpot(eyeViewW(), eyeTornPage(), detectPage(location.href) === PAGE_FACTION ? eyePanelRect() : null));
     const p = detectPage(location.href);
     if (p === PAGE_ATTACK) {
         // unsafeWindow is the page's own window in Tampermonkey; the harness has only window.
@@ -428,12 +471,20 @@ export function bootEyePage() {
         const pg = detectPage(location.href);
         if (pg !== PAGE_FACTION && pg !== PAGE_PROFILE && pg !== PAGE_ATTACK) return;
         if (pg === PAGE_FACTION) {
-            const sig = readFactionRows().map((r) => r.id + ':' + r.status).join(',') + '|' + readWarRows().map((r) => r.id + ':' + r.status).join(',');
-            if (sig !== rowsSig) {
+            // Round 7 review: the status text carries Torn's hospital clock, so a signature of it changed every second
+            // and every tag was rebuilt (focus lost, "out early" forgotten). Now: each row's state, who is out early,
+            // and a hospital end that really moved; the "out in" clocks move on by themselves (eyeTickOut).
+            const nowS = Math.floor(Date.now() / 1000);
+            const faction = readFactionRows().map((r) => eyeRowMember(r, nowS));
+            const warRows = readWarRows(document, 'enemy');
+            const war = warRows.length ? eyeWarReading(warRows, nowS) : { members: [], early: new Map() };
+            const sig = eyeRowsSig(faction, memberState) + '|' + eyeRowsSig(war.members, memberState, war.early);
+            if (sig !== rowsSig || eyeUntilMoved(ep.drawn.faction, faction) || eyeUntilMoved(ep.drawn.war, war.members)) {
                 rowsSig = sig;
                 drawAll();
                 return;
             }
+            eyeTickOut(document.getElementById('pi-eye-layer'), nowS);
         }
         if (eyeLayoutSig() !== ep.layoutSig) eyePlaceAll();
     }, 1000);

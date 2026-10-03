@@ -39,7 +39,7 @@ export function pausedBanner(m, settings) {
             text:
                 'No Torn calls while it runs' +
                 (at ? ', so this is your plan as of ' + clock(at, settings) + ' and it keeps moving on the clock' : '') +
-                '. Turn Torn Trading off (or close its Torn Bids tab) and Pumping Iron reads Torn again by itself within a minute; whatever changed meanwhile shows as one catch-up entry in Progress.',
+                '. Turn Torn Trading off (or close its Torn Bids tab) and Pumping Iron reads Torn again by itself about 2 minutes later (tabs opened before still run it: reload them); whatever changed meanwhile shows as one catch-up entry in Progress.',
         }),
     ]);
 }

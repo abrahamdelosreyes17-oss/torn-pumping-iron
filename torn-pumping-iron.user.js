@@ -49,7 +49,7 @@
     'use strict';
 
     const PI_BUILD_VERSION = '1.3.0';
-    const PI_BUILD_HASH = 'b718eb3aaf4c';
+    const PI_BUILD_HASH = '31b2d8636a1c';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -1629,6 +1629,9 @@
         problemBuf: 'problemBuf',
         // The last plan runs with their time (Settings › Report a problem).
         planRuns: 'planRuns',
+        // Stacking energy for a chain (round 7, Home's "I'm stacking"): {since: ms} while on, absent while training.
+        // GM, so every tab (the webpage, Torn's pages) and the bot's sync see it at once.
+        stacking: 'stackingChain',
     };
 
     /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */
@@ -1693,6 +1696,23 @@
     function setPlan(plan) {
         gmSet(K.plan, plan);
         return plan;
+    }
+
+    /** Stacking energy for a chain: {since: ms} while on, null while training. */
+    function getStacking() {
+        const v = gmGet(K.stacking, null);
+        return v && Number(v.since) > 0 ? { since: Number(v.since) } : null;
+    }
+
+    /** "I'm stacking" (on: kept from the first press) and Resume (off: the key goes). */
+    function setStacking(on, now = Date.now()) {
+        if (!on) {
+            gmDel(K.stacking);
+            return null;
+        }
+        const v = getStacking() || { since: now };
+        gmSet(K.stacking, v);
+        return v;
     }
 
     function getKey(name) {
@@ -1818,7 +1838,7 @@
     /** What "Your data" in Settings can clear, by group. */
     const DATA_GROUPS = {
         keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker, K.fullKey, K.fullKeyState, K.moneyLog],
-        plan: [K.plan, K.recheck, K.gymSession, K.planNow, 'savedPlanFull'],
+        plan: [K.plan, K.recheck, K.gymSession, K.planNow, 'savedPlanFull', K.stacking],
         progress: [K.statsHistory, K.dayLog, K.dayTotals, K.planLine, K.receipts, K.gymLog],
         learning: ['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions],
         prices: [K.priceHistory, K.prices],
@@ -4242,7 +4262,7 @@
      * The owner's rule: the two scripts never run together. While Torn Trading
      * is seen (its panel on a Torn page, or its Torn Bids tab), Pumping Iron
      * makes no Torn calls and draws nothing on Torn's pages; it starts again by
-     * itself about a minute after Torn Trading was last seen. Because only one
+     * itself about two minutes after Torn Trading was last seen. Because only one
      * runs at a time, Pumping Iron may use Torn Trading's own limits.
      */
 
@@ -4252,8 +4272,12 @@
     /** GM key every tab and the webpage read: when Torn Trading was last seen. */
     const TRADING_SEEN_KEY = 'tradingSeenAt';
 
-    /** Pumping Iron starts again this long after Torn Trading was last seen. */
-    const TRADING_GRACE_MS = 60 * 1000;
+    /**
+     * Pumping Iron starts again this long after Torn Trading was last seen. Two minutes, not one (round 7 review): Chrome's
+     * intensive throttling runs a hidden tab's timers about once a minute, so a tab that still runs Torn Trading can mark
+     * it seen only every ~60 s; a 60 s grace let the pause flicker off between two of its marks.
+     */
+    const TRADING_GRACE_MS = 120 * 1000;
 
     /** A tab that sees Torn Trading notes it at most this often (one small GM write). */
     const TRADING_MARK_EVERY_MS = 15 * 1000;
@@ -4278,6 +4302,63 @@
         const t = Number(seenAt) || 0;
         // A mark from the future (the clock moved back) is replaced, or the pause would never start.
         return !(t > 0) || now - t >= TRADING_MARK_EVERY_MS || t > now;
+    }
+
+    /*
+     * Round 7, the pause that "stays on" (the owner, 2026-10-02: Torn Trading turned off, Pumping Iron paused for
+     * minutes). The cause: turning a script off in Tampermonkey stops it on the next page load only. A tab opened before
+     * keeps Torn Trading running, and keeps its host (#ttv2-host) in the page, so our own look in that tab (every 5 s,
+     * hidden tabs too) keeps marking it seen until the tab is reloaded or closed. The pause was right (Torn Trading was
+     * still running there); the card's "starts again by itself within a minute" was wrong, and it never said where.
+     * Each tab that sees it now notes itself too, so the card can say which tabs to reload or close.
+     */
+
+    /** GM key: {[tabId]: {at, where}} for each tab that sees Torn Trading now. */
+    const TRADING_TABS_KEY = 'tradingTabs';
+
+    /** The page words for a tab that sees Torn Trading ("Item Market"). */
+    const TRADING_WHERE_WORDS = {
+        gym: 'Gym',
+        items: 'Items',
+        itemmarket: 'Item Market',
+        bazaar: 'a bazaar',
+        points: 'Points market',
+        profile: 'a profile',
+        faction: 'a faction page',
+        attack: 'the attack page',
+        trading: 'Torn Bids',
+        other: 'a Torn page',
+    };
+
+    /** This tab's entry in the tabs record, moved on (seen now, or gone); null when nothing changes. */
+    function nextTradingTabs(tabs, tabId, seen, where, now) {
+        const cur = tabs && typeof tabs === 'object' ? tabs : {};
+        const fresh = {};
+        // Entries older than the grace period are gone (a tab closed without saying so).
+        for (const [id, e] of Object.entries(cur)) if (e && now - (Number(e.at) || 0) < TRADING_GRACE_MS && id !== tabId) fresh[id] = e;
+        const mine = cur[tabId];
+        if (seen) {
+            if (mine && !shouldMarkSeen(mine.at, now) && mine.where === where && Object.keys(fresh).length === Object.keys(cur).length - 1) return null;
+            fresh[tabId] = { at: now, where };
+            return fresh;
+        }
+        if (!mine && Object.keys(fresh).length === Object.keys(cur).length) return null;
+        return fresh;
+    }
+
+    /**
+     * Where Torn Trading is still seen, for the paused card: the tabs that saw it within the grace period, in words,
+     * the last time it was seen and when Pumping Iron starts again.
+     * @returns {{count:number, where:string[], lastAt:number, resumesAt:number}}
+     */
+    function tradingSeenWhere(tabs, seenAt, now) {
+        const list = Object.values(tabs && typeof tabs === 'object' ? tabs : {}).filter((e) => e && now - (Number(e.at) || 0) < TRADING_GRACE_MS && Number(e.at) <= now + 1000);
+        const words = [];
+        for (const e of list.sort((a, b) => b.at - a.at)) {
+            const w = TRADING_WHERE_WORDS[e.where] || TRADING_WHERE_WORDS.other;
+            if (!words.includes(w)) words.push(w);
+        }
+        return { count: list.length, where: words, lastAt: Number(seenAt) || 0, resumesAt: resumesAt(seenAt) };
     }
 
     /**
@@ -6198,28 +6279,56 @@
 
     /* ===== src/core/eye/bands.js ===== */
     /*
-     * Torn Eye's colour bands (user-set in the Torn Eye tab; ENGINE-SPEC §10):
-     * Stomp, Good, Tough, Can't win, or No data. Never "FF".
+     * Torn Eye's bands (round 7, the owner, decided 2026-10-02/03): by the HP you keep over the fights you win, nothing
+     * else ("no need for minimum win chance, we already have stomp, good and fair"; "HP kept on fights you win that fight
+     * only"). Fixed, not user-set:
+     *
+     *   Stomp  you keep 99% or more of your HP
+     *   Good   70–99%
+     *   Fair   50–69%
+     *   low    under 50%: never listed as a target and never pinged; War and Watched still show it (they show everyone)
+     *   none   nothing known about the player
+     *
+     * The win chance is a plain number beside the band, never part of it. Never "FF".
      */
 
-    const BAND_ORDER = ['stomp', 'good', 'tough', 'cant', 'none'];
-    const BAND_WORDS = { stomp: 'Stomp', good: 'Good', tough: 'Tough', cant: "Can't win", none: 'No data' };
-    const BAND_COLORS = { stomp: '#3fbf5a', good: '#a6e08a', tough: '#f0a040', cant: '#ff5a4e', none: '#6c737a' };
-    const DEFAULT_BAND_LIMITS = { stomp: { win: 99, keep: 75 }, good: { win: 90, keep: 40 }, tough: { win: 60, keep: 0 } };
+    const BAND_ORDER = ['stomp', 'good', 'fair', 'low', 'none'];
+    const BAND_WORDS = { stomp: 'Stomp', good: 'Good', fair: 'Fair', low: 'Under 50%', none: 'No data' };
+    const BAND_COLORS = { stomp: '#3fbf5a', good: '#a6e08a', fair: '#f0c02f', low: '#ff6b5e', none: '#6c737a' };
+
+    /** The least HP kept (whole percent, as shown) for each listed band. */
+    const BAND_KEEP = { stomp: 99, good: 70, fair: 50 };
+
+    /** The bands a target may have: everyone else is never listed and never pinged. */
+    const LISTED_BANDS = ['stomp', 'good', 'fair'];
+
+    function isListedBand(band) {
+        return LISTED_BANDS.includes(band);
+    }
 
     /**
-     * @param {object|null} f - forecast() output (pWin 0..1, keep 0..1)
-     * @param {object} [limits] - {stomp:{win,keep}, good:{win,keep}, tough:{win}} in percent
+     * A band name as stored by an older version (1.3.x: stomp, good, tough, cant): Tough and Can't win are gone, and
+     * both are read as under 50% (never pinged) until the player is judged again. Anything unknown is 'none'.
      */
-    function bandOf(f, limits = DEFAULT_BAND_LIMITS) {
+    function normBand(band) {
+        if (BAND_ORDER.includes(band)) return band;
+        if (band === 'tough' || band === 'cant') return 'low';
+        return 'none';
+    }
+
+    /**
+     * @param {object|null} f - forecast() output (pWin 0..1, keep 0..1 over the fights you win, or null when you win none)
+     * @returns {'stomp'|'good'|'fair'|'low'|'none'}
+     */
+    function bandOf(f) {
         if (!f || !Number.isFinite(f.pWin)) return 'none';
-        const win = f.pWin * 100;
-        const keep = (f.keep || 0) * 100;
-        const L = { ...DEFAULT_BAND_LIMITS, ...(limits || {}) };
-        if (win >= L.stomp.win && keep >= L.stomp.keep) return 'stomp';
-        if (win >= L.good.win && keep >= L.good.keep) return 'good';
-        if (win >= L.tough.win) return 'tough';
-        return 'cant';
+        if (!(f.pWin > 0) || f.keep === null || f.keep === undefined || !Number.isFinite(f.keep)) return 'low';
+        // By the whole percent the row shows, so a row never reads "99%" and Good.
+        const keep = Math.round(f.keep * 100);
+        if (keep >= BAND_KEEP.stomp) return 'stomp';
+        if (keep >= BAND_KEEP.good) return 'good';
+        if (keep >= BAND_KEEP.fair) return 'fair';
+        return 'low';
     }
 
     /** "win 96% · keep ~62% · 2.80 respect" (no "~" when the stats are exact). */
@@ -6274,14 +6383,15 @@
 
     /**
      * @param {object[]} members - /faction/{id}/members rows
-     * @param {object} o - {bands: {id: band}, respect: {id: number}, early: Set, nowS}
+     * Within a band the one order of round 7 (the owner): most respect, then most HP kept, then the highest win.
+     * @param {object} o - {bands: {id: band}, respect: {id: number}, keep: {id: 0..1}, win: {id: 0..1}, early: Set, nowS}
      * @returns {object[]} rows {m, id, state, band, respect, until}
      */
-    function sortWar(members, { bands = {}, respect = {}, early = new Set(), nowS = 0 } = {}) {
+    function sortWar(members, { bands = {}, respect = {}, keep = {}, win = {}, early = new Set(), nowS = 0 } = {}) {
         const rows = (members || []).map((m) => {
             const id = Number(m.id);
             const state = early.has(id) ? 'early' : memberState(m);
-            return { m, id, state, band: bands[id] || 'none', respect: respect[id] || 0, until: Number(m.status && m.status.until) || 0 };
+            return { m, id, state, band: bands[id] || 'none', respect: respect[id] || 0, keep: keep[id] || 0, win: win[id] || 0, until: Number(m.status && m.status.until) || 0 };
         });
         rows.sort((a, b) => {
             const s = STATE_RANK[a.state] - STATE_RANK[b.state];
@@ -6289,7 +6399,10 @@
             if (a.state === 'okay' || a.state === 'early') {
                 const bd = BAND_ORDER.indexOf(a.band) - BAND_ORDER.indexOf(b.band);
                 if (bd) return bd;
-                return b.respect - a.respect;
+                // Compared as the row shows them (respect to 2 decimals, HP kept and win in whole percents): unrounded,
+                // two rows both reading "3.00" were ordered by a third decimal and the tie-breaks never applied.
+                const r100 = (x) => Math.round((Number(x) || 0) * 100);
+                return r100(b.respect) - r100(a.respect) || r100(b.keep) - r100(a.keep) || r100(b.win) - r100(a.win);
             }
             if (a.state === 'hospital' || a.state === 'traveling') return (a.until || Infinity) - (b.until || Infinity);
             return a.id - b.id;
@@ -6481,6 +6594,42 @@
         }
         if (st === 'fallen') return { kind: 'fallen', pre: 'Fallen', at: null, cd: false, post: '', cls: 'muted', soonAt: null };
         return { kind: st, pre: s.description || st, at: null, cd: false, post: '', cls: null, soonAt: null };
+    }
+
+    /* ------------------------------------------------ round 7: what war mode read, for Torn's own war page */
+
+    /** The table is small on purpose (Tampermonkey hands it to every Torn page): at most this many players. */
+    const WAR_BANDS_MAX = 150;
+
+    /** A band older than this is not shown on Torn's page (stats move slowly; a day-old band is still a fair guide). */
+    const WAR_BANDS_KEEP_MS = 24 * 60 * 60 * 1000;
+
+    /**
+     * The bands the Torn Eye tab's war mode worked out, as a small table for shared storage: Torn's war page asks
+     * nothing (the 1.3.0 rule), so it shows these. Players with no estimate are left out.
+     * @param {object[]} rows - {id, band, win (0–100|null), keep (0–100|null)}
+     * @returns {{at, fid, p: {[id]: [band, win, keep]}}}
+     */
+    function warBandTable(rows, { fid = null, now = Date.now() } = {}) {
+        const p = {};
+        let n = 0;
+        for (const r of rows || []) {
+            const band = r && BAND_ORDER.includes(r.band) ? r.band : null;
+            if (!r || !(Number(r.id) > 0) || !band || band === 'none') continue;
+            if (n++ >= WAR_BANDS_MAX) break;
+            p[Number(r.id)] = [band, Number.isFinite(r.win) ? Math.round(r.win) : null, Number.isFinite(r.keep) ? Math.round(r.keep) : null];
+        }
+        return { at: now, fid: Number(fid) || null, p };
+    }
+
+    /** One player's band from that table, or null when it has none or the table is too old. */
+    function warBandOf(table, id, now = Date.now()) {
+        if (!table || !table.p || !(now - (Number(table.at) || 0) < WAR_BANDS_KEEP_MS)) return null;
+        const e = table.p[Number(id)];
+        // A table written by an older version (Tough, Can't win) reads as under 50% until war mode writes it again.
+        const band = Array.isArray(e) ? normBand(e[0]) : 'none';
+        if (band === 'none') return null;
+        return { band, win: Number.isFinite(e[1]) ? e[1] : null, keep: Number.isFinite(e[2]) ? e[2] : null, at: Number(table.at) };
     }
 
     /** The status cell as one line: "Hospital · out 14:32 TCT (3:10)", "→ Mexico, lands ~15:05 (est.)". */
@@ -7983,12 +8132,49 @@
     }
 
     /**
+     * Energy the day plan keeps on purpose right now (round 7 review): the gym page and the panel never say to train it.
+     * Read from what the day plan does (plan.js), not a new rule:
+     *   jump     Xanax stacked for a jump (energy above the maximum on a jump plan): all of it waits for the jump;
+     *   boost    the daily choco boost's held Xanax ("Xanax #N · keep the energy for the boost"): all of it waits;
+     *   console  the console jump before its stack: the bar stays under the 3 Xanax (strategies.js stackRoom), so the
+     *            plan trains only what is above it (with a 100–150 bar: nothing);
+     *   war      energy kept for a faction war (Settings › Keep for war days): the plan trains above it.
+     * @returns {{why:'jump'|'boost'|'console'|'war', amount:number, all:boolean, stacked:number, stackTo:number, war:string|null}|null}
+     *   amount: the energy kept now (never more than there is); all: none of the energy is to be trained now
+     */
+    function keptEnergyOf({ strategy, energy, stacking = false, stacked = 0, holding = false, warKeep = 0, warName = null }) {
+        const e = Math.max(0, Number(energy) || 0);
+        if (!(e > 0)) return null;
+        const isConsole = strategy === 'consoleJump' || strategy === 'consoleJumpToy';
+        const stackTo = isConsole ? CONSOLE_STACK : JUMP_STACK;
+        let why = null;
+        let amount = 0;
+        if (stacking) {
+            why = 'jump';
+            amount = e;
+        } else if (holding) {
+            why = 'boost';
+            amount = e;
+        } else if (isConsole) {
+            why = 'console';
+            amount = Math.min(e, stackRoom(CONSOLE_STACK));
+        }
+        const war = Math.min(e, Math.max(0, Number(warKeep) || 0));
+        if (war > amount) {
+            why = 'war';
+            amount = war;
+        }
+        if (!why || !(amount > 0)) return null;
+        return { why, amount, all: amount >= e, stacked: why === 'jump' ? Math.max(1, Math.min(stackTo, Number(stacked) || 0)) : 0, stackTo, war: why === 'war' ? warName || null : null };
+    }
+
+    /**
      * Round 6: the numbers come from the saved plan (`compare`: every plan's result, or on Torn's pages the small part;
      * `rec`: its recommendation; `warn`: plans whose pick warns). `lite` (Torn's pages): only what those pages show is
      * worked out (today's steps, the 48 h look-ahead, the strip, the gym page's next two days); no ladder, no 30-day
      * projection. `saved`: where the saved plan stands (null: no plan yet).
      */
-    function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, rec: recIn = null, warn = null, lite = false, saved = null, onPath = false, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, warOn = null, now }) {
+    function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, rec: recIn = null, warn = null, lite = false, saved = null, onPath = false, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, warOn = null, stacking = null, now }) {
         if (!state) return { ready: false };
         // One player context per refresh: the comparison's, when the caller has it.
         const pc = pcIn || playerContext(state, statics, { unlockedKnown, learnedMult });
@@ -8094,6 +8280,7 @@
         const xanaxPlanned = today.filter(isDrugEntry).length + steps.filter((s) => (s.items || []).some((it) => it.id === XANAX) && s.at < tornDayStart(now) + DAY).length;
         // Xanax stacked for a jump: energy is above the maximum, so a refill (it only fills to the maximum) would add nothing.
         const stackingNow = (STRATEGIES[plan.strategy] || {}).kind === 'jump' && over > 0;
+        const energyKept = keptEnergyOf({ strategy: plan.strategy, energy, stacking: stackingNow, stacked: ctx.stackedSoFar, holding: ctx.holding, warKeep, warName: warOn && warOn.name });
         const strip = {
             energy: { current: energy, max: e.maximum, fullAt },
             happy: { current: happyAt(state, now, { bliss: pc.perks.bliss }), max: state.happy.maximum, property: statics.property && statics.property.property ? statics.property.property.name : null },
@@ -8261,6 +8448,8 @@
             events,
             pickBy,
             keepEnergy: warKeep,
+            // Energy the plan keeps on purpose now (null: none): what every "train now" surface leaves alone.
+            energyKept,
             noRefill: Boolean(ctx.noRefill),
             auto: auto ? { ...auto, afford: affordLine(auto, recRow ? recRow.cost / horizon : 0), wait: autoWaitLine(auto) } : null,
             // The saved plan: its dates and where it stands (null: no plan yet), and the days its numbers cover.
@@ -8273,6 +8462,9 @@
             // held: while any are held the daily refill is a special (Torn blocks the points refill until they're spent [verify]).
             special: { have: state.specialRefills, left: specialLeft(plan, state), use: plan.specialUse || 0, held: ctx.specialHeld },
             prices,
+            // Stacking energy for a chain (round 7, Home's "I'm stacking"): {since: ms}, null while training. The steps
+            // above stay as they are; every surface that would ask you to train reads this and holds them back.
+            stacking: stacking && Number(stacking.since) > 0 ? { since: Number(stacking.since) } : null,
         };
     }
 
@@ -10337,7 +10529,12 @@
      * notes the time in GM storage; every tab and the webpage read it and pause
      * (core/turns.js). Read only: we look for Torn Trading's host element and
      * never touch it.
+     *
+     * Round 7: each such tab also notes itself (TRADING_TABS_KEY), so the paused
+     * card says where Torn Trading still runs. Turning it off in Tampermonkey
+     * leaves it running in the tabs already open (core/turns.js has the cause).
      */
+
 
 
 
@@ -10346,7 +10543,7 @@
     /** Torn Trading's own hosts: NPC Arbitrage on Torn's pages, Torn Bids on its page. */
     const TRADING_HOST_IDS = ['ttv2-host', 'ttv2-sell-host'];
 
-    const turns = { listeners: [], last: null, started: false };
+    const turns = { listeners: [], last: null, started: false, tabId: Math.random().toString(36).slice(2, 10) };
 
     function tradingSeenAt() {
         return Number(get(TRADING_SEEN_KEY, 0)) || 0;
@@ -10357,15 +10554,28 @@
         return tradingRunning(tradingSeenAt(), now);
     }
 
+    /** Where Torn Trading is still seen, for the paused card ({count, where, lastAt, resumesAt}). */
+    function tradingWhere(now = Date.now()) {
+        return tradingSeenWhere(get(TRADING_TABS_KEY, null), tradingSeenAt(), now);
+    }
+
     /** Is Torn Trading on this page right now? */
     function tradingOnThisPage(doc = document) {
         return TRADING_HOST_IDS.some((id) => doc.getElementById(id));
     }
 
-    function look() {
-        if (typeof document === 'undefined' || !tradingOnThisPage()) return;
-        const now = Date.now();
-        if (shouldMarkSeen(tradingSeenAt(), now)) set(TRADING_SEEN_KEY, now);
+    function whereAmI() {
+        const href = typeof location !== 'undefined' ? location.href : '';
+        return isTradingPageUrl(href) ? 'trading' : detectPage(href);
+    }
+
+    /** One look: mark Torn Trading seen (shared time, and this tab's entry), or take this tab's entry off. */
+    function lookOnce(doc = typeof document !== 'undefined' ? document : null, now = Date.now()) {
+        if (!doc) return;
+        const seen = tradingOnThisPage(doc);
+        if (seen && shouldMarkSeen(tradingSeenAt(), now)) set(TRADING_SEEN_KEY, now);
+        const tabs = nextTradingTabs(get(TRADING_TABS_KEY, null), turns.tabId, seen, whereAmI(), now);
+        if (tabs) set(TRADING_TABS_KEY, tabs);
     }
 
     function check() {
@@ -10396,13 +10606,13 @@
         if (turns.started) return;
         turns.started = true;
         turns.last = isPaused();
-        look();
+        lookOnce();
         check();
         if (typeof document !== 'undefined' && document.body && typeof MutationObserver === 'function') {
             // Torn Trading mounts its panel on the body, usually within a second or two of ours.
             const mo = new MutationObserver(() => {
                 if (tradingOnThisPage()) {
-                    look();
+                    lookOnce();
                     check();
                 }
             });
@@ -10410,9 +10620,16 @@
             setTimeout(() => mo.disconnect(), 10000);
         }
         setInterval(() => {
-            look();
+            lookOnce();
             check();
         }, 5000);
+        // A tab closed or reloaded is no longer one to name on the card.
+        if (typeof window !== 'undefined') {
+            window.addEventListener('pagehide', () => {
+                const tabs = nextTradingTabs(get(TRADING_TABS_KEY, null), turns.tabId, false, whereAmI(), Date.now());
+                if (tabs) set(TRADING_TABS_KEY, tabs);
+            });
+        }
         gmOnChange(TRADING_SEEN_KEY, () => check());
     }
 
@@ -11608,6 +11825,32 @@
     }
 
     /**
+     * Home's "I'm stacking" (round 7): energy is kept for a faction chain. Stored in GM, so every tab and Torn's pages
+     * follow at once (their change event); today's steps, the panel's "train now" and the bot's energy and training
+     * pings wait until Resume. Nothing on torn.com is clicked.
+     */
+    function startStacking(now = Date.now()) {
+        const v = setStacking(true, now);
+        logAction('I’m stacking pressed (a chain)');
+        refresh();
+        return v;
+    }
+
+    /**
+     * Resume (round 7): stacking ends and the plan is re-planned at once from your bars, the same run as Re-plan (its
+     * light sweep included). No saved plan to re-plan (none yet, or it has ended): today's steps simply come back.
+     * @returns {Promise<object|null>} the re-planned saved plan, or null
+     */
+    function resumeTraining(o = {}) {
+        setStacking(false);
+        logAction('Resume pressed (stacking ends)');
+        refresh();
+        const pn = planNowStored();
+        if (!pn || planProgress(pn, Date.now()).ended) return Promise.resolve(null);
+        return recalibratePlan(o);
+    }
+
+    /**
      * Picking another of the saved plans yourself (the Plan page): followed the
      * whole length, nothing worked out again; Progress's line follows the pick.
      */
@@ -11675,7 +11918,7 @@
         // Income (Plan's "Plan from my income"): read on the webpage only, where a plan is made.
         const auto = app ? autoFor(plan, settings, statics, () => (pn && pn.slim.steady ? pn.slim.steady.cost / pn.days : 0)) : null;
         const planInfo = pn ? { start: pn.start, end: pn.end, months: pn.months, days: pn.days, from: pn.from, createdAt: pn.createdAt, recalibratedAt: pn.recalibratedAt, progress: planProgress(pn, now), whole: Boolean(saved) } : null;
-        const m = buildModel({ state, statics, plan: followed, onPath: Boolean(seg && seg.strategy), settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: (app ? archived(K.statsHistory, {}) : get(K.statsHistory, {})) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+        const m = buildModel({ state, statics, plan: followed, onPath: Boolean(seg && seg.strategy), settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: (app ? archived(K.statsHistory, {}) : get(K.statsHistory, {})) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), stacking: getStacking(), now });
         if (m.ready) {
             m.strategy = followed.strategy;
             m.planBusy = pi.planBusy ? { recalibrate: pi.planBusy.recalibrate, months: pi.planBusy.months, at: pi.planBusy.at, done: pi.planBusy.done, words: pi.planBusy.words } : null;
@@ -11898,6 +12141,8 @@
         gmOnChange(K.plan, refresh);
         gmOnChange(K.planNow, refresh);
         gmOnChange(K.skipped, refresh);
+        // "I'm stacking" or Resume in another tab: this one follows at once (Torn's pages too).
+        gmOnChange(K.stacking, refresh);
         gmOnChange(K.settings, refresh);
         gmOnChange(K.stateError, refresh);
         gmOnChange(K.apiKeyDead, refresh);
@@ -12087,6 +12332,7 @@
 
 
 
+
     /** Set by the runtime: a Discord skip redraws this tab's model. */
     let onSkippedChange = null;
     function onSkipped(fn) {
@@ -12118,13 +12364,12 @@
     /* Torn Eye's war and watch list for the Worker (ROUND4-PLAN §B8, §I): the lead sends them with the plan. */
     const EYE_SYNC_WAR_MAX = 100;
     const EYE_SYNC_WATCH_MAX = 50;
-    const EYE_BANDS = ['stomp', 'good', 'tough', 'cant', 'none'];
 
     function eyeSyncRow(r, withTag = false) {
         const id = Number(r && r.id);
         if (!(id > 0)) return null;
         const pct = (x) => (x === null || x === undefined || !Number.isFinite(Number(x)) ? null : Math.max(0, Math.min(100, Math.round(Number(x)))));
-        const row = { id, name: r.name ? String(r.name).slice(0, 40) : null, level: Number(r.level) > 0 ? Math.round(Number(r.level)) : null, band: EYE_BANDS.includes(r.band) ? r.band : 'none', win: pct(r.win), keep: pct(r.keep) };
+        const row = { id, name: r.name ? String(r.name).slice(0, 40) : null, level: Number(r.level) > 0 ? Math.round(Number(r.level)) : null, band: normBand(r.band), win: pct(r.win), keep: pct(r.keep) };
         if (withTag) row.tag = r.tag ? String(r.tag).slice(0, 24) : null;
         return row;
     }
@@ -12185,8 +12430,15 @@
         return w && (w.discordName || w.connectedAt) ? w : null;
     }
 
+    /**
+     * The plan the Worker pings from. Stacking for a chain (round 7, Home's "I'm stacking"): `chain: {since}` (unix
+     * seconds) and no steps, so the bot sends nothing about energy or training (worker/src/alerts.js) and /today lists
+     * nothing until Resume. Not the jump plan's stack (`type: 'jump'`): that one is part of a training plan.
+     */
     function planPayload(m) {
         if (!m || !m.ready) return null;
+        // type 'jump' + noRefill: a Worker from before round 7 ignores chain but still holds back the energy-full and refill pings.
+        if (m.stacking) return { type: 'jump', noRefill: true, steps: [], chain: { since: Math.floor(m.stacking.since / 1000) } };
         return { type: m.steps.some((s) => s.kind === 'stack' || s.kind === 'jump') ? 'jump' : 'steady', steps: stepsForWorker(m.upcoming || m.steps), ...(m.noRefill ? { noRefill: true } : {}) };
     }
 
@@ -12406,7 +12658,8 @@
         if (!w || !isVisible() || isPaused()) return false;
         const plan = planPayload(m);
         if (!plan) return false;
-        const sig = JSON.stringify(plan.steps.map((s) => [s.kind, s.label, Math.round(s.at / 300)]));
+        // "I'm stacking" and Resume change it too.
+        const sig = JSON.stringify([plan.chain ? plan.chain.since : 0, plan.steps.map((s) => [s.kind, s.label, Math.round(s.at / 300)])]);
         const pendingAcks = w.pendingAcks || [];
         const targetsDue = sync.targets && sync.targetsSig !== w.targetsSig && now - (w.targetsAt || 0) >= TARGETS_EVERY_MS;
         // Logged in with Discord: a new main key goes along once (the service pauses pings on a refused key until then).
@@ -12417,7 +12670,9 @@
         const eye = eyeSyncPayload();
         const eyeDue = Boolean(eye.sig) && eye.sig !== w.eyeSig;
         const due = sig !== w.lastSig || now - (w.lastSync || 0) >= SYNC_EVERY_MS || pendingAcks.length > 0 || targetsDue || keyDue || eyeDue;
-        if (!due || now - (w.lastSync || 0) < SYNC_MIN_MS) return false;
+        // "I'm stacking" and Resume go at once, not behind the one-a-minute gate (a ping could slip out in that minute).
+        const chainFlip = (plan.chain ? plan.chain.since : 0) !== (w.lastChain || 0);
+        if (!due || (!chainFlip && now - (w.lastSync || 0) < SYNC_MIN_MS)) return false;
         const statics = get(K.userStatic, {}) || {};
         const ki = statics.keyInfo || {};
         const body = { base: w.base, secret: w.secret, plan, ackIds: pendingAcks };
@@ -12429,7 +12684,7 @@
             body.war = eye.war;
             body.watch = eye.watch;
         }
-        set(K.worker, { ...w, lastSync: now, lastSig: sig, pendingAcks: [], ...(targetsDue ? { targetsSig: sync.targetsSig, targetsAt: now } : {}), ...(keyDue ? { keyTag: tag } : {}), ...(eyeDue ? { eyeSig: eye.sig } : {}) });
+        set(K.worker, { ...w, lastSync: now, lastSig: sig, lastChain: plan.chain ? plan.chain.since : 0, pendingAcks: [], ...(targetsDue ? { targetsSig: sync.targetsSig, targetsAt: now } : {}), ...(keyDue ? { keyTag: tag } : {}), ...(eyeDue ? { eyeSig: eye.sig } : {}) });
         workerSync(body)
             .then((r) => {
                 const acked = applyAcks(r.acks, Date.now());
@@ -12514,8 +12769,10 @@
     /* ===== src/ui/styles.js ===== */
     /*
      * The webpage's look: K's tokens and components (mockups/K-home.html and
-     * mockups/pi.css, DESIGN.md §1). Inside the page's shadow root, so Torn Eye
-     * and overlay styles on torn.com never mix with it.
+     * mockups/pi.css, DESIGN.md §1), with the round 7 type pass
+     * (mockups/round7/home.html): Source Serif 4 for titles and the one big
+     * number, Inter for everything else, an 8 px grid. Inside the page's shadow
+     * root, so Torn Eye and overlay styles on torn.com never mix with it.
      */
 
     const APP_CSS = `
@@ -12525,82 +12782,85 @@
       --chalk:#efebe2; --on-chalk:#15171a;
       --str:#e5534b; --def:#4a8ff0; --spd:#f0c02f; --dex:#43b86c;
       --good:#9bdc8a; --warn:#e8a33d; --bad:#ff6b5e; --link:#8fb8e8;
-      --b-stomp:#3fbf5a; --b-good:#a6e08a; --b-tough:#f0a040; --b-cant:#ff5a4e; --b-none:#6c737a;
-      --display: "Barlow Condensed", "Arial Narrow", Arial, sans-serif;
+      --b-stomp:#3fbf5a; --b-good:#a6e08a; --b-fair:#f0c02f; --b-low:#ff6b5e; --b-none:#6c737a;
+      --serif: "Source Serif 4", Georgia, "Times New Roman", serif; --sans: Inter, "Segoe UI", system-ui, sans-serif; --display: var(--serif);
     }
     * { box-sizing: border-box; }
-    .pi-root { margin: 0; min-height: 100vh; background: var(--page); color: var(--text); font: 13px/1.4 Arial, Helvetica, sans-serif; }
+    .pi-root { margin: 0; min-height: 100vh; background: var(--page); color: var(--text); font: 400 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
     .num { font-variant-numeric: tabular-nums; }
-    .lab { font-size: 11px; font-weight: bold; letter-spacing: .5px; text-transform: uppercase; color: var(--muted); }
+    .lab { font-size: 13px; font-weight: 500; color: var(--muted); white-space: nowrap; }
     .grow { flex: 1; }
     a { color: var(--link); text-decoration: none; }
     a:hover { text-decoration: underline; }
     .muted { color: var(--muted); } .dim { color: var(--dim); } .white { color: var(--white); }
     .s-str { color: var(--str); } .s-def { color: var(--def); } .s-spd { color: var(--spd); } .s-dex { color: var(--dex); }
     .c-good { color: var(--good); } .c-warn { color: var(--warn); } .c-bad { color: var(--bad); }
-    .mark { width: 26px; height: 26px; border-radius: 50%; background: var(--chalk); display: grid; place-items: center; box-shadow: inset 0 0 0 4px var(--chalk), inset 0 0 0 6px #2a2d31; flex: none; }
+    .mark { width: 24px; height: 24px; border-radius: 50%; background: var(--chalk); display: grid; place-items: center; box-shadow: inset 0 0 0 4px var(--chalk), inset 0 0 0 6px #2a2d31; flex: none; }
     .mark i { width: 6px; height: 6px; border-radius: 50%; background: var(--on-chalk); }
     .mark.sm { width: 18px; height: 18px; box-shadow: inset 0 0 0 3px var(--chalk), inset 0 0 0 4px #2a2d31; }
     .mark.sm i { width: 4px; height: 4px; }
 
-    /* density */
-    .app { --row: 34px; --pad: 12px; --gap: 20px; --sec: 24px; min-width: 1180px; background: var(--page); }
+    /* density; --edge: the page's side margin, 32 px, wider past 1600 px so every bar and card lines up on one column */
+    .app { --row: 44px; --pad: 16px; --gap: 24px; --sec: 24px; --edge: max(32px, calc((100% - 1600px) / 2 + 32px)); min-width: 1180px; background: var(--page); }
 
     /* top bar */
-    .top { height: 48px; display: flex; align-items: center; gap: 10px; padding: 0 20px; border-bottom: 1px solid var(--line); }
-    .brand { font: 700 17px/1 var(--display); letter-spacing: .6px; color: var(--white); text-transform: uppercase; margin-right: 16px; }
-    .tab { height: 48px; display: inline-flex; align-items: center; padding: 0 10px; color: var(--muted); font-weight: bold; border-bottom: 2px solid transparent; }
+    .top { height: 56px; display: flex; align-items: center; gap: 4px; padding: 0 var(--edge); border-bottom: 1px solid var(--line); }
+    .brand { font: 600 15px/1 var(--sans); letter-spacing: .08em; color: var(--white); text-transform: uppercase; margin: 0 20px 0 6px; white-space: nowrap; }
+    .tab { height: 56px; display: inline-flex; align-items: center; padding: 0 10px; color: var(--muted); font-weight: 500; border-bottom: 2px solid transparent; white-space: nowrap; }
     .tab:hover { text-decoration: none; color: var(--text); }
     .tab.on { color: var(--white); border-bottom-color: var(--chalk); }
-    .upd { color: var(--muted); font-size: 12px; display: inline-flex; align-items: center; gap: 6px; }
+    .upd { color: var(--muted); font-size: 13px; display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
     .upd i { width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
-    .seg { display: inline-flex; border: 1px solid var(--line2); border-radius: 14px; overflow: hidden; }
+    .seg { display: inline-flex; border: 1px solid var(--line2); border-radius: 999px; overflow: hidden; flex: none; }
     .top .seg { margin-left: 12px; }
-    .seg button { height: 26px; padding: 0 10px; background: transparent; border: 0; color: var(--muted); font: bold 11px Arial; cursor: pointer; }
+    .seg button { height: 30px; padding: 0 14px; background: transparent; border: 0; color: var(--muted); font: 500 13px var(--sans); cursor: pointer; white-space: nowrap; }
     .seg button[aria-pressed="true"] { background: var(--chalk); color: var(--on-chalk); }
     .seg button:focus-visible { outline: 2px solid var(--chalk); outline-offset: -2px; }
 
-    /* status strip */
-    .strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 24px; padding: var(--pad) 20px; border-bottom: 1px solid var(--line); background: #171a1c; }
-    .st { display: flex; flex-direction: column; gap: 5px; }
-    .st-h { display: flex; justify-content: space-between; align-items: baseline; }
-    .st-h b { font: 600 18px/1 var(--display); color: var(--white); }
+    /* status strip: the only uppercase labels on the page */
+    .strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 32px; padding: 20px var(--edge) 24px; border-bottom: 1px solid var(--line); background: #171a1c; }
+    .st { display: flex; flex-direction: column; gap: 0; min-width: 0; }
+    .st-h { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    .st-h .lab { font-size: 12px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; }
+    .st-h b { font: 600 22px/1.2 var(--serif); color: var(--white); white-space: nowrap; }
     .st-h b.warn { color: var(--warn); } .st-h b.good { color: var(--good); }
-    .bar { height: 5px; border-radius: 3px; background: var(--card2); overflow: hidden; }
-    .bar i { display: block; height: 100%; border-radius: 3px; }
-    .st small { color: var(--muted); font-size: 11px; }
+    .bar { height: 4px; border-radius: 2px; background: var(--card2); overflow: hidden; }
+    .st .bar { margin: 10px 0 8px; }
+    .bar i { display: block; height: 100%; border-radius: 2px; }
+    .st small { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
     /* body 70 / 30 */
-    .body { display: grid; grid-template-columns: minmax(0, 7fr) minmax(300px, 3fr); gap: var(--sec); padding: var(--sec) 20px; }
+    .body { display: grid; grid-template-columns: minmax(0, 7fr) minmax(300px, 3fr); gap: 32px; padding: 32px var(--edge); }
     .main, .pane { display: flex; flex-direction: column; gap: var(--sec); min-width: 0; }
-    .sh { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
-    .sh h2 { margin: 0; font: 700 22px/1 var(--display); color: var(--white); }
-    .sh h3 { margin: 0; font: 700 18px/1 var(--display); color: var(--white); }
-    .sh .meta { color: var(--muted); font-size: 12px; }
-    .sh .meta b { color: var(--good); font-weight: bold; }
+    .sh { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+    .sh h2 { margin: 0; font: 600 19px/1.3 var(--serif); color: var(--white); }
+    .sh h3 { margin: 0; font: 600 19px/1.3 var(--serif); color: var(--white); }
+    .sh .meta { color: var(--muted); font-size: 13px; }
+    .sh .meta b { color: var(--good); font-weight: 500; }
     .sh .right { margin-left: auto; }
+    .ct { font: 600 19px/1.3 var(--serif); color: var(--white); }
 
     /* buttons */
     .acts { display: flex; gap: 8px; }
-    .btn { height: 30px; padding: 0 14px; border-radius: 5px; border: 1px solid var(--line2); background: var(--card2); color: var(--text); font: bold 12px Arial; display: inline-flex; align-items: center; cursor: pointer; white-space: nowrap; }
+    .btn { height: 36px; padding: 0 16px; border-radius: 8px; border: 1px solid var(--line2); background: var(--card2); color: var(--text); font: 500 14px var(--sans); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; white-space: nowrap; }
     .btn:hover { text-decoration: none; border-color: var(--muted); }
     .btn.primary { background: var(--chalk); color: var(--on-chalk); border-color: var(--chalk); }
-    .btn.sm { height: 26px; padding: 0 10px; font-size: 11px; }
+    .btn.sm { height: 30px; padding: 0 12px; font-size: 13px; border-radius: 7px; }
     .btn.ghost { background: transparent; }
     .btn:focus-visible { outline: 2px solid var(--chalk); outline-offset: 2px; }
 
     /* next band (Home primary) */
-    .next { display: grid; grid-template-columns: auto 1fr auto; gap: 20px; align-items: center; padding: var(--pad) 16px; background: var(--card); border: 1px solid var(--chalk); border-radius: 10px; }
-    .next .cd { font: 600 44px/0.9 var(--display); color: var(--chalk); min-width: 96px; }
-    .next .what b { display: block; font-size: 17px; color: var(--white); }
+    .next { display: grid; grid-template-columns: auto 1fr auto; gap: 24px; align-items: center; padding: 20px 24px; background: var(--card2); border-radius: 12px; }
+    .next .cd { font: 600 40px/1 var(--serif); color: var(--chalk); min-width: 96px; }
+    .next .what b { display: block; font-size: 17px; font-weight: 600; color: var(--white); }
     .next .what span { color: var(--muted); font-size: 13px; }
 
     /* tables (steps, sources, targets, war) */
     .tbl { width: 100%; border-collapse: collapse; }
-    .tbl th { text-align: left; font-size: 11px; font-weight: bold; letter-spacing: .5px; text-transform: uppercase; color: var(--muted); padding: 0 8px 6px; white-space: nowrap; }
-    .tbl td { height: var(--row); padding: 0 8px; border-top: 1px solid var(--line); }
+    .tbl th { text-align: left; font-size: 13px; font-weight: 500; color: var(--muted); padding: 0 8px 8px; white-space: nowrap; vertical-align: bottom; }
+    .tbl td { height: var(--row); padding: 6px 8px; border-top: 1px solid var(--line); }
     .tbl .r { text-align: right; }
-    .tbl .t { font: 600 15px var(--display); color: var(--muted); width: 56px; }
+    .tbl .t { color: var(--muted); width: 64px; white-space: nowrap; }
     .tbl tr.done td { color: var(--dim); }
     .tbl tr.done .ok { color: var(--good); }
     .tbl tr.now td { background: #202428; color: var(--white); }
@@ -12611,104 +12871,107 @@
     .tbl tr.pending td:first-child { box-shadow: inset 2px 0 0 var(--warn); }
     .tbl tr.click { cursor: pointer; }
     .tbl tr.click:hover td { background: #1f2326; }
-    .tbl .when { color: var(--muted); font-size: 12px; }
-    .tbl small { color: var(--muted); font-size: 12px; }
-    .tbl tfoot td { border-top: 1px solid var(--line2); color: var(--muted); font-size: 12px; }
+    .tbl .when, .tbl td.second { color: var(--muted); font-size: 13px; }
+    .tbl small { color: var(--muted); font-size: 13px; }
+    .tbl tfoot td { border-top: 1px solid var(--line2); color: var(--muted); font-size: 13px; }
     .tbl tfoot b { color: var(--white); }
+    .tbl b, .tbl b.w { font-weight: 600; }
     .tbl b.w { color: var(--white); }
 
     /* stats vs build */
     .sg { display: flex; flex-direction: column; }
-    .sgr { display: grid; grid-template-columns: 40px 108px minmax(0, 1fr) 110px 110px 84px; gap: 12px; align-items: center; height: var(--row); border-top: 1px solid var(--line); }
+    .sgr { display: grid; grid-template-columns: 40px 108px minmax(0, 1fr) 120px 110px 84px; gap: 16px; align-items: center; height: var(--row); border-top: 1px solid var(--line); }
     .sgr:first-of-type { border-top: 0; }
-    .sgr b.n { font: 700 14px var(--display); letter-spacing: .5px; }
-    .sgr .v { text-align: right; font-weight: bold; color: var(--white); }
+    .sgr b.n { font: 600 13px var(--sans); letter-spacing: .04em; }
+    .sgr .v { text-align: right; font-weight: 600; color: var(--white); }
     .share { position: relative; height: 6px; border-radius: 3px; background: var(--card2); }
     .share i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; }
     .share em { position: absolute; top: -4px; width: 2px; height: 14px; background: var(--chalk); }
-    .sgr .gap { text-align: right; font-size: 12px; color: var(--muted); }
-    .sgr .tod { text-align: right; font-size: 12px; }
+    .sgr .gap { text-align: right; font-size: 13px; color: var(--muted); }
+    .sgr .tod { text-align: right; font-size: 13px; }
     .spark { width: 76px; height: 18px; }
-    .sgfoot { display: flex; gap: 20px; color: var(--muted); font-size: 12px; margin-top: 8px; }
-    .sgfoot b { color: var(--text); }
+    .sgfoot { display: flex; flex-wrap: wrap; gap: 8px 24px; color: var(--muted); font-size: 13px; margin-top: 16px; }
+    .sgfoot b { color: var(--text); font-weight: 500; }
 
     /* buy (pane) */
     .buy { display: flex; flex-direction: column; }
-    .bi { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+    .bi { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px 12px; align-items: center; padding: 12px 0; border-top: 1px solid var(--line); }
     .bi:first-of-type { border-top: 0; }
-    .bi b { color: var(--white); }
-    .bi small { grid-column: 1 / 2; color: var(--muted); font-size: 12px; }
-    .bi .p { text-align: right; font-weight: bold; }
-    .buyfoot { display: flex; justify-content: space-between; align-items: baseline; border-top: 1px solid var(--line2); padding-top: 8px; color: var(--muted); font-size: 12px; }
-    .buyfoot b { color: var(--white); font: 600 20px var(--display); }
+    .bi b { color: var(--white); font-weight: 500; }
+    .bi small { grid-column: 1 / 2; color: var(--muted); font-size: 13px; }
+    .bi .p { text-align: right; font-weight: 600; }
+    .buyfoot { display: flex; justify-content: space-between; align-items: baseline; border-top: 1px solid var(--line2); padding-top: 8px; color: var(--muted); font-size: 13px; }
+    .buyfoot b { color: var(--white); font: 600 18px var(--sans); }
 
     /* heads-up list */
-    .heads { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
-    .heads li { display: grid; grid-template-columns: 8px 1fr; gap: 10px; align-items: baseline; font-size: 13px; }
-    .heads li i { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); transform: translateY(1px); }
+    .heads { display: flex; flex-direction: column; gap: 0; margin: 0; padding: 0; list-style: none; }
+    .heads li { display: grid; grid-template-columns: 7px 1fr; gap: 12px; align-items: start; font-size: 14px; }
+    .heads li i { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); margin-top: 8px; }
     .heads li.w i { background: var(--warn); }
     .heads li.g i { background: var(--good); }
     .heads li span { color: var(--muted); }
 
     /* small card (current plan, selected choice) */
-    .plan { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
-    .plan b { color: var(--white); }
-    .plan span { color: var(--muted); font-size: 12px; }
+    .plan { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
+    .plan b { color: var(--white); font-weight: 600; }
+    .plan span { color: var(--muted); font-size: 13px; }
 
     /* primary card (Plan's recommendation, Buy's total) */
-    .prime { padding: var(--pad) 16px; background: var(--card); border: 1px solid var(--chalk); border-radius: 10px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 24px; align-items: center; }
-    .prime .k { font: 700 26px/1 var(--display); color: var(--white); }
+    .prime { padding: var(--pad) 16px; background: var(--card); border: 1px solid var(--chalk); border-radius: 14px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
+    .prime .k { font: 600 24px/1.2 var(--serif); color: var(--white); }
     .prime .d { color: var(--muted); }
-    .prime .figs { display: flex; gap: 28px; }
-    .fig { display: flex; flex-direction: column; gap: 2px; }
-    .fig b { font: 600 24px/1 var(--display); color: var(--white); }
+    .prime .figs { display: flex; flex-wrap: wrap; gap: 16px 40px; }
+    .fig { display: flex; flex-direction: column; gap: 4px; }
+    .fig b { font: 600 20px/1.2 var(--sans); color: var(--white); white-space: nowrap; }
     .fig b.good { color: var(--good); }
-    .prime .why { grid-column: 1 / -1; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
-    .pill-tag { display: inline-block; height: 20px; line-height: 20px; padding: 0 8px; border-radius: 10px; font-size: 11px; font-weight: bold; letter-spacing: .4px; text-transform: uppercase; background: var(--card2); color: var(--muted); }
+    .prime .why { grid-column: 1 / -1; color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); padding-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+    .pill-tag { display: inline-flex; align-items: center; height: 22px; padding: 0 10px; border-radius: 11px; font-size: 12px; font-weight: 500; background: var(--card2); color: var(--muted); vertical-align: 3px; white-space: nowrap; }
     .pill-tag.chalk { background: var(--chalk); color: var(--on-chalk); }
 
     /* warning block */
-    .warnb { border-left: 3px solid var(--warn); background: #231d12; padding: 10px 14px; border-radius: 0 8px 8px 0; display: flex; flex-direction: column; gap: 6px; }
-    .warnb b { color: #ffd79a; font-size: 14px; }
+    .warnb { border-left: 3px solid var(--warn); background: #231d12; padding: 16px 20px; border-radius: 0 10px 10px 0; display: flex; flex-direction: column; gap: 8px; }
+    .warnb b { color: #ffd79a; font-size: 14px; font-weight: 600; }
     .warnb p { margin: 0; color: var(--text); max-width: 90ch; }
-    .warnb .acts { margin-top: 4px; }
+    .warnb .acts { margin-top: 0; }
+    .app > .warnb.paused { padding: 16px var(--edge); }
 
     /* builds */
     .builds { display: flex; flex-direction: column; }
-    .brow { display: grid; grid-template-columns: 150px 180px minmax(0, 1fr) auto; gap: 14px; align-items: center; height: var(--row); padding: 0 8px; border-top: 1px solid var(--line); cursor: pointer; }
+    .brow { display: grid; grid-template-columns: 150px 180px minmax(0, 1fr) auto; gap: 16px; align-items: center; height: var(--row); padding: 0 8px; border-top: 1px solid var(--line); cursor: pointer; }
     .brow:first-child { border-top: 0; }
-    .brow.sel { background: var(--card); box-shadow: inset 0 0 0 1px var(--chalk); border-radius: 6px; border-top-color: transparent; }
+    .brow.sel { background: var(--card); box-shadow: inset 0 0 0 1px var(--chalk); border-radius: 8px; border-top-color: transparent; }
     .brow.sel + .brow { border-top-color: transparent; }
-    .brow b { color: var(--white); }
-    .brow span { color: var(--muted); font-size: 12px; }
+    .brow b { color: var(--white); font-weight: 600; }
+    .brow span { color: var(--muted); font-size: 13px; }
     .ratio { display: flex; height: 8px; border-radius: 4px; overflow: hidden; gap: 1px; }
     .ratio i { display: block; height: 100%; }
 
     /* inputs */
-    .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+    .field { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
     .field .inp { width: 100%; }
-    .inp { height: 30px; padding: 0 10px; border-radius: 5px; border: 1px solid var(--line2); background: #111315; color: var(--text); font: 13px Arial; min-width: 0; }
+    .field .lab { white-space: normal; }
+    .inp { height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--line2); background: #111315; color: var(--text); font: 400 14px var(--sans); min-width: 0; }
     .inp:focus { outline: 2px solid var(--chalk); outline-offset: -1px; }
     .inp.masked { -webkit-text-security: disc; }
-    textarea.inp.ta { height: auto; padding: 8px 10px; line-height: 1.4; resize: vertical; }
+    textarea.inp.ta { height: auto; padding: 8px 12px; line-height: 1.5; resize: vertical; }
     .row { display: flex; gap: 8px; align-items: center; }
-    .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 12px; }
+    .kv { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; font-size: 13px; }
     .kv dt { color: var(--muted); } .kv dd { margin: 0; text-align: right; }
 
     /* settings sections */
-    .sec { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 24px; padding: 18px 0; border-top: 1px solid var(--line); }
+    .sec { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 32px; padding: 24px 0; border-top: 1px solid var(--line); }
     .sec:first-child { border-top: 0; padding-top: 0; }
-    .sec h3 { margin: 0 0 4px; font: 700 18px/1.1 var(--display); color: var(--white); }
-    .state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: bold; }
-    .state i { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+    .sec h3 { margin: 0 0 8px; font: 600 19px/1.3 var(--serif); color: var(--white); }
+    .state { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; }
+    .state i { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); }
     .state.ok { color: var(--good); } .state.ok i { background: var(--good); }
     .state.off { color: var(--muted); }
     .state.bad { color: var(--bad); } .state.bad i { background: var(--bad); }
-    .secbody { display: flex; flex-direction: column; gap: 10px; max-width: 760px; }
+    .secbody { display: flex; flex-direction: column; gap: 16px; max-width: 760px; min-width: 0; }
     .secbody p { margin: 0; color: var(--muted); }
-    ol.steps-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+    ol.steps-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; }
     /* A plan being worked out (the Plan card): the card's own day line, filling */
-    .planrun { margin-top: 10px; }
+    .planrun { margin-top: 16px; }
     .planrun .dayline i { transition: none; opacity: .72; }
     /* Re-plan running (the owner's pick, 2A in mockups/round7/animation-options.html): a light crosses the whole bar, so it
        shows even at 2%. Transform only. Still under the PC's "reduce motion" and with Settings › Animations off. */
@@ -12717,45 +12980,45 @@
     @media (prefers-reduced-motion: reduce) { .planrun .dayline::after { animation: none; opacity: 0; } }
     .pi-root.still .planrun .dayline::after { animation: none; opacity: 0; }
     /* Report a problem */
-    ul.incl { margin: 4px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
+    ul.incl { margin: 8px 0 0; padding-left: 20px; color: var(--muted); font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
     .shots { display: flex; flex-wrap: wrap; gap: 8px; }
     .shot { position: relative; display: inline-block; }
-    .shot img { display: block; height: 72px; max-width: 160px; object-fit: cover; border-radius: 5px; border: 1px solid var(--line2); }
-    .shot .x { position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; border-radius: 50%; border: 0; background: #111315; color: var(--text); cursor: pointer; line-height: 1; }
-    pre.logbox { margin: 0; padding: 10px; max-height: 260px; overflow: auto; white-space: pre-wrap; font: 11px/1.5 Consolas, monospace; color: var(--muted); background: #111315; border: 1px solid var(--line); border-radius: 5px; }
-    details.dis > summary { cursor: pointer; color: var(--link); font-size: 12px; list-style: none; }
+    .shot img { display: block; height: 72px; max-width: 160px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line2); }
+    .shot .x { position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; border-radius: 50%; border: 0; background: #111315; color: var(--text); cursor: pointer; line-height: 1; }
+    pre.logbox { margin: 0; padding: 12px; max-height: 260px; overflow: auto; white-space: pre-wrap; font: 12px/1.5 Consolas, "Cascadia Mono", monospace; color: var(--muted); background: #111315; border: 1px solid var(--line); border-radius: 8px; }
+    details.dis > summary { cursor: pointer; color: var(--link); font-size: 13px; list-style: none; }
     details.dis > summary::before { content: "▸ "; }
     details.dis[open] > summary::before { content: "▾ "; }
-    .tos { border-collapse: collapse; margin-top: 8px; width: 100%; font-size: 12px; }
-    .tos th { text-align: left; color: var(--muted); font-weight: bold; padding: 5px 10px 5px 0; width: 170px; vertical-align: top; border-top: 1px solid var(--line); }
-    .tos td { padding: 5px 0; border-top: 1px solid var(--line); }
+    .tos { border-collapse: collapse; margin-top: 8px; width: 100%; font-size: 13px; }
+    .tos th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 16px 8px 0; width: 170px; vertical-align: top; border-top: 1px solid var(--line); }
+    .tos td { padding: 8px 0; border-top: 1px solid var(--line); }
     .check { display: inline-flex; align-items: center; gap: 8px; }
-    .check input { accent-color: var(--chalk); width: 14px; height: 14px; }
+    .check input { accent-color: var(--chalk); width: 15px; height: 15px; margin: 0; }
 
     /* charts */
     .chart { width: 100%; display: block; }
-    .chart text { font: 11px Arial; fill: var(--muted); }
+    .chart text { font: 11px var(--sans); fill: var(--muted); }
     .chart .ax { stroke: var(--line); }
-    .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); }
-    .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+    .legend { display: flex; gap: 16px; font-size: 13px; color: var(--muted); }
+    .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
 
     /* Torn Eye chip */
-    .chip { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px 0 8px; border-radius: 14px; background: #1e2124; border: 1px solid var(--line2); font: 12px Arial; color: var(--text); white-space: nowrap; }
+    .chip { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px 0 8px; border-radius: 15px; background: #1e2124; border: 1px solid var(--line2); font: 13px var(--sans); color: var(--text); white-space: nowrap; }
     .chip .dot { width: 12px; height: 12px; border-radius: 50%; box-shadow: inset 0 0 0 3px currentColor; background: #111; flex: none; }
-    .chip b { font-weight: bold; }
-    .chip .src { color: var(--dim); font-size: 11px; }
-    .b-stomp { color: var(--b-stomp); } .b-good { color: var(--b-good); } .b-tough { color: var(--b-tough); } .b-cant { color: var(--b-cant); } .b-none { color: var(--b-none); }
+    .chip b { font-weight: 600; }
+    .chip .src { color: var(--dim); font-size: 12px; }
+    .b-stomp { color: var(--b-stomp); } .b-good { color: var(--b-good); } .b-fair { color: var(--b-fair); } .b-low { color: var(--b-low); } .b-none { color: var(--b-none); }
     .chip .figs { color: var(--text); }
-    .band { display: inline-flex; align-items: center; gap: 6px; font-weight: bold; white-space: nowrap; }
+    .band { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; white-space: nowrap; }
     .band .dot { width: 10px; height: 10px; border-radius: 50%; box-shadow: inset 0 0 0 3px currentColor; background: #111; }
 
     /* hover card */
-    .hcard { width: 330px; background: var(--card); border: 1px solid var(--line2); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.45); }
+    .hcard { width: 330px; background: var(--card); border: 1px solid var(--line2); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.45); }
     .hcard .hh { display: flex; align-items: baseline; gap: 8px; }
-    .hcard .hh b { color: var(--white); font-size: 14px; }
-    .kept { display: grid; grid-template-columns: 80px minmax(0,1fr) 40px; gap: 8px; align-items: center; font-size: 12px; }
+    .hcard .hh b { color: var(--white); font-size: 14px; font-weight: 600; }
+    .kept { display: grid; grid-template-columns: 80px minmax(0,1fr) 40px; gap: 8px; align-items: center; font-size: 13px; }
     .kept .bar { height: 6px; }
-    .hcard .foot { font-size: 11px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 8px; }
+    .hcard .foot { font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 8px; }
 
     /* overlay pill + card (on torn.com) */
     .pi-pill { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px 0 6px; border-radius: 18px; background: #1b1e21; border: 1px solid var(--line2); box-shadow: 0 4px 14px rgba(0,0,0,.4); font: bold 13px Arial; color: var(--text); }
@@ -12767,28 +13030,29 @@
     .pi-card .later { font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 6px; display: flex; flex-direction: column; gap: 3px; }
     /* app-only additions */
     * { box-sizing: border-box; }
-    .pi-root button { font-family: Arial, Helvetica, sans-serif; }
+    .pi-root button, .pi-root input, .pi-root select, .pi-root textarea { font-family: var(--sans); }
+    .pi-root b, .pi-root strong { font-weight: 600; }
     .app { min-height: 100vh; }
-    .empty { padding: 48px 20px; display: flex; flex-direction: column; gap: 12px; align-items: flex-start; max-width: 640px; }
-    .empty h2 { margin: 0; font: 700 26px/1 var(--display); color: var(--white); }
+    .empty { padding: 48px var(--edge); display: flex; flex-direction: column; gap: 16px; align-items: flex-start; max-width: calc(640px + 64px); }
+    .empty h2 { margin: 0; font: 600 28px/1.2 var(--serif); color: var(--white); }
     .empty p { margin: 0; color: var(--muted); }
-    .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--card2); border: 1px solid var(--line2); color: var(--text); padding: 8px 14px; border-radius: 8px; font-size: 13px; z-index: 5; }
-    .msg { font-size: 12px; }
+    .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: var(--card2); border: 1px solid var(--line2); color: var(--text); padding: 8px 16px; border-radius: 10px; font-size: 14px; z-index: 5; }
+    .msg { font-size: 13px; }
     .msg.ok { color: var(--good); } .msg.bad { color: var(--bad); }
     .tab { cursor: pointer; }
     .btn:disabled { opacity: .45; cursor: default; }
     .brow:focus-visible, .tbl tr.click:focus-visible { outline: 2px solid var(--chalk); outline-offset: -2px; }
     .pane .chart { max-width: 100%; }
-    .big { font: 700 34px/1 var(--display); color: var(--white); }
-    .pr { display: grid; grid-template-columns: 90px 76px 1fr; gap: 10px; align-items: center; height: var(--row); border-top: 1px solid var(--line); font-size: 12px; }
+    .big { font: 600 32px/1.2 var(--serif); color: var(--white); }
+    .pr { display: grid; grid-template-columns: 90px 76px 1fr; gap: 12px; align-items: center; height: var(--row); border-top: 1px solid var(--line); font-size: 13px; }
     .pr:first-child { border-top: 0; }
-    .pr b { color: var(--white); font-size: 13px; }
+    .pr b { color: var(--white); font-size: 14px; }
     .pr .r { text-align: right; }
     .smc { display: flex; flex-direction: column; gap: 4px; }
     .smc .h { display: flex; justify-content: space-between; align-items: baseline; }
-    .smc .h b { font: 700 14px var(--display); letter-spacing: .5px; }
-    .smc .h span { font-weight: bold; color: var(--white); }
-    .smc small { color: var(--muted); font-size: 12px; }
+    .smc .h b { font: 600 13px var(--sans); letter-spacing: .04em; }
+    .smc .h span { font-weight: 600; color: var(--white); }
+    .smc small { color: var(--muted); font-size: 13px; }
     .tl { display: flex; flex-direction: column; }
     .tlr { display: grid; grid-template-columns: 18px 170px 90px minmax(0, 1fr) 110px; gap: 12px; align-items: center; height: var(--row); border-top: 1px solid var(--line); }
     .tlr:first-child { border-top: 0; }
@@ -12797,141 +13061,142 @@
     .tlr.next .dotc { border-color: var(--chalk); }
     .tlr b { color: var(--white); }
     .tlr .r { text-align: right; }
-    .meter { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; align-items: baseline; padding: 8px 0; border-top: 1px solid var(--line); }
+    .meter { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; align-items: baseline; padding: 12px 0; border-top: 1px solid var(--line); }
     .meter:first-child { border-top: 0; }
     .meter .bar { grid-column: 1 / -1; }
     .meter b { color: var(--white); }
     .keyrow { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; max-width: 560px; }
     .data { display: flex; flex-direction: column; }
-    .dr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+    .dr { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 12px; align-items: center; padding: 12px 0; border-top: 1px solid var(--line); }
     .dr:first-child { border-top: 0; }
-    .dr b { color: var(--white); }
-    .dr small { color: var(--muted); font-size: 12px; }
-    .opts { display: flex; flex-wrap: wrap; gap: 8px 20px; }
-    .filters { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding-bottom: 10px; }
-    .filters .inp { width: 64px; height: 26px; }
-    .slider { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+    .dr b { color: var(--white); font-weight: 500; }
+    .dr small { color: var(--muted); font-size: 13px; }
+    .opts { display: flex; flex-wrap: wrap; gap: 8px 24px; }
+    .filters { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding-bottom: 16px; }
+    .filters .inp { width: 64px; height: 30px; }
+    .slider { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
     .slider input { accent-color: var(--chalk); width: 140px; }
     .bands { display: flex; flex-direction: column; }
-    .bandr { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px; align-items: center; min-height: var(--row); border-top: 1px solid var(--line); font-size: 12px; }
+    .bandr { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 12px; align-items: center; min-height: var(--row); border-top: 1px solid var(--line); font-size: 13px; }
     .bandr:first-child { border-top: 0; }
-    .bandr .inp { width: 52px; height: 26px; padding: 0 6px; text-align: right; }
+    .bandr .inp { width: 56px; height: 30px; padding: 0 8px; text-align: right; }
     .stok { color: var(--good); } .sthos { color: var(--bad); } .sttr { color: var(--link); }
 
     /* ---- Round 3 (mockups/round3/r3.css): control bars, tick chips, cards with more room, charts, the Plan chooser. ---- */
-    .tab .n { margin-left: 5px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--card2); color: var(--text); font-size: 11px; line-height: 16px; text-align: center; }
-    .tab .dotw { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); margin-left: 5px; }
-    .topwarn { display: inline-flex; align-items: center; gap: 7px; margin-right: 14px; padding: 3px 10px; border: 1px solid var(--warn); border-radius: 12px; color: var(--warn); font-size: 12px; font-weight: bold; text-decoration: none; white-space: nowrap; }
-    .topwarn i { font-style: normal; width: 15px; height: 15px; border-radius: 50%; background: var(--warn); color: #15171a; display: inline-grid; place-items: center; font-size: 11px; }
+    .tab .n { margin-left: 6px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--card2); color: var(--text); font-size: 12px; font-weight: 500; line-height: 18px; text-align: center; }
+    .tab .dotw { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); margin-left: 6px; }
+    .topwarn { display: inline-flex; align-items: center; gap: 8px; height: 30px; margin-right: 16px; padding: 0 12px 0 8px; border: 1px solid var(--warn); border-radius: 15px; color: var(--warn); font-size: 13px; font-weight: 500; text-decoration: none; white-space: nowrap; }
+    .topwarn i { font-style: normal; width: 16px; height: 16px; border-radius: 50%; background: var(--warn); color: #15171a; display: inline-grid; place-items: center; font-size: 11px; font-weight: 600; }
     .topwarn:hover, .topwarn:focus-visible { background: #231d12; outline: none; }
     .strip.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    .ctl { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 12px 24px; border-bottom: 1px solid var(--line); background: #171a1c; font-size: 13px; }
-    .ctl + .ctl { padding-top: 4px; }
-    .ctl .lab { margin-right: -6px; }
-    .ctl .inp { height: 28px; width: auto; }
-    .ctl .sep { width: 1px; height: 20px; background: var(--line2); }
-    .ctl select, .ctl .sel { height: 28px; padding: 0 28px 0 10px; border-radius: 5px; border: 1px solid var(--line2); background: var(--card2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23939aa1'/%3E%3C/svg%3E") no-repeat right 10px center; color: var(--text); font: bold 12px Arial; display: inline-flex; align-items: center; appearance: none; }
-    .info { display: inline-grid; place-items: center; width: 15px; height: 15px; border-radius: 50%; border: 1px solid var(--line2); color: var(--muted); font: bold 11px Arial; cursor: help; }
-    .ticks { display: inline-flex; gap: 6px; flex-wrap: wrap; }
-    .tk { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px 0 7px; border-radius: 13px; border: 1px solid var(--line2); color: var(--muted); font: bold 12px Arial; cursor: pointer; user-select: none; background: transparent; }
+    .ctl { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 16px var(--edge); border-bottom: 1px solid var(--line); background: #171a1c; font-size: 14px; }
+    .ctl + .ctl { padding-top: 0; margin-top: -1px; border-top: 0; }
+    .ctl .lab { margin-right: -8px; }
+    .ctl .inp { height: 32px; width: auto; }
+    .ctl .sep { width: 1px; height: 24px; background: var(--line2); }
+    .ctl select, .ctl .sel { height: 32px; padding: 0 32px 0 12px; border-radius: 8px; border: 1px solid var(--line2); background: var(--card2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23939aa1'/%3E%3C/svg%3E") no-repeat right 12px center; color: var(--text); font: 500 13px var(--sans); display: inline-flex; align-items: center; appearance: none; }
+    .info { display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--line2); color: var(--muted); font: 600 11px var(--sans); cursor: help; }
+    .ticks { display: inline-flex; gap: 8px; flex-wrap: wrap; }
+    .tk { display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px 0 10px; border-radius: 15px; border: 1px solid var(--line2); color: var(--muted); font: 500 13px var(--sans); cursor: pointer; user-select: none; background: transparent; white-space: nowrap; }
     .tk i { width: 12px; height: 12px; border-radius: 3px; border: 1px solid var(--dim); display: grid; place-items: center; }
     .tk[aria-pressed="true"] { color: var(--text); border-color: var(--muted); }
     .tk[aria-pressed="true"] i { background: var(--chalk); border-color: var(--chalk); }
     .tk[aria-pressed="true"] i::after { content: ""; width: 6px; height: 3px; border: solid var(--on-chalk); border-width: 0 0 2px 2px; transform: rotate(-45deg) translate(1px, -1px); }
     .tk:focus-visible { outline: 2px solid var(--chalk); outline-offset: 2px; }
-    .why { color: var(--warn); font-size: 12px; }
+    .why { color: var(--warn); font-size: 13px; }
     .why.ok { color: var(--muted); }
     .tbl tr.whatif td { color: var(--dim); }
     .tbl tr.whatif b.w { color: var(--muted); }
-    .tag { white-space: nowrap; display: inline-block; height: 18px; line-height: 18px; padding: 0 7px; border-radius: 9px; font-size: 11px; font-weight: bold; letter-spacing: .4px; text-transform: uppercase; background: var(--card2); color: var(--muted); vertical-align: 1px; }
+    .tag { white-space: nowrap; display: inline-block; height: 22px; line-height: 22px; padding: 0 9px; border-radius: 11px; font-size: 12px; font-weight: 500; background: var(--card2); color: var(--muted); vertical-align: 1px; }
     .tag.chalk { background: var(--chalk); color: var(--on-chalk); }
     .tag.warn { background: #3a2a10; color: var(--warn); }
     .tag.good { background: #1f3320; color: var(--good); }
     .bl { display: flex; flex-direction: column; }
-    .bl .r { display: grid; grid-template-columns: 78px 90px 1fr; gap: 10px; align-items: center; height: 36px; padding: 0 8px; border-top: 1px solid var(--line); cursor: pointer; font-size: 12px; }
+    .bl .r { display: grid; grid-template-columns: 78px 90px 1fr; gap: 12px; align-items: center; height: var(--row); padding: 0 12px; border-top: 1px solid var(--line); cursor: pointer; font-size: 13px; }
     .bl .r:first-child { border-top: 0; }
-    .bl .r b { color: var(--white); font-size: 13px; }
+    .bl .r b { color: var(--white); font-size: 14px; }
     .bl .r span { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .bl .r.sel { border: 1px solid var(--chalk); border-radius: 6px; }
+    .bl .r.sel { border: 1px solid var(--chalk); border-radius: 8px; }
     .bl .r:focus-visible { outline: 2px solid var(--chalk); outline-offset: -2px; }
     .bl .ratio { height: 8px; }
-    .nowb { display: grid; grid-template-columns: auto 1fr auto; gap: 18px; align-items: center; padding: 16px 20px; border-radius: 10px; background: var(--card2); }
-    .nowb .k { font: 700 13px var(--display); letter-spacing: .6px; color: var(--on-chalk); background: var(--chalk); border-radius: 4px; padding: 3px 8px; }
-    .nowb .cd { font: 600 30px/0.9 var(--display); color: var(--chalk); min-width: 64px; }
-    .nowb b { font-size: 17px; color: var(--white); }
-    .nowb span.s { color: var(--muted); }
+    .nowb { display: grid; grid-template-columns: auto 1fr auto; gap: 24px; align-items: center; padding: 20px 24px; border-radius: 12px; background: var(--card2); }
+    .nowb .k { font: 600 12px var(--sans); color: var(--on-chalk); background: var(--chalk); border-radius: 6px; padding: 4px 8px; }
+    .nowb .cd { font: 600 40px/1 var(--serif); color: var(--chalk); min-width: 88px; }
+    .nowb b { font-size: 17px; font-weight: 600; line-height: 1.35; color: var(--white); }
+    .nowb span.s { color: var(--muted); font-size: 13px; }
     .nowb .acts { display: flex; gap: 8px; }
-    .tbl tr.ih td { height: 38px; background: #191c1f; }
+    .tbl tr.ih td { height: var(--row); background: #191c1f; }
     .tbl tr.ih b { font-size: 14px; color: var(--white); }
-    .tbl tr.sub td:first-child { padding-left: 22px; }
-    .verdict { font-size: 12px; }
+    .tbl tr.sub td:first-child { padding-left: 24px; }
+    .verdict { font-size: 13px; }
     svg.ch { width: 100%; display: block; overflow: visible; }
-    svg.ch text { font: 11px Arial; fill: var(--muted); }
+    svg.ch text { font: 11px var(--sans); fill: var(--muted); }
     svg.ch .ax { stroke: var(--line2); stroke-width: 1; }
     svg.ch .grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
-    .legend2 { display: flex; gap: 14px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
-    .legend2 i { display: inline-block; width: 14px; height: 2px; vertical-align: 3px; margin-right: 5px; }
+    .legend2 { display: flex; gap: 16px; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+    .legend2 i { display: inline-block; width: 14px; height: 2px; vertical-align: 4px; margin-right: 6px; }
     .legend2 i.dash { background: repeating-linear-gradient(90deg, currentColor 0 4px, transparent 4px 7px); height: 2px; }
-    .mult { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 28px; }
-    .mult .t { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; color: var(--muted); margin-bottom: 2px; gap: 10px; }
-    .mult .t b { font: 600 15px var(--display); }
-    .band2 { display: inline-flex; align-items: center; gap: 6px; font-weight: bold; }
+    .mult { display: grid; grid-template-columns: 1fr 1fr; gap: 24px 32px; }
+    .mult .t { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; color: var(--muted); margin-bottom: 4px; gap: 12px; }
+    .mult .t b { font: 600 13px var(--sans); letter-spacing: .04em; }
+    .band2 { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
     .band2 i { width: 9px; height: 9px; border-radius: 50%; }
     .modes button { min-width: 72px; }
     .hidden { display: none !important; }
     .cdn { color: var(--warn); }
-    .facts { display: grid; grid-template-columns: auto 1fr; gap: 9px 14px; font-size: 13px; margin: 0; }
+    .facts { display: grid; grid-template-columns: auto 1fr; gap: 12px 16px; font-size: 14px; margin: 0; }
     .facts dt { color: var(--muted); }
     .facts dd { margin: 0; text-align: right; color: var(--text); }
-    .facts .mini { height: 6px; border-radius: 3px; background: var(--card2); overflow: hidden; margin-top: 3px; }
+    .facts .mini { height: 4px; border-radius: 2px; background: var(--card2); overflow: hidden; margin-top: 8px; }
     .facts .mini i { display: block; height: 100%; background: var(--good); }
-    .one { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
-    .bliss { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; font-size: 13px; color: var(--muted); }
+    .one { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .bliss { display: grid; grid-template-columns: auto 1fr; gap: 12px 16px; font-size: 14px; color: var(--muted); }
     .bliss b { color: var(--text); }
-    .note2 { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    .note2 { color: var(--muted); font-size: 13px; margin-top: 16px; }
     /* Plan: your plan (round 6) */
-    .plancard .pc-top { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+    .plancard .pc-top { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
     .plancard .pc-what { flex: 1 1 360px; min-width: 0; }
-    .plancard .pc-title { font: 700 20px var(--display); color: var(--white); }
-    .plancard .pc-sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
+    .plancard .pc-title { font: 600 28px/1.2 var(--serif); color: var(--white); }
+    .plancard .pc-sub, .pc-sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
     .plancard .acts { display: flex; gap: 8px; }
-    .dayline { height: 5px; background: var(--line); border-radius: 3px; margin-top: 8px; position: relative; overflow: hidden; }
-    .dayline i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--chalk); border-radius: 3px; }
-    .newrow { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-    .newrow .confirm { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; border: 1px solid var(--warn); border-radius: 6px; padding: 6px 10px; }
-    .months { display: grid; gap: 4px; }
-    .months .mo { background: var(--card); border: 1px solid var(--line); border-radius: 5px; padding: 6px 6px 5px; font-size: 11px; color: var(--muted); min-width: 0; }
-    .months .mo b { display: block; color: var(--text); font-size: 13px; margin-top: 2px; }
-    .months .mo em { display: block; font-style: normal; color: var(--chalk); font-size: 11px; margin-top: 2px; text-transform: uppercase; letter-spacing: .5px; }
+    .dayline { height: 4px; background: var(--line); border-radius: 2px; margin-top: 16px; position: relative; overflow: hidden; }
+    .dayline i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--chalk); border-radius: 2px; }
+    .newrow { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 16px; display: flex; gap: 8px 12px; align-items: center; flex-wrap: wrap; }
+    .newrow .confirm { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; border: 1px solid var(--warn); border-radius: 8px; padding: 8px 12px; }
+    .months { display: grid; gap: 8px; }
+    .months .mo { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px; font-size: 12px; color: var(--muted); min-width: 0; }
+    .months .mo b { display: block; color: var(--text); font-size: 14px; font-weight: 500; margin-top: 2px; }
+    .months .mo em { display: block; font-style: normal; color: var(--chalk); font-size: 12px; font-weight: 500; margin-top: 2px; }
     .months .mo.past { opacity: .55; }
     .months .mo.now { border-color: var(--chalk); }
-    /* Breathing room and cards (owner, round 3): one level of cards; the page's primary block has a chalk edge. */
-    .app { --row: 40px; --pad: 14px; --gap: 22px; --sec: 18px; }
-    .top { padding: 0 24px; }
-    .strip { padding: 14px 24px; }
-    .body { padding: 22px 24px 28px; gap: 22px; align-items: stretch; }
-    .main > div, .pane > div { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; min-width: 0; }
-    .main > div.lead { border-color: var(--chalk); }
+    /* Breathing room and cards (owner, round 3; round 7 type pass): one level of cards; the page's primary block has a soft chalk edge. */
+    .app { --row: 44px; --pad: 16px; --gap: 24px; --sec: 24px; }
+    .top { padding: 0 var(--edge); }
+    .strip { padding: 20px var(--edge) 24px; }
+    .body { padding: 32px var(--edge) 40px; gap: 32px; align-items: stretch; }
+    .main > div, .pane > div { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 24px; min-width: 0; }
+    .main > div.lead { border-color: rgba(239, 235, 226, .4); }
+    .main > .lead:first-child > .sh:first-child h2 { font-size: 28px; line-height: 1.2; }
     .lead .prime { border: 0; padding: 0; background: none; }
     .main > div:last-child, .pane > div:last-child { flex-grow: 1; }
-    .sh { margin-bottom: 12px; }
+    .sh { margin-bottom: 16px; }
     .tbl td { border-top-color: #262a2e; }
     .tbl th { padding-bottom: 8px; }
-    .heads li { padding: 4px 0; }
+    .heads li { padding: 8px 0; }
     /* The "Plan" chooser: the one control that says "this is where I plan it". */
     .plansel { position: relative; }
-    .plansel > summary { list-style: none; display: inline-flex; align-items: center; gap: 10px; height: 34px; padding: 0 12px 0 14px; border: 1.5px solid var(--chalk); border-radius: 8px; background: #22252a; cursor: pointer; }
+    .plansel > summary { list-style: none; display: inline-flex; align-items: center; gap: 12px; height: 36px; padding: 0 14px 0 16px; border: 1.5px solid var(--chalk); border-radius: 9px; background: #22252a; cursor: pointer; white-space: nowrap; }
     .plansel > summary::-webkit-details-marker { display: none; }
     .plansel > summary .lab { color: var(--chalk); }
-    .plansel > summary b { font-size: 14px; color: var(--white); }
+    .plansel > summary b { font-size: 14px; font-weight: 600; color: var(--white); }
     .plansel > summary::after { content: ""; width: 0; height: 0; border: 5px solid transparent; border-top-color: var(--chalk); margin-top: 5px; }
-    .plansel .menu { position: absolute; z-index: 5; top: 40px; left: 0; width: 360px; background: var(--card); border: 1px solid var(--line2); border-radius: 10px; box-shadow: 0 10px 30px rgba(0,0,0,.5); padding: 6px; }
-    .plansel .opt { display: block; width: 100%; text-align: left; padding: 9px 10px; border-radius: 6px; cursor: pointer; background: transparent; border: 0; font: inherit; color: inherit; }
+    .plansel .menu { position: absolute; z-index: 5; top: 44px; left: 0; width: 380px; background: var(--card); border: 1px solid var(--line2); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,.5); padding: 8px; }
+    .plansel .opt { display: block; width: 100%; text-align: left; padding: 10px 12px; border-radius: 8px; cursor: pointer; background: transparent; border: 0; font: inherit; color: inherit; }
     .plansel .opt:hover, .plansel .opt:focus-visible { background: var(--card2); outline: none; }
     .plansel .opt b { display: block; color: var(--white); }
-    .plansel .opt span { color: var(--muted); font-size: 12px; }
+    .plansel .opt span { color: var(--muted); font-size: 13px; }
     .plansel .opt.on { outline: 1px solid var(--chalk); }
-    .main > .sec, .main > .sec:first-child { padding: 18px 20px; }
+    .main > .sec, .main > .sec:first-child { padding: 24px; }
     .heads li.go { cursor: pointer; }
     .heads li.go:hover div, .heads li.go:focus-visible div { color: var(--white); }
     .heads li.go:focus-visible { outline: 2px solid var(--chalk); outline-offset: 2px; }
@@ -12939,8 +13204,8 @@
     .pi-chip:focus-visible { outline: 2px solid var(--chalk); }
     /* Narrow windows (a tablet): bars wrap, the pane goes under the page. */
     @media (max-width: 1000px) {
-      .app { min-width: 0; }
-      .top { flex-wrap: wrap; height: auto; padding: 6px 16px; }
+      .app { min-width: 0; --edge: 16px; }
+      .top { flex-wrap: wrap; height: auto; padding: 8px 16px; }
       .strip, .strip.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .body { grid-template-columns: minmax(0, 1fr); padding: 16px; }
       .mult { grid-template-columns: minmax(0, 1fr); }
@@ -12948,6 +13213,45 @@
     }
     .warnb.paused { border-radius: 0; margin: 0; padding: 12px 24px; }
     .dev-scatter { max-width: 520px; }
+    /* ---- Round 7: stacking card ---- */
+    .pane > div.chain { flex-grow: 0; }
+    .chain .chain-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .chain .chain-state { font-weight: bold; color: var(--white); }
+    .chain p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+    .pane > div.chain.on { border-color: color-mix(in srgb, var(--warn) 55%, transparent); }
+    .chain.on .chain-state { color: var(--warn); }
+    .stackbox { padding: 24px; border-radius: 10px; background: var(--card2); }
+    .stackbox .big { font: 600 22px/1.2 var(--serif); color: var(--white); }
+    .stackbox ul { margin: 12px 0 16px; padding: 0; list-style: none; color: var(--muted); }
+    .stackbox li { padding: 4px 0; }
+    .stackbox li b { color: var(--text); }
+    /* ---- Round 7: Torn Eye list ---- */
+    .eye-chips { display: inline-flex; gap: 8px; flex-wrap: wrap; }
+    .eye-chip { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line2); background: transparent; color: var(--text); font: 600 13px var(--sans); cursor: pointer; }
+    .eye-chip i { width: 9px; height: 9px; border-radius: 50%; }
+    .eye-chip span { color: var(--muted); font-weight: normal; }
+    .eye-chip[aria-pressed="true"] { border-color: var(--chalk); background: #2a2c2e; }
+    .eye-chip:focus-visible { outline: 2px solid var(--chalk); outline-offset: 2px; }
+    .eye-rule { margin-left: auto; color: var(--muted); font-size: 13px; }
+    .eye-rule b { color: var(--text); }
+    .tbl.eyelist th.key { color: var(--white); }
+    .tbl.eyelist td.resp b { font-size: 14px; }
+    .tbl.eyelist td.st-ok { color: var(--good); }
+    .tbl.eyelist td.st-wait { color: var(--warn); }
+    .tbl.eyelist .checking { color: var(--dim); }
+    .tbl.eyelist .checking::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--dim); border-top-color: transparent; margin-right: 6px; vertical-align: -1px; animation: pi-eye-spin 1s linear infinite; }
+    .still .tbl.eyelist .checking::before { animation: none; }
+    @media (prefers-reduced-motion: reduce) { .tbl.eyelist .checking::before { animation: none; } }
+    @keyframes pi-eye-spin { to { transform: rotate(360deg); } }
+    .eye-pager { display: flex; align-items: center; gap: 8px; margin-top: 16px; color: var(--muted); font-size: 13px; flex-wrap: wrap; }
+    .eye-pager button { min-width: 30px; height: 28px; padding: 0 9px; border-radius: 6px; border: 1px solid var(--line2); background: transparent; color: var(--text); font: 600 13px var(--sans); cursor: pointer; }
+    .eye-pager button.on { background: var(--chalk); color: var(--on-chalk); border-color: var(--chalk); }
+    .eye-pager button:disabled { opacity: .35; cursor: default; }
+    .eye-pager button:focus-visible { outline: 2px solid var(--chalk); outline-offset: 2px; }
+    .eye-pager .sp { margin-left: auto; }
+    .eye-bg { display: flex; align-items: center; gap: 8px; margin-top: 16px; color: var(--muted); font-size: 13px; }
+    .eye-bg .track { flex: 0 0 180px; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+    .eye-bg .fill { height: 100%; background: var(--chalk); }
     `;
 
     /* ===== src/ui/app/common.js ===== */
@@ -13171,6 +13475,11 @@
         // Direct labels at the line ends, nudged apart.
         ends.sort((a, b) => a.y - b.y);
         for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 13) ends[i].y = ends[i - 1].y + 13;
+        // ...and lifted back above the x axis when the stack ran past it (they fell onto the legend under the chart).
+        if (ends.length && ends[ends.length - 1].y > H - B) {
+            ends[ends.length - 1].y = H - B;
+            for (let i = ends.length - 2; i >= 0; i--) ends[i].y = Math.min(ends[i].y, ends[i + 1].y - 13);
+        }
         for (const e of ends) txt(svg, e.x + 6, e.y + 4, e.s.label || e.s.name, { style: 'fill:' + (e.s.labelColor || e.s.color) + ';font-weight:' + ((e.s.width || 1.5) > 2 ? 'bold' : 'normal') });
         return svg;
     }
@@ -13301,6 +13610,8 @@
 
 
 
+
+
     /** A walk-through older than this is over (a session takes minutes; the next drug is hours away). */
     const SESSION_MAX_MS = 3 * 60 * 60 * 1000;
 
@@ -13320,6 +13631,11 @@
         return (parts || []).map(partText).join(' → ');
     }
 
+    /** All the energy there is now is kept for the plan (a jump's stack, a held boost Xanax, a console jump's bar). */
+    function keptAll(m) {
+        return Boolean((m && m.energyKept && m.energyKept.all) || (m && m.strip && m.strip.refill && m.strip.refill.stacking));
+    }
+
     /**
      * The train step the gym page walks through: the first step with trains
      * that is due now; else the energy you have now, split the same way.
@@ -13328,7 +13644,14 @@
     function currentTrainStep(m, now = m.now) {
         const due = (m.steps || []).find((s) => s.parts && s.parts.length && s.at <= now + DUE_SLACK_MS);
         if (due) return due;
-        const energy = m.strip.energy.current;
+        // Energy the plan keeps on purpose (model.js keptEnergyOf): Xanax stacked for a jump, the daily choco boost's held
+        // Xanax, the console jump's bar under its stack, a war's reserve. It waits, so the page never says to train it now
+        // (round 7: between stacks it said "Train DEX × 100" with the jump's energy; the review: the same after "Xanax #2 ·
+        // keep the energy for the boost" and before a console jump's stack). Only what is above it is trained.
+        if (m.strip && m.strip.refill && m.strip.refill.stacking) return null;
+        const kept = m.energyKept || null;
+        if (kept && kept.all) return null;
+        const energy = Math.max(0, m.strip.energy.current - (kept ? kept.amount : 0));
         const r = splitSession({
             stats: m.pc.stats,
             shares: m.shares,
@@ -13377,8 +13700,9 @@
             happy0: reading.happy,
             last: { stats: { ...reading.stats }, energy: reading.energy },
             spent,
-            // Energy the step leaves on purpose (kept for a war, or a stop that keeps a specialist gym): not a sign of a new session.
-            spare: Math.max(0, Number(m.keepEnergy) || 0),
+            // Energy the step leaves on purpose (kept for a war, the console jump's bar, or a stop that keeps a specialist
+            // gym): not a sign of a new session.
+            spare: Math.max(0, Number(m.keepEnergy) || 0, m.energyKept && !m.energyKept.all ? Number(m.energyKept.amount) || 0 : 0),
         };
     }
 
@@ -13464,18 +13788,225 @@
      * @returns {object|null}
      */
     function nextSession(prev, m, reading, now, ctx = {}) {
+        // A walk-through of "the energy you have now" ends once the plan keeps that energy (a Xanax stacked or held).
+        if (prev && prev.stepId === 'now' && keptAll(m)) prev = null;
         if (!needsNewSession(prev, reading, m, now)) return advanceSession(prev, reading, ctx);
         const step = currentTrainStep(m, now);
         return step ? startSession(step, reading, m, now) : null;
     }
 
+    /* ------------------------------------------- round 7: the gym page's states */
+
+    /** Rehab in Switzerland after an overdose: about this much a session (the owner's own log, 2026-10-02). */
+    const REHAB_COST = 215000;
+    const TRAVEL_URL = 'https://www.torn.com/travelagency.php';
+
+    /** A jump or a daily boost: candy or EDVD (or the console) with the drug, then train it all. Never FHC or cans. */
+    function isBoostStep(step) {
+        return Boolean(step) && (step.kind === 'jump' || step.kind === 'boost');
+    }
+
+    /** "EDVD × 5" from "Eat EDVD × 5"; the plan's mid-step words ("the boosters") read "Boosters". */
+    function eatWordsOf(text) {
+        const w = String(text || '').replace(/^Eat /, '');
+        return w === 'the boosters' ? 'Boosters' : w;
+    }
+
     /**
-     * @param {object} m - buildModel() output
-     * @param {object} page - {selectedId, boxes: [{stat, locked, energyPerTrain}]}
+     * How far above its maximum happy must be to count the boosters as eaten: the plan's share of the boost (plan.js
+     * MID_BOOST_*: a stack of Xanax adds a few hundred), but never more than half the boost itself. Round 7 review: a small
+     * candy boost (Candy Kisses × 4 = +200, with the Xanax +275) never reached the 300 floor, so the page stayed on a red
+     * "EAT FIRST" with Fill held for the whole boost. Half of it is still more than its Xanax (+75) for any boost over 150.
+     */
+    function eatenOver(boostHappy) {
+        const b = Math.max(0, Number(boostHappy) || 0);
+        const over = Math.max(MID_BOOST_MIN, MID_BOOST_SHARE * b);
+        return b > 0 ? Math.min(over, b / 2) : over;
+    }
+
+    /** Happy the session's trains took so far (0.5 a train energy, by your perks): added back when the boost is judged. */
+    function sessionHappyTrained(session, happyLossMult = 1) {
+        if (!session || !session.spent) return 0;
+        return HAPPY_LOSS_PER_ENERGY * (Number(happyLossMult) || 1) * spentTotal(session);
+    }
+
+    /** The same, only for a session of this boost (started within its tick window, a few hours old at most). */
+    function boostHappyTrained(session, step, happyLossMult = 1, now = Date.now()) {
+        if (!session || !step || !Number.isFinite(session.at) || !(now - session.at < SESSION_MAX_MS)) return 0;
+        const from = (Number.isFinite(step.tick) ? step.tick : step.at) - 15 * 60e3;
+        return session.at >= from ? sessionHappyTrained(session, happyLossMult) : 0;
+    }
+
+    /**
+     * The model's cooldowns as they are now: the model measured them at m.now (up to a read ago), so the time since is
+     * taken off (round 7 review: a cooldown that had just ended still counted as running until the next read).
+     */
+    function agedCooldowns(m, now = Date.now()) {
+        const age = m && Number.isFinite(m.now) ? Math.max(0, now - m.now) : 0;
+        const left = (x) => (x && Number.isFinite(x.left) ? Math.max(0, x.left - age) : 0);
+        return { boosterLeft: left(m && m.strip && m.strip.booster), drugLeft: left(m && m.strip && m.strip.drug) };
+    }
+
+    /**
+     * A boost or jump step and how far it is, from the bars (round 7). Not eaten: happy not above its maximum (by the
+     * share of the boost the plan uses to tell a boost under way: plan.js MID_BOOST_*; a stack of Xanax adds a few hundred).
+     * Eaten: happy above it and the booster cooldown running. The drug (Ecstasy or Xanax): its cooldown running once the
+     * boosters are in, unless the plan still lists it to take (an earlier Xanax's cooldown that ends before the tick).
+     * @param {object} step - plan.js jump/boost step {items, actions, mid, deadline, gain, parts}
+     * @param {object} reads - {happy:{current,max}|null, boosterLeft:ms, drugLeft:ms, trained:boolean}
+     * @returns {{jump, eaten, drugIn, ready, eat, drug, deadline, gain, list:{id, text, done, next}[]}}
+     */
+    function boostProgress(step, { happy = null, boosterLeft = 0, drugLeft = 0, trained = false, happyTrained = 0 } = {}) {
+        const acts = Array.isArray(step.actions) ? step.actions : [];
+        const act = (id) => acts.find((a) => a.id === id) || null;
+        const eatA = act('eat');
+        const jpA = act('jp');
+        const drugA = act('drug');
+        const items = step.items || [];
+        const boostHappy = items.reduce((a, it) => a + (ITEMS[it.id] && ITEMS[it.id].kind === 'booster' ? (ITEMS[it.id].happy || 0) * (it.qty || 0) : 0), 0);
+        const over = eatenOver(boostHappy);
+        const live = happy && Number.isFinite(happy.current) && Number.isFinite(happy.max);
+        // The happy the step's trains took so far is added back: training it all must not read as "not eaten" again.
+        const h = live ? happy.current + Math.max(0, Number(happyTrained) || 0) : 0;
+        const eaten = live ? h >= happy.max + over && (boosterLeft > 0 || Boolean(step.mid)) : Boolean(step.mid || (eatA && eatA.done));
+        const drugToTake = items.some((it) => it.id === XANAX || it.id === ECSTASY);
+        const drugIn = !drugA ? eaten : eaten && (Boolean(drugA.done) || (drugLeft > 0 && !(step.mid && drugToTake)));
+        const drug = drugA ? drugA.text.replace(/^Take the /, '') : null;
+        const trainWords = (() => {
+            const by = {};
+            for (const p of step.parts || []) by[p.stat] = (by[p.stat] || 0) + p.trains;
+            const t = Object.entries(by).map(([k, n]) => STAT_LABEL[k] + ' × ' + n).join(' + ');
+            return t ? 'Train it all: ' + t : 'Train it all';
+        })();
+        const list = [];
+        if (eatA) list.push({ id: 'eat', text: eatWordsOf(eatA.text), done: eaten });
+        if (jpA) list.push({ id: 'jp', text: jpA.text, done: drugIn });
+        if (drugA) list.push({ id: 'drug', text: drug, done: drugIn });
+        list.push({ id: 'train', text: trainWords, done: Boolean(trained) });
+        if (act('refill')) list.push({ id: 'refill', text: 'Refill, then train again', done: false });
+        const next = list.findIndex((x) => !x.done);
+        list.forEach((x, i) => (x.next = i === next));
+        return { jump: step.kind === 'jump', eaten, drugIn, ready: eaten && drugIn, eat: eatA ? eatWordsOf(eatA.text) : null, drug, deadline: step.deadline || null, gain: step.gain || 0, list };
+    }
+
+    /*
+     * The overdose (owner: "happiness goes to 0"). Torn's overdose sets energy, happy (and nerve) to 0; a Xanax overdose
+     * also sets about a day of drug cooldown (docs/research-addiction-rehab.md). Round 7 review: happy 0 + energy 0 with a
+     * drug cooldown running is also a player with a small happy maximum who took a Xanax and trained it all (training
+     * costs 0.4–0.6 happy an energy), and the flag was kept for hours. So the bars at 0 count only with one more sign:
+     *   - a drug cooldown longer than any Xanax's (6–8 h): the overdose's ~24 h; or
+     *   - a sudden fall: minutes ago the bars held more happy than training all that energy could take.
+     * Once seen it is checked against every fresh reading: it ends with the cooldown, and as soon as the bars hold more
+     * than regeneration alone gives back since (a refill, a can, a drug: the plan goes on).
+     */
+
+    /** A drug cooldown longer than this is no Xanax's (360–480 min) or Ecstasy's: an overdose's (~24 h). */
+    const OD_CD_MS = 9 * 3600e3;
+    /** The reading before the fall counts for this long. */
+    const OD_FALL_MS = 15 * 60e3;
+    /** The most happy a train energy can cost (Torn: 0.4–0.6), and a little slack. */
+    const OD_TRAIN_LOSS = 0.6;
+    const OD_SLACK = 25;
+    /** Regeneration back from 0, generously (5 a tick, a tick every 5 minutes), plus a tick of slack. */
+    const OD_REGEN_PER_MS = 5 / (5 * 60e3);
+
+    const barNum = (b) => (b && Number.isFinite(b.current) ? b.current : null);
+
+    /** The last reading with something in the bars ({at, happy, energy}), for the next one to compare with. */
+    function nextBarsSeen(prevSeen, { happy = null, energy = null } = {}, now) {
+        const h = barNum(happy);
+        const e = barNum(energy);
+        if (h === null || e === null || (h === 0 && e === 0)) return prevSeen || null;
+        return { at: now, happy: h, energy: e };
+    }
+
+    /**
+     * An overdose seen on the bars: happy and energy at 0, a drug cooldown running, and either the overdose's long
+     * cooldown or a fall training can't explain (`before`: nextBarsSeen's last reading).
+     */
+    function isOverdose({ happy = null, energy = null, drugLeft = 0 } = {}, { before = null, now = 0 } = {}) {
+        if (barNum(happy) !== 0 || barNum(energy) !== 0 || !(drugLeft > 0)) return false;
+        if (drugLeft > OD_CD_MS) return true;
+        if (!before || !Number.isFinite(before.at) || now < before.at || now - before.at > OD_FALL_MS) return false;
+        return before.happy > 0 && before.happy > OD_TRAIN_LOSS * Math.max(0, before.energy) + OD_SLACK;
+    }
+
+    /** The bars still look like the overdose: no more than regeneration gives back since it was seen. */
+    function stillOverdosed(od, { happy = null, energy = null, drugLeft = null } = {}, now) {
+        if (drugLeft !== null && Number.isFinite(drugLeft) && !(drugLeft > 0)) return false;
+        const back = OD_REGEN_PER_MS * Math.max(0, now - od.at) + 5;
+        const h = barNum(happy);
+        const e = barNum(energy);
+        return !((h !== null && h > back) || (e !== null && e > back));
+    }
+
+    /**
+     * The overdose kept across reads (the bars climb again a tick later): {at, until: the drug cooldown's end} once seen,
+     * while fresh readings still look like it (stillOverdosed) and until that cooldown is over; null otherwise.
+     * @param {object|null} prev - the stored overdose
+     * @param {object} reads - {happy, energy, drugLeft}
+     * @param {number} now
+     * @param {object|null} [before] - nextBarsSeen's last reading with something in the bars
+     */
+    function nextOverdose(prev, reads, now, before = null) {
+        if (prev && Number.isFinite(prev.until) && now < prev.until && now >= (prev.at || 0)) return stillOverdosed(prev, reads || {}, now) ? prev : null;
+        return isOverdose(reads, { before, now }) ? { at: now, until: now + reads.drugLeft } : null;
+    }
+
+    /**
+     * Which of the gym page's states it is (owner's picks, 2026-10-03; overlays.html §6):
+     *   stacking  stacking energy for a chain: training paused, no train marks
+     *   overdose  every jump mark stops; fly to Switzerland
+     *   wrong     the part is in another gym: that gym pulses, Fill waits
+     *   eat       a jump or daily boost with the boosters or the drug still to take: the stat pulses red, Fill waits
+     *   ready     the boosters and the drug are in: steady green, train it all
+     *   right     the right gym, train now (steady green)
+     *   done      the session is done; idle: nothing to train now
+     *   kept      nothing to train now because the plan keeps the energy (a jump's stack, the boost's held Xanax, the
+     *             console jump's bar, a war's reserve): the strip says how much and why; no train mark
+     */
+    function gymPageState({ step = null, cur = null, here = false, done = false, reads = {}, overdose = null, stacking = null, kept = null, now = 0 } = {}) {
+        if (stacking) return { kind: 'stacking', since: Number(stacking.since) || null, boost: null };
+        if (overdose && now < overdose.until) return { kind: 'overdose', at: overdose.at, cost: REHAB_COST, boost: null };
+        const boost = isBoostStep(step) ? boostProgress(step, { ...reads, trained: done }) : null;
+        if (!cur && !done && kept && kept.amount > 0) return { kind: 'kept', kept, boost };
+        if (!cur) return { kind: done ? 'done' : 'idle', boost };
+        if (!here) return { kind: 'wrong', boost };
+        if (boost && !boost.ready) return { kind: 'eat', boost };
+        return { kind: boost ? 'ready' : 'right', boost };
+    }
+
+    const KEPT_FOR = { jump: 'the jump', boost: 'the boost', console: 'the console jump', war: 'the war' };
+
+    /** "Keeping 650 energy for the jump" */
+    function keptHead(k) {
+        return 'Keeping ' + fmtInt(k.amount) + ' energy for ' + (KEPT_FOR[k.why] || 'the plan');
+    }
+
+    /** Why it is kept, in a few words. */
+    function keptWhy(k) {
+        if (k.why === 'jump') return 'Xanax ' + k.stacked + ' of ' + k.stackTo + ' stacked · don’t train it now';
+        if (k.why === 'boost') return 'the Xanax waits for the boost after the tick · don’t train it now';
+        if (k.why === 'console') return 'it stays in the bar under the ' + k.stackTo + ' Xanax · don’t train it';
+        return 'kept for ' + (k.war || 'the enemy faction') + ' · Settings › Keep for war days';
+    }
+
+    /** "EDVD × 5, then the Ecstasy, then train it all" */
+    function eatOrder(boost) {
+        const parts = [];
+        for (const x of boost.list) if (!x.done && x.id !== 'train' && x.id !== 'refill') parts.push(x.id === 'drug' ? 'the ' + x.text : x.text);
+        parts.push('train it all');
+        return parts.map((p, i) => (i ? 'then ' + p : p)).join(', ');
+    }
+
+    /**
+     * @param {object} m - buildModel() output (m.stacking: {since}|null while stacking for a chain)
+     * @param {object} page - {selectedId, boxes: [{stat, locked, energyPerTrain}], reading,
+     *   reads: {happy, energy, boosterLeft, drugLeft} (the sidebar's bars, the model's cooldowns), overdose: {at, until}|null}
      * @param {object|null} [session] - the walk-through (nextSession); null = the current step, nothing done yet
      * @param {number} [now]
-     * @returns {{strip:string[], parts:object[], current:object|null, done:boolean, nextGym:{id, label}|null, switchHint:string|null,
-     *   perStat:object, pill:string|null, gym:object|null}}
+     * @returns {{strip:string[], parts:object[], current:object|null, done:boolean, nextGym:{id, label, group}|null, switchHint:string|null,
+     *   perStat:object, pill:string|null, gym:object|null, hereGym:{id, wrong}|null, state:object, line:object}}
      */
     function planGymPage(m, page = {}, session = null, now = m.now) {
         const table = m.pc.table;
@@ -13485,35 +14016,41 @@
         const reading = page.reading || { stats, energy: m.strip.energy.current };
         const energy = reading.energy;
         const perStat = {};
-        const out = { strip: [], parts: [], current: null, done: false, nextGym: null, switchHint: null, perStat, pill: null, gym };
+        const out = { strip: [], parts: [], current: null, done: false, nextGym: null, switchHint: null, perStat, pill: null, gym, hereGym: null, state: { kind: 'idle', boost: null }, line: null };
         if (!gym) return out;
-        if (!session) {
-            const step = currentTrainStep(m, now);
-            session = step ? startSession(step, reading, m, now) : null;
-        }
+        const due = currentTrainStep(m, now);
+        // "The energy you have now" while the plan keeps that energy: no walk-through (nextSession does the same).
+        if (session && session.stepId === 'now' && keptAll(m)) session = null;
+        if (!session) session = due ? startSession(due, reading, m, now) : null;
         const prog = session ? sessionProgress(session) : { parts: [], current: null, done: false };
         out.parts = prog.parts;
         out.current = prog.current;
         out.done = Boolean(session) && prog.done;
         const cur = prog.current;
-        const here = cur && cur.gymId === selectedId;
+        const here = Boolean(cur) && cur.gymId === selectedId;
+        const reads0 = page.reads || { happy: m.strip.happy ? { current: m.strip.happy.current, max: m.strip.happy.max } : null, energy: m.strip.energy, ...agedCooldowns(m, now) };
+        // The boost is judged with the happy this step's trains took added back (they don't un-eat it).
+        const reads = isBoostStep(due) ? { ...reads0, happyTrained: boostHappyTrained(session, due, m.pc.perks && m.pc.perks.happyLossMult, now) } : reads0;
+        const state = gymPageState({ step: due, cur, here, done: out.done, reads, overdose: page.overdose || null, stacking: m.stacking || null, kept: m.energyKept || null, now });
+        out.state = state;
+        const off = state.kind === 'stacking' || state.kind === 'overdose';
 
         const total = totalOf(stats);
         const tomorrow = (m.projection && m.projection[1]) || {};
         const boxes = new Map((page.boxes || []).map((b) => [b.stat, b]));
         const partsOfStat = (k) => prog.parts.filter((p) => p.stat === k);
-        // The grey word on a box that isn't trained now.
+        // The word on a box that isn't trained now: in full (hover), and its small corner tag.
         const greyWord = (stat, all, left, lockedHere) => {
-            if (all.length && !left.length) return 'Done ✓ · ' + STAT_LABEL[stat] + ' × ' + all.reduce((a, p) => a + p.trains, 0);
+            if (all.length && !left.length) return { text: 'Done ✓ · ' + STAT_LABEL[stat] + ' × ' + all.reduce((a, p) => a + p.trains, 0), tag: 'done ✓' };
             if (left.length) {
                 const p = left[0];
-                return p.gymId === selectedId ? 'Next · ' + STAT_LABEL[stat] + ' × ' + p.left + ' after ' + (cur ? STAT_LABEL[cur.stat] : 'this') : 'Later · ' + STAT_LABEL[stat] + ' × ' + p.left + ' at ' + p.gymName;
+                return p.gymId === selectedId ? { text: 'Next · ' + STAT_LABEL[stat] + ' × ' + p.left + ' after ' + (cur ? STAT_LABEL[cur.stat] : 'this'), tag: 'next · after ' + (cur ? STAT_LABEL[cur.stat] : 'this') } : { text: 'Later · ' + STAT_LABEL[stat] + ' × ' + p.left + ' at ' + p.gymName, tag: 'later · ' + p.gymName };
             }
-            if (lockedHere) return 'Not trained here';
+            if (lockedHere) return { text: 'Not trained here', tag: 'not here' };
             const share = total > 0 ? stats[stat] / total : 0;
-            if (share > m.shares[stat] + 0.005) return 'Skip · ' + (share * 100).toFixed(0) + '% of total, over target';
-            if (tomorrow[stat] > 0) return 'Next · starts tomorrow';
-            return 'Skip · not in this session';
+            if (share > m.shares[stat] + 0.005) return { text: 'Skip · ' + (share * 100).toFixed(0) + '% of total, over target', tag: 'skip · over target' };
+            if (tomorrow[stat] > 0) return { text: 'Next · starts tomorrow', tag: 'tomorrow' };
+            return { text: 'Skip · not in this session', tag: 'skip' };
         };
 
         for (const k of STATS) {
@@ -13521,51 +14058,129 @@
             const locked = (box && box.locked) || !(gym.dots[k] > 0);
             const mine = partsOfStat(k);
             const open = mine.filter((p) => p.left > 0);
-            if (here && k === cur.stat) {
+            if (off) {
+                // Stacking for a chain, or an overdose: no train or jump mark anywhere (the strip says why).
+                perStat[k] = { kind: 'off', text: '' };
+            } else if (here && k === cur.stat) {
                 const n = cur.left;
                 const canNow = Number.isFinite(energy) ? Math.max(0, Math.min(n, Math.floor(energy / cur.perTrain))) : n;
                 const allEnergy = n * cur.perTrain > energy - cur.perTrain;
                 const gain = cur.trains > 0 ? (cur.gain * n) / cur.trains : 0;
                 const waitWord = canNow < n ? (canNow === 0 ? ' · energy ' + fmtInt(energy) + (session.drug ? ', take the Xanax first' : ', wait for more') : ' · ' + canNow + ' now, the rest after more energy') : '';
+                const b = state.boost;
+                const eat = state.kind === 'eat';
                 perStat[k] = {
                     kind: 'train',
+                    // right / ready: steady green; eat: pulses red, Fill waits.
+                    mark: state.kind,
+                    hold: eat,
                     trains: n,
-                    fill: canNow,
+                    fill: eat ? 0 : canNow,
+                    fillN: n,
                     gain: Math.round(gain),
+                    tab: eat ? 'Eat first' : state.kind === 'ready' ? 'Train it all · about ' + fmtSigned(Math.round(b.gain || gain)) : 'Train this · ' + fmtInt(n) + ' train' + (n === 1 ? '' : 's') + (cur.done > 0 ? ' left' : '') + ' · about ' + fmtSigned(gain),
                     text: fmtInt(n) + ' train' + (n === 1 ? '' : 's') + (cur.done > 0 ? ' left' : ''),
-                    sub: (allEnergy ? 'all your energy' : fmtInt(n * cur.perTrain) + ' energy') + ' · about ' + fmtSigned(gain) + waitWord,
+                    sub: eat ? b.list.filter((x) => !x.done && (x.id === 'eat' || x.id === 'drug' || x.id === 'jp')).map((x) => x.text).join(' + ') + ' first' : (allEnergy ? 'all ' + (state.kind === 'ready' ? fmtInt(energy) + ' ' : 'your ') + 'energy' : fmtInt(n * cur.perTrain) + ' energy') + ' · about ' + fmtSigned(gain) + waitWord,
                     warn: cur.stopAt !== undefined ? 'Stop at ' + n + ' trains. More puts you under the rule for ' + cur.stopReason + ' and you lose it.' : null,
                 };
+            } else if (cur && !here && k === cur.stat && !locked) {
+                // The wrong gym: the stat the part trains is marked dashed grey, and Fill waits until you switch.
+                perStat[k] = { kind: 'wait', trains: cur.left, fill: 0, fillN: cur.left, tab: 'After you switch: ' + STAT_LABEL[k] + ' × ' + cur.left, text: 'switch gyms first', sub: '' };
             } else if (cur && !here) {
                 // The current part is in another gym: the strip says so in one line; Torn's boxes are left as they are
-                // (owner, round 6: greying them read as "the gym is disabled").
-                // A part already done here still says so.
-                perStat[k] = { kind: 'away', text: mine.length && !open.length ? greyWord(k, mine, open, locked) : '' };
+                // (owner, round 6: greying them read as "the gym is disabled"). A part already done here still says so.
+                const w = mine.length && !open.length ? greyWord(k, mine, open, locked) : { text: '', tag: '' };
+                perStat[k] = { kind: 'away', text: w.text, tag: w.tag };
             } else {
-                const text = greyWord(k, mine, open, locked);
-                perStat[k] = { kind: open.length ? 'next' : mine.length ? 'done' : text === 'Not trained here' ? 'none' : text.startsWith('Next') ? 'next' : 'skip', text };
+                const w = greyWord(k, mine, open, locked);
+                perStat[k] = { kind: open.length ? 'next' : mine.length ? 'done' : w.text === 'Not trained here' ? 'none' : w.text.startsWith('Next') ? 'next' : 'skip', text: w.text, tag: w.tag };
             }
         }
 
-        if (cur && !here) {
-            const label = 'Next: ' + cur.gymName + ' · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
+        const target = cur ? gymById(cur.gymId, table) : null;
+        out.target = target;
+        if (cur && !here && !off) {
+            const k = cur.stat;
+            const label = 'Next: ' + cur.gymName + ' · ' + STAT_LABEL[k] + ' × ' + cur.left;
             out.nextGym = { id: cur.gymId, label, group: gymGroupWord(cur.gymId) };
-            out.switchHint = 'This session trains at ' + cur.gymName + ': open it · then ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
+            const dots = (g) => (g.dots[k] > 0 ? STAT_LABEL[k] + ' ' + g.dots[k] : 'no ' + STAT_LABEL[k]);
+            out.switchHint = 'you’re in ' + gym.name + ' (' + dots(gym) + ') · switch to ' + cur.gymName + (target ? ' (' + dots(target) + ')' : '');
         }
-        // In the right gym: its button is outlined too, so where to train is never a guess.
-        if (cur && here) out.hereGym = { id: cur.gymId, label: 'Train here · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left };
+        // The gym you're in: a steady outline, green when the part is here, red when it isn't.
+        if (cur && !off) out.hereGym = { id: selectedId, wrong: !here, label: here ? 'Train here · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left : 'Wrong gym' };
 
         out.strip.push(m.build.name);
+        let nextGymWords = null;
         if (m.nextGym && m.nextGym.gym) {
             const ng = m.nextGym.gym;
             const k = cur ? cur.stat : STATS.reduce((a, x) => (m.shares[x] - stats[x] / total > m.shares[a] - stats[a] / total ? x : a), 'str');
-            out.strip.push(ng.name + (m.nextGym.known ? ' in ' + fmtInt(m.nextGym.energyLeft) + ' E' : ' next') + ', ' + STAT_LABEL[k] + ' ' + ng.dots[k] + ' there');
+            nextGymWords = ng.name + (m.nextGym.known ? ' in ' + fmtInt(m.nextGym.energyLeft) + ' E' : ' next') + ', ' + STAT_LABEL[k] + ' ' + ng.dots[k] + ' there';
+            out.strip.push(nextGymWords);
         }
-        if (out.done) out.pill = 'Session done';
-        else if (cur && here) out.pill = 'Train ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
-        else if (cur) out.pill = out.switchHint;
-        else out.pill = energy < gym.energy ? 'Energy ' + fmtInt(energy) + ' · wait for the next step' : null;
+
+        // The strip's one line: its colour, a bold head, the words, a small source; a link for an overdose.
+        const b = state.boost;
+        const finish = b && b.deadline ? 'finish before ' + tornClock(b.deadline) : null;
+        const what = b ? (b.jump ? 'Jump' : 'Boost') : null;
+        if (state.kind === 'stacking') {
+            out.line = { tone: 'amber', head: 'Stacking for a chain', text: 'training paused · no train marks until you resume', src: null };
+            out.pill = 'Stacking for a chain · training paused';
+        } else if (state.kind === 'overdose') {
+            out.line = { tone: 'amber', head: 'Overdosed', text: 'happy and energy went to 0 · no training now · fly to Switzerland for rehab, about $' + fmtInt(REHAB_COST) + ' a session · the plan is worked out again after rehab', src: null, link: { text: 'Open Travel', href: TRAVEL_URL } };
+            out.pill = 'Overdosed · fly to Switzerland';
+        } else if (state.kind === 'wrong') {
+            out.line = { tone: 'red', head: 'Wrong gym', text: out.switchHint + (b && !b.ready ? ' · eat first: ' + eatOrder(b) : ''), src: null };
+            out.pill = 'Wrong gym · switch to ' + cur.gymName;
+        } else if (state.kind === 'eat') {
+            out.line = { tone: 'red', head: what + ': eat first', text: eatOrder(b), src: finish };
+            out.pill = 'Eat first · ' + (b.list.find((x) => x.next) || { text: 'the boosters' }).text;
+        } else if (state.kind === 'ready') {
+            out.line = { tone: 'green', head: what + ' ready' + (reads.happy && Number.isFinite(reads.happy.current) ? ' · happy ' + fmtInt(reads.happy.current) : ''), text: 'train it all' + (b.list.some((x) => x.id === 'refill') ? ', then the refill' : ''), src: finish };
+            out.pill = 'Train it all · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
+        } else if (state.kind === 'right') {
+            out.line = { tone: 'green', head: 'Train ' + STAT_LABEL[cur.stat] + ' × ' + cur.left + ' here', text: [gym.name, m.build.name].join(' · '), src: nextGymWords };
+            out.pill = 'Train ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
+        } else if (state.kind === 'done') {
+            out.line = { tone: 'plain', head: 'Session done', text: m.build.name, src: nextGymWords };
+            out.pill = 'Session done';
+        } else if (state.kind === 'kept') {
+            // No pill: the panel keeps the plan's next step and its countdown ("Xanax #3 of 4 · don't train").
+            const k = state.kept;
+            const next = (m.steps || []).find((s) => s.at > now - DUE_SLACK_MS) || null;
+            out.line = { tone: 'plain', head: keptHead(k), text: keptWhy(k), src: next ? 'next: ' + tornClock(next.at) + ' ' + String(next.label || '').split(' · ')[0] : null };
+        } else {
+            out.pill = energy < gym.energy ? 'Energy ' + fmtInt(energy) + ' · wait for the next step' : null;
+            out.line = { tone: 'plain', head: out.pill || 'Nothing to train now', text: m.build.name, src: nextGymWords };
+        }
         return out;
+    }
+
+    /**
+     * The panel on the gym page, from planGymPage's state (overlays.html §6): its colour, a small title, the big step,
+     * one muted line, a checklist on a jump or boost, and its one action.
+     * @returns {{tone, title, step, sub, checklist:{text, done, next}[]|null, action:{text, href}|null}|null} null: the usual panel
+     */
+    function gymPanel(plan) {
+        const st = plan && plan.state;
+        if (!st) return null;
+        const cur = plan.current;
+        const b = st.boost;
+        const when = b && b.deadline ? 'finish before ' + tornClock(b.deadline) : null;
+        const what = b ? (b.jump ? 'Jump' : 'Boost') : '';
+        if (st.kind === 'overdose') return { tone: 'amber', title: 'Overdosed', step: 'Fly to Switzerland', sub: 'Rehab there: about $' + fmtInt(st.cost) + ' a session. The plan is worked out again after rehab.', checklist: null, action: { text: 'Open Travel', href: TRAVEL_URL } };
+        if (st.kind === 'stacking') return { tone: 'amber', title: 'Stacking', step: 'Stacking for a chain', sub: 'Training paused · no train marks until you resume', checklist: null, action: null };
+        if (st.kind === 'wrong') {
+            const g = plan.gym;
+            const t = plan.target || gymById(cur.gymId);
+            const k = cur.stat;
+            const there = STAT_LABEL[k] + ' trains at ' + (t ? t.dots[k] : '?') + ' there';
+            const sub = g && t && g.dots[k] > 0 ? there + ', ' + g.dots[k] + ' here: ' + (t.dots[k] / g.dots[k]).toFixed(1) + '× the gain for the same energy' : there + ', not at all here';
+            return { tone: 'red', title: 'Wrong gym', step: 'Switch to ' + cur.gymName, sub, checklist: b && !b.ready ? b.list : null, action: null };
+        }
+        if (st.kind === 'eat') return { tone: 'red', title: what + (b.deadline ? ' · ' + tornClock(b.deadline) : ''), step: (b.list.find((x) => x.next) || { text: 'Eat first' }).text, sub: [when, 'seen from your bars'].filter(Boolean).join(' · '), checklist: b.list, action: null };
+        if (st.kind === 'ready') return { tone: 'green', title: what + ' · now', step: 'Train it all: ' + STAT_LABEL[cur.stat] + ' × ' + cur.left, sub: [when, 'about ' + fmtSigned(Math.round(b.gain))].filter(Boolean).join(' · '), checklist: b.list, action: null };
+        if (st.kind === 'right') return { tone: 'green', title: 'Now', step: 'Train ' + STAT_LABEL[cur.stat] + ' × ' + cur.left, sub: [cur.gymName, plan.perStat[cur.stat] && plan.perStat[cur.stat].gain ? 'about ' + fmtSigned(plan.perStat[cur.stat].gain) : null].filter(Boolean).join(' · '), checklist: null, action: null };
+        return null;
     }
 
     /* ------------------------------------------------ Home and Plan lines */
@@ -13857,7 +14472,7 @@
         const hi = Math.max(...vals);
         const old = plans.some((p) => !p.current && p.values.some((v) => v !== null));
         return h('div', {}, [
-            h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('lab', 'Total stats against the plan'), h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), 'you']), h('span', {}, [h('i', { class: 'dash', style: 'color:var(--muted)' }), 'plan']), old ? h('span', {}, [h('i', { class: 'dash', style: 'color:var(--dim)' }), 'earlier plan']) : null])]),
+            h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:16px' }, [t('ct', 'Total stats against the plan'), h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), 'you']), h('span', {}, [h('i', { class: 'dash', style: 'color:var(--muted)' }), 'plan']), old ? h('span', {}, [h('i', { class: 'dash', style: 'color:var(--dim)' }), 'earlier plan']) : null])]),
             lineChart(
                 [
                     ...plans.filter((p) => p.values.some((v) => v !== null)).map((p) => ({ name: p.current ? 'plan' : 'earlier plan', color: p.current ? 'var(--muted)' : 'var(--dim)', dash: p.current ? '5 4' : '2 4', width: p.current ? 1.5 : 1.2, values: p.values, label: p.current ? 'plan' : false })),
@@ -13897,7 +14512,7 @@
                 lineChart(series, { w: 460, h: 90, left: 4, right: 4, yMin: lo - (hi - lo || hi * 0.01) * 0.1, yMax: hi + (hi - lo || hi * 0.01) * 0.1, n: youVals.length > 1 ? youVals.length : 2, label: STAT_LABEL[k] + ' over the days shown' }),
             ]);
         });
-        return h('div', {}, [h('div', { class: 'lab', style: 'margin-bottom:8px', text: 'Each stat · own scale' }), h('div', { class: 'mult num' }, cells)]);
+        return h('div', {}, [h('div', { class: 'ct', style: 'margin-bottom:16px', text: 'Each stat · own scale' }), h('div', { class: 'mult num' }, cells)]);
     }
 
     /** One Torn day's gained and planned (core/planline.js dayNumbers), for the bars and "This week". */
@@ -13918,8 +14533,8 @@
         const done = days.filter((d) => d < today);
         const onPlan = days.filter((d, i) => d < today && nums[i].planned > 0 && nums[i].gained / nums[i].planned >= 0.95).length;
         return h('div', {}, [
-            h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [
-                h('span', {}, [t('lab', 'Gained against plan, each day'), done.length ? h('span', { class: 'muted', style: 'margin-left:10px;font-size:12px', text: onPlan + ' of ' + done.length + ' days on plan' }) : null]),
+            h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:16px' }, [
+                h('span', {}, [t('ct', 'Gained against plan, each day'), done.length ? h('span', { class: 'muted', style: 'margin-left:12px;font-size:13px', text: onPlan + ' of ' + done.length + ' days on plan' }) : null]),
                 h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--good)' }), 'on plan']), h('span', {}, [h('i', { style: 'background:var(--spd)' }), '75–95%']), h('span', {}, [h('i', { style: 'background:var(--bad)' }), 'under 75%']), h('span', {}, [h('i', { style: 'background:var(--line2)' }), 'today so far'])]),
             ]),
             planBars(pct, labels, { w: 1000, h: 110, partial: days.length - 1, label: 'Stats gained each day as a share of the plan' }),
@@ -13959,7 +14574,7 @@
             rows.length
                 ? h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Session' }), h('th', { text: 'Gym' }), h('th', { class: 'r', title: 'The gain formula on the trains you did, at the happy and stat of the read before them. It checks the formula, not the plan.', text: 'Formula says' }), h('th', { class: 'r', text: 'You got' }), h('th', { class: 'r', style: 'width:80px', text: 'Off by' })])]), h('tbody', {}, rows)])
                 : null,
-            h('p', { class: 'muted', style: rows.length ? 'margin:6px 0 0;font-size:12px' : 'margin:0', text: 'Only reads under two minutes apart with one stat trained and nothing taken in between (no drug, booster or refill, no happy reset): they check the gain maths, not your plan, so a session’s total here can be less than what you really gained. Your real gains are under “Your gains”.' + (ctx.gymLog ? ' Sessions marked “Torn log” are from Torn’s own log (your Full key): trains while Pumping Iron wasn’t open, e.g. on your phone.' : ' With a Full key (Settings), trains on your phone show here too, from Torn’s log.') }),
+            h('p', { class: 'muted', style: rows.length ? 'margin:6px 0 0;font-size:13px' : 'margin:0', text: 'Only reads under two minutes apart with one stat trained and nothing taken in between (no drug, booster or refill, no happy reset): they check the gain maths, not your plan, so a session’s total here can be less than what you really gained. Your real gains are under “Your gains”.' + (ctx.gymLog ? ' Sessions marked “Torn log” are from Torn’s own log (your Full key): trains while Pumping Iron wasn’t open, e.g. on your phone.' : ' With a Full key (Settings), trains on your phone show here too, from Torn’s log.') }),
         ]);
     }
 
@@ -14259,7 +14874,7 @@
         return h('div', {}, [
             head,
             h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [
-                h('span', { class: 'muted', style: 'font-size:12px', text: 'You: ' + fmtSigned(period.gained) + ' from ' + fmtInt(period.energy) + ' E and ' + fmtMoney(period.money) }),
+                h('span', { class: 'muted', style: 'font-size:13px', text: 'You: ' + fmtSigned(period.gained) + ' from ' + fmtInt(period.energy) + ' E and ' + fmtMoney(period.money) }),
                 h('span', { class: 'legend2' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), 'you']), h('span', {}, [h('i', { class: 'dash', style: 'color:var(--muted)' }), 'another plan'])]),
             ]),
             lineChart(series, { w: 1000, h: 180, left: 50, right: 150, yMin: lo - (hi - lo || hi * 0.01) * 0.08, yMax: hi + (hi - lo || hi * 0.01) * 0.08, grid: [lo, hi], xLabels: [[0, dayLabel(period.days[0].day)], [n, lastDay === today ? 'today' : dayLabel(lastDay)]], n: n + 1, label: 'Total stats: you against other plans with your energy' }),
@@ -14464,7 +15079,7 @@
                         return h('tr', {}, [
                             h('td', { class: 't', style: 'width:130px;white-space:nowrap', text: day(st.at) + ' ' + clock(st.at, settings) }),
                             h('td', {}, [h('b', { class: 'w', text: st.label }), st.note ? h('br') : null, st.note ? h('small', { class: 'muted', text: st.note }) : null]),
-                            h('td', { style: 'width:150px' }, [h('span', { class: k.length === 1 ? 's-' + k[0] : null, text: trainsText(st.trains) || '—' })]),
+                            h('td', { style: 'width:190px' }, [h('span', { class: k.length === 1 ? 's-' + k[0] : null, text: trainsText(st.trains) || '—' })]),
                             h('td', { class: 'r', style: 'width:110px', text: st.gain ? fmtSigned(st.gain) : '' }),
                         ]);
                     }),
@@ -14473,10 +15088,10 @@
         ]);
     }
 
-    /** Share bar against the target, "24.9% → 27.8%", what's left, and today's trains. */
+    /** Share bar against the target, "24.9% → 27.8%", what's left, and today's trains (none while stacking for a chain). */
     function youVsBuild(m, ctx = null) {
         const tot = {};
-        for (const st of m.steps) for (const [k, n] of Object.entries(st.trains || {})) tot[k] = (tot[k] || 0) + n;
+        for (const st of m.stacking ? [] : m.steps) for (const [k, n] of Object.entries(st.trains || {})) tot[k] = (tot[k] || 0) + n;
         const only = Object.keys(tot).length === 1 ? Object.keys(tot)[0] : null;
         const rows = m.statRows.map((r) => {
             const k = r.stat;
@@ -14543,7 +15158,7 @@
         const used = STATS.filter((k) => days.some((d) => d[k]));
         const legend = h('span', { class: 'legend2' }, used.map((k) => h('span', {}, [h('i', { style: 'background:' + STAT_COLOR[k] }), STAT_LABEL[k]])));
         return h('div', {}, [
-            h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('lab', fromPlan ? 'Next 7 days · what your plan gains a day (today: what is left)' : 'Next 7 days · stats gained a day'), legend]),
+            h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('ct', fromPlan ? 'Next 7 days · gained a day' : 'Next 7 days · stats gained a day'), legend]),
             stackBars(perDay, days.map((_, i) => DAYS[(start + i) % 7]), { w: 1000, h: 84, top: totals.map((v) => '+' + fmtShort(v)), label: 'Stats gained each of the next 7 days' }),
         ]);
     }
@@ -14596,9 +15211,75 @@
         ]);
     }
 
+    /*
+     * Stacking for a chain (round 7, the owner's pick in mockups/round7/home.html): a small card on top of the pane turns
+     * it on; Today then shows that training waits instead of the steps, and Resume re-plans at once (Re-plan's run, its
+     * light sweep included). The flag is stored for every tab (platform/store.js K.stacking); the model carries it as
+     * `m.stacking = {since}`.
+     */
+
+    /** "since 14:02", or "since Tue 14:02" when it began before today's Torn day. */
+    function sinceWords(since, now, settings) {
+        return (tornDayStart(since) < tornDayStart(now) ? DAY_NAMES[settings && settings.timeFormat === 'local' ? new Date(since).getDay() : new Date(since).getUTCDay()] + ' ' : '') + clock(since, settings);
+    }
+
+    /** Heads-up lines that ask you to train or to use energy (a strict step coming, the refill, boosters): held back while stacking. */
+    function trainingHead(x) {
+        const text = String((x && x.text) || '');
+        return /^In \d+ min: /.test(text) || text === 'Refill unused' || /^No candy today/.test(text) || /^No boosters before /.test(text);
+    }
+
+    /** The pane's first card: "Training · Stacking energy for a chain? [I'm stacking]", or since when and Resume. */
+    function chainCard(m, ctx) {
+        const st = m.stacking;
+        const busy = Boolean(m.planBusy);
+        return h('div', { class: 'chain' + (st ? ' on' : ''), 'data-chain': st ? 'on' : 'off' }, [
+            h('div', { class: 'chain-row' }, [
+                h('div', {}, [
+                    h('div', { class: 'chain-state', text: st ? 'Stacking since ' + sinceWords(st.since, m.now, ctx.settings) : 'Training' }),
+                    h('p', { text: st ? 'Resume re-plans from your bars right away.' : 'Stacking energy for a chain?' }),
+                ]),
+                st
+                    ? h('button', { class: 'btn primary', type: 'button', disabled: busy, title: 'Training steps come back and the plan is re-planned now, from your bars', onclick: () => ctx.resumeStacking && ctx.resumeStacking(), text: 'Resume' })
+                    : h('button', { class: 'btn', type: 'button', disabled: busy, title: 'No training steps and no Discord pings about energy or training until you resume', onclick: () => ctx.startStacking && ctx.startStacking(), text: 'I’m stacking' }),
+            ]),
+        ]);
+    }
+
+    /** Today while stacking: no steps, what waits, the energy kept, and Resume. */
+    function stackingBox(m, ctx) {
+        const e = m.strip.energy;
+        return h('div', { class: 'stackbox num', role: 'status' }, [
+            h('div', { class: 'big', text: 'Stacking for a chain' }),
+            h('ul', {}, [
+                h('li', {}, [h('b', { text: 'No training steps' }), ' until you resume']),
+                h('li', {}, [h('b', { text: 'No Discord pings' }), ' about energy or training']),
+                h('li', {}, ['Energy now ', h('b', { text: fmtInt(e.current) + ' / ' + fmtInt(e.max) }), ', kept for the chain']),
+            ]),
+            h('button', { class: 'btn primary', type: 'button', disabled: Boolean(m.planBusy), onclick: () => ctx.resumeStacking && ctx.resumeStacking(), text: 'Resume and re-plan' }),
+        ]);
+    }
+
+    /**
+     * Re-plan running (Resume starts it from here): the Plan card's bar with the owner's light sweep (2A; still with
+     * Settings › Animations off or the PC's reduce-motion). app.js planProgress moves it without a redraw.
+     */
+    function homeRun(m, ctx) {
+        const busy = m.planBusy;
+        if (!busy) {
+            const err = ctx.ui && ctx.ui.homeReplan && ctx.ui.planError;
+            return err ? h('p', { class: 'c-bad', style: 'margin:8px 0 0', text: err }) : null;
+        }
+        return h('div', { class: 'planrun', role: 'status', 'aria-live': 'polite' }, [
+            h('div', { class: 'dayline', role: 'progressbar', 'aria-label': busy.recalibrate ? 'Re-planning' : 'Working out your plan' }, [h('i', { 'data-plan-bar': '1', style: 'width:' + Math.round(100 * Math.max(0.02, busy.done || 0)) + '%' })]),
+            h('div', { class: 'row', style: 'justify-content:space-between;margin-top:6px' }, [h('span', { class: 'pc-sub num', 'data-plan-words': '1', text: planRunWords(busy) }), h('span', { class: 'muted', style: 'font-size:12px', text: 'Today’s steps follow your bars meanwhile' })]),
+        ]);
+    }
+
     function renderHome(m, ctx) {
         const s = ctx.settings;
         const now = m.now;
+        if (m.stacking) return renderStacking(m, ctx);
         const next = m.next;
         const late = next && next.kind === 'xanax' && m.strip.drug.left === 0;
         // "On plan" only while no step is waiting on you (the plan re-times, so a due step is the one sign of being behind).
@@ -14645,18 +15326,34 @@
         });
         const steps = rows.length
             ? h('table', { class: 'tbl num', style: 'margin-top:8px' }, [
-                  h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Step' }), h('th', { style: 'width:150px', text: 'Train' }), h('th', { class: 'r', style: 'width:110px', text: 'Gain' }), h('th', { class: 'r', style: 'width:110px', text: 'In' })])]),
+                  h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Step' }), h('th', { style: 'width:190px', text: 'Train' }), h('th', { class: 'r', style: 'width:110px', text: 'Gain' }), h('th', { class: 'r', style: 'width:110px', text: 'In' })])]),
                   h('tbody', {}, rows),
               ])
             : null;
         const foot = h('div', { class: 'row muted num', style: 'justify-content:space-between;margin-top:6px;font-size:12px;gap:12px;flex-wrap:wrap' }, [h('span', {}, ['So far ', h('b', { class: 'white', text: fmtSigned(m.gainedToday) }), ' of ' + fmtInt(plannedToday) + ' today']), h('span', { text: dayResetWords(m) + ' · ' + xanaxCdWords(m.xanaxCd) })]);
 
-        const lead = h('div', { class: 'lead' }, [head, nowBand, steps, foot]);
+        const lead = h('div', { class: 'lead' }, [head, homeRun(m, ctx), nowBand, steps, foot]);
         const week = weekChart(m, ctx);
         return {
             strip: true,
             main: [lead, nextDays(m, s), youVsBuild(m, ctx), week].filter(Boolean),
-            pane: [gainsCard(m), buyCard(m, ctx), h('div', {}, [sectionHead('Heads-up', null, null, 'h3'), headsList(m.heads.length ? m.heads : [{ tone: 'good', text: 'Nothing needs you' }], (tab) => ctx.go(tab))]), planLine(m, ctx), weekCard(m, ctx)],
+            pane: [chainCard(m, ctx), gainsCard(m), buyCard(m, ctx), headsCard(m, ctx), planLine(m, ctx), weekCard(m, ctx)],
+        };
+    }
+
+    function headsCard(m, ctx) {
+        const heads = m.stacking ? m.heads.filter((x) => !trainingHead(x)) : m.heads;
+        return h('div', {}, [sectionHead('Heads-up', null, null, 'h3'), headsList(heads.length ? heads : [{ tone: 'good', text: 'Nothing needs you' }], (tab) => ctx.go(tab))]);
+    }
+
+    /** Home while stacking for a chain: Today says training waits; no steps, no 48 h look-ahead, no training heads-up. */
+    function renderStacking(m, ctx) {
+        const head = sectionHead('Today', meta([dateLine(m.now) + ' · ', h('b', { style: 'color:var(--warn)', text: 'training paused' })]));
+        const lead = h('div', { class: 'lead' }, [head, stackingBox(m, ctx)]);
+        return {
+            strip: true,
+            main: [lead, youVsBuild(m, ctx), weekChart(m, ctx)].filter(Boolean),
+            pane: [chainCard(m, ctx), gainsCard(m), buyCard(m, ctx), headsCard(m, ctx), planLine(m, ctx), weekCard(m, ctx)],
         };
     }
 
@@ -14821,7 +15518,6 @@
                 ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.setPlan({ goal: null }), text: 'Back to the build' })
                 : h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.goalForm = !ctx.ui.goalForm; ctx.rerender(); }, text: '+ Stat numbers' }),
             !goal && m.nextGym && m.nextGym.gym ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.setPlan({ goal: { kind: 'unlockGym', gymId: m.nextGym.gym.id } }), text: '+ Unlock ' + m.nextGym.gym.name }) : null,
-            h('span', { class: 'muted', text: 'used by the next Create plan or Re-plan' }),
         ];
         const bar2 = [];
         const sp = m.special || {};
@@ -14840,6 +15536,8 @@
         }
         const bliss = m.pc && m.pc.perks.bliss;
         bar2.push(t('lab', 'Ignorance Is Bliss'), h('span', { class: 'tag' + (bliss ? ' good' : ''), text: bliss ? 'Active' + (m.pc.perks.blissDays ? ' · ' + m.pc.perks.blissDays + ' days' : '') : 'Not active' }), h('span', { class: 'info', title: 'Read from your perks: the book’s line shows while it is active (31 days). The plan counts it the day it shows.', text: 'i' }));
+        // The note for the whole bar sits at the right of the second line, so the first never wraps for it.
+        bar2.push(h('span', { class: 'muted', style: 'margin-left:auto', text: 'Used by the next Create plan or Re-plan' }));
         return [bar1, bar2];
     }
 
@@ -14904,7 +15602,7 @@
         const kids = [
             sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + money + ' · ' + days + ' days'])),
             h('div', { class: 'prime num' }, [
-                h('div', {}, [h('span', { class: 'pill-tag chalk', text: kindOf(rec.recommended) }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: planWhat(rec.recommended, best) }), best && best.candy && tierWords(best.candy.id) ? h('div', { class: 'd muted', style: 'margin-top:2px;font-size:12px', text: 'Candy: ' + tierWords(best.candy.id) + '; what you hold goes first' }) : null]),
+                h('div', {}, [h('span', { class: 'pill-tag chalk', text: kindOf(rec.recommended) }), h('span', { class: 'k', style: 'margin-left:8px', text: S.name }), h('div', { class: 'd', style: 'margin-top:6px', text: planWhat(rec.recommended, best) }), best && best.candy && tierWords(best.candy.id) ? h('div', { class: 'd muted', style: 'margin-top:2px;font-size:13px', text: 'Candy: ' + tierWords(best.candy.id) + '; what you hold goes first' }) : null]),
                 h('div', { class: 'figs' }, figs),
                 h('div', { class: 'why' }, [
                     'Wins because: ' + reasons + (autoOn && a && a.afford ? ' ' + a.afford : spend) + ' ',
@@ -15039,7 +15737,7 @@
                 }, [
                     h('td', {}, [h('small', { text: kindOf(a.id) })]),
                     h('td', {}, [h('b', { class: 'w', text: st.name }), current ? h('span', { class: 'tag chalk', style: 'margin-left:6px', text: 'current plan' }) : null, pending ? h('span', { class: 'tag warn', style: 'margin-left:6px', text: 'picked · see the warning' }) : null]),
-                    h('td', { class: 'muted', title: compare[a.id] && compare[a.id].candy ? tierWords(compare[a.id].candy.id) || null : null, text: planWhat(a.id, compare[a.id]) }),
+                    h('td', { class: 'muted second', title: compare[a.id] && compare[a.id].candy ? tierWords(compare[a.id].candy.id) || null : null, text: planWhat(a.id, compare[a.id]) }),
                     h('td', { class: 'r' }, ['+' + fmtShort(a.gained), h('br'), h('span', { class: a.deltaStatsPct >= 0 ? 'c-good' : 'c-bad', style: 'white-space:nowrap', text: fmtPct(a.deltaStatsPct) })]),
                     h('td', { class: 'r' }, [fmtMoney(a.cost), h('br'), h('span', { class: a.deltaCost > 0 ? 'c-bad' : 'c-good', style: 'white-space:nowrap', text: (a.deltaCost >= 0 ? '+' : '−') + fmtMoney(Math.abs(a.deltaCost)) })]),
                     h('td', { class: 'r', text: a.cost > 0 ? chartNum(a.perM) : '—' }),
@@ -15055,7 +15753,7 @@
                 h('tr', { class: 'whatif' }, [
                     h('td', {}, [h('small', { text: 'Book' })]),
                     h('td', {}, [h('b', { class: 'w', text: st.name === 'Steady with Bliss' ? st.name : st.name + ' with Bliss' }), ' ', h('span', { class: 'tag', text: 'what-if' })]),
-                    h('td', { text: planWhat(w.id, w) }),
+                    h('td', { class: 'second', text: planWhat(w.id, w) }),
                     h('td', { class: 'r', text: fmtPct(d) }),
                     h('td', { class: 'r', text: (w.cost - best.cost >= 0 ? '+' : '−') + fmtMoney(Math.abs(w.cost - best.cost)) }),
                     h('td', { class: 'r', text: chartNum(perMillion(w)) }),
@@ -15071,7 +15769,7 @@
                 h('tr', { class: 'whatif job' }, [
                     h('td', {}, [h('small', { text: 'Job' })]),
                     h('td', {}, [h('b', { class: 'w', text: w.title }), ' ', h('span', { class: 'tag', text: 'what-if' })]),
-                    h('td', { text: planWhat(w.strategy, r) }),
+                    h('td', { class: 'second', text: planWhat(w.strategy, r) }),
                     h('td', { class: 'r', text: fmtPct(d) }),
                     h('td', { class: 'r', text: (r.cost - best.cost >= 0 ? '+' : '−') + fmtMoney(Math.abs(r.cost - best.cost)) }),
                     h('td', { class: 'r', text: r.cost > 0 ? chartNum(perMillion(r)) : '—' }),
@@ -15088,7 +15786,7 @@
         return h('div', {}, [
             sectionHead('Other plans', meta(['against ' + STRATEGIES[rec.recommended].short.toLowerCase() + ' · click a row to pick it']), tick),
             h('table', { class: 'tbl num' }, [
-                h('thead', {}, [h('tr', {}, [h('th', { style: 'width:52px', text: 'Kind' }), h('th', { style: 'width:190px', text: 'Plan' }), h('th', { style: 'width:230px', text: 'What you do' }), h('th', { class: 'r', style: 'width:76px', title: 'Stats gained over the ' + days + ' days, and the difference from the recommended plan', text: 'Stats' }), h('th', { class: 'r', style: 'width:88px', title: 'What it costs over the ' + days + ' days, and the difference from the recommended plan', text: 'Cost' }), h('th', { class: 'r', style: 'width:70px', title: 'Stats gained for each $1M spent over the ' + days + ' days', text: 'Per $1M' }), h('th', { text: 'Why it isn’t the pick' })])]),
+                h('thead', {}, [h('tr', {}, [h('th', { style: 'width:60px', text: 'Kind' }), h('th', { style: 'width:150px', text: 'Plan' }), h('th', { style: 'width:180px', text: 'What you do' }), h('th', { class: 'r', style: 'width:76px', title: 'Stats gained over the ' + days + ' days, and the difference from the recommended plan', text: 'Stats' }), h('th', { class: 'r', style: 'width:88px', title: 'What it costs over the ' + days + ' days, and the difference from the recommended plan', text: 'Cost' }), h('th', { class: 'r', style: 'width:68px', title: 'Stats gained for each $1M spent over the ' + days + ' days', text: 'Per $1M' }), h('th', { text: 'Why it isn’t the pick' })])]),
                 h('tbody', {}, rows.length ? rows : [h('tr', {}, [h('td', { colspan: '7', class: 'muted', text: 'No other plan fits you.' })])]),
             ]),
             note,
@@ -15227,7 +15925,7 @@
             h('div', { class: 'dayline', role: 'progressbar', 'aria-label': busy.recalibrate ? 'Re-planning' : 'Working out your plan' }, [h('i', { 'data-plan-bar': '1', style: 'width:' + Math.round(100 * Math.max(0.02, busy.done || 0)) + '%' })]),
             h('div', { class: 'row', style: 'justify-content:space-between;margin-top:6px' }, [
                 h('span', { class: 'pc-sub num', 'data-plan-words': '1', text: planRunWords(busy) }),
-                h('span', { class: 'row', style: 'gap:10px' }, [h('span', { class: 'muted', style: 'font-size:12px', text: 'You can keep using the page, or leave it: your plan stays as it is until this is done.' }), h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.cancelPlan && ctx.cancelPlan(), text: 'Cancel' })]),
+                h('span', { class: 'row', style: 'gap:10px' }, [h('span', { class: 'muted', style: 'font-size:13px', text: 'You can keep using the page, or leave it: your plan stays as it is until this is done.' }), h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.cancelPlan && ctx.cancelPlan(), text: 'Cancel' })]),
             ]),
         ]);
     }
@@ -16668,7 +17366,7 @@
                 ]),
                 unlocked
                     ? h('div', { class: 'row' }, [h('button', { class: 'btn sm primary', type: 'button', onclick: () => { ctx.ui.devPage = true; ctx.rerender(); }, text: 'Open the Developer page' }), h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.dev.setUnlocked(false); ctx.rerender(); }, text: 'Lock' })])
-                    : h('div', { class: 'row', style: 'flex-wrap:wrap' }, [keyIn, h('button', { class: 'btn sm', type: 'button', onclick: unlock, text: 'Unlock' }), h('span', { class: 'muted', style: 'font-size:12px', text: 'For the owner only: what it learned (graphs, plain words), import a friend’s export, and the raw details.' }), msg]),
+                    : h('div', { class: 'row', style: 'flex-wrap:wrap' }, [keyIn, h('button', { class: 'btn sm', type: 'button', onclick: unlock, text: 'Unlock' }), h('span', { class: 'muted', style: 'font-size:13px', text: 'For the owner only: what it learned (graphs, plain words), import a friend’s export, and the raw details.' }), msg]),
             ]),
         ]);
     }
@@ -16859,7 +17557,7 @@
             h('div', {}, [
                 h('details', { class: 'dis' }, [
                     h('summary', { text: 'Raw for Claude · accept log, scores, storage' }),
-                    h('pre', { style: 'white-space:pre-wrap;font-size:11px;color:var(--muted);margin:8px 0 0' }, [
+                    h('pre', { style: 'white-space:pre-wrap;font-size:12px;color:var(--muted);margin:8px 0 0' }, [
                         log.slice(-12).map((r) => new Date(r.at).toISOString().slice(0, 16) + ' gym ' + (r.gym.candidates || []).map((c) => c.mode + ' ' + (c.error === null ? '—' : c.error.toFixed(2) + '%')).join(' / ') + ' · held-out ' + (r.gym.heldOut.current === null ? '—' : r.gym.heldOut.current.toFixed(2) + '% → ' + r.gym.heldOut.learned.toFixed(2) + '%') + ' · ' + (r.gym.accepted ? 'ACCEPT' : 'keep') + ' · eye ' + (r.fights.accepted ? 'ACCEPT' : 'keep') + ' (' + r.fights.fights + ')').join('\n') || 'no learning runs yet',
                         '\n\nstorage: ' + Object.entries(sizes).map(([k, v]) => k + ' ' + fmtInt(v) + ' B').join(' · '),
                     ]),
@@ -16959,7 +17657,7 @@
                 h('p', { text: 'Found a bug, or something slow? Say what happened, add screenshots, and download one .zip to send. It also holds the problem log (what failed, what you clicked just before, how long each plan took) and your stats, gym log and saved plan, so the cause is found without guessing. Nothing is sent anywhere by this page.' }),
                 h('label', { class: 'field' }, [h('span', { class: 'lab', text: 'What happened?' }), happened]),
                 h('label', { class: 'field' }, [h('span', { class: 'lab', text: 'What did you expect?' }), expected]),
-                h('div', { class: 'row', style: 'flex-wrap:wrap' }, [h('button', { class: 'btn sm', type: 'button', onclick: () => file.click(), text: 'Add screenshots' }), h('span', { class: 'muted', style: 'font-size:12px', text: 'Win + Shift + S takes one; save it, then add it here.' }), file]),
+                h('div', { class: 'row', style: 'flex-wrap:wrap' }, [h('button', { class: 'btn sm', type: 'button', onclick: () => file.click(), text: 'Add screenshots' }), h('span', { class: 'muted', style: 'font-size:13px', text: 'Win + Shift + S takes one; save it, then add it here.' }), file]),
                 shots.length ? h('div', { class: 'shots' }, shots) : null,
                 h('div', {}, [h('span', { class: 'lab', text: 'What goes in the zip' }), h('ul', { class: 'incl' }, includes.map((x) => h('li', { text: x })))]),
                 h('div', { class: 'row', style: 'flex-wrap:wrap' }, [
@@ -16982,11 +17680,10 @@
     /*
      * Settings (mockups/round3/X-settings.html): keys and data, ordered by use,
      * each key with Torn's ToS table where it is entered. Discord folds to one
-     * line once it works; Torn Eye's colour bands live here; Developer (export
+     * line once it works (Torn Eye's bands are fixed, round 7: no setting); Developer (export
      * learning data for everyone, the developer key unlocks the rest);
      * Diagnostics against Torn Trading's limits (the two take turns).
      */
-
 
 
 
@@ -17080,27 +17777,6 @@
 
     function stateTag(tone, text) {
         return h('span', { class: 'state ' + tone }, [h('i'), text]);
-    }
-
-    /**
-     * Keep the colour bands in order after an edit: Stomp ≥ Good ≥ Tough (win),
-     * Stomp ≥ Good (HP kept). The band just edited wins; its neighbours move.
-     */
-    function orderedBands(l, edited = null) {
-        const b = { stomp: { ...l.stomp }, good: { ...l.good }, tough: { ...l.tough } };
-        if (edited === 'stomp') {
-            b.good.win = Math.min(b.good.win, b.stomp.win);
-            b.good.keep = Math.min(b.good.keep, b.stomp.keep);
-            b.tough.win = Math.min(b.tough.win, b.good.win);
-        } else if (edited === 'tough') {
-            b.good.win = Math.max(b.good.win, b.tough.win);
-            b.stomp.win = Math.max(b.stomp.win, b.good.win);
-        } else {
-            b.stomp.win = Math.max(b.stomp.win, b.good.win);
-            b.stomp.keep = Math.max(b.stomp.keep, b.good.keep);
-            b.tough.win = Math.min(b.tough.win, b.good.win);
-        }
-        return { ...l, ...b };
     }
 
     /** A button that deletes asks once more ("Sure? Forget keys") for 5 seconds; a second click does it. */
@@ -17358,28 +18034,12 @@
             h('details', { class: 'dis', open: !fk.has }, [h('summary', { text: 'How this key is used' }), tosTable(TOS_FULL)]),
         ]);
 
-        // Torn Eye's colour bands (moved here from the Torn Eye pane).
-        const limits = { ...DEFAULT_BAND_LIMITS, ...(s.bands || {}) };
-        const bandCell = (band) => h('span', { class: 'band2' }, [h('i', { style: 'background:' + BAND_COLORS[band] }), BAND_WORDS[band]]);
-        const bandInput = (band, key) => h('input', { class: 'inp num', style: 'width:52px', inputmode: 'numeric', value: String(limits[band][key]), 'aria-label': BAND_WORDS[band] + ' ' + key, onchange: (ev) => { const v = Math.max(0, Math.min(100, Number(ev.target.value) || 0)); ctx.setSettings({ bands: orderedBands({ ...limits, [band]: { ...limits[band], [key]: v } }, band) }); } });
-        const bandsSec = settingsSection('Torn Eye colours', h('span', { class: 'state off', text: 'your limits' }), [
-            h('table', { class: 'tbl num', style: 'max-width:520px' }, [
-                h('thead', {}, [h('tr', {}, [h('th', { text: 'Band' }), h('th', { text: 'Win at least' }), h('th', { text: 'Keep HP at least' })])]),
-                h('tbody', {}, [
-                    h('tr', {}, [h('td', {}, [bandCell('stomp')]), h('td', {}, [bandInput('stomp', 'win'), ' %']), h('td', {}, [bandInput('stomp', 'keep'), ' %'])]),
-                    h('tr', {}, [h('td', {}, [bandCell('good')]), h('td', {}, [bandInput('good', 'win'), ' %']), h('td', {}, [bandInput('good', 'keep'), ' %'])]),
-                    h('tr', {}, [h('td', {}, [bandCell('tough')]), h('td', {}, [bandInput('tough', 'win'), ' %']), h('td', { class: 'muted', text: '—' })]),
-                    h('tr', {}, [h('td', {}, [bandCell('cant')]), h('td', { class: 'muted', colspan: '2', text: 'below that' })]),
-                ]),
-            ]),
-        ]);
-
         const overlaySec = settingsSection('On Torn’s pages', null, [
             h('div', { class: 'opts' }, [settingsCheck('Panel on every page', s.pill, (v) => ctx.setSettings({ pill: v })), settingsCheck('Marks on the gym page', s.gymMarks, (v) => ctx.setSettings({ gymMarks: v })), settingsCheck('Marks on items and markets', s.marketMarks, (v) => ctx.setSettings({ marketMarks: v })), settingsCheck('Torn Eye chips', s.eyeChips, (v) => ctx.setSettings({ eyeChips: v }))]),
             h('p', { class: 'num' }, ['Expand or collapse the panel: ', h('b', { class: 'white', text: 'Alt+`' }), ' · drag it by its bar; it stays in the empty margin beside Torn’s page, left of it first, so NPC Arbitrage keeps the right.']),
             h('div', { class: 'opts' }, [settingsCheck('Bazaar prices from TornW3B', s.w3b !== false, (v) => ctx.setSettings({ w3b: v })), settingsCheck('Animations', s.motion !== false, (v) => ctx.setSettings({ motion: v }))]),
             h('p', {}, ['Bazaar prices come from ', h('a', { href: W3B_SITE_URL, target: '_blank', rel: 'noopener', text: 'TornW3B' }), ' (item ids only, never a key; ', h('a', { href: W3B_TERMS_URL, target: '_blank', rel: 'noopener', text: 'their terms' }), '). Off: Item Market and points market only.']),
-            h('p', {}, [h('b', { class: 'white', text: 'Pumping Iron pauses while Torn Trading (NPC Arbitrage / Torn Bids) runs' }), ': the two never share Torn’s API limit or mark the same pages. While paused it asks Torn nothing, draws nothing on Torn’s pages and shows a warning sign; it starts again by itself within a minute of Torn Trading being turned off.']),
+            h('p', {}, [h('b', { class: 'white', text: 'Pumping Iron pauses while Torn Trading (NPC Arbitrage / Torn Bids) runs' }), ': the two never share Torn’s API limit or mark the same pages. While paused it asks Torn nothing, draws nothing on Torn’s pages and shows a warning sign; it starts again by itself about 2 minutes after the last tab running Torn Trading is reloaded or closed.']),
         ]);
 
         const displaySec = settingsSection('Display', null, [
@@ -17405,7 +18065,7 @@
             h('div', {}, [sectionHead('What it never does', null, null, 'h3'), headsList([{ tone: 'plain', text: 'Train, buy, use or attack', sub: 'Fill only types a number' }, { tone: 'plain', text: 'Load a Torn page by itself' }, { tone: 'plain', text: 'Ping from a Torn tab', sub: 'only your Discord service does' }])]),
         ];
         // One card per section, ordered by use.
-        return { main: [tornSec, fullSec, discordSec, ffsSec, tsSec, bandsSec, overlaySec, displaySec, reportSec, devSec].filter(Boolean), pane };
+        return { main: [tornSec, fullSec, discordSec, ffsSec, tsSec, overlaySec, displaySec, reportSec, devSec].filter(Boolean), pane };
     }
 
     /* ===== src/ui/app/app.js ===== */
@@ -17437,7 +18097,9 @@
 
     const RENDERERS = { home: renderHome, plan: renderPlan, buy: renderBuy, progress: renderProgress, settings: renderSettings };
 
-    const FONT_URL = 'https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&display=swap';
+    // Round 7 type pass: Source Serif 4 for titles and the one big number, Inter for the rest (webpage only; torn.com uses Segoe UI).
+    // Loaded into the document: @font-face rules there reach the app's shadow root.
+    const FONT_URL = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,600&display=swap';
 
     /** The warning while Torn Trading runs (Z-paused). */
     function pausedBanner(m, settings) {
@@ -17448,7 +18110,7 @@
                 text:
                     'No Torn calls while it runs' +
                     (at ? ', so this is your plan as of ' + clock(at, settings) + ' and it keeps moving on the clock' : '') +
-                    '. Turn Torn Trading off (or close its Torn Bids tab) and Pumping Iron reads Torn again by itself within a minute; whatever changed meanwhile shows as one catch-up entry in Progress.',
+                    '. Turn Torn Trading off (or close its Torn Bids tab) and Pumping Iron reads Torn again by itself about 2 minutes later (tabs opened before still run it: reload them); whatever changed meanwhile shows as one catch-up entry in Progress.',
             }),
         ]);
     }
@@ -17959,9 +18621,11 @@
      * other slices of that level band are skipped: they'd be the same list.
      *
      * Then the owner's hard rule: every candidate goes through our fight model
-     * and only players you beat (Stomp, Good or Tough) are ever stored. The
-     * list is sorted by the most respect you can win.
+     * and only players you beat keeping half your HP or more (Stomp, Good or
+     * Fair, round 7) are ever stored. One order everywhere: most respect, then
+     * most HP kept, then the highest win.
      */
+
 
 
 
@@ -17970,8 +18634,14 @@
     /** The full range: no respect cap (owner). Torn caps fair fight at 3. */
     const TARGET_FF = { min: 1.0, max: 3.0 };
 
-    /** Bumped when the way lists are asked changes: an older stored list is asked again once. */
-    const TARGETS_VERSION = 2;
+    /** Bumped when the way lists are asked or judged changes: an older stored list is asked again once (3: round 7's bands). */
+    const TARGETS_VERSION = 3;
+
+    /** What the list is asked with (round 7: the Level range and the Show ticks are gone; inactive players, any faction). */
+    const TARGET_LOAD = { minLevel: 1, maxLevel: 100, inactiveOnly: 1, factionless: null };
+
+    /** [calibrate] The list is asked again by itself when the Torn Eye tab is open and the stored one is this old (no Refresh button). */
+    const TARGETS_REFRESH_MS = 6 * 60 * 60 * 1000;
 
     const FF_SLICES = [
         [1.0, 1.5],
@@ -17986,10 +18656,11 @@
     /** An estimate older than this is marked "old". */
     const OLD_ESTIMATE_DAYS = 180;
 
-    const BEATABLE = ['stomp', 'good', 'tough'];
+    /** Only these are ever listed or pinged (round 7: HP kept 50% or more over the fights you win). */
+    const BEATABLE = ['stomp', 'good', 'fair'];
 
     function isBeatable(band) {
-        return BEATABLE.includes(band);
+        return isListedBand(band);
     }
 
     /** [calibrate] Max life from level when no profile was read: Torn's base plus typical merits and perks. */
@@ -18051,20 +18722,29 @@
         return !Number.isFinite(ff) || (ff >= TARGET_FF.min && ff <= TARGET_FF.max);
     }
 
-    /** Most respect first; then the surer win. */
+    /**
+     * Respect as the row shows it (two decimals), in hundredths: the order compares what is on screen, so two rows that
+     * both read "3.00" fall to HP kept, not to a third decimal nobody sees.
+     */
+    function shownRespect(respect) {
+        return Math.round((Number(respect) || 0) * 100);
+    }
+
+    /** The one order (round 7, the owner): most respect, then most HP kept, then the highest win. Rows {respect, keep, win} (0–100). */
     function byRespect(a, b) {
-        return (b.respect || 0) - (a.respect || 0) || (b.win ?? -1) - (a.win ?? -1);
+        const pc = (v) => (Number.isFinite(v) ? Math.round(v) : -1);
+        return shownRespect(b.respect) - shownRespect(a.respect) || pc(b.keep) - pc(a.keep) || pc(b.win) - pc(a.win);
     }
 
     /**
      * The hard rule: judge every candidate, keep only the ones you beat.
      * @param {object[]} rows - merged list rows
      * @param {function} judge - row => {band, win (0–100), keep (0–100|null), respect, ours (fair fight), source, ageDays} | null
-     * @returns {{kept: object[], dropped: {cant, none, range}}}
+     * @returns {{kept: object[], dropped: {low, none, range}}} low: you'd keep under 50% HP (or never win)
      */
     function selectTargets(rows, judge) {
         const kept = [];
-        const dropped = { cant: 0, none: 0, range: 0 };
+        const dropped = { low: 0, none: 0, range: 0 };
         for (const r of rows || []) {
             if (!inFfRange(r)) {
                 dropped.range++;
@@ -18072,7 +18752,7 @@
             }
             const j = judge(r);
             if (!j || !j.band || j.band === 'none') dropped.none++;
-            else if (!isBeatable(j.band)) dropped.cant++;
+            else if (!isBeatable(j.band)) dropped.low++;
             else kept.push({ ...r, ...j });
         }
         kept.sort(byRespect);
@@ -18095,15 +18775,15 @@
 
     /**
      * A plain judge (no cache, no gear, no learner): the tests' and a fallback.
-     * @param {object} o - {me: {str,spd,def,dex}, myLife, row, ffs (normalizeFfsRow), limits, now}
+     * @param {object} o - {me: {str,spd,def,dex}, myLife, row, ffs (normalizeFfsRow), now}
      */
-    function judgeTarget({ me, myLife = 7500, row, ffs = null, limits = undefined, now = Date.now() }) {
+    function judgeTarget({ me, myLife = 7500, row, ffs = null, now = Date.now() }) {
         const est = estimatePlayer({ me, ffs: ffs || listRowAsFfs(row, now), now });
         if (!est) return null;
         const f = forecast({ me: { ...me, life: myLife }, target: { id: row.playerId, life: lifeFromLevel(row.level), bss: est.bss } });
         const ours = fairFight(est.bss, bssOf(me));
         return {
-            band: bandOf(f, limits),
+            band: bandOf(f),
             win: Math.round(f.pWin * 100),
             keep: f.keep === null ? null : Math.round(f.keep * 100),
             respect: row.level ? respectFor(row.level, ours) : null,
@@ -18130,6 +18810,117 @@
         };
     }
 
+    /* ------------------------------------------------ round 7: where a target is, from what was already read */
+
+    /**
+     * A status read is believed this long; a hospital stay until its own time, a flight until it lands. 25 min (round 7,
+     * was 15): one pass over 600 targets at 30 a minute takes 20 min, so a row read in the last pass is still known when
+     * the next one reaches it.
+     */
+    const STATUS_FRESH_MS = 25 * 60 * 1000;
+
+    /**
+     * Where a player is, from reads already made, or null when nothing fresh is known. A stored target has no status of
+     * its own (FFScouter's list carries none, and the list asks Torn about nobody), so a player abroad read as "Okay".
+     * This joins what other reads left behind (the watch list, the war list, a profile, a flight first seen): the
+     * newest wins, and one too old to trust is dropped.
+     * @param {{status: object, at: number}[]} reads - Torn's {state, description, until (s)} and when it was read (ms)
+     * @param {object} [o] - {flight: {desc, at} from the flights seen, now}
+     * @returns {{status, at, state: 'okay'|'hospital'|'travel'|'jail'|'fallen'}|null}
+     */
+    function knownStatus(reads, { flight = null, now = Date.now() } = {}) {
+        const all = (reads || []).filter((r) => r && r.status && r.at > 0);
+        if (flight && flight.desc && flight.at > 0) all.push({ status: { state: /^in /i.test(flight.desc) ? 'Abroad' : 'Traveling', description: flight.desc }, at: flight.at });
+        if (!all.length) return null;
+        const r = all.reduce((a, b) => (b.at > a.at ? b : a));
+        const m = { status: r.status };
+        const st = memberState(m);
+        const fresh = now - r.at < STATUS_FRESH_MS;
+        if (st === 'hospital') {
+            const until = Number(r.status.until) > 0 ? Number(r.status.until) * 1000 : null;
+            if (until ? until <= now : !fresh) return null;
+            return { status: r.status, at: r.at, state: 'hospital' };
+        }
+        if (st === 'traveling') {
+            const tr = travelOf(m);
+            const lands = tr && tr.minutes ? r.at + tr.minutes * 60000 : null;
+            if (!fresh && !(lands && lands > now)) return null;
+            return { status: r.status, at: r.at, state: 'travel' };
+        }
+        // Jail like hospital (round 7 review): until its own out-time, and no longer once that has passed.
+        if (st === 'jail') {
+            const until = Number(r.status.until) > 0 ? Number(r.status.until) * 1000 : null;
+            if (until ? until <= now : !fresh) return null;
+            return { status: r.status, at: r.at, state: 'jail' };
+        }
+        if (!fresh) return null;
+        return { status: r.status, at: r.at, state: st === 'abroad' ? 'travel' : st };
+    }
+
+    /**
+     * One stored target's status, from the reads already made (round 7 review):
+     *   - `status`: the newest one still worth believing (knownStatus), or null;
+     *   - `statusAt`: when the player was last read, by anything. The scheduler asks again STATUS_REFRESH_MS after it, a
+     *     hospital stay included (a player revived early is seen within 10 minutes, not at the stay's end);
+     *   - `hospitalUntil`: FFScouter's out-time from the list, only while no read is newer than the list. The list can be
+     *     6 hours old: a player revived since and read "Okay" was still shown in hospital and hidden by "Ready now".
+     * @param {{status, at}[]} reads - Torn's statuses and when each was read (ms); nulls are skipped
+     * @param {object} o - {listAt: when the list was asked (ms), hospitalUntil: the list's out-time (ms), flight, now}
+     * @returns {{status: object|null, statusAt: number, hospitalUntil: number|null}}
+     */
+    function targetStatus(reads, { listAt = 0, hospitalUntil = null, flight = null, now = Date.now() } = {}) {
+        const real = (reads || []).filter((r) => r && r.status && r.at > 0);
+        const statusAt = real.reduce((a, r) => Math.max(a, r.at), 0);
+        const known = knownStatus(real, { flight, now });
+        const fromList = Number(hospitalUntil) > 0 && !(statusAt > (Number(listAt) || 0)) ? Number(hospitalUntil) : null;
+        return { status: known ? known.status : null, statusAt, hospitalUntil: fromList };
+    }
+
+    /* ------------------------------------------------ round 7: a player you just hit */
+
+    /** Results of your own attack that leave the other player in hospital. */
+    const HIT_RESULTS = ['Hospitalized', 'Attacked', 'Mugged'];
+
+    /**
+     * [calibrate] A player you beat is greyed this long. Torn's hospital times vary with the hit and aren't in the
+     * attack row; the next list load brings the real out-time (FFScouter's `hospital_until`).
+     */
+    const OWN_HIT_MS = 60 * 60 * 1000;
+
+    /** Your attacks are read hourly: until the next read, an attack page you opened this recently marks the row. */
+    const ATTACK_OPENED_MS = 10 * 60 * 1000;
+
+    /**
+     * Who you hit lately, with no call: from your attacks (read hourly) and, until that read, from the attack pages you
+     * opened (Torn Eye notes each one for its fight learner).
+     * @param {object[]} attacks - myAttacks rows {def, ended (s), result}
+     * @param {object[]} predictions - {def, at (ms)}
+     * @returns {Map<number, {kind: 'hit'|'opened', at, result}>}
+     */
+    function ownHits(attacks, predictions, now = Date.now()) {
+        const out = new Map();
+        for (const p of predictions || []) {
+            const id = Number(p && p.def);
+            if (!(id > 0) || !(now - p.at < ATTACK_OPENED_MS) || p.at > now) continue;
+            if (!out.has(id) || out.get(id).at < p.at) out.set(id, { kind: 'opened', at: p.at, result: null });
+        }
+        for (const a of attacks || []) {
+            const id = Number(a && a.def);
+            const at = (Number(a && a.ended) || 0) * 1000;
+            if (!(id > 0) || !HIT_RESULTS.includes(a.result) || !(now - at < OWN_HIT_MS)) continue;
+            const cur = out.get(id);
+            if (!cur || cur.kind !== 'hit' || cur.at < at) out.set(id, { kind: 'hit', at, result: a.result });
+        }
+        return out;
+    }
+
+    /** "You hospitalized them 12 min ago", "Attack opened 4 min ago". */
+    function hitText(hit, now = Date.now()) {
+        const min = Math.max(1, Math.round((now - hit.at) / 60000));
+        if (hit.kind === 'opened') return 'Attack opened ' + min + ' min ago';
+        return 'You ' + (hit.result === 'Hospitalized' ? 'hospitalized' : hit.result === 'Mugged' ? 'mugged' : 'beat') + ' them ' + min + ' min ago';
+    }
+
     /**
      * What to say instead of an empty table ("press Refresh" said nothing).
      * @returns {{kind:'paused'|'dead'|'wait'|'error'|'loading'|'empty'|'none', text}}
@@ -18143,11 +18934,183 @@
         if (stored && !(stored.list || []).length) {
             const d = stored.dropped || {};
             const parts = [];
-            if (d.cant) parts.push(d.cant + ' can’t-win dropped');
+            if (d.low) parts.push(d.low + ' under 50% HP kept dropped');
             if (d.none) parts.push(d.none + ' with no estimate');
             return { kind: 'empty', text: 'FFScouter found nobody you can beat in range' + (parts.length ? ' · ' + parts.join(' · ') : '') };
         }
         return { kind: 'none', text: stored ? '' : 'No targets yet.' };
+    }
+
+    /* ------------------------------------------------ round 7: the list (mockups/round7/torn-eye-targets.html) */
+
+    /** Rows a page; only these are built (round 7: 300 rows drawn at once held the click up). */
+    const PAGE_SIZE = 20;
+
+    /** The band chips, in order. */
+    const BAND_CHIPS = ['all', 'stomp', 'good', 'fair'];
+
+    /** The one order on the rows the tab draws (forecast 0..1): most respect, then most HP kept, then the highest win. */
+    function byOrder(a, b) {
+        // Compared as the row shows them (respect to 2 decimals, HP kept and win in whole percents), so the tie-breaks apply.
+        const k = (r) => (r.forecast && Number.isFinite(r.forecast.keep) ? Math.round(r.forecast.keep * 100) : -1);
+        const w = (r) => (r.forecast && Number.isFinite(r.forecast.pWin) ? Math.round(r.forecast.pWin * 100) : -1);
+        return shownRespect(b.respect) - shownRespect(a.respect) || k(b) - k(a) || w(b) - w(a);
+    }
+
+    /** A hospital or jail read whose own out-time has passed: they are out (or about to be), so it says nothing now. */
+    function statusOver(status, now = Date.now()) {
+        const st = status || {};
+        const s = String(st.state || st.description || '').toLowerCase();
+        return (s.includes('hospital') || s.includes('jail')) && Number(st.until) > 0 && Number(st.until) * 1000 <= now;
+    }
+
+    /**
+     * Where a target row is, from what is known: 'hospital' (FFScouter's out-time, a read, or your own hit in the last
+     * hour), 'travel' (flying or abroad), 'jail', 'okay', 'other', or 'unknown' when nothing fresh was read.
+     */
+    function rowState(r, now = Date.now()) {
+        const st = (r && r.status) || {};
+        const s = statusOver(st, now) ? '' : String(st.state || st.description || '').toLowerCase();
+        if ((r.hospitalUntil && r.hospitalUntil > now) || s.includes('hospital') || (r.hit && r.hit.kind === 'hit')) return 'hospital';
+        if (s.includes('travel') || s.includes('abroad') || s.startsWith('in ')) return 'travel';
+        if (s.includes('jail') || s.includes('federal')) return 'jail';
+        return s ? (s.includes('okay') ? 'okay' : 'other') : 'unknown';
+    }
+
+    /** "Ready now" hides these: in hospital (or hit by you in the last hour), flying or abroad, in jail. Unknown stays. */
+    function isReadyNow(r, now = Date.now()) {
+        const s = rowState(r, now);
+        return !(s === 'hospital' || s === 'travel' || s === 'jail');
+    }
+
+    /**
+     * The Targets view's rows: only listed bands (the hard rule, whatever was stored), the band chip, "Ready now", the one
+     * order. Counts per chip are of every listed row (before "Ready now"); `hidden` is what "Ready now" took out.
+     * @param {object[]} rows - {band, respect, forecast, status, hospitalUntil, hit}
+     * @param {object} o - {band: 'all'|'stomp'|'good'|'fair', ready: boolean, now}
+     * @returns {{rows: object[], counts: {all, stomp, good, fair}, hidden: number}}
+     */
+    function listTargets(rows, { band = 'all', ready = true, now = Date.now() } = {}) {
+        const listed = (rows || []).filter((r) => r && isBeatable(r.band));
+        const counts = { all: listed.length, stomp: 0, good: 0, fair: 0 };
+        for (const r of listed) counts[r.band]++;
+        const inBand = BAND_CHIPS.includes(band) && band !== 'all' ? listed.filter((r) => r.band === band) : listed;
+        const out = ready ? inBand.filter((r) => isReadyNow(r, now)) : inBand;
+        return { rows: [...out].sort(byOrder), counts, hidden: inBand.length - out.length };
+    }
+
+    /** One page of rows: {rows, page (0-based, clamped), pages, from, to (1-based, for "21–40")}. */
+    function pageOf(rows, page = 0, per = PAGE_SIZE) {
+        const n = (rows || []).length;
+        const pages = Math.max(1, Math.ceil(n / per));
+        const p = Math.max(0, Math.min(pages - 1, Math.floor(Number(page) || 0)));
+        const slice = (rows || []).slice(p * per, p * per + per);
+        return { rows: slice, page: p, pages, from: n ? p * per + 1 : 0, to: p * per + slice.length };
+    }
+
+    /** The pager's numbers: the first three, the last two, the ones next to this page, '…' between (0-based). */
+    function pagerItems(page, pages) {
+        const out = [];
+        for (let p = 0; p < pages; p++) {
+            if (p < 3 || p > pages - 3 || Math.abs(p - page) <= 1) out.push(p);
+            else if (out[out.length - 1] !== '…') out.push('…');
+        }
+        return out;
+    }
+
+    /* ------------------------------------------------ round 7: statuses the Torn Trading way (its updateSellPresence) */
+
+    /** Each player is asked again after this (Torn Trading's SELL_PRESENCE_REFRESH_MS). */
+    const STATUS_REFRESH_MS = 10 * 60 * 1000;
+    /** The player you opened to attack: again after this (Trading's open item, SELL_PRESENCE_OPEN_REFRESH_MS). */
+    const STATUS_OPEN_REFRESH_MS = 90 * 1000;
+    /** At most this many asked a minute (Trading's SELL_PRESENCE_PER_MIN), in Torn Eye's API lane. */
+    const STATUS_PER_MIN = 30;
+    /** At most this many asked at once (Trading's SELL_PRESENCE_MAX_PENDING). */
+    const STATUS_MAX_PENDING = 3;
+    /** A failed read is not asked again sooner (Trading's PRESENCE_RETRY_MS). */
+    const STATUS_RETRY_MS = 2 * 60 * 1000;
+    /** Statuses kept across reloads and tabs: 600 targets (FFScouter's finder asked 12 × 50) and a few more. */
+    const STATUS_KEEP = 640;
+
+    /** Who is asked first: the player opened to attack, then the page on screen, then every other row in the list's order. */
+    function statusOrder({ open = [], page = [], all = [] } = {}) {
+        const seen = new Set();
+        const out = [];
+        for (const id of [...open, ...page, ...all]) {
+            const n = Number(id);
+            if (n > 0 && !seen.has(n)) {
+                seen.add(n);
+                out.push(n);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Which players to ask now (Trading's updateSellPresence, pure): in order, skipping one asked or read lately (any
+     * read counts: the war list, the watch list, a flight, our own), one pending, one failed lately; never more than 3 at
+     * once or 30 in a minute.
+     * @param {object} o - {order: id[], open: Set, readAt: id => ms|0, pending: Set, retryAt: Map, asked: ms[], now}
+     * @returns {{ask: number[], asked: number[]}} asked: the minute's ask times, these included
+     */
+    function statusesToAsk({ order = [], open = new Set(), readAt = () => 0, pending = new Set(), retryAt = new Map(), asked = [], now = Date.now() } = {}) {
+        const minute = asked.filter((t) => now - t < 60000);
+        const ask = [];
+        let busy = pending.size;
+        for (const id of order) {
+            if (busy >= STATUS_MAX_PENDING || minute.length >= STATUS_PER_MIN) break;
+            if (pending.has(id) || now < (retryAt.get(id) || 0)) continue;
+            const every = open.has(id) ? STATUS_OPEN_REFRESH_MS : STATUS_REFRESH_MS;
+            if (now - (readAt(id) || 0) < every) continue;
+            ask.push(id);
+            minute.push(now);
+            busy++;
+        }
+        return { ask, asked: minute };
+    }
+
+    /**
+     * Whether a row's status was actually read (round 7 review): a status from a read, not FFScouter's out-time from the
+     * list nor your own hit, which are known without asking Torn and left "checked" counting rows never read.
+     */
+    function statusChecked(r, now = Date.now()) {
+        return Boolean(r && r.status && (r.status.state || r.status.description) && !statusOver(r.status, now));
+    }
+
+    /**
+     * The progress line's numbers: how many of the list's players have a status known now, and about how long the rest
+     * take at 30 a minute.
+     * @param {number[]} ids - every row of the stored list
+     * @param {function} known - id => boolean
+     */
+    function statusProgress(ids, known) {
+        const total = (ids || []).length;
+        const checked = (ids || []).filter((id) => known(id)).length;
+        return { checked, total, leftMin: Math.ceil((total - checked) / STATUS_PER_MIN) };
+    }
+
+    /** "Statuses: 40 of 600 checked · this page first · the rest in about 19 min" (the mockup's words). */
+    function statusLine({ checked, total, leftMin }) {
+        if (!total) return '';
+        if (checked >= total) return 'Statuses: all ' + total + ' checked · each again every 10 min';
+        return 'Statuses: ' + checked + ' of ' + total + ' checked · this page first · the rest in about ' + Math.max(1, leftMin) + ' min';
+    }
+
+    /**
+     * The statuses kept across reloads and tabs ({id: [status, at]}): two tabs' merged, the newest read of each player
+     * kept, the newest STATUS_KEEP players, none over a day old.
+     */
+    function mergeStatuses(a, b, now = Date.now()) {
+        const out = {};
+        for (const src of [a, b]) {
+            for (const [id, v] of Object.entries(src || {})) {
+                if (!Array.isArray(v) || !v[0] || !(Number(v[1]) > 0) || !(now - Number(v[1]) < 24 * 3600e3)) continue;
+                if (!out[id] || out[id][1] < Number(v[1])) out[id] = [v[0], Number(v[1])];
+            }
+        }
+        const kept = Object.entries(out).sort((x, y) => y[1][1] - x[1][1]).slice(0, STATUS_KEEP);
+        return Object.fromEntries(kept);
     }
 
     /* ===== src/core/eye/watch.js ===== */
@@ -18332,14 +19295,15 @@
 
     /* ===== src/ui/app/eye-tab.js ===== */
     /*
-     * Torn Eye tab (mockups/round3/W-eye.html): one question, "who can I hit?".
-     * Four modes: Targets (FFScouter's list judged by our own fight model:
-     * only players you beat are ever kept, most respect first), Chain (only
-     * Stomp and Good, most respect first, always), War (everyone in the enemy
-     * faction, found by itself from your faction's wars, coloured by risk:
-     * online status, hospital out-times, landings, jail) and Watched (the
-     * players you chose to keep an eye on). Sorts and tick filters per mode;
-     * the colour bands live in Settings.
+     * Torn Eye tab (mockups/round7/torn-eye-targets.html, picked by the owner): one question, "who can I hit?".
+     * Three views: Targets (FFScouter's list judged by our own fight model: only players you beat keeping half your HP or
+     * more are ever kept), War (everyone in the enemy faction, found by itself from your faction's wars: online status,
+     * hospital out-times, landings, jail) and Watched (the players you chose to keep an eye on). Chain is gone (round 7:
+     * it was the same list as Targets).
+     *
+     * Targets: the band chips (All / Stomp / Good / Fair, with counts) and "Ready now" (on by default); one order for
+     * everything, most respect, then most HP kept, then the highest win; 20 rows a page, only those drawn; the statuses
+     * read the Torn Trading way (eye-service.js `pumpStatuses`), this page first, then the rest quietly.
      */
 
 
@@ -18355,90 +19319,58 @@
 
     const EYE_MODES = [
         ['targets', 'Targets'],
-        ['chain', 'Chain'],
         ['war', 'War'],
         ['watched', 'Watched'],
     ];
 
-    const EYE_SORTS = [
-        ['respect', 'Most respect'],
-        ['easy', 'Easiest'],
-        ['keep', 'HP kept'],
-        ['level', 'Level'],
-        ['active', 'Last active'],
-    ];
-
-    /** Targets and Chain hold only players you beat (owner's hard rule), so there is no "Hide can't win" there. */
+    /** War shows everyone by default (owner): its own ticks, all off. Targets has the band chips and "Ready now" instead. */
     const EYE_TICKS = [
-        ['stompOnly', 'Stomp only'],
-        ['keep50', 'Keep over 50% HP'],
-        ['hideHosp', 'Hide hospital'],
-        ['hideTravel', 'Hide traveling'],
-        ['inactive', 'Inactive 14+ days'],
-        ['factionless', 'No faction'],
-        ['notToday', 'Not attacked by me today'],
-        // War shows everyone by default (owner): its own ticks, all off.
-        ['warHideCant', 'Hide can’t win'],
+        ['warHideLow', 'Hide under 50%'],
         ['warHideHosp', 'Hide hospital'],
         ['warHideTravel', 'Hide traveling'],
     ];
 
-    const DEFAULT_EYE_FILTERS = { minLevel: 1, maxLevel: 100, inactive: true, factionless: false, stompOnly: false, keep50: false, hideHosp: false, hideTravel: false, notToday: false, sort: 'respect' };
+    /** "Ready now" is on by default (the owner's default stands until he says). */
+    const DEFAULT_EYE_FILTERS = { band: 'all', ready: true, warHideLow: false, warHideHosp: false, warHideTravel: false };
+
+    /** The filters, from whatever was kept: keys of older versions (sort, level range, the seven Show ticks) are dropped. */
+    function eyeFilters(f) {
+        const src = f && typeof f === 'object' ? f : {};
+        const out = { ...DEFAULT_EYE_FILTERS };
+        if (BAND_CHIPS.includes(src.band)) out.band = src.band;
+        for (const k of ['ready', 'warHideLow', 'warHideHosp', 'warHideTravel']) if (typeof src[k] === 'boolean') out[k] = src[k];
+        return out;
+    }
+
+    /** The chips' words. */
+    const CHIP_WORDS = { all: 'All', stomp: 'Stomp', good: 'Good', fair: 'Fair' };
 
     /**
-     * Load the targets without a click: the first visit with FFScouter connected,
-     * and once for a list asked the old way (1.1.x: one ask, strongest first,
-     * can't-win players kept; 1.1.0 even without a fair-fight range).
+     * Load the targets without a click (there is no Refresh button): the first visit with FFScouter connected, a list
+     * asked or judged the old way, and a list older than TARGETS_REFRESH_MS. `autoLoaded`: when this page last did it
+     * (true: once, for good).
      */
-    function shouldAutoLoad({ mode, hasFfs, paused, stored, loading, error, autoLoaded, ready = true }) {
-        return ready && (mode === 'targets' || mode === 'chain') && Boolean(hasFfs) && !paused && (!stored || needsRefetch(stored.params)) && !loading && !error && !autoLoaded;
+    function shouldAutoLoad({ mode, hasFfs, paused, stored, loading, error, autoLoaded, ready = true, now = Date.now() }) {
+        if (!(ready && mode === 'targets' && Boolean(hasFfs) && !paused && !loading && !error)) return false;
+        if (typeof autoLoaded === 'number' ? now - autoLoaded < TARGETS_REFRESH_MS : autoLoaded) return false;
+        return !stored || needsRefetch(stored.params) || !(now - (Number(stored.at) || 0) < TARGETS_REFRESH_MS);
     }
 
-    /** Rank targets: 0 = easiest first (win × HP kept), 1 = most respect you can still win. */
-    function rankTargets(rows, slider) {
-        const s = Math.max(0, Math.min(1, slider));
-        const maxR = Math.max(1e-9, ...rows.map((r) => r.respect || 0));
-        const score = (r) => {
-            if (!r.forecast) return -1;
-            const easy = r.forecast.pWin * (r.forecast.keep || 0);
-            const resp = ((r.respect || 0) / maxR) * r.forecast.pWin;
-            return (1 - s) * easy + s * resp;
-        };
-        return [...rows].sort((a, b) => score(b) - score(a));
+    /** Where a target row is (core/eye/targets.js rowState): 'hospital', 'travel', 'jail', 'okay', 'other' or 'unknown'. */
+    const stateOf = rowState;
+
+    /** The view showing ('targets', 'war' or 'watched'): anything else kept from an older version shows Targets. */
+    function eyeModeOf(ui) {
+        const m = ui && ui.eyeMode;
+        return EYE_MODES.some(([k]) => k === m) ? m : 'targets';
     }
 
-    /** Sort by the chosen key (unknown estimates last). */
-    function sortTargets(rows, key) {
-        const val = {
-            easy: (r) => (r.forecast ? r.forecast.pWin * (r.forecast.keep || 0) : -1),
-            respect: (r) => (r.forecast && r.forecast.pWin >= 0.5 ? r.respect || 0 : -1),
-            keep: (r) => (r.forecast ? r.forecast.keep || 0 : -1),
-            level: (r) => -(r.level || 999),
-            active: (r) => -(r.lastAction || Infinity),
-        }[key] || ((r) => (r.forecast ? r.forecast.pWin : -1));
-        return [...rows].sort((a, b) => val(b) - val(a));
-    }
-
-    function stateOf(r, now) {
-        const st = r.status || {};
-        const s = String(st.state || st.description || '').toLowerCase();
-        if ((r.hospitalUntil && r.hospitalUntil > now) || s.includes('hospital')) return 'hospital';
-        if (s.includes('travel') || s.includes('abroad') || s.startsWith('in ')) return 'travel';
-        return 'okay';
-    }
-
-    /** Apply the ticks (and, whatever the ticks, the hard rule: only players you beat). */
-    function filterTargets(rows, f, { now, attackedToday = new Set() } = {}) {
-        return rows.filter((r) => {
-            if (!isBeatable(r.band)) return false;
-            if (f.stompOnly && r.band !== 'stomp') return false;
-            if (f.keep50 && !(r.forecast && r.forecast.keep > 0.5)) return false;
-            const st = stateOf(r, now);
-            if (f.hideHosp && st === 'hospital') return false;
-            if (f.hideTravel && st === 'travel') return false;
-            if (f.notToday && attackedToday.has(Number(r.id))) return false;
-            return true;
-        });
+    /**
+     * Whether target statuses are read now (round 7 review): only while Targets shows, and only with FFScouter connected
+     * (no key, no list to read statuses for). War, Watched and other tabs neither ask nor redraw for them.
+     */
+    function readsTargetStatuses({ tab, ui, hasFfs }) {
+        return tab === 'eye' && eyeModeOf(ui) === 'targets' && Boolean(hasFfs);
     }
 
     /**
@@ -18464,7 +19396,7 @@
     }
 
     function bandCell(band) {
-        return h('span', { class: 'band2' }, [h('i', { style: 'background:' + BAND_COLORS[band] }), BAND_WORDS[band]]);
+        return h('span', { class: 'band2' }, [h('i', { style: 'background:' + BAND_COLORS[band || 'none'] }), BAND_WORDS[band || 'none']]);
     }
 
     /** The first cell of a row, with the band colour on the row's edge. */
@@ -18478,12 +19410,25 @@
         return d < 1 ? 'today' : d + ' d';
     }
 
-    function statusCell(r, now) {
-        if (r.hospitalUntil && r.hospitalUntil > now) return h('td', { class: 'cdn', text: 'Hospital ' + countdown(r.hospitalUntil - now) });
-        const st = r.status || {};
+    /**
+     * The status cell: what was read, your own hit, or "checking" while the statuses are being read. FFScouter's
+     * out-time comes only while no read is newer than the list (app-page.js eyeRows, targetStatus), as in rowState.
+     */
+    function statusCell(r, now, checking) {
+        if (r.hospitalUntil && r.hospitalUntil > now) return h('td', { class: 'cdn', text: 'Hospital · ' + countdown(r.hospitalUntil - now) });
+        // Your own hit: known without asking Torn.
+        if (r.hit && r.hit.kind === 'hit') return h('td', { class: 'cdn', text: hitText(r.hit, now) });
+        // A hospital or jail read whose out-time has passed says nothing now (rowState: unknown).
+        const st = r.status && !statusOver(r.status, now) ? r.status : {};
         const d = st.description || st.state;
-        if (d && !/^okay$/i.test(d)) return h('td', { class: /hospital/i.test(d) ? 'cdn' : null, text: d });
-        return h('td', { text: 'Okay' });
+        if (d && /hospital/i.test(d) && Number(st.until) * 1000 > now) return h('td', { class: 'cdn', text: 'Hospital · ' + countdown(Number(st.until) * 1000 - now) });
+        if (d && !/^okay$/i.test(st.state || d)) return h('td', { class: 'st-wait', text: d });
+        // The attack page you opened (not a hit yet) says so beside Okay.
+        if (d) return h('td', { class: 'st-ok', text: r.hit ? 'Okay · ' + hitText(r.hit, now).toLowerCase() : 'Okay' });
+        if (r.hit) return h('td', { class: 'muted', text: hitText(r.hit, now) });
+        // Nothing read yet: being read (this page first), or not at all without a key.
+        if (checking) return h('td', {}, [h('span', { class: 'checking', text: 'checking' })]);
+        return h('td', { class: 'muted', title: 'Not read. Statuses are read with your Torn key while this tab is open.', text: '—' });
     }
 
     /** A war-style status cell: "Hospital · out 14:32 TCT (3:10)", "→ Mexico, lands ~15:05 (est.)". */
@@ -18506,8 +19451,8 @@
         return x === null || x === undefined ? '—' : Math.round(x * 100) + '%';
     }
 
-    function attackBtn(id, primary, ghost) {
-        return h('a', { class: 'btn sm' + (primary ? ' primary' : ghost ? ' ghost' : ''), href: attackUrl(id), target: '_blank', rel: 'noopener', text: 'Attack' });
+    function attackBtn(id, primary, ghost, onclick = null) {
+        return h('a', { class: 'btn sm' + (primary ? ' primary' : ghost ? ' ghost' : ''), href: attackUrl(id), target: '_blank', rel: 'noopener', onclick, text: 'Attack' });
     }
 
     function sourceShort(r, now) {
@@ -18545,50 +19490,80 @@
         });
     }
 
-    /** Rows of a long list drawn with the click; the rest follow in the next moments, this many at a time. */
-    const ROWS_FIRST = 60;
-
-    function targetsTable(rows, { now, chain = false, ctx }) {
-        const head = chain
-            ? ['Band', 'Player', 'Lvl', 'Respect', 'Win', 'HP kept', 'Status', 'Active', '', '']
-            : ['Band', 'Player', 'Lvl', 'Win', 'HP kept', 'Respect', 'Status', 'Active', 'Estimate from', '', ''];
+    /** One page of targets (only these 20 are built). The numbers in the list's order: respect, HP kept, win. */
+    function targetsTable(rows, { now, ctx, checking }) {
+        const head = ['Band', 'Player', 'Lvl', 'Respect', 'HP kept', 'Win', 'Status', 'Active', 'From', '', ''];
         const right = [2, 3, 4, 5, 7];
         const open = ctx.ui.eyeOpen;
-        const rowOf = (r, i) => {
+        const down = (r) => {
+            const s = rowState(r, now);
+            return s === 'hospital' || s === 'travel' || s === 'jail';
+        };
+        // The bright Attack button goes to the first player known to be free now, never one you just put in hospital.
+        const firstUp = rows.find((r) => !r.hit && rowState(r, now) === 'okay') || null;
+        const statuses = ctx.eye.statuses;
+        const rowOf = (r) => {
             const body = [];
-            const win = h('td', { class: 'r', text: r.forecast ? pct(r.forecast.pWin) : '—' });
-            const keep = h('td', { class: 'r', text: r.forecast && r.forecast.keep !== null ? (r.est && r.est.confidence === 'exact' ? '' : '~') + pct(r.forecast.keep) : '—' });
-            const resp = h('td', { class: 'r' }, [chain ? h('b', { class: 'white', text: r.respect ? r.respect.toFixed(2) : '—' }) : r.respect ? r.respect.toFixed(2) : '—']);
-            const cells = [edgeTd(r.band, [bandCell(r.band)]), h('td', {}, [h('a', { href: profileUrl(r.id), target: '_blank', rel: 'noopener', onclick: (ev) => ev.stopPropagation() }, [h('b', { class: 'w', text: r.name || String(r.id) })])]), h('td', { class: 'r', text: r.level ? String(r.level) : '—' })];
-            if (chain) cells.push(resp, win, keep);
-            else cells.push(win, keep, resp);
-            cells.push(statusCell(r, now), h('td', { class: 'r muted', text: ago(r.lastAction, now) }));
-            if (!chain) cells.push(h('td', { class: 'muted', text: sourceShort(r, now) }));
-            cells.push(h('td', { class: 'r', style: 'width:40px' }, [starBtn(ctx, r)]));
-            cells.push(h('td', { class: 'r' }, [attackBtn(r.id, i === 0, false)]));
+            const keep = r.forecast && r.forecast.keep !== null && r.forecast.keep !== undefined ? (r.est && r.est.confidence === 'exact' ? '' : '~') + pct(r.forecast.keep) : '—';
+            const cells = [
+                edgeTd(r.band, [bandCell(r.band)]),
+                h('td', {}, [h('a', { href: profileUrl(r.id), target: '_blank', rel: 'noopener', onclick: (ev) => ev.stopPropagation() }, [h('b', { class: 'w', text: r.name || String(r.id) })])]),
+                h('td', { class: 'r', text: r.level ? String(r.level) : '—' }),
+                h('td', { class: 'r resp' }, [h('b', { class: 'white', text: r.respect ? r.respect.toFixed(2) : '—' })]),
+                h('td', { class: 'r', text: keep }),
+                h('td', { class: 'r', text: r.forecast ? pct(r.forecast.pWin) : '—' }),
+                statusCell(r, now, checking),
+                h('td', { class: 'r muted', text: ago(r.lastAction, now) }),
+                h('td', { class: 'muted', text: sourceShort(r, now) }),
+                h('td', { class: 'r', style: 'width:40px' }, [starBtn(ctx, r)]),
+                h('td', { class: 'r' }, [
+                    attackBtn(r.id, r === firstUp, false, (ev) => {
+                        ev.stopPropagation();
+                        if (statuses) statuses.attack(r.id);
+                    }),
+                ]),
+            ];
             const d = detailsText(targetDetails(r.stored || {}, r));
             const isOpen = open === r.id;
-            body.push(h('tr', { class: 'click' + (isOpen ? ' sel' : ''), tabindex: '0', title: d, 'aria-expanded': String(isOpen), onclick: () => { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); }, onkeydown: (ev) => { if (ev.key === 'Enter') { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); } } }, cells));
+            // A player you just hit, in hospital, away or in jail: greyed (still listed when "Ready now" is off).
+            const grey = (r.hit && r.hit.kind === 'hit') || down(r);
+            body.push(h('tr', { class: 'click' + (isOpen ? ' sel' : '') + (grey ? ' whatif' : ''), tabindex: '0', title: d, 'aria-expanded': String(isOpen), onclick: () => { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); }, onkeydown: (ev) => { if (ev.key === 'Enter') { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); } } }, cells));
             if (isOpen) body.push(h('tr', { class: 'sub' }, [h('td', { colspan: String(head.length), class: 'muted', style: 'font-size:12px' }, [d])]));
             return body;
         };
-        // The rows on screen now, the rest right after the page has drawn (round 7: 300 rows in one go held the click up).
-        const later = typeof requestAnimationFrame === 'function' && rows.length > ROWS_FIRST;
-        const tbody = h('tbody', {}, (later ? rows.slice(0, ROWS_FIRST) : rows).flatMap(rowOf));
-        if (later) {
-            let at = ROWS_FIRST;
-            const more = () => {
-                if (!tbody.isConnected) return;
-                for (const tr of rows.slice(at, at + ROWS_FIRST).flatMap((r, j) => rowOf(r, at + j))) tbody.appendChild(tr);
-                at += ROWS_FIRST;
-                if (at < rows.length) setTimeout(more, 0);
-            };
-            requestAnimationFrame(() => setTimeout(more, 0));
-        }
-        return h('table', { class: 'tbl num' }, [
-            h('thead', {}, [h('tr', {}, head.map((x, i) => h('th', { class: right.includes(i) ? 'r' : null, style: i === 0 ? 'width:110px' : null, text: x })))]),
-            tbody,
+        return h('table', { class: 'tbl num eyelist' }, [
+            h('thead', {}, [h('tr', {}, head.map((x, i) => h('th', { class: [right.includes(i) ? 'r' : '', i === 3 ? 'key' : ''].filter(Boolean).join(' ') || null, style: i === 0 ? 'width:110px' : null, text: x })))]),
+            h('tbody', {}, rows.flatMap(rowOf)),
         ]);
+    }
+
+    /** ‹ Prev · 1 2 3 … · Next › and "20 a page · page 2 of 30". */
+    function pager(pg, ctx) {
+        const go = (p) => () => {
+            ctx.ui.eyePage = p;
+            ctx.rerender();
+        };
+        const kids = [h('button', { type: 'button', disabled: pg.page === 0, 'aria-label': 'Previous page', onclick: go(pg.page - 1), text: '‹ Prev' })];
+        for (const p of pagerItems(pg.page, pg.pages)) kids.push(p === '…' ? h('span', { text: '…' }) : h('button', { type: 'button', class: p === pg.page ? 'on' : null, 'aria-current': p === pg.page ? 'page' : null, onclick: go(p), text: String(p + 1) }));
+        kids.push(h('button', { type: 'button', disabled: pg.page >= pg.pages - 1, 'aria-label': 'Next page', onclick: go(pg.page + 1), text: 'Next ›' }));
+        kids.push(h('span', { class: 'sp', text: PAGE_SIZE + ' a page · page ' + (pg.page + 1) + ' of ' + pg.pages }));
+        return h('div', { class: 'eye-pager', role: 'navigation', 'aria-label': 'Pages' }, kids);
+    }
+
+    /** The band chips and "Ready now" (Targets). */
+    function targetChips(ctx, f, list) {
+        const set = (k, v) => {
+            ctx.ui.eyeFilters = { ...f, [k]: v };
+            ctx.ui.eyePage = 0;
+            ctx.rerender();
+        };
+        const bands = h(
+            'div',
+            { class: 'eye-chips', role: 'group', 'aria-label': 'Band' },
+            BAND_CHIPS.map((b) => h('button', { type: 'button', class: 'eye-chip', 'aria-pressed': String(f.band === b), onclick: () => set('band', b) }, [b === 'all' ? null : h('i', { style: 'background:' + BAND_COLORS[b] }), CHIP_WORDS[b], h('span', { text: ' ' + list.counts[b] })])),
+        );
+        const ready = h('button', { type: 'button', class: 'eye-chip', 'data-act': 'ready', 'aria-pressed': String(f.ready), title: 'Hides hospital, abroad, traveling, jail and players you hit in the last hour', onclick: () => set('ready', !f.ready) }, ['Ready now', f.ready && list.hidden ? h('span', { text: ' · ' + list.hidden + ' hidden' }) : null]);
+        return [bands, h('div', { class: 'eye-chips' }, [ready]), h('span', { class: 'eye-rule' }, ['Order: ', h('b', { text: 'respect' }), ' › ', h('b', { text: 'HP kept' }), ' › ', h('b', { text: 'win' })])];
     }
 
     /** War and Watched rows share one layout: band edge, online dot, status with out-times and landings, win and HP kept. */
@@ -18607,7 +19582,7 @@
         if (respect) cells.push(h('td', { class: 'r', text: r.respect ? r.respect.toFixed(2) : '—' }));
         cells.push(statusTd(w.parts, now, ctx.settings), h('td', { class: 'muted', text: act.text }));
         cells.push(...extra);
-        cells.push(h('td', { class: 'r' }, [attackable || w.state === 'hospital' ? attackBtn(w.id, first && attackable, r.band === 'cant') : null]));
+        cells.push(h('td', { class: 'r' }, [attackable || w.state === 'hospital' ? attackBtn(w.id, first && attackable, r.band === 'low') : null]));
         return h('tr', { class: w.state === 'fallen' ? 'whatif' : null }, cells);
     }
 
@@ -18688,13 +19663,18 @@
         const views = new Map((members || []).map((mm) => [Number(mm.id), e.view(Number(mm.id), { level: mm.level, name: mm.name, life: mm.life || null }, { war })]));
         const bands = {};
         const respect = {};
+        const keep = {};
+        const win = {};
         for (const [id, v] of views) {
             if (v) {
                 bands[id] = v.band;
                 respect[id] = v.respect || 0;
+                keep[id] = v.forecast && Number.isFinite(v.forecast.keep) ? v.forecast.keep : 0;
+                win[id] = v.forecast && Number.isFinite(v.forecast.pWin) ? v.forecast.pWin : 0;
             }
         }
-        return sortWar(members || [], { bands, respect, early, nowS: Math.floor(now / 1000) }).map((r) => ({ ...r, view: views.get(r.id), parts: statusParts(r.m, { now, seenAt: flights[r.id] ? flights[r.id].at : null, early: r.state === 'early' }) }));
+        // Within a band the one order: respect, then HP kept, then win.
+        return sortWar(members || [], { bands, respect, keep, win, early, nowS: Math.floor(now / 1000) }).map((r) => ({ ...r, view: views.get(r.id), parts: statusParts(r.m, { now, seenAt: flights[r.id] ? flights[r.id].at : null, early: r.state === 'early' }) }));
     }
 
     function warControls(ctx, e) {
@@ -18733,51 +19713,40 @@
         const e = ctx.eye;
         const now = Date.now();
         const ui = ctx.ui;
-        const mode = EYE_MODES.some(([k]) => k === ui.eyeMode) ? ui.eyeMode : 'targets';
-        const f = ui.eyeFilters || (ui.eyeFilters = { ...DEFAULT_EYE_FILTERS });
-        const inputs = {};
-        const reload = () => {
-            f.minLevel = Math.max(1, Math.min(100, Number(inputs.min && inputs.min.value) || f.minLevel || 1));
-            f.maxLevel = Math.max(f.minLevel, Math.min(100, Number(inputs.max && inputs.max.value) || f.maxLevel || 100));
-            e.load({ minLevel: f.minLevel, maxLevel: f.maxLevel, inactiveOnly: f.inactive ? 1 : 0, factionless: f.factionless ? 1 : null });
-        };
-        const attacks = e.attacks ? e.attacks() : [];
-        const today = tornDayStart(now);
-        const attackedToday = new Set(attacks.filter((a) => (a.ended || 0) * 1000 >= today).map((a) => Number(a.def)));
+        const mode = eyeModeOf(ui);
+        // Kept filters of older versions (sort, level range, the seven Show ticks) are ignored.
+        const f = eyeFilters(ui.eyeFilters);
+        const reload = () => e.load({ ...TARGET_LOAD });
         const watch = e.watch ? e.watch.state() : { list: [], states: {}, flights: {}, offers: [] };
+        const stored = e.stored ? e.stored() : null;
+        const rowsAll = mode === 'targets' ? e.rows() : [];
+        const list = mode === 'targets' ? listTargets(rowsAll, { band: f.band, ready: f.ready, now }) : null;
 
         // Controls
         const modeSeg = h('div', { class: 'seg modes', role: 'group', 'aria-label': 'Mode' }, EYE_MODES.map(([k, label]) => h('button', { type: 'button', 'aria-pressed': String(k === mode), onclick: () => { ui.eyeMode = k; ctx.rerender(); }, text: k === 'watched' && watch.list.length ? label + ' ' + watch.list.length : label })));
         const bar1 = [modeSeg];
         if (mode === 'war' && e.war) bar1.push(...warControls(ctx, e));
-        if (mode === 'targets' || mode === 'chain') {
-            bar1.push(h('span', { class: 'sep' }), t('lab', 'Sort'));
-            if (mode === 'chain') bar1.push(h('span', { class: 'muted', text: 'most respect first, always' }));
-            else bar1.push(h('div', { class: 'seg', role: 'group', 'aria-label': 'Sort' }, EYE_SORTS.map(([k, label]) => h('button', { type: 'button', 'aria-pressed': String(k === f.sort), onclick: () => { f.sort = k; ctx.rerender(); }, text: label }))));
-            bar1.push(h('span', { class: 'sep' }), t('lab', 'Level'), (inputs.min = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:44px', 'aria-label': 'Lowest level', value: String(f.minLevel), onchange: reload })), '–', (inputs.max = h('input', { class: 'inp num', inputmode: 'numeric', style: 'width:50px', 'aria-label': 'Highest level', value: String(f.maxLevel), onchange: reload })));
-            if (ctx.flags.hasFfs) bar1.push(h('button', { class: 'btn sm', type: 'button', onclick: reload, disabled: e.loading() || ctx.paused, text: e.loading() ? 'Loading…' : 'Refresh' }));
+        if (mode === 'targets') {
+            bar1.push(...targetChips(ctx, f, list));
         } else if (mode === 'war') {
             bar1.push(h('span', { class: 'muted', text: 'attackable now first, then out of hospital soonest' }));
         } else {
             bar1.push(h('span', { class: 'sep' }), h('span', { class: 'muted', text: watch.list.length + ' of ' + WATCH_MAX + ' · read every 60 s while this is open' }));
         }
-        const tickKeys = mode === 'war' ? ['warHideCant', 'warHideHosp', 'warHideTravel'] : mode === 'chain' ? ['stompOnly', 'keep50', 'hideHosp', 'hideTravel', 'inactive', 'factionless', 'notToday'] : mode === 'targets' ? EYE_TICKS.map(([k]) => k).filter((k) => !k.startsWith('war')) : [];
-        const refetch = new Set(['inactive', 'factionless']);
-        const bar2 = tickKeys.length
-            ? [
-                  t('lab', 'Show'),
-                  h('div', { class: 'ticks', role: 'group', 'aria-label': 'Show' }, EYE_TICKS.filter(([k]) => tickKeys.includes(k)).map(([k, label]) => h('button', { type: 'button', class: 'tk', 'aria-pressed': String(Boolean(f[k])), onclick: () => { f[k] = !f[k]; if (refetch.has(k) && ctx.flags.hasFfs) reload(); else ctx.rerender(); } }, [h('i'), label]))),
-              ]
-            : [];
+        const bar2 =
+            mode === 'war'
+                ? [
+                      t('lab', 'Show'),
+                      h('div', { class: 'ticks', role: 'group', 'aria-label': 'Show' }, EYE_TICKS.map(([k, label]) => h('button', { type: 'button', class: 'tk', 'aria-pressed': String(Boolean(f[k])), onclick: () => { ui.eyeFilters = { ...f, [k]: !f[k] }; ctx.rerender(); } }, [h('i'), label]))),
+                  ]
+                : [];
 
         const main = [];
         const pane = [];
-        const stored = e.stored ? e.stored() : null;
-        const rowsAll = e.rows();
-        // First visit with FFScouter connected: load the targets without a click; also once for a list asked the old way
-        // (1.1.x: one ask, strongest first, can't-win players kept).
-        if (shouldAutoLoad({ mode, hasFfs: ctx.flags.hasFfs, paused: ctx.paused, stored, loading: e.loading(), error: e.error(), autoLoaded: ui.eyeAutoLoaded, ready: Boolean(m && m.ready) })) {
-            ui.eyeAutoLoaded = true;
+        // First visit with FFScouter connected: load the targets without a click; again for a list asked or judged the
+        // old way, and when the stored one is old (there is no Refresh button).
+        if (shouldAutoLoad({ mode, hasFfs: ctx.flags.hasFfs, paused: ctx.paused, stored, loading: e.loading(), error: e.error(), autoLoaded: ui.eyeAutoLoaded, ready: Boolean(m && m.ready), now })) {
+            ui.eyeAutoLoaded = now;
             setTimeout(reload, 0);
         }
 
@@ -18787,7 +19756,7 @@
         if (mode === 'war') {
             const w = e.war ? e.war.state() : { members: [], enemies: [] };
             let rows = memberRows(w.members || [], e, { now, early: w.early || new Set(), flights: watch.flights, war: true });
-            rows = rows.filter((r) => !(f.warHideCant && r.band === 'cant') && !(f.warHideHosp && r.state === 'hospital') && !(f.warHideTravel && (r.state === 'traveling' || r.state === 'abroad')));
+            rows = rows.filter((r) => !(f.warHideLow && r.band === 'low') && !(f.warHideHosp && r.state === 'hospital') && !(f.warHideTravel && (r.state === 'traveling' || r.state === 'abroad')));
             const sum = warSummary(rows, Math.floor(now / 1000));
             const fallen = rows.filter((r) => r.state === 'fallen').length;
             const empty = w.fid
@@ -18804,7 +19773,7 @@
                     sectionHead('War' + (w.name ? ' · ' + w.name : ''), meta(['everyone, coloured by how the fight goes for you · attackable now first, then who’s out soonest' + (w.fid ? ' · read every 10 s while open' : '')])),
                     w.error && rows.length ? h('div', { class: 'why', style: 'margin-bottom:8px', text: 'Couldn’t read the faction just now: ' + w.error }) : null,
                     rows.length ? warTable(rows, { now, ctx }) : h('p', { class: 'muted', style: 'margin:0', text: empty }),
-                    h('div', { class: 'note2', text: 'War shows everyone, even Can’t win (the colour tells you the risk) and the fallen (greyed, at the bottom). Landing times are estimated from when we first saw them fly and the standard flight time.' }),
+                    h('div', { class: 'note2', text: 'War shows everyone, even under 50% HP kept (red: the colour tells you the risk) and the fallen (greyed, at the bottom). Landing times are estimated from when we first saw them fly and the standard flight time.' }),
                 ]),
             );
             const outs = rows.filter((r) => r.state === 'hospital').slice(0, 5);
@@ -18818,7 +19787,7 @@
                               ...lands.flatMap((r) => [h('dt', { text: '~' + clock(r.parts.at, ctx.settings) }), h('dd', { text: (r.m.name || r.id) + ' lands' })]),
                           ])
                         : h('p', { class: 'muted', style: 'margin:0', text: 'Nobody in hospital.' }),
-                    h('div', { class: 'note2', text: sum.attackable + ' attackable now · ' + rows.filter((r) => r.state === 'hospital' && r.until * 1000 - now < 5 * 60000).length + ' out within 5 min · ' + (sum.traveling + rows.filter((r) => r.state === 'abroad').length) + ' traveling or abroad · ' + rows.filter((r) => r.band === 'cant').length + ' can’t win' + (fallen ? ' · ' + fallen + ' fallen' : '') }),
+                    h('div', { class: 'note2', text: sum.attackable + ' attackable now · ' + rows.filter((r) => r.state === 'hospital' && r.until * 1000 - now < 5 * 60000).length + ' out within 5 min · ' + (sum.traveling + rows.filter((r) => r.state === 'abroad').length) + ' traveling or abroad · ' + rows.filter((r) => r.band === 'low').length + ' under 50%' + (fallen ? ' · ' + fallen + ' fallen' : '') }),
                 ]),
             );
             if (heads.length) pane.push(headsUpBlock(heads, now, ctx.settings));
@@ -18857,37 +19826,48 @@
             main.push(h('div', { class: 'lead', 'data-mode': 'watched' }, kids));
             pane.push(heads.length ? headsUpBlock(heads, now, ctx.settings) : h('div', {}, [sectionHead('Heads-up', meta(['watched players']), null, 'h3'), h('p', { class: 'muted', style: 'margin:0', text: 'Nothing coming up in the next 3 minutes.' })]));
         } else {
-            let rows = filterTargets(rowsAll, f, { now, attackedToday });
-            const hiddenKeep = f.keep50 ? rowsAll.filter((r) => !(r.forecast && r.forecast.keep > 0.5)).length : 0;
-            if (mode === 'chain') rows = rows.filter((r) => r.band === 'stomp' || r.band === 'good').sort((a, b) => (b.respect || 0) - (a.respect || 0));
-            else rows = sortTargets(rows, f.sort);
+            const rows = list.rows;
+            const pg = pageOf(rows, ui.eyePage || 0);
+            if ((ui.eyePage || 0) !== pg.page) ui.eyePage = pg.page;
+            const statuses = e.statuses || null;
+            // Read only with FFScouter connected (readsTargetStatuses): without it no "checking" and no progress line.
+            const checking = Boolean(statuses && ctx.flags.hasFfs && statuses.active());
+            // Statuses: the players opened to attack, then this page, then every other listed row in the one order.
+            const everyone = listTargets(rowsAll, { band: 'all', ready: false, now }).rows;
+            // Without FFScouter there is no list to read statuses for: nothing asked (round 7 review).
+            if (statuses && ctx.flags.hasFfs) {
+                statuses.show({ page: pg.rows.map((r) => r.id), all: everyone.map((r) => r.id), opened: everyone.filter((r) => r.hit && r.hit.kind === 'opened').map((r) => r.id), readAt: new Map(everyone.map((r) => [Number(r.id), r.statusAt || 0])) });
+            }
             const msg = targetsMessage({ paused: ctx.paused, error: e.error(), loading: e.loading(), stored });
             let body;
             if (!ctx.flags.hasFfs) body = h('p', { class: 'muted', style: 'margin:0' }, ['Targets come from FFScouter. ', h('a', { href: '#settings', onclick: (ev) => { ev.preventDefault(); ctx.go('settings'); }, text: 'Connect it in Settings' }), '; chips on Torn’s pages work without it (your fights and public stats).']);
             else if (!rows.length) {
-                const text = msg.kind !== 'none' ? msg.text : rowsAll.length ? 'Nobody passes your ticks.' : 'No targets yet.';
+                const text = msg.kind !== 'none' ? msg.text : list.counts.all ? (f.ready && list.hidden ? 'Nobody ready now: ' + list.hidden + ' hidden (hospital, away, jail or just hit).' : 'Nobody in this band.') : 'No targets yet.';
                 body = h('p', { class: msg.kind === 'dead' || msg.kind === 'error' ? 'c-bad' : 'muted', style: 'margin:0' }, [text, msg.kind === 'dead' ? h('span', {}, [' · ', h('a', { href: '#settings', onclick: (ev) => { ev.preventDefault(); ctx.go('settings'); }, text: 'check it in Settings' })]) : null]);
-            } else body = targetsTable(rows, { now, chain: mode === 'chain', ctx });
+            } else body = targetsTable(pg.rows, { now, ctx, checking });
             const notes = [];
             const d = (stored && stored.dropped) || {};
-            if (mode === 'targets' && stored && stored.list && stored.list.length) {
-                if (d.cant) notes.push(d.cant + ' can’t-win player' + (d.cant === 1 ? '' : 's') + ' dropped (never kept)');
+            if (stored && stored.list && stored.list.length) {
+                if (d.low) notes.push(d.low + ' player' + (d.low === 1 ? '' : 's') + ' left out (you’d keep under 50% HP)');
                 if (d.none) notes.push(d.none + ' with no estimate dropped');
-                if (stored.ffIgnored) notes.push('FFScouter’s list ignored the strength range this time; our own fight check still decided');
+                if (stored.ffIgnored) notes.push('FFScouter ignored the strength range; our fight check decided');
             }
-            if (hiddenKeep) notes.push(hiddenKeep + ' hidden because you’d keep under 50% HP');
             // A load that failed still says so above an older list.
             const warnLine = rows.length && (msg.kind === 'error' || msg.kind === 'dead' || msg.kind === 'wait' || msg.kind === 'paused') ? h('div', { class: 'why', style: 'margin-bottom:8px', text: msg.text + (stored && stored.at ? ' · showing the list from ' + clock(stored.at, ctx.settings) : '') }) : null;
+            // "Statuses: 40 of 600 checked · this page first · the rest in about 19 min" (every listed row, whatever the chips).
+            // Only rows with a status actually read count as checked (not the list's out-time or your own hit).
+            const known = new Set(everyone.filter((r) => statusChecked(r, now)).map((r) => r.id));
+            const prog = statusProgress(everyone.map((r) => r.id), (id) => known.has(id));
+            const progress = checking && prog.total ? h('div', { class: 'eye-bg' }, [h('div', { class: 'track' }, [h('div', { class: 'fill', style: 'width:' + Math.round((100 * prog.checked) / prog.total) + '%' })]), h('span', { 'data-eye-progress': '1', text: statusLine(prog) })]) : null;
             main.push(
                 h('div', { class: 'lead', 'data-mode': mode }, [
-                    sectionHead(mode === 'chain' ? 'Chain' : 'Targets', meta([mode === 'chain' ? 'only Stomp and Good · most respect first · ' + rows.length + ' players' : rowsAll.length + ' players you beat · win and HP kept from your stats against theirs · ' + (EYE_SORTS.find(([k]) => k === f.sort) || [0, ''])[1].toLowerCase() + ' first'])),
+                    sectionHead('Targets', meta([rows.length + ' players you beat' + (rows.length ? ' · ' + pg.from + '–' + pg.to + ' shown' : '') + ' · win and HP kept from your stats against theirs'])),
                     warnLine,
                     ui.eyeNote ? h('div', { class: 'why', style: 'margin-bottom:8px', text: ui.eyeNote }) : null,
                     body,
+                    rows.length > PAGE_SIZE || pg.page > 0 ? pager(pg, ctx) : null,
+                    progress,
                     notes.length ? h('div', { class: 'note2', text: notes.join(' · ') + '.' }) : null,
-                    mode === 'chain'
-                        ? h('div', { class: 'note2', text: 'Chains only list players you’ll beat (green and light green); Tough never shows here, and Can’t win is never kept.' })
-                        : h('div', { class: 'note2', text: 'Only players you beat are kept: FFScouter is asked for players up to 75% of your strength (the most respect Torn gives), by levels, then each one is checked with the fight model. Click a row for its details.' }),
                 ]),
             );
             if (heads.length) pane.push(headsUpBlock(heads, now, ctx.settings));
@@ -18907,15 +19887,15 @@
                     h('dt', { text: 'Public stats (rough)' }),
                     h('dd', { text: 'always on' }),
                     h('dt', { text: 'Gear seen' }),
-                    h('dd', { text: fmtInt(src.gear) + ' players · this computer only' }),
+                    h('dd', { text: fmtInt(src.gear) + ' players' }),
                 ]),
-                h('div', { class: 'note2' }, ['Estimates by ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }), '. Colours: Settings › Torn Eye colours.']),
+                h('div', { class: 'note2' }, ['Estimates by ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }), '. Bands: HP you keep · Stomp 99%+ · Good 70–99% · Fair 50–69%.']),
             ]),
         );
         if (m && m.ready) {
             const mods = m.state.statMods || {};
             const eff = Object.entries(m.pc.stats).reduce((a, [k, v]) => a + v * (1 + (mods[k] || 0) / 100), 0);
-            pane.push(h('div', {}, [sectionHead('Your side', meta(['what the fight uses']), null, 'h3'), h('dl', { class: 'facts num' }, [h('dt', { text: 'Stats as they fight' }), h('dd', { text: fmtShort(eff) + ' (merits and passives in)' }), h('dt', { text: 'Life' }), h('dd', { text: m.state.life ? fmtInt(m.state.life.maximum) : '—' })])]));
+            pane.push(h('div', {}, [sectionHead('Your side', meta(['merits and passives in']), null, 'h3'), h('dl', { class: 'facts num' }, [h('dt', { text: 'Stats as they fight' }), h('dd', { text: fmtShort(eff) }), h('dt', { text: 'Life' }), h('dd', { text: m.state.life ? fmtInt(m.state.life.maximum) : '—' })])]));
         }
         const upd = e.updatedAt && e.updatedAt() ? 'targets ' + Math.max(0, Math.round((now - e.updatedAt()) / 60000)) + ' min ago' : null;
         return { ctl: [bar1, bar2], main, pane, upd };
@@ -19045,6 +20025,8 @@
     const WATCH_KEY = 'eyeWatch';
     const WATCH_STATE_KEY = 'eyeWatchState';
     const FLIGHTS_KEY = 'eyeFlights';
+    /** GM storage: the bands the Torn Eye tab's war mode worked out (warBandTable in core/eye/war.js), for Torn's war page. */
+    const WAR_BANDS_KEY = 'eyeWarBands';
 
     const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(), timer: null, listeners: [], mem: new Map(), fc: new Map(), flushing: null, again: false, todo: new Map(), working: false, idling: false, side: null };
 
@@ -19079,21 +20061,71 @@
         return eye.loading;
     }
 
+    /**
+     * [calibrate] A status answer (30 a minute while Targets shows) changes only a player's level, life and status here:
+     * the whole cache is written at most this often for those (round 7 review: it was rewritten about 30 times a minute).
+     * A hidden or closing tab writes what is waiting at once.
+     */
+    const STATUS_SAVE_MS = 30 * 1000;
+
     let saveTimer = null;
+
+    function writeEye() {
+        saveTimer = null;
+        const c = eye.cache;
+        if (!c) return;
+        // Keep the newest 3,000 players.
+        const ids = Object.keys(c.players);
+        if (ids.length > 3000) {
+            ids.sort((a, b) => (c.players[a].seen || 0) - (c.players[b].seen || 0));
+            for (const id of ids.slice(0, ids.length - 3000)) delete c.players[id];
+        }
+        c.savedAt = Date.now();
+        idbSet('eye', c).catch(() => {});
+    }
+
     function saveSoon() {
         clearTimeout(saveTimer);
-        saveTimer = setTimeout(() => {
-            const c = eye.cache;
-            if (!c) return;
-            // Keep the newest 3,000 players.
-            const ids = Object.keys(c.players);
-            if (ids.length > 3000) {
-                ids.sort((a, b) => (c.players[a].seen || 0) - (c.players[b].seen || 0));
-                for (const id of ids.slice(0, ids.length - 3000)) delete c.players[id];
-            }
-            c.savedAt = Date.now();
-            idbSet('eye', c).catch(() => {});
-        }, 1500);
+        saveTimer = setTimeout(writeEye, 1500);
+    }
+
+    /** A save that can wait (status answers): one write per STATUS_SAVE_MS at most; a sooner save already due covers it. */
+    function saveLater() {
+        if (saveTimer) return;
+        saveTimer = setTimeout(writeEye, STATUS_SAVE_MS);
+        writeOnHide();
+    }
+
+    let hideHooked = false;
+    /** What is waiting is written when the tab is hidden or closed, so the long delay loses nothing on unload. */
+    function writeOnHide() {
+        if (hideHooked || typeof window === 'undefined' || !window || typeof window.addEventListener !== 'function') return;
+        hideHooked = true;
+        const now = () => {
+            if (!saveTimer) return;
+            clearTimeout(saveTimer);
+            writeEye();
+        };
+        window.addEventListener('pagehide', now);
+        if (typeof document !== 'undefined' && document && typeof document.addEventListener === 'function') {
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'hidden') now();
+            });
+        }
+    }
+
+    /**
+     * Load the stored estimates without asking anybody (round 7): a local IndexedDB read. Torn's faction and war lists
+     * ask about nobody (the 1.3.0 rule), so nothing else loaded them there and every row said "No data".
+     * @returns {Promise<boolean>} whether this call was the one that loaded them (listeners are told once)
+     */
+    function loadEyeCache() {
+        if (eye.cache) return Promise.resolve(false);
+        const first = !eye.loading;
+        return cache().then(() => {
+            if (first) notify();
+            return first;
+        });
     }
 
     function onEye(fn) {
@@ -19133,9 +20165,11 @@
         await idbSet('eye', eye.cache).catch(() => {});
         set('myAttacks', null);
         pageSet(TARGETS_KEY, null);
-        for (const k of [WATCH_KEY, 'eyeWarAuto']) set(k, null);
+        for (const k of [WATCH_KEY, 'eyeWarAuto', WAR_BANDS_KEY]) set(k, null);
         pageSet(WATCH_STATE_KEY, null);
         pageSet(FLIGHTS_KEY, null);
+        statusRun.map = {};
+        await idbSet(STATUS_KEY, {}).catch(() => {});
         notify();
     }
 
@@ -19159,11 +20193,14 @@
         return { list: out, incoming };
     }
 
-    /** Your attacks (for the "your fight" layer), refreshed hourly by whichever tab needs them. */
-    async function myAttacks() {
+    /**
+     * Your attacks (for the "your fight" layer), refreshed hourly by whichever tab needs them.
+     * @param {object} [o] - {after: a read older than this (ms) is not fresh enough, whatever its age}
+     */
+    async function myAttacks({ after = 0 } = {}) {
         const stored = get('myAttacks', null);
-        if (stored && Date.now() - stored.at < ATTACKS_FRESH_MS) return stored.list;
-        if (!isVisible() || !getKey(K.apiKey)) return stored ? stored.list : [];
+        if (stored && Date.now() - stored.at < ATTACKS_FRESH_MS && stored.at >= after) return stored.list;
+        if (!isVisible() || !getKey(K.apiKey) || get(K.apiKeyDead, false)) return stored ? stored.list : [];
         try {
             const list = await fetchAttacks(tornClient(), { limit: 100 });
             const me = (get(K.userStatic, {}) || {}).keyInfo;
@@ -19173,6 +20210,55 @@
         } catch {
             return stored ? stored.list : [];
         }
+    }
+
+    /**
+     * [calibrate] An attack page opened this long ago: your attacks are read again once (round 7 review), so "hit by you
+     * in the last hour" doesn't wait for the hourly read (the "attack opened" mark lasts only ATTACK_OPENED_MS).
+     */
+    const ATTACKS_AFTER_OPEN_MS = 3 * 60 * 1000;
+
+    /**
+     * When your attacks are due to be read again for the attack pages opened (pure): the earliest open in the last hour
+     * that no read made ATTACKS_AFTER_OPEN_MS after it covers, once that time has come; null when none is due.
+     * @param {{at: number}[]} predictions - the attack pages opened (eyePredictions)
+     * @param {number} readAt - when your attacks were last read (ms)
+     */
+    function attacksDueAt(predictions, readAt, now = Date.now()) {
+        let due = null;
+        for (const p of predictions || []) {
+            const at = Number(p && p.at);
+            if (!(at > 0) || at > now || !(now - at < OWN_HIT_MS)) continue;
+            const d = at + ATTACKS_AFTER_OPEN_MS;
+            if ((Number(readAt) || 0) >= d) continue;
+            if (due === null || d < due) due = d;
+        }
+        return due !== null && due <= now ? due : null;
+    }
+
+    const attacksRun = { busy: false, at: 0 };
+
+    /**
+     * Read your attacks again once an attack page opened is ATTACKS_AFTER_OPEN_MS old, once per open (a read covers every
+     * open before it; never again within ATTACKS_AFTER_OPEN_MS, a failed read included). One /user/attacks call through the
+     * shared Torn client and its lanes; visible tab, a key, not while Torn Trading runs. Another tab's read (GM storage)
+     * counts. Safe to call often.
+     * @returns {Promise<boolean>} whether a read was made
+     */
+    async function attacksAfterOpen(now = Date.now()) {
+        if (attacksRun.busy || now - attacksRun.at < ATTACKS_AFTER_OPEN_MS) return false;
+        if (!isVisible() || isPaused() || !getKey(K.apiKey) || get(K.apiKeyDead, false)) return false;
+        const stored = get('myAttacks', null);
+        const due = attacksDueAt(getShared(K.eyePredictions, []) || [], stored ? Number(stored.at) || 0 : 0, now);
+        if (due === null) return false;
+        attacksRun.busy = true;
+        attacksRun.at = now;
+        try {
+            await myAttacks({ after: due });
+        } finally {
+            attacksRun.busy = false;
+        }
+        return true;
     }
 
     async function myEquipment() {
@@ -19330,7 +20416,6 @@
             // Your stats in ~1% steps (round 6): every train moved them, and every chip's Monte Carlo ran again (~50 ms for 100).
             meKey: Object.values(meStats).map((v) => Math.round(Math.log1p(v) * 100)),
             fm: learnedModel(getShared(K.learned, null)).fight,
-            bands: getSettings().bands,
             attacksBy,
         };
         Promise.resolve().then(() => {
@@ -19355,7 +20440,7 @@
         const prof = r.profile || {};
         const level = prof.level || extra.level || null;
         const life = prof.life || extra.life || lifeFromLevel(level);
-        const { meStats, statics, gMe, myLife, meKey, fm, bands, attacksBy } = yourSide(m);
+        const { meStats, statics, gMe, myLife, meKey, fm, attacksBy } = yourSide(m);
         const fights = attacksBy.get(Number(id)) || [];
         const pub = r.pub && (prof.rank || extra.rank) ? { rank: prof.rank || extra.rank, level, crimes: r.pub.crimes, networth: r.pub.networth } : null;
         const est = estimatePlayer({ me: meStats, spy: r.spy || null, fights, ffs: r.ffs || null, pub, now: Date.now() });
@@ -19389,7 +20474,7 @@
         let main = fGear || f;
         // What the fight learner kept from your own fights (only when it predicted your newest fights better).
         if (main && fm) main = { ...main, ...applyFightModel(fm, { pWin: main.pWin, keep: main.keep }), learned: true };
-        const band = bandOf(main, bands);
+        const band = bandOf(main);
         const ff = est ? fairFight(est.bss, bssOf(meStats)) : null;
         const respect = est && level ? respectFor(level, ff, { war }) : null;
         return {
@@ -19408,8 +20493,22 @@
             figures: chipFigures(main, est, respect),
             source: est ? est.sourceText : null,
             status: prof.status || null,
+            // When that status was read (a profile read; none for one the watch list left): a list trusts only a fresh one.
+            statusAt: r.profileAt || null,
             pending,
         };
+    }
+
+    /**
+     * A player this site holds no estimate for, as the Torn Eye tab's war mode judged them (round 7): the webpage's
+     * estimates live in the webpage's own IndexedDB, and Torn's pages don't ask about war rows. Band, win and HP kept
+     * only; null when war mode has nothing on them (or it is over a day old).
+     */
+    function sharedView(id, extra = {}, now = Date.now()) {
+        const b = warBandOf(getShared(WAR_BANDS_KEY, null), id, now);
+        if (!b) return null;
+        const f = b.win === null ? null : { pWin: b.win / 100, keep: b.keep === null ? null : b.keep / 100, turns: null };
+        return { id, name: extra.name || null, level: extra.level || null, life: extra.life || null, est: null, forecast: f, plain: null, withGear: null, gear: null, band: b.band, respect: null, ours: null, figures: chipFigures(f, null, null), source: 'war mode', status: null, pending: false, shared: { at: b.at } };
     }
 
     /** Work between two breaks while queued fights are worked out: a click or a scroll never waits longer. */
@@ -19742,6 +20841,111 @@
         return read.length > 0;
     }
 
+    /* ------------------------------------------------ round 7: target statuses, the Torn Trading way */
+
+    /**
+     * Where each target is (hospital, abroad, jail, okay), one public profile at a time, the way Torn Trading checks its
+     * traders (`updateSellPresence`): the page on screen first, then every other row quietly; at most 3 at once and 30 a
+     * minute, in Torn Eye's API lane; each player again after 10 minutes (the one opened to attack after 90 s); only from
+     * a visible tab, never while Torn Trading runs. What is read is kept across reloads and tabs in this site's
+     * IndexedDB (`eyeStatus`, {id: [status, at]}, merged with what other tabs wrote).
+     */
+    const STATUS_KEY = 'eyeStatus';
+
+    const statusRun = { map: null, loading: null, loadedAt: 0, pending: new Set(), retryAt: new Map(), asked: [], saveTimer: null, listeners: [] };
+
+    /** The kept statuses, read from IndexedDB (again every minute, for what other tabs read). */
+    function loadStatuses(now = Date.now()) {
+        if (statusRun.loading) return statusRun.loading;
+        statusRun.loadedAt = now;
+        statusRun.loading = idbGet(STATUS_KEY)
+            .then((v) => (statusRun.map = mergeStatuses(v, statusRun.map, Date.now())))
+            .catch(() => (statusRun.map = statusRun.map || {}))
+            .finally(() => (statusRun.loading = null));
+        return statusRun.loading;
+    }
+
+    /** The last status read for this player by this scheduler (any tab): {status, at} or null. */
+    function statusRead(id) {
+        const v = statusRun.map && statusRun.map[Number(id)];
+        return v ? { status: v[0], at: v[1] } : null;
+    }
+
+    /** Told the id of each player whose read ended (answered or not). */
+    function onStatus(fn) {
+        statusRun.listeners.push(fn);
+    }
+
+    function saveStatusesSoon() {
+        if (statusRun.saveTimer) return;
+        statusRun.saveTimer = setTimeout(() => {
+            statusRun.saveTimer = null;
+            const mine = statusRun.map || {};
+            idbUpdate(STATUS_KEY, (prev) => mergeStatuses(prev, mine)).catch(() => {});
+        }, 3000);
+    }
+
+    function statusDone(id) {
+        for (const fn of statusRun.listeners) {
+            try {
+                fn(id);
+            } catch {
+                // a listener's problem stays there
+            }
+        }
+    }
+
+    /**
+     * Ask Torn about the players due now (statusesToAsk), without waiting for the answers. Safe to call often.
+     * @param {object} o - {order: id[] (opened, page, rest), open: Set, readAt: id => ms (the newest read from anywhere)}
+     * @returns {number[]} the ids asked now
+     */
+    function pumpStatuses({ order = [], open = new Set(), readAt = () => 0, now = Date.now() } = {}) {
+        if (!isVisible() || isPaused() || !getKey(K.apiKey) || get(K.apiKeyDead, false)) return [];
+        if (!statusRun.map || now - statusRun.loadedAt > 60000) {
+            loadStatuses(now);
+            if (!statusRun.map) return [];
+        }
+        const mine = (id) => {
+            const r = statusRead(id);
+            return Math.max(r ? r.at : 0, readAt(id) || 0);
+        };
+        const { ask, asked } = statusesToAsk({ order, open, readAt: mine, pending: statusRun.pending, retryAt: statusRun.retryAt, asked: statusRun.asked, now });
+        statusRun.asked = asked;
+        for (const id of ask) {
+            statusRun.pending.add(id);
+            fetchProfile(tornClient(), id)
+                .then((p) => {
+                    const t = Date.now();
+                    if (!p || !p.status) {
+                        statusRun.retryAt.set(id, t + STATUS_RETRY_MS);
+                        return;
+                    }
+                    statusRun.retryAt.delete(id);
+                    statusRun.map = { ...(statusRun.map || {}), [id]: [{ state: p.status.state || null, description: p.status.description || null, until: p.status.until || null }, t] };
+                    saveStatusesSoon();
+                    // Level and life for the fight model too (this site's cache), as a profile read always did.
+                    const c = eye.cache;
+                    if (c) {
+                        const r = (c.players[id] = c.players[id] || {});
+                        r.profile = { ...(r.profile || {}), level: p.level || null, rank: p.rank || null, life: (p.life && p.life.maximum) || null, status: p.status, name: p.name || null, faction: p.faction_id || null };
+                        r.profileAt = t;
+                        // The status itself is kept in `eyeStatus` (saveStatusesSoon): this cache can wait (STATUS_SAVE_MS).
+                        saveLater();
+                    }
+                })
+                .catch((error) => {
+                    // Taking turns with Torn Trading: asked again when it's over, not held back.
+                    if (!(error && error.takingTurns)) statusRun.retryAt.set(id, Date.now() + STATUS_RETRY_MS);
+                })
+                .finally(() => {
+                    statusRun.pending.delete(id);
+                    statusDone(id);
+                });
+        }
+        return ask;
+    }
+
     /* ===== src/income.js ===== */
     /*
      * Auto mode's Full key: saved only in this browser and used for one thing,
@@ -19893,6 +21097,7 @@
      * only for items the Buy list needs (plus a few tracked ones), at most once
      * every 5 minutes, and only while this tab is visible.
      */
+
 
 
 
@@ -20146,7 +21351,7 @@
      * Its members are read every 10 s while the War view shows, and every
      * 5 min otherwise when Discord is set up (the bot's war pings need the bands).
      */
-    const war = { manual: null, pick: null, members: [], membersFid: null, name: null, early: new Set(), at: 0, loading: false, error: null, enemies: [], warsAt: 0, warsLoading: false, myFaction: undefined };
+    const war = { manual: null, pick: null, members: [], membersFid: null, name: null, early: new Set(), at: 0, readAt: 0, loading: false, error: null, enemies: [], warsAt: 0, warsLoading: false, myFaction: undefined };
 
     const WAR_TAB_POLL_MS = 10000;
     const WAR_BACKGROUND_POLL_MS = 5 * 60 * 1000;
@@ -20201,6 +21406,8 @@
             rememberFlights(members, nowMs);
             war.members = members;
             war.membersFid = fid;
+            // When the members were last read for real (`at` also moves on a failed read).
+            war.readAt = nowMs;
             war.error = null;
             wantPlayers(members.map((m) => Number(m.id)));
         } catch (error) {
@@ -20233,14 +21440,59 @@
     function eyeRows() {
         const stored = pageGet(TARGETS_KEY, null);
         if (!stored || !Array.isArray(stored.list)) return [];
+        // Where each target is, from reads already made (round 7): the list itself asks Torn about nobody, so a row's
+        // status is whatever the watch list, the war list, a profile or a flight first seen left, if it is fresh.
+        const now = Date.now();
+        const watched = watchStates().players;
+        const flights = flightsSeen();
+        const fid = warFid();
+        const warBy = new Map((war.membersFid === fid ? war.members || [] : []).map((mm) => [Number(mm.id), mm]));
+        // Who you just hit: your attacks (read hourly) and the attack pages you opened since.
+        const hits = ownHits((getShared('myAttacks', null) || {}).list || [], getShared(K.eyePredictions, []) || [], now);
         const rows = stored.list.map((x) => {
             // A fight not worked out yet isn't simulated inside the draw: the row shows what the list stored until it is.
             const live = eyeView(x.playerId, { level: x.level, name: x.name }, { later: true });
             const v = live && !live.pending ? live : null;
-            const base = v || { id: x.playerId, band: x.band || 'none', forecast: Number.isFinite(x.win) ? { pWin: x.win / 100, keep: Number.isFinite(x.keep) ? x.keep / 100 : null } : null, respect: x.respect || null };
-            return { ...base, name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId, stored: x };
+            const base = v || { id: x.playerId, band: normBand(x.band), forecast: Number.isFinite(x.win) ? { pWin: x.win / 100, keep: Number.isFinite(x.keep) ? x.keep / 100 : null } : null, respect: x.respect || null };
+            const ws = watched[x.playerId];
+            const wm = warBy.get(Number(x.playerId));
+            // The free reads first (the watch list, the war list, a flight first seen), then the statuses read one by one.
+            const sr = statusRead(x.playerId);
+            const reads = [ws ? { status: ws.status, at: ws.readAt } : null, wm ? { status: wm.status, at: war.readAt } : null, live && live.statusAt ? { status: live.status, at: live.statusAt } : null, sr];
+            // The newest read believed now; asked again 10 min after the last read (a hospital stay too: a revive shows);
+            // the list's hospital out-time only while no read is newer than the list (targetStatus, round 7 review).
+            const ts = targetStatus(reads, { listAt: stored.at, hospitalUntil: x.hospitalUntil, flight: flights[x.playerId] || null, now });
+            const hit = hits.get(Number(x.playerId)) || null;
+            return { ...base, name: x.name, level: x.level, hospitalUntil: ts.hospitalUntil, lastAction: x.lastAction, id: x.playerId, stored: x, status: ts.status, statusAt: ts.statusAt, hit };
         });
         return rows.filter((r) => isBeatable(r.band));
+    }
+
+    /*
+     * Target statuses (round 7, the Torn Trading way): the Torn Eye tab says which rows are on screen at each draw; the
+     * players opened to attack go first, then that page, then every other listed row in the list's order.
+     */
+    const statusPlan = { order: [], page: new Set(), open: new Set(), readAt: new Map(), clicked: new Map() };
+
+    function showStatuses({ page = [], all = [], opened = [], readAt = new Map() } = {}) {
+        const now = Date.now();
+        for (const [id, at] of statusPlan.clicked) if (!(now - at < ATTACK_OPENED_MS)) statusPlan.clicked.delete(id);
+        const open = [...statusPlan.clicked.keys(), ...opened];
+        statusPlan.order = statusOrder({ open, page, all });
+        statusPlan.page = new Set(page.map(Number));
+        statusPlan.open = new Set(open.map(Number));
+        statusPlan.readAt = readAt;
+        pumpTargetStatuses();
+    }
+
+    /** Targets shows, with FFScouter connected: the only time target statuses are read or redrawn for (round 7 review). */
+    function targetsShowing() {
+        return Boolean(page.app) && readsTargetStatuses({ tab: page.app.tab, ui: page.app.ui, hasFfs: Boolean(getKey(K.ffsKey)) });
+    }
+
+    function pumpTargetStatuses() {
+        if (!targetsShowing() || !statusPlan.order.length) return;
+        pumpStatuses({ order: statusPlan.order, open: statusPlan.open, readAt: (id) => statusPlan.readAt.get(id) || 0 });
     }
 
     /* The bot's /targets, /war and watch pings read Torn Eye (ids, names, levels, bands, win, HP kept; disclosed in Settings), only if you set up Discord. */
@@ -20254,7 +21506,8 @@
         if (fightsPending()) return;
         eyeSyncAt = Date.now();
         const row = (id, name, level, v, extra = {}) => ({ id, name: name || (v && v.name) || null, level: level || (v && v.level) || null, band: v ? v.band : 'none', win: v && v.forecast ? Math.round(v.forecast.pWin * 100) : null, keep: v && v.forecast && v.forecast.keep !== null && v.forecast.keep !== undefined ? Math.round(v.forecast.keep * 100) : null, ...extra });
-        const rows = eyeRows();
+        // The bot's /targets: the first 50 in the one order (respect, HP kept, win).
+        const rows = eyeRows().sort(byOrder);
         const bands = {};
         for (const r of rows) if (r.band) bands[r.id] = r.band;
         const fid = warFid();
@@ -20269,6 +21522,29 @@
             return row(Number(x.id), x.name || s.name, x.level || s.level, eyeView(Number(x.id), { level: x.level || s.level, name: x.name || s.name, life: s.life || null }), { tag: x.tag || null });
         });
         setEyeForSync({ war: fid && warRows.length ? { factionId: fid, members: warRows } : null, watch: watchRows });
+    }
+
+    /*
+     * What war mode worked out, for Torn's own war page (round 7): that page asks about nobody, and this page's estimates
+     * live in this site's IndexedDB, so the enemy's bands go to shared storage as one small table. Written only when a
+     * band changed, or every 10 minutes so its age stays true.
+     */
+    let warBandsSig = '';
+    let warBandsAt = 0;
+    const WAR_BANDS_REWRITE_MS = 10 * 60 * 1000;
+
+    function shareWarBands() {
+        const fid = warFid();
+        if (!fid || war.membersFid !== fid || !(war.members || []).length || !isVisible() || fightsPending()) return;
+        const views = war.members.map((mm) => eyeView(Number(mm.id), { level: mm.level, name: mm.name, life: mm.life || null }, { war: true, later: true }));
+        // A fight still being worked out: the table waits for it (asked again in 2 s).
+        if (views.some((v) => !v || v.pending)) return;
+        const table = warBandTable(views.map((v) => ({ id: v.id, band: v.band, win: v.forecast ? v.forecast.pWin * 100 : null, keep: v.forecast && v.forecast.keep !== null && v.forecast.keep !== undefined ? v.forecast.keep * 100 : null })), { fid });
+        const sig = fid + '|' + JSON.stringify(table.p);
+        if (sig === warBandsSig && Date.now() - warBandsAt < WAR_BANDS_REWRITE_MS) return;
+        warBandsSig = sig;
+        warBandsAt = Date.now();
+        set(WAR_BANDS_KEY, table);
     }
 
     /** Settings the report carries: the switches and limits, never a key, a faction or a player id. */
@@ -20370,7 +21646,7 @@
             keyProblem: keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: statics.keyInfo || null }),
             planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
             fullKey: fullKeyView(),
-            sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (pageGet(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), readLines(pageGet(K.planLine, null)).map((l) => l.at).join(',')].join('|'),
+            sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (pageGet(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), readLines(pageGet(K.planLine, null)).map((l) => l.at).join(','), JSON.stringify(get(K.stacking, null))].join('|'),
             setSettings: (p) => {
                 setSettings(p);
                 refresh();
@@ -20393,6 +21669,16 @@
             recalibratePlan: () => runPlan(() => recalibratePlan()),
             // The Plan card's Cancel while a plan is being worked out: nothing is saved, the old plan stays.
             cancelPlan: () => cancelPlan(),
+            // Home's "I'm stacking" (a chain) and Resume, which re-plans at once like Re-plan (round 7).
+            startStacking: () => {
+                page.app.ui.homeReplan = false;
+                startStacking();
+                page.app.render(true);
+            },
+            resumeStacking: () => {
+                page.app.ui.homeReplan = true;
+                return runPlan(() => resumeTraining());
+            },
             wantPrices: (ids, slim = []) => {
                 if (isVisible()) setTimeout(() => loadPrices(ids, slim).catch(() => {}), 0);
             },
@@ -20478,6 +21764,19 @@
                 sources: () => ({ fights: ((get('myAttacks', null) || {}).list || []).length, ffsFree: page.ffs ? page.ffs.stats().remaining : 60, gear: page.eye.gear }),
                 view: (id, extra, o) => eyeView(id, extra, o),
                 attacks: () => (get('myAttacks', null) || {}).list || [],
+                statuses: {
+                    /** The rows on screen and every listed row, in order (each draw of Targets). */
+                    show: showStatuses,
+                    /** An Attack button pressed on the list: that player is asked first. */
+                    attack: (id) => {
+                        statusPlan.clicked.set(Number(id), Date.now());
+                        statusPlan.order = statusOrder({ open: [id], all: statusPlan.order });
+                        statusPlan.open.add(Number(id));
+                        pumpTargetStatuses();
+                    },
+                    /** Whether statuses are being read now (a key, not paused): else a row with none says "—", not "checking". */
+                    active: () => Boolean(getKey(K.apiKey)) && !get(K.apiKeyDead, false) && !isPaused(),
+                },
                 updatedAt: () => (pageGet(TARGETS_KEY, null) || {}).at || null,
                 params: () => (pageGet(TARGETS_KEY, null) || {}).params || null,
                 war: {
@@ -20534,6 +21833,26 @@
             page.app.render(true);
         });
         gearCount().then((n) => (page.eye.gear = n));
+        // A status answered: a row on screen redraws at once; one on another page at most every 5 s (its counts and the
+        // progress line), so a background pass never redraws what you're not looking at more than that.
+        let statusDrawAt = 0;
+        let statusDrawTimer = null;
+        onStatus((id) => {
+            // Only the Targets view shows statuses: War, Watched and the other tabs aren't redrawn for them (round 7 review).
+            if (!targetsShowing()) return;
+            if (statusPlan.page.has(Number(id))) {
+                statusDrawAt = Date.now();
+                page.app.render(true);
+                return;
+            }
+            if (statusDrawTimer) return;
+            statusDrawTimer = setTimeout(() => {
+                statusDrawTimer = null;
+                statusDrawAt = Date.now();
+                if (targetsShowing()) page.app.render(true);
+            }, Math.max(0, 5000 - (Date.now() - statusDrawAt)));
+        });
+        loadStatuses().catch(() => {});
         page.app.mount();
         // Torn Eye works only while its tab is open (owner, round 6): the targets' estimates are asked for when it opens.
         let eyeOpen = false;
@@ -20578,6 +21897,8 @@
         for (const k of [K.prices, K.settings, K.plan, K.userStatic, K.stateError, K.apiKeyDead]) gmOnChange(k, () => page.app.render());
         // The watch list is changed from Torn's pages too (☆ on a profile or the attack page) and read there.
         gmOnChange('eyeWatch', () => page.app.tab === 'eye' && page.app.render(true));
+        // An attack page opened on Torn, or your attacks read again: the rows of the players you just hit grey at once.
+        for (const k of [K.eyePredictions, 'myAttacks']) gmOnChange(k, () => page.app.tab === 'eye' && page.app.render(true));
         onPauseChange(() => page.app.render(true));
         // War mode: a faction picked by id stays until "Back to our war"; otherwise your faction's war, found by itself.
         war.manual = getSettings().warFaction || null;
@@ -20592,6 +21913,10 @@
             // The Watched view reads its players every 60 s while it shows (the war list just read costs nothing).
             if (page.app.ui.eyeMode === 'watched') pollWatch({ members: war.members }).catch(() => {});
             syncEye();
+            shareWarBands();
+            pumpTargetStatuses();
+            // An attack page opened 3 min ago: your attacks once more, so the players you just hit grey (round 7 review).
+            attacksAfterOpen().catch(() => {});
         }, 2000);
         // A Log in with Discord that was under way when the page reloaded: keep waiting for it.
         setTimeout(() => {
@@ -20618,6 +21943,12 @@
      * neither margin is wide enough does it float. Alt+` collapses/expands it
      * (NPC Arbitrage uses ` alone). In its own shadow root (:host{all:initial}).
      * No sounds, pop-ups or title changes, ever.
+     *
+     * Round 7's look (overlays.html §5): the step in big type, one muted line,
+     * the energy bar, "then …", one action button ("Open the gym"); a coloured
+     * edge only when it's time to act (chalk) or the page says so (green, red,
+     * amber); folded it is one tag. On the attack page it folds to one line
+     * under Torn Eye's fight card and never covers it.
      */
 
 
@@ -20634,64 +21965,181 @@
     /** Under NPC Arbitrage's layer, so the trading script's windows stay on top if they ever meet. */
     const Z = 2147482990;
 
+    /** Space between Torn Eye's fight card and the panel docked under it (the attack page). */
+    const DOCK_GAP = 8;
+
+    /** The edge colours (round 7's one look): chalk "do this", green train, red wrong or not yet, amber paused or overdosed. */
+    const TONES = { chalk: '#efebe2', green: '#3fbf5a', red: '#ff6b5e', amber: '#e8a33d' };
+
     const OVERLAY_CSS = `
     :host { all: initial; }
-    * { box-sizing: border-box; font-family: Arial, Helvetica, sans-serif; }
-    .wrap { position: fixed; z-index: ${Z}; width: var(--w, ${PANEL_W}px); display: flex; flex-direction: column; background: #1b1e21; border: 1px solid #3a4046; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.5); color: #e3e5e8; font-size: 13px; overflow: hidden; }
-    .head { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 4px 0 6px; font-weight: bold; cursor: move; user-select: none; touch-action: none; white-space: nowrap; }
+    * { box-sizing: border-box; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
+    .wrap { --b: #3a4046; position: fixed; z-index: ${Z}; width: var(--w, ${PANEL_W}px); display: flex; flex-direction: column; background: #101214; border: 1px solid #3a4046; border-radius: 10px; box-shadow: 0 8px 26px rgba(0,0,0,.6); color: #f2f3f5; font-size: var(--fs, 13px); line-height: 1.4; overflow: hidden; }
+    .wrap.toned { border-color: color-mix(in srgb, var(--b) 55%, #3a4046); }
+    .ribbon { height: 4px; flex: none; background: var(--b); display: none; }
+    .wrap.toned .ribbon { display: block; }
+    .collapsed .ribbon { display: none !important; }
+    .wrap.collapsed { border-radius: 6px; }
+    .wrap.collapsed.toned { border-left: 5px solid var(--b); }
+    .head { display: flex; align-items: center; gap: 8px; height: 36px; flex: none; padding: 0 4px 0 8px; font-weight: 700; cursor: move; user-select: none; touch-action: none; white-space: nowrap; }
     .head:focus-visible { outline: 2px solid #efebe2; outline-offset: -2px; }
-    .head .cd { font: bold 16px "Arial Narrow", Arial, sans-serif; color: #efebe2; font-variant-numeric: tabular-nums; flex: none; }
-    .head .ti { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-    .plate { width: 24px; height: 24px; border-radius: 50%; background: #efebe2; display: grid; place-items: center; box-shadow: inset 0 0 0 4px #efebe2, inset 0 0 0 5px #2a2d31; flex: none; }
-    .plate i { width: 5px; height: 5px; border-radius: 50%; background: #15171a; }
-    .wrap.paused { border-color: #e8a33d; }
-    .wrap.paused .plate { background: #e8a33d; box-shadow: none; color: #15171a; font: bold 14px Arial, sans-serif; }
-    .wrap.paused .step { font-weight: bold; }
-    .wrap.paused .sub { color: #c9cdd1; }
-    .col { flex: none; width: 26px; height: 26px; padding: 0; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #e3e5e8; font: bold 15px/24px Arial, sans-serif; cursor: pointer; }
-    .col:hover { border-color: #3a4046; }
-    .col:focus-visible { outline: 2px solid #efebe2; outline-offset: 1px; }
-    .body { border-top: 1px solid #2c3136; padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
+    .head .cd { font-weight: 700; font-size: 15px; color: #efebe2; font-variant-numeric: tabular-nums; flex: none; }
+    .head .ti { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #fff; }
+    .plate { width: 18px; height: 18px; border-radius: 50%; background: #efebe2; display: grid; place-items: center; box-shadow: inset 0 0 0 3.5px #efebe2, inset 0 0 0 5px #15171a; flex: none; }
+    .plate i { width: 4px; height: 4px; border-radius: 50%; background: #15171a; }
+    .wrap.paused .plate { background: #e8a33d; box-shadow: none; color: #15171a; font: 700 12px 'Segoe UI', system-ui, sans-serif; }
+    .col, .app { flex: none; width: 26px; height: 26px; padding: 0; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #c5cad0; font: 700 14px/24px 'Segoe UI', system-ui, sans-serif; cursor: pointer; }
+    .col:hover, .app:hover { border-color: #3a4046; }
+    .col:focus-visible, .app:focus-visible { outline: 2px solid #efebe2; outline-offset: 1px; }
+    .body { border-top: 1px solid #262a2e; padding: 10px 14px 14px; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
     .collapsed .body { display: none; }
-    .step { font-weight: bold; color: #fff; }
-    .sub { font-size: 12px; color: #939aa1; }
-    .mini { display: grid; grid-template-columns: 48px 1fr 64px; gap: 6px; align-items: center; font-size: 11px; color: #939aa1; font-variant-numeric: tabular-nums; }
-    .bar { height: 5px; border-radius: 3px; background: #24282c; overflow: hidden; }
-    .bar i { display: block; height: 100%; border-radius: 3px; }
-    .later { font-size: 12px; color: #939aa1; border-top: 1px solid #2c3136; padding-top: 6px; display: flex; flex-direction: column; gap: 3px; font-variant-numeric: tabular-nums; }
-    .open { height: 28px; border-radius: 5px; border: 0; background: #efebe2; color: #15171a; font: bold 12px Arial, sans-serif; cursor: pointer; }
-    .open:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
-    .warn { color: #e8a33d; font-size: 12px; font-weight: bold; }
+    .lbl { font-size: 11px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: var(--lb, #9aa1a8); }
+    .step { font-weight: 700; font-size: var(--fstep, 20px); line-height: 1.2; color: #fff; }
+    .sub { font-size: 12px; color: #9aa1a8; }
+    .row2 { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; font-variant-numeric: tabular-nums; }
+    .row2 .k { color: #9aa1a8; }
+    .meter { height: 6px; border-radius: 3px; background: #2a2e33; overflow: hidden; }
+    .meter i { display: block; height: 100%; border-radius: 3px; background: #3fbf5a; }
+    .later { font-size: 12px; color: #9aa1a8; font-variant-numeric: tabular-nums; }
+    .check { display: flex; gap: 8px; align-items: center; font-size: 12px; color: #c5cad0; }
+    .check i { width: 14px; height: 14px; border-radius: 3px; border: 1.5px solid #6c737a; display: inline-grid; place-items: center; font-style: normal; font-size: 10px; flex: none; }
+    .check.done { color: #9aa1a8; }
+    .check.done i { background: #3fbf5a; border-color: #3fbf5a; color: #101214; }
+    .check.next { color: #fff; font-weight: 700; }
+    .check.next i { border-color: var(--b); }
+    .cta { display: block; height: 32px; line-height: 32px; text-align: center; border-radius: 6px; border: 0; background: #efebe2; color: #15171a; font: 700 13px 'Segoe UI', system-ui, sans-serif; cursor: pointer; text-decoration: none; }
+    .cta:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+    .warn { color: #e8a33d; font-size: 12px; font-weight: 700; }
+    /* Sized to the free space beside Torn's page (fitTier): narrower with smaller type, then one tag, then the smallest. */
+    .wrap.fit-narrow .body { padding: 8px 10px 10px; gap: 6px; }
+    .wrap.fit-narrow .sub, .wrap.fit-narrow .later, .wrap.fit-narrow .check, .wrap.fit-narrow .row2 { font-size: 11px; }
+    .wrap.fit-compact .head, .wrap.fit-mini .head { gap: 5px; padding: 0 2px 0 6px; }
+    .wrap.fit-compact .head .cd, .wrap.fit-mini .head .cd { font-size: 13px; }
+    .wrap.fit-compact .body { padding: 6px 8px 8px; gap: 5px; }
+    .wrap.fit-compact .app, .wrap.fit-mini .ti, .wrap.fit-mini .col, .wrap.fit-mini .app { display: none; }
     `;
+
+    /**
+     * Where the panel docks on the attack page: directly under Torn Eye's fight card, as wide as it, never on top of it.
+     * Above the card when there is no room under it; under it (partly off screen) when neither fits.
+     * @param {{left, top, right, bottom, width}} card - the card's rect (viewport)
+     * @returns {{x:number, y:number, width:number, side:'below'|'above'}}
+     */
+    /**
+     * Another page's Torn Eye card (the profile) in the margin the panel would take: they share a side when their columns
+     * overlap and the card starts above the panel's foot (the full panel is about 340 px tall). Then the panel docks under it.
+     */
+    function sharesMargin(card, x, y, width, height = 340) {
+        if (!card || !(card.width > 0) || !(card.height > 0)) return false;
+        return card.left < x + width && card.right > x && card.top < y + height && card.bottom > y;
+    }
+
+    /**
+     * Round 7 review: the dock forced 160 px although the card can be about 100 (its smallest size), so in a narrow margin
+     * the panel reached over Torn's page (52 px of the fight at 1200 px). It is now the card's width, kept in the card's
+     * margin when Torn's page (`page`: {left, right}) is known; null when that margin can't hold the smallest tag (the
+     * panel then takes its own place: a margin, else the window's corner).
+     * @returns {{x:number, y:number, width:number, side:'below'|'above'}|null}
+     */
+    function dockUnder(card, viewW, viewH, height = 36, gap = DOCK_GAP, page = null) {
+        let lo = 4;
+        let hi = viewW - 4;
+        if (page && Number.isFinite(page.left) && Number.isFinite(page.right)) {
+            const mid = card.left + card.width / 2;
+            if (mid >= page.right) lo = Math.max(lo, Math.ceil(page.right) + 1);
+            else if (mid <= page.left) hi = Math.min(hi, Math.floor(page.left) - 1);
+            // A card over Torn's page itself: nothing of ours docks there.
+            else return null;
+        }
+        const width = Math.round(Math.min(card.width, hi - lo));
+        if (width < MINI_W) return null;
+        const x = Math.round(Math.min(Math.max(lo, card.left), hi - width));
+        const below = card.bottom + gap;
+        if (below + height > viewH - 4 && card.top - gap - height >= 4) return { x, y: Math.round(card.top - gap - height), width, side: 'above' };
+        return { x, y: Math.round(below), width, side: 'below' };
+    }
+
+    /*
+     * Round 7 (the owner): the panel never goes over Torn's page. Like NPC Arbitrage it sizes itself to the free space
+     * beside Torn's page: the full card where a margin holds it, a narrower one with smaller type, then one tag; only with
+     * no usable margin at all it is the smallest tag in the window's top corner (over Torn's header, never its content).
+     */
+
+    /** The least width of each size, by the free width a margin gives. */
+    const FIT_FULL_W = 260;
+    const FIT_NARROW_W = 180;
+    const FIT_COMPACT_W = 100;
+    /** The smallest tag (the plate and the countdown) and where it sits when no margin holds even one tag. */
+    const MINI_W = 84;
+    const CORNER_TOP = 4;
+
+    const TIER_RANK = { full: 3, narrow: 2, compact: 1, mini: 0 };
+
+    /**
+     * The panel's size for a width it can have.
+     * @returns {{tier: 'full'|'narrow'|'compact'|'mini', font: number, step: number, folded: boolean}}
+     *   font: its type (px), step: the big step's type (px), folded: one tag (compact folds by itself; mini always)
+     */
+    function fitTier(width) {
+        if (width >= FIT_FULL_W) return { tier: 'full', font: 13, step: 20, folded: false };
+        if (width >= FIT_NARROW_W) return { tier: 'narrow', font: 12, step: 16, folded: false };
+        if (width >= FIT_COMPACT_W) return { tier: 'compact', font: 11, step: 14, folded: true };
+        return { tier: 'mini', font: 11, step: 14, folded: true };
+    }
 
     /**
      * Where the panel may live. `page` is Torn's page (sidebar + content) as
      * {left, right}; null when it can't be measured.
-     * @returns {{side: 'left'|'right'|'float', from: number, to: number, width: number}[]}
-     *   each margin wide enough to hold it (left first), else one 'float' spot
+     * @returns {{side: 'left'|'right'|'corner', from: number, to: number, width: number, tier, font, step, folded}[]}
+     *   each margin that holds at least one tag, the best size first (the left one on a tie, so NPC Arbitrage keeps
+     *   the right), else one 'corner' spot for the smallest tag
      */
-    function spots(viewW, page, want = PANEL_W, min = PANEL_MIN_W) {
+    function spots(viewW, page, want = PANEL_W, min = FIT_COMPACT_W) {
         const out = [];
         if (page && Number.isFinite(page.left) && Number.isFinite(page.right)) {
             for (const m of [{ side: 'left', from: EDGE, to: page.left - GAP }, { side: 'right', from: page.right + GAP, to: viewW - EDGE }]) {
-                if (m.to - m.from >= min) out.push({ ...m, width: Math.min(want, m.to - m.from) });
+                const free = m.to - m.from;
+                if (free >= min) {
+                    const width = Math.round(Math.min(want, free));
+                    out.push({ ...m, width, ...fitTier(width) });
+                }
             }
         }
-        if (!out.length) out.push({ side: 'float', from: 4, to: viewW - 4, width: Math.max(160, Math.min(want, viewW - 8)) });
+        out.sort((a, b) => TIER_RANK[b.tier] - TIER_RANK[a.tier]);
+        if (!out.length) out.push(cornerSpot());
         return out;
+    }
+
+    /** The smallest tag's spot in the window's top corner (over Torn's header, never its content). */
+    function cornerSpot() {
+        return { side: 'corner', from: 4, to: 4 + MINI_W, width: MINI_W, ...fitTier(0) };
+    }
+
+    /**
+     * The spots that don't share a column with `col` ({left, right} on screen: Torn Eye's list tags; round 7 review: the
+     * panel covered them when both took the same margin). None left: the corner tag.
+     */
+    function spotsClearOf(list, col) {
+        if (!col || !Number.isFinite(col.left) || !Number.isFinite(col.right)) return list;
+        const free = list.filter((s) => s.side === 'corner' || !(col.left < s.to && col.right > s.from));
+        return free.length ? free : [cornerSpot()];
     }
 
     /** A saved spot ({side, off, y}: off = distance from the margin's outer edge) as a point on screen. */
     function pointOf(pos, list, viewH, height = 36) {
-        const spot = (pos && list.find((s) => s.side === pos.side)) || list[0];
+        // The side you left it on, unless the other side holds a bigger panel now (a narrower window).
+        const saved = pos && list.find((s) => s.side === pos.side);
+        const spot = saved && TIER_RANK[saved.tier] >= TIER_RANK[list[0].tier] ? saved : list[0];
+        if (spot.side === 'corner') return { spot, x: spot.from, y: CORNER_TOP };
         const off = pos && pos.side === spot.side && Number.isFinite(pos.off) ? pos.off : 0;
-        // The left margin counts from the window's left edge; the right one and a floating panel from the right edge.
+        // The left margin counts from the window's left edge; the right one from the right edge.
         const x = spot.side === 'left' ? spot.from + off : spot.to - spot.width - off;
         return clampInto(spot, x, pos && Number.isFinite(pos.y) ? pos.y : DEFAULT_TOP, viewH, height);
     }
 
     /** Keep a point inside its spot and on screen (at least the header stays visible). */
     function clampInto(spot, x, y, viewH, height = 36) {
+        if (spot.side === 'corner') return { spot, x: spot.from, y: CORNER_TOP };
         const maxX = Math.max(spot.from, spot.to - spot.width);
         const maxY = Math.max(4, viewH - Math.min(height, 40) - 4);
         return { spot, x: Math.round(Math.min(maxX, Math.max(spot.from, x))), y: Math.round(Math.min(maxY, Math.max(4, y))) };
@@ -20714,18 +22162,28 @@
         return { side: s.side, off: Math.round(s.side === 'left' ? p.x - s.from : s.to - s.width - p.x), y: p.y };
     }
 
+
+    /** "12 s ago", "3 min ago" */
+    function agoWords(ms) {
+        const s = Math.max(0, Math.round(ms / 1000));
+        return s < 60 ? s + ' s ago' : Math.round(s / 60) + ' min ago';
+    }
+
     class Overlay {
         /**
          * @param {object} o
-         * @param {function} o.onOpen
+         * @param {function} o.onOpen - open the webpage
          * @param {function} o.loadPos - () => {side, off, y}|null
          * @param {function} o.savePos
          * @param {function} o.loadCollapsed - () => boolean
          * @param {function} o.saveCollapsed
          * @param {function} o.pageRect - () => {left, right}|null (Torn's sidebar + content)
          * @param {function} [o.avoidRect] - () => DOMRect|null: a panel to stay above (NPC Arbitrage)
+         * @param {function} [o.dockTo] - () => Element|null: dock folded under it (Torn Eye's fight card on the attack page)
+         * @param {function} [o.dockIfShared] - () => Element|null: dock under it only when it sits in the panel's margin (the profile card)
+         * @param {function} [o.avoidColumn] - () => {left, right}|null: a column it never shares (Torn Eye's list tags)
          */
-        constructor({ onOpen, loadPos, savePos, loadCollapsed, saveCollapsed, pageRect, avoidRect = () => null }) {
+        constructor({ onOpen, loadPos, savePos, loadCollapsed, saveCollapsed, pageRect, avoidRect = () => null, dockTo = () => null, dockIfShared = () => null, avoidColumn = () => null }) {
             this.onOpen = onOpen;
             this.loadPos = loadPos;
             this.savePos = savePos;
@@ -20733,6 +22191,10 @@
             this.saveCollapsed = saveCollapsed;
             this.pageRect = pageRect;
             this.avoidRect = avoidRect;
+            this.dockTo = dockTo;
+            this.dockIfShared = dockIfShared;
+            this.avoidColumn = avoidColumn;
+            this.docked = null;
             this.off = false;
         }
 
@@ -20742,9 +22204,10 @@
             this.shadow = this.host.shadowRoot || this.host.attachShadow({ mode: 'open' });
             this.head = h('div', { class: 'head', role: 'button', tabindex: '0', 'aria-label': 'Pumping Iron: next step (Alt+` to expand or collapse)' });
             this.headInfo = h('span', { class: 'ti' });
-            this.colBtn = h('button', { class: 'col', type: 'button', onclick: () => this.setCollapsed(!this.collapsed, true) });
+            this.colBtn = h('button', { class: 'col', type: 'button', onclick: () => this.toggle() });
+            this.ribbon = h('div', { class: 'ribbon' });
             this.body = h('div', { class: 'body' });
-            this.wrap = h('div', { class: 'wrap' }, [this.head, this.body]);
+            this.wrap = h('div', { class: 'wrap' }, [this.ribbon, this.head, this.body]);
             fill(this.shadow, [h('style', { text: OVERLAY_CSS }), this.wrap]);
             this.headInfo.textContent = 'Pumping Iron';
             fill(this.head, [h('span', { class: 'plate' }, [h('i')]), this.headInfo, this.colBtn]);
@@ -20752,13 +22215,13 @@
             this.head.addEventListener('keydown', (e) => {
                 if (e.target === this.head && (e.key === 'Enter' || e.key === ' ')) {
                     e.preventDefault();
-                    this.setCollapsed(!this.collapsed, true);
+                    this.toggle();
                 }
             });
             doc.addEventListener('keydown', (e) => {
                 if (e.altKey && !e.ctrlKey && !e.metaKey && !e.repeat && e.code === 'Backquote') {
                     e.preventDefault();
-                    this.setCollapsed(!this.collapsed, true);
+                    this.toggle();
                 }
             });
             window.addEventListener('resize', () => this.place());
@@ -20780,33 +22243,108 @@
             });
         }
 
+        /**
+         * Docked under the fight card it stays one line (it would cover the card otherwise), and so does the smallest tag;
+         * a one-tag panel (a narrow margin) opens for a look without changing your choice; else fold or unfold, remembered.
+         */
+        toggle() {
+            if (this.docked || (this.fit && this.fit.tier === 'mini')) return;
+            if (this.fit && this.fit.tier === 'compact') {
+                this.peek = !this.peek;
+                this.showFolded();
+                this.place();
+                return;
+            }
+            this.setCollapsed(!this.collapsed, true);
+        }
+
+        /** One tag now: your choice, docked under the fight card, or the free space holds no more (fitTier). */
+        isFolded() {
+            const f = this.fit;
+            return this.collapsed || Boolean(this.docked) || Boolean(f && (f.tier === 'mini' || (f.tier === 'compact' && !this.peek)));
+        }
+
+        /** The size the free space gives it (fitTier): its type and how it folds. */
+        setFit(width) {
+            const f = fitTier(width);
+            const changed = !this.fit || this.fit.tier !== f.tier;
+            this.fit = f;
+            this.wrap.style.setProperty('--fs', f.font + 'px');
+            this.wrap.style.setProperty('--fstep', f.step + 'px');
+            if (!changed) return;
+            for (const t of ['full', 'narrow', 'compact', 'mini']) this.wrap.classList.toggle('fit-' + t, t === f.tier);
+            this.wrap.setAttribute('data-fit', f.tier);
+            if (f.tier !== 'compact') this.peek = false;
+            this.showFolded();
+        }
+
         setCollapsed(on, save, soon = false) {
             this.collapsed = Boolean(on);
-            this.wrap.classList.toggle('collapsed', this.collapsed);
-            this.colBtn.textContent = this.collapsed ? '+' : '–';
+            this.showFolded();
             this.colBtn.setAttribute('aria-label', this.collapsed ? 'Expand' : 'Collapse');
             this.colBtn.title = (this.collapsed ? 'Expand' : 'Collapse') + ' (Alt+`)';
-            this.head.setAttribute('aria-expanded', String(!this.collapsed));
             if (save) this.saveCollapsed(this.collapsed);
             if (soon) this.placeSoon();
             else this.place();
         }
 
-        spotList() {
-            return spots(window.innerWidth, this.pageRect());
+        /** Folded = one tag: the user's choice, or always while docked under the fight card. */
+        showFolded() {
+            const folded = this.isFolded();
+            this.wrap.classList.toggle('collapsed', folded);
+            this.wrap.classList.toggle('docked', Boolean(this.docked));
+            this.colBtn.textContent = folded ? '+' : '–';
+            this.colBtn.style.display = this.docked || (this.fit && this.fit.tier === 'mini') ? 'none' : '';
+            this.head.setAttribute('aria-expanded', String(!folded));
         }
 
-        /** Put it where it was left (or the default), inside its margin, above NPC Arbitrage when they share one. */
+        /** The card to dock under: the attack page's always; the profile's only when it took the panel's margin. */
+        dockCard() {
+            const card = this.dockTo ? this.dockTo() : null;
+            if (card) return card;
+            const other = this.dockIfShared ? this.dockIfShared() : null;
+            if (!other || !other.getBoundingClientRect) return null;
+            const stored = this.loadPos();
+            const p = pointOf(stored && stored.side ? stored : null, this.spotList(), window.innerHeight);
+            return sharesMargin(other.getBoundingClientRect(), p.x, p.y, p.spot.width) ? other : null;
+        }
+
+        spotList() {
+            const col = this.avoidColumn ? this.avoidColumn() : null;
+            this.colKey = col ? col.left + ',' + col.right : '';
+            return spotsClearOf(spots(window.innerWidth, this.pageRect()), col);
+        }
+
+        /** Put it where it was left (or the default), inside its margin, above NPC Arbitrage when they share one; on the attack page under the fight card. */
         place() {
             if (!this.wrap) return;
             this.wrap.style.display = this.off ? 'none' : 'flex';
             if (this.off) return;
             this.wrap.style.visibility = '';
+            const card = this.dockCard();
+            const r = card && card.getBoundingClientRect ? card.getBoundingClientRect() : null;
+            const was = Boolean(this.docked);
+            // Under the card, in its margin only; a margin too narrow for a tag: the panel's own place instead.
+            const d = r && r.width > 0 && r.height > 0 ? dockUnder(r, window.innerWidth, window.innerHeight, 36, DOCK_GAP, this.pageRect()) : null;
+            if (d) {
+                this.docked = { key: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height), window.innerWidth, window.innerHeight].join(',') };
+                if (!was) this.showFolded();
+                this.wrap.style.left = d.x + 'px';
+                this.wrap.style.top = d.y + 'px';
+                this.wrap.style.setProperty('--w', d.width + 'px');
+                this.setFit(d.width);
+                return;
+            }
+            this.docked = null;
+            this.noDockKey = r && r.width > 0 && r.height > 0 ? [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height), window.innerWidth, window.innerHeight].join(',') : null;
+            if (was) this.showFolded();
             const list = this.spotList();
             const stored = this.loadPos();
             const pos = stored && stored.side ? stored : null;
-            const spot = (pos && list.find((s) => s.side === pos.side)) || list[0];
-            this.wrap.style.setProperty('--w', spot.width + 'px');
+            // Sized to the free space first (the height it then has places it).
+            const first = pointOf(pos, list, window.innerHeight);
+            this.wrap.style.setProperty('--w', first.spot.width + 'px');
+            this.setFit(first.spot.width);
             const p = pointOf(pos, list, window.innerHeight, this.wrap.offsetHeight || 36);
             this.apply(p);
         }
@@ -20815,17 +22353,18 @@
             this.wrap.style.left = p.x + 'px';
             this.wrap.style.top = p.y + 'px';
             this.wrap.style.setProperty('--w', p.spot.width + 'px');
+            this.setFit(p.spot.width);
             // The body scrolls inside the window, and stops above NPC Arbitrage if that panel is below it.
             let bottom = window.innerHeight - 12;
             const a = this.avoidRect();
             if (a && a.width && a.height && a.left < p.x + p.spot.width && a.right > p.x && a.top > p.y + 36) bottom = Math.min(bottom, a.top - 8);
-            this.body.style.maxHeight = Math.max(60, bottom - p.y - 36) + 'px';
+            this.body.style.maxHeight = Math.max(60, bottom - p.y - 40) + 'px';
         }
 
         bindDrag() {
             let start = null;
             this.head.addEventListener('pointerdown', (e) => {
-                if (e.button !== 0) return;
+                if (e.button !== 0 || this.docked) return;
                 if (e.target.closest && e.target.closest('button, a, input')) return;
                 const r = this.wrap.getBoundingClientRect();
                 start = { x: e.clientX, y: e.clientY, left: r.left, top: r.top, moved: false, list: this.spotList() };
@@ -20846,15 +22385,18 @@
                 start = null;
                 if (this.head.hasPointerCapture && this.head.hasPointerCapture(e.pointerId)) this.head.releasePointerCapture(e.pointerId);
                 if (moved && p) this.savePos(posOf(p));
-                else if (!moved && e.type === 'pointerup' && this.collapsed) this.setCollapsed(false, true);
+                else if (!moved && e.type === 'pointerup' && this.isFolded()) this.toggle();
             };
             this.head.addEventListener('pointerup', end);
             this.head.addEventListener('pointercancel', end);
         }
 
         /**
-         * @param {object} v - {off, paused, cdAt, pillText, pillNow, cardStep, cardSub, warn, energy:{current,max}, happy:{current,max}, later:[string]}
-         *   paused: Torn Trading runs (a warning sign instead of the plate, an amber edge)
+         * @param {object} v - {off, paused, tone, label, cdAt, pillText, pillNow, cardStep, cardSub, warn, checklist, energy:{current,max},
+         *   later:[string], action:{text, href}|null, seen:{count, where, lastAt, resumesAt}}
+         *   tone: the edge's colour (chalk: time to act; green, red, amber); none: a plain border
+         *   paused: Torn Trading runs (a warning sign instead of the plate, an amber card)
+         *   action: the one button (a link to a Torn page, e.g. "Open the gym"); none: "Open Pumping Iron"
          */
         update(v) {
             const wasOff = this.off;
@@ -20864,34 +22406,72 @@
                 return;
             }
             const now = Date.now();
+            const tone = v.paused ? 'amber' : v.tone && TONES[v.tone] ? v.tone : null;
+            this.wrap.style.setProperty('--b', tone ? TONES[tone] : '#3a4046');
+            this.wrap.classList.toggle('toned', Boolean(tone));
+            this.wrap.setAttribute('data-tone', tone || '');
+            this.wrap.classList.toggle('paused', Boolean(v.paused));
             const cdText = v.pillNow || (v.cdAt ? countdown(v.cdAt - now) : '');
             this.headInfo.textContent = v.pillText || 'Pumping Iron';
-            this.wrap.classList.toggle('paused', Boolean(v.paused));
-            fill(this.head, [v.paused ? h('span', { class: 'plate', text: '!', 'aria-label': 'Paused' }) : h('span', { class: 'plate' }, [h('i')]), cdText ? h('span', { class: 'cd', 'data-cd': v.cdAt && !v.pillNow ? String(v.cdAt) : null, text: cdText }) : null, this.headInfo, this.colBtn]);
+            // One way to the webpage always: the big button when there is no Torn page to go to, else a small ↗ here.
+            const link = v.action && v.action.href;
+            const app = link ? h('button', { class: 'app open', type: 'button', title: 'Open Pumping Iron', 'aria-label': 'Open Pumping Iron', onclick: () => this.onOpen(), text: '↗' }) : null;
+            fill(this.head, [v.paused ? h('span', { class: 'plate', text: '!', 'aria-label': 'Paused' }) : h('span', { class: 'plate' }, [h('i')]), cdText ? h('span', { class: 'cd', 'data-cd': v.cdAt && !v.pillNow ? String(v.cdAt) : null, text: cdText }) : null, this.headInfo, app, this.colBtn]);
             this.head.title = v.pillText || '';
-            const bars = [];
-            if (v.energy) bars.push(h('div', { class: 'mini' }, [h('span', { text: 'Energy' }), h('div', { class: 'bar' }, [h('i', { style: 'width:' + Math.min(100, (100 * v.energy.current) / Math.max(1, v.energy.max)) + '%;background:#efebe2' })]), h('span', { text: v.energy.current + ' / ' + v.energy.max })]));
-            if (v.happy) bars.push(h('div', { class: 'mini' }, [h('span', { text: 'Happy' }), h('div', { class: 'bar' }, [h('i', { style: 'width:' + Math.min(100, (100 * v.happy.current) / Math.max(1, v.happy.max)) + '%;background:#9bdc8a' })]), h('span', { text: String(v.happy.current).replace(/\B(?=(\d{3})+(?!\d))/g, ',') })]));
-            fill(this.body, [
-                h('span', { class: 'step', text: v.cardStep || '' }),
-                v.cardSub ? h('span', { class: 'sub', text: v.cardSub }) : null,
-                v.warn ? h('span', { class: 'warn', text: v.warn }) : null,
-                ...bars,
-                v.later && v.later.length ? h('div', { class: 'later' }, v.later.map((x) => h('span', { text: x }))) : null,
-                h('button', { class: 'open', type: 'button', onclick: () => this.onOpen(), text: 'Open Pumping Iron' }),
-            ]);
+            const kids = [];
+            if (v.label) kids.push(h('span', { class: 'lbl', style: tone ? '--lb:' + TONES[tone] : null, text: v.label }));
+            if (v.cardStep) kids.push(h('span', { class: 'step', text: v.cardStep }));
+            if (v.cardSub) kids.push(h('span', { class: 'sub', text: v.cardSub }));
+            if (v.warn) kids.push(h('span', { class: 'warn', text: v.warn }));
+            if (v.seen) {
+                const s = v.seen;
+                if (s.count > 0) {
+                    kids.push(h('span', {}, ['Still seen in ', h('b', { style: 'color:#fff', text: s.count + ' tab' + (s.count === 1 ? '' : 's') }), ': ' + s.where.join(', ') + '.']));
+                    kids.push(h('span', { class: 'sub', text: 'Reload or close ' + (s.count === 1 ? 'it' : 'them') + '. Pumping Iron starts again 2 min after the last one.' }));
+                } else {
+                    kids.push(h('span', {}, ['Torn Trading isn’t seen any more. Starting again in ', h('b', { style: 'color:#fff', 'data-cd': String(s.resumesAt), text: countdown(s.resumesAt - now) }), '.']));
+                }
+                if (s.lastAt) kids.push(h('div', { class: 'row2' }, [h('span', { class: 'k', text: 'Last seen' }), h('span', { 'data-ago': String(s.lastAt), text: agoWords(now - s.lastAt) })]));
+            }
+            if (v.checklist && v.checklist.length) for (const c of v.checklist) kids.push(h('div', { class: 'check' + (c.done ? ' done' : '') + (c.next ? ' next' : '') }, [h('i', { text: c.done ? '✓' : '' }), h('span', { text: c.text })]));
+            if (v.energy) {
+                kids.push(h('div', { class: 'row2' }, [h('span', { class: 'k', text: 'Energy' }), h('span', { text: fmtNum(v.energy.current) + ' / ' + fmtNum(v.energy.max) })]));
+                kids.push(h('div', { class: 'meter' }, [h('i', { style: 'width:' + Math.min(100, (100 * v.energy.current) / Math.max(1, v.energy.max)) + '%' })]));
+            }
+            if (v.later && v.later.length) kids.push(h('div', { class: 'later', text: 'then ' + v.later.join(' · ') }));
+            kids.push(link ? h('a', { class: 'cta go', href: v.action.href, text: v.action.text }) : h('button', { class: 'cta open', type: 'button', onclick: () => this.onOpen(), text: 'Open Pumping Iron' }));
+            fill(this.body, kids);
             if (wasOff || !this.placed) {
                 this.placed = true;
                 this.placeSoon();
             }
         }
 
-        /** Every second: the countdowns only. */
+        /** Every second: the countdowns, and the dock follows the fight card. */
         tick() {
             if (!this.shadow) return;
             const now = Date.now();
             for (const el of this.shadow.querySelectorAll('[data-cd]')) el.textContent = countdown(Number(el.getAttribute('data-cd')) - now);
+            for (const el of this.shadow.querySelectorAll('[data-ago]')) el.textContent = agoWords(now - Number(el.getAttribute('data-ago')));
+            if (this.off || !this.wrap) return;
+            // Torn Eye's list tags took (or left) a column: out of it (one attribute read, no layout).
+            const col = this.docked ? null : this.avoidColumn ? this.avoidColumn() : null;
+            if (!this.docked && (col ? col.left + ',' + col.right : '') !== (this.colKey || '')) {
+                this.place();
+                return;
+            }
+            const card = this.dockCard();
+            if (!card && !this.docked) return;
+            const r = card && card.getBoundingClientRect ? card.getBoundingClientRect() : null;
+            const key = r ? [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height), window.innerWidth, window.innerHeight].join(',') : '';
+            // A card whose margin can't hold the docked tag: placed once on its own for it, not again every second.
+            if (!this.docked && key && this.noDockKey === key) return;
+            if (!this.docked || this.docked.key !== key) this.place();
         }
+    }
+
+    function fmtNum(n) {
+        return String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
     }
 
     /* ===== src/sources/dom/gym.js ===== */
@@ -21039,38 +22619,64 @@
 
     /* ===== src/ui/marks/marks.js ===== */
     /*
-     * Marks on Torn's own pages (DESIGN §5): an outline and a small label on
-     * the thing the plan uses, a one-line strip on the gym page, and Fill N,
-     * which types into Torn's reps box on your click. Labels never take the
-     * pointer (trading's pattern), so Torn's buttons are never covered.
-     * Everything we add carries the class `pi-mark` and can be removed at once.
+     * Marks on Torn's own pages (DESIGN §5; round 7's one look, overlays.html):
+     * an opaque near-black tag with our plate mark, a 5 px coloured edge, a 1 px
+     * border and, on the one thing to do now, a soft glow in its colour (green
+     * to train, red wrong or not yet, amber paused or overdosed, chalk "take
+     * this"). At most one thing glows on a page. On the gym page: the strip (one
+     * line before the stat boxes), the stat to train outlined with its tab, the
+     * gym you're in (steady green or red), the gym to go to (the only pulse for
+     * gyms), and Fill N, which types into Torn's reps box on your click. Our
+     * things never take the pointer except our own buttons, never sit on Torn's
+     * content, and carry the class `pi-mark` so they go at once.
      */
 
 
 
 
     const MARK_CSS = `
-    .pi-mark, .pi-mark * { box-sizing: border-box; font-family: Arial, Helvetica, sans-serif; }
-    .pi-strip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 7px 10px; margin: 0 0 10px; background: #1b1e21; border: 1px solid #3a4046; border-radius: 6px; font-size: 12px; line-height: 1.4; color: #e3e5e8; }
-    .pi-strip b { color: #fff; }
-    .pi-strip .pi-sep { color: #6c737a; }
-    .pi-strip .pi-hint { color: #e8a33d; font-weight: bold; }
-    .pi-plate { width: 18px; height: 18px; border-radius: 50%; background: #efebe2; display: inline-grid; place-items: center; box-shadow: inset 0 0 0 3px #efebe2, inset 0 0 0 4px #2a2d31; flex: none; }
+    .pi-mark, .pi-mark * { box-sizing: border-box; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
+    .pi-c-green { --b: #3fbf5a; } .pi-c-red { --b: #ff6b5e; } .pi-c-amber { --b: #e8a33d; } .pi-c-chalk { --b: #efebe2; } .pi-c-grey { --b: #6c737a; } .pi-c-plain { --b: #6c737a; }
+    .pi-tag { display: flex; align-items: center; gap: 10px; min-height: 32px; padding: 0 12px 0 0; border-radius: 6px; background: #101214; border: 1px solid color-mix(in srgb, var(--b, #efebe2) 55%, transparent); box-shadow: 0 2px 8px rgba(0,0,0,.4); color: #f2f3f5; font-size: 13px; line-height: 1.35; overflow: hidden; }
+    .pi-tag > .pi-edge { align-self: stretch; width: 5px; flex: none; background: var(--b, #efebe2); }
+    .pi-glow { box-shadow: 0 0 0 3px color-mix(in srgb, var(--b) 14%, transparent), 0 0 16px color-mix(in srgb, var(--b) 24%, transparent), 0 2px 8px rgba(0,0,0,.4) !important; }
+    .pi-plate { width: 16px; height: 16px; border-radius: 50%; background: #efebe2; display: inline-grid; place-items: center; box-shadow: inset 0 0 0 3px #efebe2, inset 0 0 0 4.5px #15171a; flex: none; }
     .pi-plate i { width: 4px; height: 4px; border-radius: 50%; background: #15171a; }
-    .pi-on { box-shadow: 0 0 0 2px #efebe2 !important; border-radius: 5px; position: relative; }
-    .pi-panel { display: flex; align-items: center; gap: 10px; padding: 7px 10px; margin: 6px 0; background: #1b1e21; border-radius: 5px; font-size: 12px; color: #e3e5e8; }
-    .pi-panel b { color: #fff; font-size: 13px; }
-    .pi-fill { white-space: nowrap; height: 26px; padding: 0 12px; border-radius: 13px; background: #efebe2; color: #15171a; font: bold 12px Arial, sans-serif; border: 0; cursor: pointer; margin-left: auto; }
-    .pi-fill:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
-    .pi-grey { color: #8a9096; font-size: 12px; margin: 4px 0; }
-    .pi-warn { display: flex; align-items: center; gap: 10px; padding: 7px 10px; margin: 6px 0; background: #2a1f10; border-left: 3px solid #e8a33d; border-radius: 0 5px 5px 0; font-size: 12px; color: #ffd79a; }
-    .pi-warn b { color: #ffe3b3; }
-    .pi-outlined { box-shadow: inset 0 0 0 2px #efebe2 !important; position: relative; }
+    .pi-strip { flex-wrap: wrap; row-gap: 2px; padding-top: 5px; padding-bottom: 5px; margin: 0 0 10px; }
+    .pi-strip b { color: #fff; font-weight: 700; }
+    .pi-strip .pi-sep { width: 1px; align-self: stretch; margin: 2px 0; background: #2f3439; flex: none; }
+    .pi-strip .pi-src { color: #9aa1a8; font-size: 11px; }
+    .pi-strip .pi-hint { color: #e8a33d; font-weight: 700; }
     .pi-strip .pi-part { color: #939aa1; white-space: nowrap; }
-    .pi-strip .pi-part.pi-cur { color: #fff; font-weight: bold; }
+    .pi-strip .pi-part.pi-cur { color: #fff; font-weight: 700; }
     .pi-strip .pi-part.pi-done { color: #9bdc8a; }
-    .pi-strip .pi-done-all { color: #9bdc8a; font-weight: bold; }
-    .pi-label { position: absolute; top: -9px; left: 10px; right: auto; height: 18px; line-height: 18px; padding: 0 8px; border-radius: 9px; background: #efebe2; color: #15171a; font: bold 11px Arial, sans-serif; pointer-events: none; z-index: 2; white-space: nowrap; }
+    .pi-strip .pi-arrow { color: #6c737a; }
+    .pi-strip a.pi-link { color: #101214; background: var(--b); border-radius: 5px; padding: 2px 10px; font-weight: 700; font-size: 12px; text-decoration: none; white-space: nowrap; }
+    .pi-strip a.pi-link:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+    .pi-rel { position: relative; }
+    .pi-statmark { position: absolute; inset: -3px; border: 2px solid var(--b); border-radius: 6px; pointer-events: none; z-index: 1; }
+    .pi-statmark.pi-dashed { border-style: dashed; }
+    .pi-tab { height: 22px; padding: 0 9px; border-radius: 4px; background: var(--b); color: #101214; font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex: none; }
+    .pi-tab::before { content: ''; width: 10px; height: 10px; border-radius: 50%; box-shadow: inset 0 0 0 2px #101214; flex: none; }
+    .pi-pulse::after { content: ''; position: absolute; inset: -2px; border-radius: 7px; box-shadow: 0 0 0 2px color-mix(in srgb, var(--b) 80%, transparent), 0 0 22px color-mix(in srgb, var(--b) 80%, transparent); opacity: 0; animation: pi-pulse 1.4s ease-in-out infinite; pointer-events: none; }
+    .pi-pulse.pi-still::after { animation: none; opacity: .7; }
+    @keyframes pi-pulse { 50% { opacity: 1; } }
+    @media (prefers-reduced-motion: reduce) { .pi-pulse::after { animation: none; opacity: .7; } }
+    .pi-gymmark { outline: 2px solid var(--b) !important; outline-offset: 1px; position: relative; }
+    .pi-ring { position: absolute; inset: -2px; border-radius: 6px; pointer-events: none; }
+    .pi-panel { min-height: 32px; margin: 6px 0; font-size: 12px; }
+    .pi-panel b { color: #fff; font-size: 13px; }
+    .pi-panel .pi-sub { color: #c5cad0; }
+    .pi-fill { white-space: nowrap; height: 24px; padding: 0 12px; border-radius: 5px; border: 1px solid #3fbf5a; background: #3fbf5a; color: #101214; font: 700 12px 'Segoe UI', system-ui, sans-serif; cursor: pointer; margin-left: auto; flex: none; }
+    .pi-fill:disabled { background: #24282c; color: #6c737a; border-color: #3a4046; cursor: default; }
+    .pi-fill:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+    .pi-warn { --b: #e8a33d; }
+    .pi-warn b { color: #ffe3b3; }
+    .pi-corner { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; margin: 4px 0; border-radius: 4px; background: #101214; border: 1px solid #3a4046; color: #c5cad0; font-size: 11px; white-space: nowrap; }
+    .pi-outlined { box-shadow: inset 0 0 0 2px #efebe2 !important; position: relative; }
+    .pi-outlined.pi-glow { box-shadow: inset 0 0 0 2px #efebe2, 0 0 0 3px rgba(239,235,226,.15), 0 0 16px rgba(239,235,226,.22) !important; }
+    .pi-label { position: absolute; top: -11px; left: 10px; height: 20px; padding: 0 8px 0 6px; border-radius: 5px; background: #efebe2; color: #15171a; font: 700 11px 'Segoe UI', system-ui, sans-serif; letter-spacing: .4px; text-transform: uppercase; pointer-events: none; z-index: 2; white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; }
+    .pi-label::before { content: ''; width: 9px; height: 9px; border-radius: 50%; box-shadow: inset 0 0 0 2px #15171a; flex: none; }
     `;
 
     /** Our page CSS, once per page (torn.com: no outside fonts). */
@@ -21082,15 +22688,21 @@
         (doc.head || doc.documentElement).appendChild(st);
     }
 
+    /** The classes we put on Torn's own elements (taken off with our marks). */
+    const ON_TORN = ['pi-on', 'pi-wait', 'pi-rel', 'pi-outlined', 'pi-dim', 'pi-glow', 'pi-gymmark', 'pi-c-green', 'pi-c-red', 'pi-c-grey', 'pi-c-chalk', 'pi-c-amber'];
+
     /** Remove every mark we drew inside `scope`. */
     function clearMarks(scope = document) {
         for (const el of scope.querySelectorAll('.pi-mark')) el.remove();
-        for (const el of scope.querySelectorAll('.pi-on, .pi-outlined, .pi-dim')) el.classList.remove('pi-on', 'pi-outlined', 'pi-dim');
+        for (const el of scope.querySelectorAll('.pi-on, .pi-wait, .pi-rel, .pi-outlined, .pi-dim, .pi-gymmark')) el.classList.remove(...ON_TORN);
+        for (const el of scope.querySelectorAll('[data-pi-gym]')) el.removeAttribute('data-pi-gym');
     }
 
     function plate() {
         return h('span', { class: 'pi-plate' }, [h('i')]);
     }
+
+    const TONE = { green: 'pi-c-green', red: 'pi-c-red', amber: 'pi-c-amber', chalk: 'pi-c-chalk', plain: 'pi-c-plain' };
 
     /**
      * Draw the gym page marks from planGymPage() output.
@@ -21098,60 +22710,82 @@
      * @param {object} plan - planGymPage(model, page)
      * @param {object[]} boxes - readStatBoxes(root)
      * @param {function} rereadBox - (stat) => the box as it is now (React may have replaced the input)
-     * @param {{id, el}[]} [buttons] - readGymButtons(root): the next part's gym gets an outline
+     * @param {{id, el}[]} [buttons] - readGymButtons(root): the gym you're in and the gym to go to
+     * @param {{motion:boolean}} [opts] - motion false (Settings › Animations off): the pulse is held still
      */
-    function drawGymMarks(root, plan, boxes, rereadBox, buttons = []) {
+    function drawGymMarks(root, plan, boxes, rereadBox, buttons = [], { motion = true } = {}) {
         clearMarks(root);
         const list = root.querySelector('ul[class*="properties___"]');
         if (!list) return;
-        const sep = (text) => h('span', { class: 'pi-sep', text });
-        const strip = h('div', { class: 'pi-mark pi-strip' }, [plate()]);
-        strip.appendChild(h('b', { text: plan.strip[0] || '' }));
-        // The session, part by part: ticks on the ones done, the current one bright.
-        if (plan.parts && plan.parts.length) {
-            strip.appendChild(sep('·'));
+        const line = plan.line || { tone: 'plain', head: plan.strip[0] || '', text: '', src: null };
+        const kind = plan.state ? plan.state.kind : 'idle';
+        const still = motion === false ? ' pi-still' : '';
+        const sep = () => h('span', { class: 'pi-sep' });
+        // The one thing that glows: the stat to train (right, ready), the stat to eat for (pulse), the gym to go to
+        // (pulse), or the strip itself when it is all there is (an overdose, stacking for a chain).
+        const stripGlows = kind === 'overdose' || kind === 'stacking';
+        const strip = h('div', { class: 'pi-mark pi-tag pi-strip ' + (TONE[line.tone] || TONE.plain) + (stripGlows ? ' pi-glow' : ''), 'data-pi-state': kind }, [h('span', { class: 'pi-edge' }), plate(), h('b', { text: line.head })]);
+        if (line.text) {
+            strip.appendChild(sep());
+            strip.appendChild(h('span', { class: 'pi-words', text: line.text }));
+        }
+        // A session in more than one part (or one already ticked): the parts, the current one bright.
+        if (plan.parts && (plan.parts.length > 1 || plan.parts.some((p) => p.state === 'done')) && kind !== 'overdose' && kind !== 'stacking') {
+            strip.appendChild(sep());
             plan.parts.forEach((p, i) => {
-                if (i) strip.appendChild(sep('→'));
+                if (i) strip.appendChild(h('span', { class: 'pi-arrow', text: '→' }));
                 const words = p.gymName + ': ' + p.stat.toUpperCase() + ' × ' + p.trains + (p.state === 'current' && p.done > 0 ? ' (' + p.left + ' left)' : '');
                 strip.appendChild(h('span', { class: 'pi-part' + (p.state === 'done' ? ' pi-done' : p.state === 'current' ? ' pi-cur' : ''), text: (p.state === 'done' ? '✓ ' : '') + words }));
             });
         }
-        if (plan.done) {
-            strip.appendChild(sep('·'));
-            strip.appendChild(h('span', { class: 'pi-done-all', text: 'Session done' }));
+        if (line.src) {
+            strip.appendChild(sep());
+            strip.appendChild(h('span', { class: 'pi-src', text: line.src }));
         }
-        for (const p of plan.strip.slice(1)) {
-            strip.appendChild(sep('·'));
-            strip.appendChild(h('span', { text: p }));
-        }
-        if (plan.switchHint) {
-            strip.appendChild(sep('·'));
-            strip.appendChild(h('span', { class: 'pi-hint', text: plan.switchHint }));
-        }
+        if (line.link) strip.appendChild(h('a', { class: 'pi-link', href: line.link.href, text: line.link.text }));
         list.parentNode.insertBefore(strip, list);
-        // The next part is in another gym: outline that gym's button (the user switches; we never do).
-        if (plan.nextGym) {
-            const b = buttons.find((x) => x.id === plan.nextGym.id);
-            if (b && b.el) outline(b.el, plan.nextGym.label);
-            // Its button isn't on the page (Torn shows one group of gyms at a time): the strip says which group to open.
-            else strip.appendChild(h('span', { class: 'pi-hint', text: ' · open ' + plan.nextGym.group.replace(/^a /, 'the ') + 's to find it' }));
-        }
+
+        // The gym you're in: a steady outline, green when right, red when wrong (no glow).
         if (plan.hereGym) {
             const b = buttons.find((x) => x.id === plan.hereGym.id);
-            if (b && b.el) outline(b.el, plan.hereGym.label);
+            if (b && b.el) {
+                b.el.classList.add('pi-gymmark', plan.hereGym.wrong ? 'pi-c-red' : 'pi-c-green');
+                b.el.setAttribute('data-pi-gym', plan.hereGym.wrong ? 'wrong' : 'right');
+            }
         }
+        // The gym to go to: green, and it pulses (the only pulse for gyms). The user switches; we never do.
+        if (plan.nextGym) {
+            const b = buttons.find((x) => x.id === plan.nextGym.id);
+            if (b && b.el) {
+                b.el.classList.add('pi-gymmark', 'pi-c-green');
+                b.el.setAttribute('data-pi-gym', 'go');
+                b.el.appendChild(h('span', { class: 'pi-mark pi-ring pi-pulse' + still, title: plan.nextGym.label, 'aria-hidden': 'true' }));
+            } else {
+                // Its button isn't on the page (Torn shows one group of gyms at a time): the strip says which group to open.
+                strip.appendChild(h('span', { class: 'pi-hint', text: 'open ' + plan.nextGym.group.replace(/^a /, 'the ') + 's to find it' }));
+            }
+        }
+
         for (const box of boxes) {
             const p = plan.perStat[box.stat];
-            if (!p) continue;
-            if (p.kind === 'train') {
+            if (!p || p.kind === 'off') continue;
+            if (p.kind === 'train' || p.kind === 'wait') {
+                const wait = p.kind === 'wait';
+                const tone = wait ? 'pi-c-grey' : p.mark === 'eat' ? 'pi-c-red' : 'pi-c-green';
+                box.li.classList.add(wait ? 'pi-wait' : 'pi-on', 'pi-rel');
+                // The mark: steady green to train, a red pulse until the boosters are in, dashed grey in the wrong gym.
+                const markCls = 'pi-mark pi-statmark ' + tone + (wait ? ' pi-dashed' : p.mark === 'eat' ? ' pi-pulse' + still : ' pi-glow');
+                // The outline is a border just outside the box (pointer-events none); its tab sits in our own row inside
+                // the box, never floating over Torn's controls (the owner: nothing of ours covers Torn's page).
+                box.li.appendChild(h('span', { class: markCls, 'aria-hidden': 'true' }));
                 const n = p.fill !== undefined ? p.fill : p.trains;
-                box.li.classList.add('pi-on');
-                box.li.appendChild(h('span', { class: 'pi-mark pi-label', text: 'Train this' }));
+                const shown = p.fillN !== undefined && (p.hold || wait) ? p.fillN : n;
                 const fill = h('button', {
                     class: 'pi-fill',
                     type: 'button',
-                    text: 'Fill ' + n,
-                    disabled: n <= 0,
+                    text: 'Fill ' + shown,
+                    title: wait ? 'Switch gyms first' : p.hold ? 'Take the boosters and the drug first' : null,
+                    disabled: wait || p.hold || n <= 0,
                     onclick: (e) => {
                         e.preventDefault();
                         e.stopPropagation();
@@ -21159,19 +22793,25 @@
                         fillTrains(now.input, n);
                     },
                 });
-                const panel = p.warn ? h('div', { class: 'pi-mark pi-warn' }, [h('span', {}, [h('b', { text: p.warn.split('. ')[0] + '.' }), ' ' + p.warn.split('. ').slice(1).join('. ')]), fill]) : h('div', { class: 'pi-mark pi-panel' }, [h('b', { text: p.text }), h('span', { text: p.sub }), fill]);
-                box.content.insertBefore(panel, box.content.firstChild);
-            } else if (p.text) {
-                // Never dims Torn's boxes (round 6): a grey line only.
-                box.content.insertBefore(h('div', { class: 'pi-mark pi-grey', text: p.text }), box.content.firstChild);
+                const row = p.warn
+                    ? h('div', { class: 'pi-mark pi-tag pi-panel pi-warn' }, [h('span', { class: 'pi-edge' }), h('span', {}, [h('b', { text: p.warn.split('. ')[0] + '.' }), ' ' + p.warn.split('. ').slice(1).join('. ')]), fill])
+                    : h('div', { class: 'pi-mark pi-tag pi-panel ' + tone }, [h('span', { class: 'pi-edge' }), h('span', { class: 'pi-tab', text: p.tab }), wait || p.hold ? h('b', { text: wait ? 'Switch gyms first' : p.text }) : null, p.sub ? h('span', { class: 'pi-sub', text: wait || p.hold ? p.sub : p.sub.replace(/ · about [+−-]?[\d,]+/, '') }) : null, fill]);
+                box.content.insertBefore(row, box.content.firstChild);
+            } else if (p.tag) {
+                // Never dims or covers Torn's boxes (round 6): a small dark tag on its own line, the full words on hover.
+                box.content.insertBefore(h('div', { class: 'pi-mark pi-corner', title: p.text, text: p.tag }), box.content.firstChild);
             }
         }
     }
 
-    /** Outline one element with a label (items, bazaar cards, market rows, points lots). */
-    function outline(el, label) {
+    /**
+     * Outline one element with its chalk tab (items, bazaar cards, market rows, points lots). `glow`: the one thing
+     * that glows on the page (the first listing to take).
+     */
+    function outline(el, label, { glow = false } = {}) {
         if (!el) return;
         el.classList.add('pi-outlined');
+        if (glow) el.classList.add('pi-glow');
         el.appendChild(h('span', { class: 'pi-mark pi-label', text: label }));
     }
 
@@ -21292,11 +22932,54 @@
         return panel ? panel.getBoundingClientRect() : null;
     }
 
+    /** The column Torn Eye's list tags use ({left, right} on screen), from its layer's data-pi-col; null: none. */
+    function eyeColumn() {
+        const layer = document.getElementById('pi-eye-layer');
+        const v = layer && layer.getAttribute('data-pi-col');
+        const [left, right] = v ? v.split(',').map(Number) : [];
+        return Number.isFinite(left) && Number.isFinite(right) ? { left, right } : null;
+    }
+
     /* ---------------------------------------------------------------- pill */
 
     /** Why there's no state yet (key refused, too limited, Torn not answering), or null. */
     function currentProblem() {
         return keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: (get(K.userStatic, {}) || {}).keyInfo || null });
+    }
+
+    /** The bars as Torn's sidebar shows them now (they move before our next read), else the model's. */
+    function liveReads(m, now = Date.now()) {
+        const happy = readHappyBar() || (m && m.strip && m.strip.happy ? { current: m.strip.happy.current, max: m.strip.happy.max } : null);
+        const energy = readEnergyBar() || (m && m.strip ? m.strip.energy : null);
+        return { happy, energy, ...agedCooldowns(m, now) };
+    }
+
+    /** GM key: an overdose seen on the bars ({at, until}), so every tab stops its jump marks. */
+    const OVERDOSE_KEY = 'overdose';
+
+    /**
+     * An overdose seen on the bars (gympage.js nextOverdose: the bars at 0 with the overdose's long cooldown, or a fall
+     * training can't explain), kept while fresh readings still look like it and until the drug cooldown it started is over.
+     */
+    function overdoseOf(m, reads = liveReads(m), now = Date.now()) {
+        if (!m || !m.ready) return null;
+        const prev = get(OVERDOSE_KEY, null);
+        const next = nextOverdose(prev, reads, now, tp.barsSeen);
+        tp.barsSeen = nextBarsSeen(tp.barsSeen, reads, now);
+        if (JSON.stringify(next) !== JSON.stringify(prev)) set(OVERDOSE_KEY, next);
+        return next;
+    }
+
+    /** The step's one action on Torn: the page it is done on (none when you are on it). */
+    function stepAction(step, page, boost = null) {
+        if (!step) return null;
+        const items = (step.items || []).filter((it) => it.qty > 0);
+        const trains = Boolean(step.parts && step.parts.length);
+        if (boost) return boost.ready ? (page === PAGE_GYM ? null : { text: 'Open the gym', href: gymUrl() }) : page === PAGE_ITEMS ? null : { text: 'Open Items', href: itemsUrl() };
+        if (items.some((it) => it.id === POINTS)) return page === PAGE_POINTS ? null : { text: 'Open Points', href: pointsUrl() };
+        if (items.length) return page === PAGE_ITEMS ? null : { text: 'Open Items', href: itemsUrl() };
+        if (trains && page !== PAGE_GYM) return { text: 'Open the gym', href: gymUrl() };
+        return null;
     }
 
     function overlayView(m, page) {
@@ -21309,18 +22992,31 @@
             if (p) return { pillText: p.short, cardStep: p.title, cardSub: p.text, warn: p.kind === 'retry' ? null : 'Open Pumping Iron › Settings' };
             return hasKey ? { pillText: 'Reading your state…', cardStep: 'Asking Torn for your bars, stats and gym.' } : { pillText: 'Open to set up', cardStep: 'Add your Torn key in Pumping Iron’s Settings.' };
         }
+        const now = Date.now();
         const next = m.next;
-        const later = m.steps.slice(1, 3).map((x) => tornClock(x.at) + ' · ' + x.label + (trainsText(x.trains) ? ', ' + trainsText(x.trains) : ''));
-        const v = { energy: m.strip.energy, happy: m.strip.happy, later };
+        const later = m.steps.slice(1, 3).map((x) => tornClock(x.at) + ' ' + x.label.split(' · ')[0] + (trainsText(x.trains) ? ', ' + trainsText(x.trains) : ''));
+        const energy = readEnergyBar() || m.strip.energy;
+        // Stacking energy for a chain (Home's "I'm stacking"): no training steps, the energy is kept.
+        if (m.stacking) {
+            return { tone: 'amber', label: 'Stacking', pillText: 'Stacking for a chain · training paused', cardStep: 'Stacking for a chain', cardSub: 'Training paused · energy now ' + fmtInt(energy.current) + ' / ' + fmtInt(energy.max) + ', kept', energy, later: [] };
+        }
+        const reads = liveReads(m);
+        if (overdoseOf(m, reads, now)) {
+            return { tone: 'amber', label: 'Overdosed', pillText: 'Overdosed · fly to Switzerland', cardStep: 'Fly to Switzerland', cardSub: 'Rehab there: about $' + fmtInt(REHAB_COST) + ' a session. The plan is worked out again after rehab.', later: [], action: { text: 'Open Travel', href: TRAVEL_URL } };
+        }
+        const v = { energy, later };
         // On the gym page the bar follows the walk-through. Round 7: once the session is done and the next step is still
         // ahead, it moves on to that step and its countdown (it stayed on "Now · Session done").
-        const sessionOver = page === PAGE_GYM && tp.lastGymPlan && tp.lastGymPlan.done && next && next.at > Date.now();
-        if (page === PAGE_GYM && tp.lastGymPlan && tp.lastGymPlan.pill && !sessionOver) {
+        const gp = page === PAGE_GYM ? tp.lastGymPlan : null;
+        const sessionOver = gp && gp.done && next && next.at > now;
+        if (gp && gp.pill && !sessionOver) {
             v.pillNow = 'Now';
-            v.pillText = tp.lastGymPlan.pill;
+            v.pillText = gp.pill;
         }
+        // A jump or a daily boost due now: its checklist, ticked from the bars (every Torn page).
+        const boost = next && isBoostStep(next) && next.at <= now + DUE_SLACK_MS ? boostProgress(next, { ...reads, happyTrained: boostHappyTrained(get(K.gymSession, null), next, m.pc && m.pc.perks ? m.pc.perks.happyLossMult : 1, now) }) : null;
         if (next) {
-            const due = next.at <= Date.now();
+            const due = next.at <= now;
             if (!v.pillText) {
                 if (due) {
                     v.pillNow = 'Now';
@@ -21330,25 +23026,47 @@
                     v.pillText = next.label.split(' · ')[0];
                 }
             } else if (!due) v.cdAt = next.at;
+            // A chalk edge only when it's time to act.
+            v.tone = due || boost ? 'chalk' : null;
+            v.label = due || boost ? 'Now' : 'Next';
             v.cardStep = (sessionOver ? 'Session done. Next: ' : '') + stepWords(next);
             v.cardSub = next.gain ? 'about +' + fmtInt(next.gain) + (next.energy ? ' · ' + fmtInt(next.energy) + ' energy' : '') : null;
-            if (next.strict && next.warnAt !== null && Date.now() >= next.warnAt) v.warn = 'Strict: ' + (next.note || 'on the tick');
+            if (next.strict && next.warnAt !== null && now >= next.warnAt) v.warn = 'Strict: ' + (next.note || 'on the tick');
+            v.action = stepAction(next, page, boost);
+            if (boost) {
+                v.checklist = boost.list;
+                v.tone = boost.ready ? 'green' : 'red';
+                v.label = (boost.jump ? 'Jump' : 'Boost') + (boost.ready ? ' · now' : boost.deadline ? ' · finish before ' + tornClock(boost.deadline) : '');
+            }
         } else {
             v.pillText = 'Done for today';
             v.cardStep = 'Nothing left today';
+            v.label = 'Today';
+        }
+        // The gym page's own states (overlays.html §6): the right gym, the wrong one, eat first, ready.
+        const panel = gp && !sessionOver ? gymPanel(gp) : null;
+        if (panel) {
+            Object.assign(v, { tone: panel.tone, label: panel.title, cardStep: panel.step, cardSub: panel.sub, checklist: panel.checklist, action: panel.action });
+            v.warn = null;
         }
         return v;
     }
 
-    /** The panel while Torn Trading runs: a warning sign, why, how to switch, and the plan's last steps. */
-    function pausedView(m) {
+    /**
+     * The panel while Torn Trading runs: an amber card that says where it is still seen and when it was last seen (round 7:
+     * it said "starts again by itself within a minute", which isn't so while a tab opened before Torn Trading was turned
+     * off still runs it), then the plan's next steps.
+     */
+    function pausedView(m, seen = tradingWhere()) {
         const steps = m && m.ready ? m.steps.slice(0, 2).map((x) => x.label.split(' · ')[0] + ' at ' + tornClock(x.at)) : [];
         return {
             paused: true,
+            tone: 'amber',
+            label: 'Paused · Torn Trading is on',
             pillText: 'Paused · Torn Trading is on',
-            cardStep: 'Pumping Iron and Torn Trading can’t run at the same time: they’d share Torn’s 100 calls a minute and mark the same listings.',
-            cardSub: 'To use Pumping Iron: turn off Torn Trading in Tampermonkey (or close its Torn Bids tab). Pumping Iron starts again by itself within a minute. Nothing is asked from Torn while paused.',
-            later: steps.length ? ['Your plan’s next steps: ' + steps.join(' · ')] : [],
+            cardStep: '',
+            seen,
+            later: steps.length ? [steps.join(' · ')] : [],
         };
     }
 
@@ -21399,9 +23117,11 @@
         const prev = get(K.gymSession, null);
         const session = nextSession(prev, m, reading, now, { table: m.pc.table, perks: m.pc.perks.mult });
         if (JSON.stringify(session) !== JSON.stringify(prev)) set(K.gymSession, session);
-        const plan = planGymPage(m, { selectedId: sum.selectedId || m.state.gymId, boxes, reading }, session, now);
+        // Round 7: the gym page's states come from the same reads (the sidebar's happy and energy, the model's cooldowns).
+        const reads = liveReads(m);
+        const plan = planGymPage(m, { selectedId: sum.selectedId || m.state.gymId, boxes, reading, reads, overdose: overdoseOf(m, reads, now) }, session, now);
         tp.lastGymPlan = plan;
-        drawGymMarks(root, plan, boxes, (stat) => readStatBoxes(gymRoot()).find((b) => b.stat === stat), buttons);
+        drawGymMarks(root, plan, boxes, (stat) => readStatBoxes(gymRoot()).find((b) => b.stat === stat), buttons, { motion: getSettings().motion !== false });
         // Our own drawing is not Torn changing the page: those records are dropped, and what Torn shows now is remembered.
         if (tp.observer) tp.observer.takeRecords();
         tp.gymSig = gymPageSig(root);
@@ -21412,7 +23132,7 @@
         const boxes = readStatBoxes(root).map((b) => b.stat + ':' + b.value + ':' + (b.locked ? 1 : 0)).join(',');
         const sel = gymListSummary(readGymButtons(root)).selectedId;
         // Our marks' count too: Torn re-rendering a box (a message, same value) wipes its panel without changing a value.
-        return [boxes, sel, JSON.stringify(readEnergyBar()), gymLoading(root) ? 1 : 0, root.querySelectorAll('.pi-mark').length].join('|');
+        return [boxes, sel, JSON.stringify(readEnergyBar()), JSON.stringify(readHappyBar()), gymLoading(root) ? 1 : 0, root.querySelectorAll('.pi-mark').length].join('|');
     }
 
     function watchGym() {
@@ -21459,6 +23179,8 @@
         const check = () => {
             if (isPaused() || !isVisible()) return;
             const now = look();
+            // The last reading with something in the bars: an overdose is a fall from it that training can't explain.
+            tp.barsSeen = nextBarsSeen(tp.barsSeen, now, Date.now());
             if (barsActed(last, now)) readSoon();
             last = now;
         };
@@ -21488,13 +23210,19 @@
 
     function drawItems(m) {
         clearMarks(document.querySelector('.content-wrapper') || document);
-        if (!m || !m.ready || !getSettings().marketMarks) return;
+        // Stacking for a chain: no step to buy for until Resume (the panel says so).
+        if (!m || !m.ready || m.stacking || !getSettings().marketMarks) return;
         const idx = m.steps.findIndex((s) => (s.items || []).some((it) => it.id !== POINTS));
         if (idx < 0) return;
         const step = m.steps[idx];
         const n = m.done.length + idx + 1;
+        // At most one thing glows on a page: the first one marked.
+        let glow = true;
         for (const it of step.items) {
-            for (const row of readItemRows().filter((r) => r.itemId === Number(it.id))) outline(row.el, 'Step ' + n + ' of today · ' + step.label.split(' · ')[0]);
+            for (const row of readItemRows().filter((r) => r.itemId === Number(it.id))) {
+                outline(row.el, 'Step ' + n + ' of today · ' + step.label.split(' · ')[0], { glow });
+                glow = false;
+            }
         }
     }
 
@@ -21532,25 +23260,31 @@
         if (want.length) loadPrices(want).catch(() => {});
         const fills = chosenFills(m);
         const label = (r) => 'Take ' + fmtInt(r.qty) + ' · $' + fmtInt(r.subtotal);
+        // The chosen listing with its chalk tab ("TAKE 3 · $2,479,500"); at most one thing glows on a page: the first.
+        let glow = true;
+        const mark = (el, text) => {
+            outline(el, text, { glow });
+            glow = false;
+        };
         if (page === PAGE_BAZAAR) {
             const owner = bazaarOwnerId(location.href);
             const cards = readBazaarCards();
             for (const f of fills) for (const r of f.fill.rows) if (r.source === SOURCE_BAZAAR && r.sellerId === owner) {
                 const card = cards.find((c) => c.itemId === Number(f.id) && c.price === r.price);
-                if (card) outline(card.el, label(r));
+                if (card) mark(card.el, label(r));
             }
         } else if (page === PAGE_ITEM_MARKET) {
             const item = Number(itemMarketItemOf(location.href));
             const rows = readItemMarketRows();
             for (const f of fills) if (Number(f.id) === item) for (const r of f.fill.rows) if (r.source === SOURCE_ITEM_MARKET) {
                 const row = rows.find((x) => x.price === r.price);
-                if (row) outline(row.el, label(r));
+                if (row) mark(row.el, label(r));
             }
         } else if (page === PAGE_POINTS) {
             const rows = readPointsRows();
             for (const f of fills) if (f.id === POINTS) for (const r of f.fill.rows) if (r.source === SOURCE_POINTS) {
                 const row = rows.find((x) => (r.listingId && x.listingId === r.listingId) || x.price === r.price);
-                if (row) outline(row.el, label(r));
+                if (row) mark(row.el, label(r));
             }
         }
     }
@@ -21587,6 +23321,12 @@
             saveCollapsed: (v) => set(K.overlayCollapsed, v),
             pageRect,
             avoidRect: tradingRect,
+            // The attack page: folded to one line under Torn Eye's fight card, never on top of it (round 7).
+            dockTo: () => (detectPage(location.href) === PAGE_ATTACK ? document.getElementById('pi-eyecard') : null),
+            // A profile's Torn Eye card that had to take the panel's margin: the panel folds under it instead of covering it.
+            dockIfShared: () => document.getElementById('pi-eyecard'),
+            // Torn Eye's tags on faction and war lists (eye-page.js notes their column on its layer): never the same margin.
+            avoidColumn: eyeColumn,
         });
         tp.overlay.mount();
         gmMenu('Reset overlay position', () => {
@@ -21604,6 +23344,15 @@
                 tp.overlay.update(view);
             }
         };
+        // The paused card follows where Torn Trading is still seen (another tab reloaded or closed) without a new model.
+        const showPaused = (m) => {
+            const pv = pausedView(m);
+            const s = JSON.stringify(pv);
+            if (s !== lastView) {
+                lastView = s;
+                tp.overlay.update(pv);
+            }
+        };
         onModel((m) => {
             tp.model = m;
             if (!isVisible()) return;
@@ -21613,11 +23362,7 @@
                     lastSig = 'paused';
                     clearAll();
                 }
-                const pv = JSON.stringify(pausedView(m));
-                if (pv !== lastView) {
-                    lastView = pv;
-                    tp.overlay.update(pausedView(m));
-                }
+                showPaused(m);
                 return;
             }
             const p = detectPage(location.href);
@@ -21625,7 +23370,9 @@
             const planSig = m && m.ready && m.saved ? m.saved.createdAt + ':' + (m.saved.recalibratedAt || 0) : '';
             // What you hold is read after the first draw (the slow data): the marks take it off, so it redraws them.
             const heldSig = JSON.stringify((get(K.userStatic, {}) || {}).inventory || {});
-            const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), JSON.stringify(getPlan()), planSig, heldSig, Object.values(getPrices()).map((x) => x.at).join(), pageRowsCount(p)].join('|');
+            // Stacking for a chain, or an overdose seen on the bars: the gym page's marks change at once.
+            const stateSig = JSON.stringify([(m && m.stacking) || null, overdoseOf(m)]);
+            const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), JSON.stringify(getPlan()), planSig, heldSig, stateSig, Object.values(getPrices()).map((x) => x.at).join(), pageRowsCount(p)].join('|');
             if (sig !== lastSig) {
                 lastSig = sig;
                 if (p === PAGE_GYM) {
@@ -21636,7 +23383,10 @@
             }
             tp.showView(m);
         });
-        setInterval(() => tp.overlay.tick(), 1000);
+        setInterval(() => {
+            tp.overlay.tick();
+            if (isVisible() && isPaused()) showPaused(tp.model);
+        }, 1000);
         watchBars();
         // Torn's pages change the hash without a load (Item Market search, items tabs).
         window.addEventListener('hashchange', () => {
@@ -21786,10 +23536,18 @@
 
     /* ===== src/ui/eye/eye-ui.js ===== */
     /*
-     * Torn Eye on Torn's pages (DESIGN §6, mockup R): a one-line chip (band,
-     * win, HP kept, respect, source), a hover card, the war list's column,
-     * summary and order, and a side panel on the attack page. Never the words
-     * FF or fair fight. FFScouter is credited wherever its numbers show.
+     * Torn Eye on Torn's pages (round 7, mockups/round7/overlays.html): one look
+     * for everything we draw there, an opaque near-black tag with the plate
+     * mark, a coloured edge, a 1 px border and (on the one thing per page that
+     * matters most) a soft glow in its colour. The numbers that decide a fight
+     * are big and always in the list's order: respect, HP kept, win.
+     *
+     * Never on top of Torn's content and never inside a cell other scripts
+     * restyle: the profile card and the list tags sit in the free space beside
+     * Torn's page (never a line on it: smaller type instead), the mini-profile
+     * gets one line of its own, the attack page's card sits beside the fight.
+     * Never the words FF or fair fight. FFScouter is credited wherever its
+     * numbers show. Segoe UI / system-ui only (Torn's page can't load fonts).
      */
 
 
@@ -21797,41 +23555,373 @@
 
 
 
+    const EYE_FONT = "'Segoe UI', system-ui, -apple-system, sans-serif";
+
     const EYE_CSS = `
-    .pi-chip { display: inline-flex; align-items: center; gap: 8px; height: 28px; padding: 0 10px 0 8px; margin: 6px 0; border-radius: 14px; background: #1e2124; border: 1px solid #3a4046; font: 12px Arial, sans-serif; color: #e3e5e8; white-space: nowrap; cursor: default; vertical-align: middle; }
-    .pi-chip .pi-dot { width: 12px; height: 12px; border-radius: 50%; box-shadow: inset 0 0 0 3px currentColor; background: #111; flex: none; }
-    .pi-chip b { font-weight: bold; }
-    .pi-chip .pi-src { color: #939aa1; font-size: 11px; }
-    .pi-chip.pi-mini { height: 22px; margin: 0 0 0 6px; padding: 0 8px 0 6px; gap: 6px; font-size: 11px; }
-    .pi-chip.pi-mini .pi-dot { width: 10px; height: 10px; }
-    .pi-eyecard { position: fixed; z-index: 99991; width: 330px; background: #1c1f22; border: 1px solid #3a4046; border-radius: 10px; padding: 12px 14px; box-shadow: 0 8px 24px rgba(0,0,0,.45); display: flex; flex-direction: column; gap: 10px; font: 12px/1.4 Arial, sans-serif; color: #e3e5e8; pointer-events: none; }
-    .pi-eyecard .pi-hh { display: flex; align-items: baseline; gap: 8px; }
-    .pi-eyecard .pi-hh b.pi-name { color: #fff; font-size: 14px; }
-    .pi-eyecard .pi-lab { font-size: 11px; font-weight: bold; letter-spacing: .5px; text-transform: uppercase; color: #939aa1; }
-    .pi-kept { display: grid; grid-template-columns: 80px minmax(0,1fr) 40px; gap: 8px; align-items: center; }
-    .pi-kept .pi-bar { height: 6px; border-radius: 3px; background: #24282c; overflow: hidden; }
-    .pi-kept .pi-bar i { display: block; height: 100%; }
-    .pi-eyecard .pi-foot { font-size: 11px; color: #939aa1; border-top: 1px solid #2c3136; padding-top: 8px; }
-    .pi-eyecard .pi-warnline { color: #e8a33d; font-weight: bold; }
-    .pi-warsum { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; padding: 7px 10px; margin: 6px 0 8px; background: #1b1e21; border: 1px solid #3a4046; border-radius: 6px; font: 12px Arial, sans-serif; color: #e3e5e8; }
-    .pi-warsum b { color: #fff; font-size: 14px; }
-    .pi-warsum .pi-muted { color: #939aa1; margin-left: auto; }
-    .pi-early { background: #1f2a1d !important; }
+    .pi-mark.pi-eye, .pi-mark.pi-eye *, .pi-hovercard, .pi-hovercard * { box-sizing: border-box; font-family: ${EYE_FONT}; letter-spacing: normal; text-transform: none; text-shadow: none; }
+    .pi-eye { --b: #efebe2; color: #f2f3f5; font-size: 13px; line-height: 1.3; text-align: left; }
+    #pi-eye-layer { position: absolute; left: 0; top: 0; width: 0; height: 0; overflow: visible; z-index: 9990; }
+    #pi-eye-layer > *, #pi-eye-layer > * > * { position: absolute; }
+    #pi-eye-layer .pi-tag { width: max-content; }
+    .pi-eye .pi-edge { align-self: stretch; width: 5px; flex: none; background: var(--b); }
+    .pi-eye .pi-mk { width: 14px; height: 14px; border-radius: 50%; background: #efebe2; box-shadow: inset 0 0 0 3px #efebe2, inset 0 0 0 4px #2a2d31; display: inline-grid; place-items: center; flex: none; }
+    .pi-eye .pi-mk i { width: 4px; height: 4px; border-radius: 50%; background: #15171a; }
+    .pi-eye .pi-band { font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: var(--b); white-space: nowrap; }
+    .pi-eye .pi-sep { width: 1px; align-self: stretch; margin: 6px 0; background: #2f3439; flex: none; }
+    .pi-eye .pi-fig { color: #c9cdd2; font-size: 12px; white-space: nowrap; }
+    .pi-eye .pi-fig b { color: #fff; font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .pi-eye .pi-src, .pi-eye .pi-muted { color: #9aa1a8; font-size: 12px; }
+    .pi-eye .pi-src { font-size: 11px; }
+    .pi-eye .pi-muted a, .pi-eye .pi-src a { color: #8fb8e8; }
+    .pi-eye.pi-tag { display: flex; align-items: center; gap: 8px; min-height: 26px; padding: 0 10px 0 0; border-radius: 6px; background: #101214; border: 1px solid color-mix(in srgb, var(--b) 55%, transparent); box-shadow: 0 2px 8px rgba(0,0,0,.4); overflow: hidden; white-space: nowrap; cursor: default; }
+    .pi-eye.pi-tag .pi-band { font-size: 12px; }
+    .pi-eye.pi-glow { box-shadow: 0 0 0 3px color-mix(in srgb, var(--b) 14%, transparent), 0 0 16px color-mix(in srgb, var(--b) 24%, transparent), 0 2px 8px rgba(0,0,0,.4); }
+    .pi-eye.pi-dimmed { opacity: .5; }
+    .pi-eye.pi-short { gap: 6px; padding-right: 7px; }
+    .pi-eye.pi-short .pi-fig b { font-size: 12px; }
+    .pi-eye.pi-sum { white-space: normal; padding: 4px 10px 4px 0; min-height: 30px; }
+    .pi-eye.pi-sum .pi-sumtext { min-width: 0; }
+    .pi-eye.pi-sum.pi-short { font-size: 11px; line-height: 1.25; }
+    .pi-eye.pi-sum .pi-edge { align-self: stretch; margin: -4px 0; }
+    .pi-eye.pi-sum b { color: #fff; font-weight: 700; }
+    .pi-eye.pi-edgebar { width: 4px; border-radius: 2px; background: var(--b); pointer-events: none; }
+    .pi-eye.pi-mini-line { display: block; width: 100%; max-width: 100%; margin: 8px 0 0; clear: both; }
+    .pi-eye.pi-mini-line .pi-tag { width: 100%; }
+    .pi-eye.pi-card { background: #101214; border: 1px solid color-mix(in srgb, var(--b) 45%, #3a4046); border-radius: 10px; box-shadow: 0 8px 26px rgba(0,0,0,.6); overflow: hidden; }
+    .pi-eye.pi-card.pi-glow { box-shadow: 0 0 0 3px color-mix(in srgb, var(--b) 14%, transparent), 0 0 18px color-mix(in srgb, var(--b) 22%, transparent), 0 8px 26px rgba(0,0,0,.6); }
+    .pi-card .pi-ribbon { height: 4px; background: var(--b); }
+    .pi-card .pi-top { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid #262a2e; min-width: 0; }
+    .pi-card .pi-top .pi-band { font-size: 16px; }
+    .pi-card .pi-who { color: #fff; font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pi-card .pi-bd { padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+    .pi-card .pi-big3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .pi-card .pi-big3 > div { background: #181b1e; border-radius: 6px; padding: 6px 8px; }
+    .pi-card .pi-big3 small { display: block; color: #9aa1a8; font-size: 10px; letter-spacing: .5px; text-transform: uppercase; }
+    .pi-card .pi-big3 b { font-size: 20px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
+    .pi-card .pi-stack { display: grid; grid-template-columns: auto minmax(0, 1fr); row-gap: 2px; column-gap: 8px; align-items: baseline; }
+    .pi-card .pi-stack span { color: #9aa1a8; font-size: 10px; letter-spacing: .5px; text-transform: uppercase; }
+    .pi-card .pi-stack b { font-size: 17px; font-weight: 700; color: #fff; text-align: right; font-variant-numeric: tabular-nums; }
+    .pi-card .pi-row2 { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; }
+    .pi-card .pi-meter { height: 6px; border-radius: 3px; background: #2a2e33; overflow: hidden; }
+    .pi-card .pi-meter i { display: block; height: 100%; background: var(--b); }
+    .pi-card .pi-warnline { color: #e8a33d; font-weight: 700; font-size: 12px; }
+    .pi-card .pi-good { color: #9bdc8a; font-weight: 700; font-size: 12px; }
+    .pi-card.pi-mid .pi-top, .pi-card.pi-mid .pi-bd { padding: 8px 10px; }
+    .pi-card.pi-mid .pi-top { gap: 6px; }
+    .pi-card.pi-mid .pi-top .pi-band { font-size: 14px; }
+    .pi-card.pi-mid .pi-who { font-size: 11px; font-weight: 400; color: #c9cdd2; }
+    .pi-card.pi-mid .pi-muted { font-size: 11px; }
+    .pi-card.pi-small .pi-top, .pi-card.pi-small .pi-bd { padding: 6px 8px; }
+    .pi-card.pi-small .pi-top .pi-band { font-size: 13px; }
+    .pi-card.pi-small .pi-stack b { font-size: 15px; }
+    .pi-card.pi-small .pi-stack { column-gap: 6px; }
+    .pi-eye.pi-card.pi-fixed { position: fixed; z-index: 9991; overflow: hidden auto; }
     .pi-warlist { display: flex !important; flex-direction: column; }
-    .pi-warsum a { color: #8fb8e8; }
-    .pi-earlytag { color: #9bdc8a; font-weight: bold; font-size: 11px; margin-left: 6px; }
-    .pi-landtag { color: #8fb8e8; font-weight: bold; font-size: 11px; margin-left: 6px; }
-    .pi-edge-stomp { box-shadow: inset 3px 0 0 #3fbf5a !important; }
-    .pi-edge-good { box-shadow: inset 3px 0 0 #a6e08a !important; }
-    .pi-edge-tough { box-shadow: inset 3px 0 0 #f0a040 !important; }
-    .pi-edge-cant { box-shadow: inset 3px 0 0 #ff5a4e !important; }
-    .pi-watch { display: inline-flex; align-items: center; gap: 6px; margin: 6px 0 6px 8px; vertical-align: middle; font: 12px Arial, sans-serif; }
-    .pi-watch button, .pi-watch select, .pi-watch input { height: 24px; border-radius: 12px; border: 1px solid #3a4046; background: #1e2124; color: #e3e5e8; font: bold 11px Arial, sans-serif; padding: 0 10px; cursor: pointer; }
-    .pi-watch input { cursor: text; width: 130px; border-radius: 5px; font-weight: normal; }
-    .pi-watch select { border-radius: 5px; padding: 0 6px; }
-    .pi-watch button[aria-pressed="true"] { color: #efebe2; border-color: #efebe2; }
-    .pi-watch .pi-full { color: #e8a33d; font-size: 11px; }
+    .pi-eye .pi-watch { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+    .pi-eye .pi-watch button, .pi-eye .pi-watch select, .pi-eye .pi-watch input { height: 24px; border-radius: 5px; border: 1px solid color-mix(in srgb, #efebe2 45%, transparent); background: #1c1f22; color: #fff; font: 700 11px ${EYE_FONT}; padding: 0 9px; cursor: pointer; margin: 0; }
+    .pi-eye .pi-watch input { cursor: text; width: 120px; font-weight: 400; }
+    .pi-eye .pi-watch select { padding: 0 4px; max-width: 120px; }
+    .pi-eye .pi-watch button[aria-pressed="true"] { color: #101214; background: #efebe2; border-color: #efebe2; }
+    .pi-eye .pi-watch .pi-full { color: #e8a33d; font-size: 11px; }
+    .pi-hovercard { position: fixed; z-index: 99991; width: 330px; background: #101214; border: 1px solid #3a4046; border-radius: 10px; padding: 12px 14px; box-shadow: 0 8px 24px rgba(0,0,0,.5); display: flex; flex-direction: column; gap: 10px; font-size: 12px; line-height: 1.4; color: #e3e5e8; pointer-events: none; text-align: left; }
+    .pi-hovercard .pi-hh { display: flex; align-items: baseline; gap: 8px; }
+    .pi-hovercard .pi-hh b.pi-name { color: #fff; font-size: 14px; }
+    .pi-hovercard .pi-lab { font-size: 11px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: #939aa1; }
+    .pi-hovercard .pi-kept { display: grid; grid-template-columns: 80px minmax(0,1fr) 40px; gap: 8px; align-items: center; }
+    .pi-hovercard { max-height: calc(100vh - 16px); overflow: hidden; }
+    .pi-hovercard.pi-mid, .pi-hovercard.pi-small { padding: 8px 10px; gap: 6px; font-size: 11px; }
+    .pi-hovercard.pi-mid .pi-kept { grid-template-columns: minmax(0,1fr) 48px 32px; gap: 6px; }
+    .pi-hovercard.pi-small .pi-kept { grid-template-columns: minmax(0,1fr) auto; gap: 6px; }
+    .pi-hovercard.pi-small .pi-bar { display: none; }
+    .pi-hovercard.pi-small .pi-hh { flex-wrap: wrap; }
+    .pi-hovercard.pi-small .pi-hh b.pi-name { font-size: 12px; }
+    .pi-hovercard .pi-bar { height: 6px; border-radius: 3px; background: #24282c; overflow: hidden; }
+    .pi-hovercard .pi-bar i { display: block; height: 100%; }
+    .pi-hovercard .pi-foot { font-size: 11px; color: #939aa1; border-top: 1px solid #2c3136; padding-top: 8px; }
+    .pi-hovercard .pi-warnline { color: #e8a33d; font-weight: 700; }
     `;
+
+    function ensureEyeCss(doc = document) {
+        if (doc.getElementById('pi-eye-css')) return;
+        const st = doc.createElement('style');
+        st.id = 'pi-eye-css';
+        st.textContent = EYE_CSS;
+        (doc.head || doc.documentElement).appendChild(st);
+    }
+
+    /* ------------------------------------------------------------ bands and figures */
+
+    const EYE_NO_BAND = '#6c737a';
+
+    function eyeBandColor(band) {
+        return BAND_COLORS[band] || EYE_NO_BAND;
+    }
+
+    function eyeBandWord(band) {
+        return BAND_WORDS[band] || BAND_WORDS.none || 'No data';
+    }
+
+    /**
+     * Whether a list row gets a tag: a band that says something, and never a fight where you'd keep under half your HP
+     * (owner, round 7: "under 50% never listed"): bands.js's 'low' ("Under 50%") and 'none' are never drawn on a row;
+     * words and colours come from bands.js.
+     */
+    function eyeShown(v) {
+        if (!v || !v.band || v.band === 'none' || v.band === 'low' || !BAND_COLORS[v.band]) return false;
+        const f = v.forecast;
+        return !(f && Number.isFinite(f.keep) && f.keep < 0.5);
+    }
+
+    /**
+     * The three numbers, always in this order: respect, HP kept, win.
+     * @returns {{k: 'respect'|'keep'|'win', label: string, short: string, text: string}[]}
+     */
+    function eyeFigures(v) {
+        const f = v && v.forecast;
+        const respect = v && Number.isFinite(v.respect) && v.respect > 0 ? v.respect.toFixed(2) : '—';
+        const keep = f && f.pWin >= 0.05 && Number.isFinite(f.keep) ? Math.round(f.keep * 100) + '%' : '—';
+        const win = f && Number.isFinite(f.pWin) ? Math.round(f.pWin * 100) + '%' : '—';
+        return [
+            { k: 'respect', label: 'Respect', short: 'Resp', text: respect },
+            { k: 'keep', label: 'HP kept', short: 'HP', text: keep },
+            { k: 'win', label: 'Win', short: 'Win', text: win },
+        ];
+    }
+
+    /** "all 99%" / "70–74%": HP kept over their likely builds; '' when the stats are exact or there are none. */
+    function eyeBuildsText(f) {
+        if (!f || f.exact || !f.perBuild) return '';
+        const ks = Object.values(f.perBuild).filter((r) => r && r.pWin >= 0.05 && Number.isFinite(r.keep)).map((r) => Math.round(r.keep * 100));
+        if (!ks.length) return '';
+        const lo = Math.min(...ks);
+        const hi = Math.max(...ks);
+        return lo === hi ? 'all ' + lo + '%' : lo + '–' + hi + '%';
+    }
+
+    /** Hours and minutes: "1:17" (an hour and 17 minutes), "0:48". */
+    function eyeHmm(s) {
+        const m = Math.max(0, Math.ceil(Number(s) / 60));
+        return Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0');
+    }
+
+    /** Seconds left in a Torn status cell's clock ("Hospital 01:17:00", "42:10"); null when it shows none. */
+    function eyeStatusSeconds(text) {
+        const t = String(text || '');
+        let m = t.match(/(\d{1,3}):(\d{2}):(\d{2})/);
+        if (m) return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+        m = t.match(/(\d{1,2}):(\d{2})/);
+        return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+    }
+
+    /* ------------------------------------------------------------ where things go */
+
+    /** Free space thresholds (owner's pick): full card from 300 px, the narrower card from 160, the left side under 130. */
+    const EYE_FREE = { full: 300, mid: 160, left: 130, least: 80 };
+    const EYE_CARD_W = 300;
+
+    /** The least free width a list's tags can use (the 'tiny' tag, 58 px, and its 6 px a side). */
+    const EYE_ROW_LEAST = 70;
+
+    /**
+     * The side Torn Eye uses: the right, unless it is narrow and the left is wider. `avoid` (round 7 review): the training
+     * panel's rect; when it sits in that side's free space and the other side has at least `least` px, the other side, so
+     * the panel and Torn Eye's tags never share a margin (both stay off Torn's page).
+     */
+    function eyeSide(viewW, page, avoid = null, least = 0) {
+        const right = Math.max(0, Math.floor(viewW - page.right));
+        const left = Math.max(0, Math.floor(page.left));
+        const useLeft = right < EYE_FREE.left && left > right;
+        let side = useLeft ? 'left' : 'right';
+        if (avoid && avoid.width > 0 && avoid.height > 0) {
+            const takes = (s) => (s === 'right' ? avoid.right > page.right && avoid.left < viewW : avoid.left < page.left && avoid.right > 0);
+            const other = side === 'right' ? 'left' : 'right';
+            if (takes(side) && !takes(other) && (other === 'right' ? right : left) >= least) side = other;
+        }
+        return { side, free: side === 'left' ? left : right };
+    }
+
+    /**
+     * Where a card goes in the free space beside Torn's page (never on it).
+     * @param {number} viewW - the window's width without its scrollbar
+     * @param {{left: number, right: number}} page - Torn's page (sidebar + content)
+     * @param {DOMRect|null} [avoid] - the training panel, whose margin the card leaves when the other one has room
+     * @returns {{mode: 'full'|'mid'|'small'|'none', side: 'left'|'right', free: number, x: number, width: number}}
+     */
+    function eyeCardSpot(viewW, page, avoid = null) {
+        const { side, free } = eyeSide(viewW, page, avoid, EYE_FREE.least);
+        if (free < EYE_FREE.least) return { mode: 'none', side, free, x: 0, width: 0 };
+        const mode = free >= EYE_FREE.full ? 'full' : free >= EYE_FREE.mid ? 'mid' : 'small';
+        const pad = mode === 'full' ? 12 : mode === 'mid' ? 8 : 6;
+        const width = mode === 'full' ? Math.min(EYE_CARD_W, free - 2 * pad) : free - 2 * pad;
+        const x = side === 'right' ? page.right + pad : page.left - pad - width;
+        return { mode, side, free, x: Math.round(x), width: Math.round(width) };
+    }
+
+    /**
+     * Where list tags go, level with each row: 'full' (band word and the three numbers), 'short' (the three numbers;
+     * the edge carries the band), 'tiny' (HP kept), 'none' (no room: only the row edges).
+     */
+    function eyeRowSpot(viewW, page, avoid = null) {
+        const { side, free } = eyeSide(viewW, page, avoid, EYE_ROW_LEAST);
+        const pad = free >= EYE_FREE.mid ? 10 : 6;
+        const w = Math.min(250, free - 2 * pad);
+        const mode = w >= 190 ? 'full' : w >= 118 ? 'short' : w >= 58 ? 'tiny' : 'none';
+        const x = side === 'right' ? page.right + pad : page.left - pad - Math.max(0, w);
+        return { mode, side, free, x: Math.round(x), width: Math.max(0, Math.round(w)) };
+    }
+
+    /* ------------------------------------------------------------ the pieces */
+
+    function eyeMk() {
+        return h('span', { class: 'pi-mk', 'aria-hidden': 'true' }, [h('i')]);
+    }
+
+    function eyeSourceTitle(v) {
+        if (!v) return 'Torn Eye';
+        const parts = ['Torn Eye'];
+        if (v.est && v.est.source === 'ffscouter') parts.push('stats: FFScouter (ffscouter.com), ' + (v.est.ageDays ?? '?') + ' d old');
+        else if (v.source) parts.push('stats: ' + v.source);
+        const b = eyeBuildsText(v.plain || v.forecast);
+        if (b) parts.push('their likely builds: ' + b);
+        return parts.join(' · ');
+    }
+
+    function eyeFigSpans(v, mode) {
+        const fs = eyeFigures(v);
+        if (mode === 'tiny') return [h('span', { class: 'pi-fig' }, [h('b', { text: fs[1].text }), ' HP'])];
+        return [h('span', { class: 'pi-fig' }, [h('b', { text: fs[0].text })]), h('span', { class: 'pi-fig' }, [h('b', { text: fs[1].text }), ' HP']), h('span', { class: 'pi-fig' }, [h('b', { text: fs[2].text })])];
+    }
+
+    /**
+     * A list row's tag. `state` is the row's: ready rows show the numbers; a row in hospital (dimmed) when it is out.
+     * @param {object} v - eyeView()
+     * @param {object} o - {mode, state: 'okay'|'early'|'hospital'|'traveling'|'abroad'|'jail', outInS, outAt, landText, glow}
+     *   outAt: when they are out (epoch seconds): the "out in" clock is then moved on by eyeTickOut, not by a redraw
+     */
+    function eyeRowTag(v, { mode = 'full', state = 'okay', outInS = null, outAt = null, landText = null, glow = false } = {}) {
+        const ready = state === 'okay' || state === 'early';
+        const kids = [h('span', { class: 'pi-edge' })];
+        if (mode === 'full') kids.push(h('span', { class: 'pi-band', text: eyeBandWord(v.band) }));
+        if (ready) {
+            kids.push(...eyeFigSpans(v, mode));
+            if (state === 'early' && mode !== 'tiny') kids.push(h('span', { class: 'pi-src', text: 'out early' }));
+        } else if (state === 'hospital' && Number.isFinite(outInS)) {
+            kids.push(h('span', { class: 'pi-fig' }, ['out in ', h('span', { 'data-pi-out-at': Number.isFinite(outAt) ? String(outAt) : null, text: eyeHmm(outInS) })]));
+        } else {
+            const what = state === 'hospital' ? 'in hospital' : state === 'traveling' ? landText || 'traveling' : state === 'abroad' ? 'abroad' : state === 'jail' ? 'in jail' : state;
+            kids.push(h('span', { class: 'pi-fig', text: what }));
+        }
+        const cls = 'pi-mark pi-eye pi-tag pi-rowtag' + (mode !== 'full' ? ' pi-short' : '') + (ready ? '' : ' pi-dimmed') + (glow && ready ? ' pi-glow' : '');
+        return h('div', { class: cls, style: '--b:' + eyeBandColor(v.band), 'data-pi-player': String(v.id || ''), 'data-pi-hover': '1', title: eyeSourceTitle(v), tabindex: '0', role: 'button', 'aria-label': eyeBandWord(v.band) + ' · ' + eyeFigures(v).map((x) => x.label + ' ' + x.text).join(' · ') }, kids);
+    }
+
+    /** The 4 px band edge beside a row, on our own layer. */
+    function eyeEdgeBar(band, dim = false) {
+        return h('div', { class: 'pi-mark pi-eye pi-edgebar', style: '--b:' + eyeBandColor(band) + (dim ? ';opacity:.35' : ''), 'aria-hidden': 'true' });
+    }
+
+    /**
+     * The summary over a list, as numbers: ready (okay or out early), in hospital (and when the next one is out),
+     * traveling.
+     * @param {object[]} rows - sortWar() rows ({state, until})
+     */
+    function eyeSummary(rows, nowS) {
+        const ready = rows.filter((r) => r.state === 'okay' || r.state === 'early').length;
+        const hosp = rows.filter((r) => r.state === 'hospital');
+        const outs = hosp.filter((r) => r.until > nowS).map((r) => r.until - nowS);
+        const nextOutS = outs.length ? Math.min(...outs) : null;
+        return { ready, early: rows.filter((r) => r.state === 'early').length, hospital: hosp.length, nextOutS, nextOutAt: nextOutS === null ? null : nowS + nextOutS, traveling: rows.filter((r) => r.state === 'traveling').length };
+    }
+
+    /** "2 ready · 1 out in 1:17 · 0 traveling". */
+    function eyeSummaryText(s) {
+        const parts = [s.ready + ' ready' + (s.early ? ' (' + s.early + ' out early)' : '')];
+        if (s.nextOutS !== null && s.nextOutS !== undefined) parts.push('1 out in ' + eyeHmm(s.nextOutS));
+        else if (s.hospital) parts.push(s.hospital + ' in hospital');
+        parts.push(s.traveling + ' traveling');
+        return parts.join(' · ');
+    }
+
+    /** The summary tag on top of a list. `note` (where the numbers come from) goes in its title. */
+    function eyeSummaryTag(s, { note = '', fromFfs = false, short = false } = {}) {
+        const words = [];
+        eyeSummaryText(s).split(' · ').forEach((p, i) => {
+            if (i) words.push(' · ');
+            const m = p.match(/^(\d+)(.*)$/);
+            // "1 out in 1:17": its clock moves on by eyeTickOut (no redraw every second).
+            const out = m && Number.isFinite(s.nextOutAt) && /^ out in /.test(m[2]);
+            words.push(out ? h('span', {}, [h('b', { text: m[1] }), ' out in ', h('span', { 'data-pi-out-at': String(s.nextOutAt), text: m[2].replace(/^ out in /, '') })]) : m ? h('span', {}, [h('b', { text: m[1] }), m[2]]) : h('span', { text: p }));
+        });
+        if (fromFfs) words.push(h('span', { class: 'pi-src' }, [' · stats: ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' })]));
+        return h('div', { class: 'pi-mark pi-eye pi-tag pi-sum' + (short ? ' pi-short' : ''), title: note || 'Torn Eye' }, [h('span', { class: 'pi-edge' }), short ? null : eyeMk(), h('span', { class: 'pi-sumtext' }, words)]);
+    }
+
+    /** Move every "out in" clock on (they carry data-pi-out-at); only the ones whose minute changed are written. */
+    function eyeTickOut(root, nowS) {
+        if (!root || !root.querySelectorAll) return 0;
+        let n = 0;
+        for (const el of root.querySelectorAll('[data-pi-out-at]')) {
+            const text = eyeHmm(Math.max(0, Number(el.getAttribute('data-pi-out-at')) - nowS));
+            if (el.textContent !== text) {
+                el.textContent = text;
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /*
+     * "Out early" (round 7 review: it lasted about a second). A member is out early when the last reading had them in
+     * hospital with an end still ahead and this one shows them okay. Before, only the reading just before counted, and
+     * the list was redrawn every second (the hospital clock in the status text ticks), so the next draw forgot them. They
+     * are now kept until the hospital end they had passes, or their state changes again.
+     */
+
+    /**
+     * @param {Map<number, number>|null} prevEarly - id → the hospital end they left before (epoch seconds)
+     * @param {object[]|null} prevMembers - the last reading ({id, status: {state, until}})
+     * @param {object[]} members - this reading
+     * @param {number} nowS
+     * @param {function} stateOf - war.js memberState
+     * @returns {Map<number, number>}
+     */
+    function eyeNextEarly(prevEarly, prevMembers, members, nowS, stateOf) {
+        const before = new Map((prevMembers || []).map((m) => [Number(m.id), m]));
+        const out = new Map();
+        for (const m of members || []) {
+            const id = Number(m.id);
+            if (stateOf(m) !== 'okay') continue;
+            const kept = prevEarly && prevEarly.get(id);
+            if (Number.isFinite(kept) && kept > nowS) {
+                out.set(id, kept);
+                continue;
+            }
+            const p = before.get(id);
+            const until = p && stateOf(p) === 'hospital' ? Number(p.status && p.status.until) || 0 : 0;
+            if (until > nowS + 30) out.set(id, until);
+        }
+        return out;
+    }
+
+    /**
+     * What a list's look depends on, without the ticking clocks: each row's id and state. `early`: the ids out early now.
+     * A hospital end that moved is eyeUntilMoved's (read from a clock that ticks, it wobbles by a second).
+     */
+    function eyeRowsSig(members, stateOf, early = null) {
+        const rows = (members || []).map((m) => m.id + ':' + stateOf(m));
+        return rows.join(',') + (early && early.size ? '|early:' + [...early.keys()].sort((a, b) => a - b).join(',') : '');
+    }
+
+    /** Did any row's hospital end move by more than `slack` seconds (hospitalised again, a revive)? */
+    function eyeUntilMoved(prevMembers, members, slack = 30) {
+        const before = new Map((prevMembers || []).map((m) => [Number(m.id), Number(m.status && m.status.until) || 0]));
+        return (members || []).some((m) => {
+            const was = before.get(Number(m.id));
+            return was !== undefined && Math.abs((Number(m.status && m.status.until) || 0) - was) > slack;
+        });
+    }
+
+    /* ------------------------------------------------------------ watch */
 
     /** The watch reasons offered on Torn's pages (the webpage offers the same, plus your own words there). */
     const WATCH_TAG_WORDS = ['hospitalize', 'mug', 'revenge', 'bounty'];
@@ -21843,7 +23933,7 @@
      */
     function watchControl(s, on) {
         const kids = [h('button', { type: 'button', 'aria-pressed': String(Boolean(s.watching)), title: s.watching ? 'Torn Eye is watching this player · click to stop' : 'Watch this player in Torn Eye (status, hospital, flights)', onclick: (e) => { e.preventDefault(); e.stopPropagation(); on.toggle(); }, text: s.watching ? '★ Watching' : '☆ Watch' })];
-        if (s.watching) {
+        if (s.watching && on.tag) {
             const tag = s.tag || '';
             const custom = tag && !WATCH_TAG_WORDS.includes(tag);
             const sel = h('select', { 'aria-label': 'Why you watch them', onchange: (e) => { if (e.target.value === '__custom') { const inp = h('input', { maxlength: '24', placeholder: 'your reason', 'aria-label': 'Your reason', onkeydown: (ev) => { if (ev.key === 'Enter') on.tag(ev.target.value); } }); inp.addEventListener('blur', () => on.tag(inp.value)); sel.replaceWith(inp); inp.focus(); } else on.tag(e.target.value || null); } }, [
@@ -21855,51 +23945,151 @@
             sel.value = tag;
             kids.push(sel);
         }
-        if (s.full) kids.push(h('span', { class: 'pi-full', text: 'Watch list full (20)' }));
-        return h('span', { class: 'pi-mark pi-watch', 'data-pi-watch': [s.watching ? 1 : 0, s.tag || '', s.full ? 1 : 0].join('|') }, kids);
+        if (s.full) kids.push(h('span', { class: 'pi-full', text: 'Watch list full' }));
+        return h('span', { class: 'pi-watch', 'data-pi-watch': [s.watching ? 1 : 0, s.tag || '', s.full ? 1 : 0].join('|') }, kids);
     }
 
-    function ensureEyeCss(doc = document) {
-        if (doc.getElementById('pi-eye-css')) return;
-        const st = doc.createElement('style');
-        st.id = 'pi-eye-css';
-        st.textContent = EYE_CSS;
-        (doc.head || doc.documentElement).appendChild(st);
+    /* ------------------------------------------------------------ cards */
+
+    function eyeStatusLine(st) {
+        if (!st) return '';
+        return String(st.description || st.state || '').replace(/<[^>]*>/g, '').trim();
     }
 
-    /** The short figure on a list row: HP kept where you'd win, else the win chance (or "rough"). */
-    function miniFigure(v) {
-        const f = v.forecast;
-        if (v.est && v.est.confidence === 'rough' && f.pWin < 0.6) return 'rough';
-        if (v.band === 'cant' || f.keep === null || f.keep === undefined) return 'win ' + Math.round(f.pWin * 100) + '%';
-        return 'keep ' + (v.est && v.est.confidence === 'exact' ? '' : '~') + Math.round(f.keep * 100) + '%';
+    function eyeSourceLine(v, short) {
+        if (!v || !v.est) return h('div', { class: 'pi-muted', text: v && v.shared ? 'from war mode on the Torn Eye tab' : 'no estimate yet' });
+        const b = short ? '' : eyeBuildsText(v.plain || v.forecast);
+        if (v.est.source === 'ffscouter') return h('div', { class: 'pi-muted' }, [h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }), ' ' + (v.est.ageDays ?? '?') + ' d' + (b ? ' · their likely builds: ' + b : '')]);
+        return h('div', { class: 'pi-muted', text: (v.source || '') + (b ? ' · their likely builds: ' + b : '') });
     }
 
-    /** The chip for one player view (eyeView()). */
-    function chipEl(v, { mini = false, id = null } = {}) {
+    function eyeNumbers(v, mode) {
+        const fs = eyeFigures(v);
+        if (mode === 'full') return h('div', { class: 'pi-big3' }, fs.map((x) => h('div', { 'data-pi-fig': x.k }, [h('small', { text: x.label }), h('b', { text: x.text })])));
+        const kids = [];
+        for (const x of fs) kids.push(h('span', { text: mode === 'small' ? x.short : x.label }), h('b', { 'data-pi-fig': x.k, text: x.text }));
+        return h('div', { class: 'pi-stack' }, kids);
+    }
+
+    function eyeCardShell(v, mode, { id = null, who = '', hover = false } = {}) {
         const band = v ? v.band : 'none';
-        const color = BAND_COLORS[band];
-        const kids = [h('i', { class: 'pi-dot', style: 'color:' + color }), h('b', { style: 'color:' + color, text: BAND_WORDS[band] })];
-        if (v && v.forecast) kids.push(h('span', { text: mini ? miniFigure(v) : v.figures }));
-        else kids.push(h('span', { text: mini ? '' : 'no estimate yet' }));
-        if (!mini && v && v.source) kids.push(h('span', { class: 'pi-src', text: v.source }));
-        // The player id is always on the chip, estimate or not: redraw checks compare it.
-        const title = v && v.est ? 'Torn Eye · stats: ' + (v.est.source === 'ffscouter' ? 'FFScouter (ffscouter.com)' : v.source) : 'Torn Eye';
-        return h('span', { class: 'pi-mark pi-chip' + (mini ? ' pi-mini' : ''), 'data-pi-player': String(id || (v && v.id) || ''), title, tabindex: '0', role: 'button', 'aria-label': title + ' · ' + BAND_WORDS[band] }, kids);
+        const top = [];
+        if (mode === 'full') top.push(eyeMk());
+        top.push(h('span', { class: 'pi-band', text: v ? eyeBandWord(band) : 'Torn Eye' }));
+        if (who && mode !== 'small') top.push(h('span', { class: 'pi-who', text: who }));
+        const bd = h('div', { class: 'pi-bd' });
+        const el = h('div', { class: 'pi-mark pi-eye pi-card pi-' + mode, style: '--b:' + eyeBandColor(band), 'data-pi-player': String(id || (v && v.id) || ''), 'data-pi-mode': mode, title: mode === 'small' ? eyeSourceTitle(v) : null, 'data-pi-hover': hover ? '1' : null, tabindex: hover ? '0' : null }, [h('div', { class: 'pi-ribbon' }), h('div', { class: 'pi-top' }, top), bd]);
+        return { el, bd };
     }
+
+    function eyeWhoText(v, mode) {
+        if (!v) return '';
+        const lvl = v.level ? '[' + v.level + ']' : '';
+        if (mode === 'mid') return lvl;
+        return ((v.name || '') + (lvl ? ' ' + lvl : '')).trim();
+    }
+
+    /**
+     * The profile card, in the free space beside Torn's page. Full: the three numbers in boxes, the source, ★ Watch and
+     * their status. Mid: the same narrower, the numbers stacked. Small: the band word and the three numbers (the rest
+     * in its title and the hover card).
+     * @param {object|null} v - eyeView() (null while reading)
+     * @param {'full'|'mid'|'small'} mode
+     * @param {object} o - {id, watch: {state, on}, glow}
+     */
+    function eyeProfileCard(v, mode, { id = null, watch = null, glow = true } = {}) {
+        const { el, bd } = eyeCardShell(v, mode, { id, who: eyeWhoText(v, mode), hover: mode === 'small' });
+        // The one Torn Eye card on a page (here or the attack page's): the training panel docks under #pi-eyecard.
+        el.id = 'pi-eyecard';
+        if (glow) el.classList.add('pi-glow');
+        if (!v) {
+            if (mode !== 'small') bd.appendChild(h('div', { class: 'pi-muted', text: 'Reading this player…' }));
+            return el;
+        }
+        bd.appendChild(eyeNumbers(v, mode));
+        if (mode === 'small') return el;
+        bd.appendChild(eyeSourceLine(v, mode === 'mid'));
+        const w = watch ? watchControl(watch.state, mode === 'full' ? watch.on : { toggle: watch.on.toggle }) : null;
+        if (mode === 'full') {
+            const st = eyeStatusLine(v.status);
+            bd.appendChild(h('div', { class: 'pi-row2' }, [w, st ? h('span', { class: 'pi-muted', text: st }) : null]));
+        } else if (w) bd.appendChild(w);
+        return el;
+    }
+
+    /**
+     * The attack page's fight card: band, the three numbers, turns and the gear note, HP kept per likely build. The
+     * training panel docks under it (#pi-eyecard), so its foot is left free.
+     * @param {object|null} v - eyeView()
+     * @param {'full'|'mid'|'small'} mode
+     * @param {object} s - {gearVisible, gearSaved, watch: {watching, tag, full, toggle}}
+     */
+    function eyeFightCard(v, mode, s = {}) {
+        const { el, bd } = eyeCardShell(v, mode, { who: eyeWhoText(v, mode), hover: mode === 'small' });
+        el.id = 'pi-eyecard';
+        el.classList.add('pi-glow', 'pi-fixed');
+        const watchBtn = () => (s.watch ? watchControl({ watching: s.watch.watching, tag: null, full: s.watch.full }, { toggle: s.watch.toggle }) : null);
+        if (!v) {
+            if (mode !== 'small') {
+                bd.appendChild(h('div', { class: 'pi-muted', text: 'Reading this player… (your fights, FFScouter, public stats)' }));
+                const w = watchBtn();
+                if (w) bd.appendChild(w);
+            }
+            return el;
+        }
+        bd.appendChild(eyeNumbers(v, mode));
+        if (mode === 'small') return el;
+        const f = v.forecast;
+        const gear = s.gearSaved ? 'their gear is saved for next time' : s.gearVisible ? '' : 'their gear shows once the fight starts';
+        const turns = f && f.turns ? 'About ' + f.turns + ' turns' : '';
+        const line = [turns, turns ? gear : gear.charAt(0).toUpperCase() + gear.slice(1)].filter(Boolean).join(' · ');
+        if (line) bd.appendChild(h('div', { class: s.gearSaved ? 'pi-good' : 'pi-muted', text: line }));
+        if (v.gear) bd.appendChild(h('div', { class: 'pi-muted', text: 'Last seen: ' + (v.gear.text || 'gear') + ' · ' + Math.max(0, Math.round((Date.now() - v.gear.seenAt) / 86400000)) + ' d ago' }));
+        if (v.withGear && mode === 'full') bd.appendChild(h('div', { class: 'pi-warnline', text: 'With their gear: win ' + Math.round(v.withGear.pWin * 100) + '% · HP kept ~' + Math.round((v.withGear.keep || 0) * 100) + '%' }));
+        const p = v.plain || f;
+        if (mode === 'full' && p && p.perBuild && !p.exact) {
+            const rows = Object.entries(p.perBuild).sort((a, b) => (b[1].keep || 0) - (a[1].keep || 0)).slice(0, 3);
+            for (const [k, r] of rows) {
+                const pct = Math.round((r.keep || 0) * 100);
+                bd.appendChild(h('div', { class: 'pi-row2' }, [h('span', { class: 'pi-muted', text: BUILD_WORDS[k] || k }), h('span', { text: r.pWin < 0.05 ? 'lose' : pct + '%' })]));
+                bd.appendChild(h('div', { class: 'pi-meter' }, [h('i', { style: 'width:' + (r.pWin < 0.05 ? 0 : pct) + '%' })]));
+            }
+        }
+        bd.appendChild(eyeSourceLine(v, true));
+        const w = watchBtn();
+        if (w) bd.appendChild(w);
+        return el;
+    }
+
+    /** The mini-profile's last line: one tag inside the popup's width. */
+    function eyeMiniLine(v, { id = null, glow = false } = {}) {
+        const band = v ? v.band : 'none';
+        const kids = [h('span', { class: 'pi-edge' }), eyeMk(), h('span', { class: 'pi-band', text: eyeBandWord(band) })];
+        if (v && v.forecast) {
+            kids.push(h('span', { class: 'pi-sep' }));
+            const fs = eyeFigures(v);
+            kids.push(h('span', { class: 'pi-fig' }, [h('b', { text: fs[0].text }), ' resp']), h('span', { class: 'pi-fig' }, [h('b', { text: fs[1].text }), ' HP']), h('span', { class: 'pi-fig' }, [h('b', { text: fs[2].text }), ' win']));
+        } else kids.push(h('span', { class: 'pi-src', text: 'no estimate yet' }));
+        const tag = h('div', { class: 'pi-eye pi-tag' + (glow ? ' pi-glow' : ''), style: '--b:' + eyeBandColor(band), 'data-pi-player': String(id || (v && v.id) || ''), 'data-pi-hover': '1', title: eyeSourceTitle(v), tabindex: '0', role: 'button' }, kids);
+        return h('div', { class: 'pi-mark pi-eye pi-mini-line', 'data-pi-player': String(id || (v && v.id) || '') }, [tag]);
+    }
+
+    /* ------------------------------------------------------------ hover card */
 
     /** The hover card: HP kept by likely build, gear, sources with credit. */
-    function cardEl(v) {
+    function cardEl(v, mode = 'full') {
         const band = v.band;
-        const kids = [h('div', { class: 'pi-hh' }, [h('b', { style: 'color:' + BAND_COLORS[band], text: BAND_WORDS[band] }), h('b', { class: 'pi-name', text: (v.name || 'Player') + (v.level ? ' [' + v.level + ']' : '') })])];
+        const kids = [h('div', { class: 'pi-hh' }, [h('b', { style: 'color:' + eyeBandColor(band), text: eyeBandWord(band) }), h('b', { class: 'pi-name', text: (v.name || 'Player') + (v.level ? ' [' + v.level + ']' : '') })])];
         const f = v.plain || v.forecast;
         if (f && f.perBuild && !f.exact) {
             kids.push(h('span', { class: 'pi-lab', text: 'HP you keep, by their likely build' }));
             const rows = Object.entries(f.perBuild).sort((a, b) => (b[1].keep || 0) - (a[1].keep || 0)).slice(0, 3);
             for (const [k, r] of rows) {
                 const pct = Math.round((r.keep || 0) * 100);
-                kids.push(h('div', { class: 'pi-kept' }, [h('span', { text: BUILD_WORDS[k] || k }), h('div', { class: 'pi-bar' }, [h('i', { style: 'width:' + pct + '%;background:' + BAND_COLORS[band] })]), h('span', { text: r.pWin < 0.05 ? 'lose' : pct + '%' })]));
+                kids.push(h('div', { class: 'pi-kept' }, [h('span', { text: BUILD_WORDS[k] || k }), h('div', { class: 'pi-bar' }, [h('i', { style: 'width:' + pct + '%;background:' + eyeBandColor(band) })]), h('span', { text: r.pWin < 0.05 ? 'lose' : pct + '%' })]));
             }
+        } else if (f && v.shared) {
+            kids.push(h('span', { text: 'Win ' + Math.round(f.pWin * 100) + '%' + (f.keep === null || f.keep === undefined ? '' : ' · keep ~' + Math.round(f.keep * 100) + '%') }));
         } else if (f) {
             kids.push(h('span', { text: 'Their exact stats (spy): win ' + Math.round(f.pWin * 100) + '% · keep ' + Math.round((f.keep || 0) * 100) + '%' }));
         }
@@ -21909,14 +24099,19 @@
             if (v.withGear) kids.push(h('span', { class: 'pi-warnline', text: 'With their gear: win ' + Math.round(v.withGear.pWin * 100) + '% · keep ~' + Math.round((v.withGear.keep || 0) * 100) + '%' }));
         }
         const src = v.est ? v.est.source : null;
-        const foot = src === 'ffscouter' ? ['Stats: ', h('b', { text: 'FFScouter' }), ' (' + FFS_SITE_URL.replace('https://', '').replace(/\/$/, '') + '), ' + (v.est.ageDays ?? '?') + ' days old.'] : src === 'spy' ? ['Stats: a spy, ' + v.est.ageDays + ' days old.'] : src === 'fight' ? ['Stats: from your own fight with them' + (v.est.lowerBound ? ' (at least this strong)' : '') + '.'] : src === 'public' ? ['Stats: rough, from public stats (' + v.est.range + ').'] : ['No estimate yet. Connect FFScouter or fight them once.'];
+        const mins = v.shared ? Math.max(0, Math.round((Date.now() - v.shared.at) / 60000)) : 0;
+        const foot = v.shared ? ['From war mode on Pumping Iron’s Torn Eye tab, ' + (mins < 1 ? 'just now' : mins < 90 ? mins + ' min ago' : Math.round(mins / 60) + ' h ago') + '. Open their profile for the full estimate.'] : src === 'ffscouter' ? ['Stats: ', h('b', { text: 'FFScouter' }), ' (' + FFS_SITE_URL.replace('https://', '').replace(/\/$/, '') + '), ' + (v.est.ageDays ?? '?') + ' days old.'] : src === 'spy' ? ['Stats: a spy, ' + v.est.ageDays + ' days old.'] : src === 'fight' ? ['Stats: from your own fight with them' + (v.est.lowerBound ? ' (at least this strong)' : '') + '.'] : src === 'public' ? ['Stats: rough, from public stats (' + v.est.range + ').'] : ['No estimate yet. Connect FFScouter or fight them once.'];
         if (v.forecast && v.forecast.turns) foot.push(' About ' + v.forecast.turns + ' turns.');
         kids.push(h('div', { class: 'pi-foot' }, foot));
-        return h('div', { class: 'pi-mark pi-eyecard' }, kids);
+        return h('div', { class: 'pi-mark pi-hovercard pi-' + mode }, kids);
     }
 
-    /** One floating card for the page, shown next to the chip under the pointer. */
-    function bindCard(doc, getView) {
+    /**
+     * One floating card for the page, shown next to the tag under the pointer (tags marked data-pi-hover). Like
+     * everything else it stays in the free space beside Torn's page, as wide as that allows (spotOf: eyeCardSpot);
+     * with no room there it isn't shown.
+     */
+    function bindCard(doc, getView, spotOf = null) {
         let card = null;
         let shownFor = null;
         const hide = () => {
@@ -21926,21 +24121,24 @@
         };
         // Hover, keyboard focus or a tap shows the card; Escape or leaving hides it.
         const show = (e) => {
-            const chip = e.target && e.target.closest ? e.target.closest('.pi-chip[data-pi-player]') : null;
-            if (!chip) {
+            const tag = e.target && e.target.closest ? e.target.closest('[data-pi-hover][data-pi-player]') : null;
+            if (!tag) {
                 if (card) hide();
                 return;
             }
-            // Moving within the same chip (its dot, its words) keeps the card: it was rebuilt on every move (round 6).
-            if (card && shownFor === chip && e.type === 'mouseover') return;
-            const v = getView(Number(chip.getAttribute('data-pi-player')));
+            // Moving within the same tag (its edge, its words) keeps the card (round 6: it was rebuilt on every move).
+            if (card && shownFor === tag && e.type === 'mouseover') return;
+            const v = getView(Number(tag.getAttribute('data-pi-player')));
             if (!v) return;
+            const spot = spotOf ? spotOf() : null;
+            if (spot && spot.mode === 'none') return;
             hide();
-            card = cardEl(v);
-            shownFor = chip;
+            card = cardEl(v, spot ? spot.mode : 'full');
+            shownFor = tag;
             doc.body.appendChild(card);
-            const r = chip.getBoundingClientRect();
-            const x = Math.min(window.innerWidth - 340, Math.max(8, r.left));
+            const r = tag.getBoundingClientRect();
+            if (spot) card.style.width = spot.width + 'px';
+            const x = spot ? spot.x : Math.min(window.innerWidth - 340, Math.max(8, r.left));
             const below = r.bottom + 8 + card.offsetHeight < window.innerHeight;
             card.style.left = x + 'px';
             card.style.top = (below ? r.bottom + 6 : Math.max(8, r.top - card.offsetHeight - 6)) + 'px';
@@ -21948,7 +24146,7 @@
         doc.addEventListener('mouseover', show);
         doc.addEventListener('focusin', show);
         doc.addEventListener('click', (e) => {
-            if (e.target && e.target.closest && e.target.closest('.pi-chip[data-pi-player]')) show(e);
+            if (e.target && e.target.closest && e.target.closest('[data-pi-hover][data-pi-player]')) show(e);
         });
         doc.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') hide();
@@ -21956,75 +24154,50 @@
         doc.addEventListener('scroll', hide, true);
     }
 
-    /** The war summary line: "5 attackable now · 0:48 until the next one is out · 1 traveling". */
-    function warSummaryEl(sum, updatedAgoS, fromFfs = false) {
-        const mmss = (s) => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
-        return h('div', { class: 'pi-mark pi-warsum' }, [
-            h('span', { class: 'pi-plate' }, [h('i')]),
-            h('span', {}, [h('b', { text: String(sum.attackable) }), ' attackable now' + (sum.early ? ' (' + sum.early + ' out early)' : '')]),
-            sum.nextOutS !== null ? h('span', {}, [h('b', { text: mmss(sum.nextOutS) }), ' until the next one is out']) : null,
-            h('span', {}, [h('b', { text: String(sum.traveling) }), ' traveling']),
-            // Torn's pages read nothing for the war (owner, round 6): what this page shows; the live read is on the Torn Eye tab.
-            h('span', { class: 'pi-muted' }, [updatedAgoS === null || updatedAgoS === undefined ? 'from this page · live war mode on Pumping Iron’s Torn Eye tab' : 'updated ' + updatedAgoS + 's ago · every 10 s while this tab is open', fromFfs ? ' · stats: ' : '', fromFfs ? h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }) : null]),
-        ]);
+    /* ------------------------------------------------------------ our layer */
+
+    /** Our own layer for everything placed beside Torn's page (absolute, in page coordinates). */
+    function eyeLayer(doc = document) {
+        let el = doc.getElementById('pi-eye-layer');
+        if (!el) {
+            el = h('div', { id: 'pi-eye-layer', class: 'pi-mark pi-eye' });
+            (doc.body || doc.documentElement).appendChild(el);
+        }
+        return el;
     }
 
-    /**
-     * The attack page's side panel (a shadow host beside Torn's layout).
-     * @param {object} v - eyeView() or null
-     * @param {object} s - {gearVisible, gearSaved}
-     */
-    function attackPanelContent(v, s) {
-        const kids = [h('span', { class: 'row' }, [h('span', { class: 'plate' }, [h('i')]), h('b', { class: 'white', text: 'Torn Eye' })])];
-        if (!v) {
-            kids.push(h('span', { class: 'muted', text: 'Reading this player… (your fights, FFScouter, public stats)' }));
-            if (s.watch) kids.push(h('button', { class: 'watch', type: 'button', 'aria-pressed': String(Boolean(s.watch.watching)), onclick: () => s.watch.toggle(), text: s.watch.watching ? '★ Watching' : '☆ Watch' }));
-            return kids;
+    /** One part of the layer (profile, war, faction), made on first use. */
+    function eyeLayerPart(name, doc = document) {
+        const layer = eyeLayer(doc);
+        let part = layer.querySelector(':scope > [data-pi-part="' + name + '"]');
+        if (!part) {
+            part = h('div', { 'data-pi-part': name, style: 'position:absolute;left:0;top:0;width:0;height:0' });
+            layer.appendChild(part);
         }
-        const f = v.forecast;
-        kids.push(h('span', { class: 'big', style: 'color:' + BAND_COLORS[v.band], text: BAND_WORDS[v.band] + (f && f.pWin >= 0.05 && f.keep !== null ? ' · keep ' + (v.est && v.est.confidence === 'exact' ? '' : '~') + Math.round(f.keep * 100) + '%' : '') }));
-        if (f) kids.push(h('span', { text: 'Win ' + Math.round(f.pWin * 100) + '%' + (v.respect ? ' · ' + v.respect.toFixed(2) + ' respect' : '') + (f.turns ? ' · about ' + f.turns + ' turns' : '') }));
-        if (s.gearSaved) kids.push(h('span', { class: 'good', text: 'Their gear is saved for next time.' }));
-        else if (!s.gearVisible) kids.push(h('span', { class: 'muted', text: 'Their gear isn’t shown yet. Torn shows it after Start Fight (earlier with the Gun Shop job perk). We’ll save it for next time.' }));
-        if (v.gear) kids.push(h('span', { class: 'muted', text: 'Last seen: ' + (v.gear.text || 'gear') + ' · ' + Math.max(0, Math.round((Date.now() - v.gear.seenAt) / 86400000)) + ' days ago' }));
-        if (v.source) kids.push(v.est && v.est.source === 'ffscouter' ? h('span', { class: 'muted' }, ['Stats: ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' }), ', ' + (v.est.ageDays ?? '?') + ' days old']) : h('span', { class: 'muted', text: 'Stats: ' + v.source }));
-        if (s.watch) kids.push(h('button', { class: 'watch', type: 'button', 'aria-pressed': String(Boolean(s.watch.watching)), onclick: () => s.watch.toggle(), text: s.watch.watching ? '★ Watching' + (s.watch.tag ? ' · ' + s.watch.tag : '') : s.watch.full ? 'Watch list full (20)' : '☆ Watch' }));
-        return kids;
+        return part;
     }
 
-    const ATTACK_PANEL_CSS = `
-    :host { all: initial; }
-    * { box-sizing: border-box; font-family: Arial, Helvetica, sans-serif; }
-    .panel { position: fixed; z-index: 99989; pointer-events: none; width: 250px; background: #1b1e21; border: 1px solid #3a4046; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: #e3e5e8; box-shadow: 0 6px 18px rgba(0,0,0,.4); }
-    .row { display: flex; align-items: center; gap: 8px; }
-    .plate { width: 18px; height: 18px; border-radius: 50%; background: #efebe2; display: inline-grid; place-items: center; box-shadow: inset 0 0 0 3px #efebe2, inset 0 0 0 4px #2a2d31; }
-    .plate i { width: 4px; height: 4px; border-radius: 50%; background: #15171a; }
-    .white { color: #fff; }
-    .big { font: bold 22px "Arial Narrow", Arial, sans-serif; }
-    .muted { color: #939aa1; }
-    .good { color: #9bdc8a; font-weight: bold; }
-    a { color: #8fb8e8; pointer-events: auto; }
-    button.watch { pointer-events: auto; align-self: flex-start; height: 24px; padding: 0 10px; border-radius: 12px; border: 1px solid #3a4046; background: #1e2124; color: #e3e5e8; font: bold 11px Arial, sans-serif; cursor: pointer; }
-    button.watch[aria-pressed="true"] { color: #efebe2; border-color: #efebe2; }
-    `;
-
-    function attackPanel(doc = document) {
-        let host = doc.getElementById('pi-attack');
-        if (!host) {
-            host = h('div', { id: 'pi-attack' });
-            (doc.body || doc.documentElement).appendChild(host);
-            const sr = host.attachShadow({ mode: 'open' });
-            fill(sr, [h('style', { text: ATTACK_PANEL_CSS }), h('div', { class: 'panel' })]);
-        }
-        return host.shadowRoot.querySelector('.panel');
+    /** Empty a part of the layer. */
+    function eyeClearPart(name, doc = document) {
+        const layer = doc.getElementById('pi-eye-layer');
+        const part = layer && layer.querySelector(':scope > [data-pi-part="' + name + '"]');
+        if (part) fill(part, []);
     }
 
     /* ===== src/eye-page.js ===== */
     /*
-     * Torn Eye on torn.com: chips on profiles, the mini-profile popup and
-     * faction lists; war mode on ranked-war lists (the enemy faction read every
-     * 10 s while the tab is visible); the attack page's panel and the
-     * read-only attackData reader that saves their gear.
+     * Torn Eye on torn.com (round 7, the owner's pick in mockups/round7/overlays.html):
+     *   - a profile: a card in the free space beside Torn's page, level with the
+     *     profile's title (full, narrower or smallest by the room there; the
+     *     left-hand space when the right one is too narrow); never a line on
+     *     Torn's page;
+     *   - the mini-profile popup: one tag as its last line;
+     *   - faction and ranked-war lists: Torn's rows untouched; a band edge on our
+     *     own layer and a tag per row in the free space, level with the row, and
+     *     a summary tag on top (war rows are still shown in our order with CSS);
+     *   - the attack page: the fight card (#pi-eyecard) beside the fight, and the
+     *     read-only attackData reader that saves their gear.
+     * Re-placed when the window is resized or Torn's page moves.
      */
 
 
@@ -22042,19 +24215,63 @@
 
 
 
-
-    const ep = { extras: new Map(), war: { factionId: null, members: null, prev: null, at: 0, polling: false }, attack: { gearVisible: false, gearSaved: false }, drawing: false };
+    const ep = { extras: new Map(), war: { prev: null, early: new Map() }, drawn: { war: null, faction: null }, attack: { gearVisible: false, gearSaved: false }, drawing: false, sig: {}, lists: {}, layoutSig: '' };
 
     function view(id) {
-        return eyeView(id, ep.extras.get(id) || {}, { war: Boolean(ep.war.members) });
+        const x = ep.extras.get(id) || {};
+        const v = eyeView(id, x, { war: false });
+        // No estimate on this site: what the Torn Eye tab's war mode worked out, when it did.
+        return v && v.est ? v : sharedView(id, x) || v;
     }
 
-    const EDGES = ['pi-edge-stomp', 'pi-edge-good', 'pi-edge-tough', 'pi-edge-cant'];
+    /* ------------------------------------------------------------- where Torn's page is */
 
-    function removeChips(scope, { watch = true } = {}) {
-        for (const el of scope.querySelectorAll('.pi-chip, .pi-warsum, .pi-earlytag, .pi-landtag' + (watch ? ', .pi-watch' : ''))) el.remove();
-        for (const el of scope.querySelectorAll('.pi-early')) el.classList.remove('pi-early');
-        for (const el of scope.querySelectorAll('.' + EDGES.join(', .'))) el.classList.remove(...EDGES);
+    /** Torn's page (sidebar + content) on screen; a centred 976 px page when it can't be measured. */
+    function eyeTornPage() {
+        const parts = [document.querySelector('.content-wrapper'), document.getElementById('sidebarroot'), document.getElementById('sidebar')].filter(Boolean);
+        const rects = parts.map((el) => el.getBoundingClientRect()).filter((r) => r.width > 0 && r.height > 0);
+        if (rects.length) return { left: Math.min(...rects.map((r) => r.left)), right: Math.max(...rects.map((r) => r.right)) };
+        const vw = eyeViewW();
+        const w = Math.min(vw, 976);
+        return { left: (vw - w) / 2, right: (vw + w) / 2 };
+    }
+
+    /** The window's width without its scrollbar. */
+    function eyeViewW() {
+        return (document.documentElement && document.documentElement.clientWidth) || window.innerWidth;
+    }
+
+    /**
+     * The training panel on screen (our own, in its shadow root; null when hidden). Round 7 review: the list tags and the
+     * hover card leave its margin when the other one has room, and the panel leaves the tags' column (data-pi-col).
+     */
+    function eyePanelRect() {
+        const host = document.getElementById('pi-overlay');
+        const w = host && host.shadowRoot && host.shadowRoot.querySelector('.wrap');
+        if (!w) return null;
+        const r = w.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 ? r : null;
+    }
+
+    /** Where list tags go now (eyeRowSpot, clear of the panel). */
+    function eyeListSpot() {
+        return eyeRowSpot(eyeViewW(), eyeTornPage(), eyePanelRect());
+    }
+
+    /** Note the tags' column on our layer (x from, x to, on screen) for the panel to keep out of; none: no tags. */
+    function eyeMarkColumn(spot) {
+        const layer = document.getElementById('pi-eye-layer');
+        if (!layer) return;
+        const v = spot && spot.mode !== 'none' && Object.keys(ep.lists).length ? Math.round(spot.x) + ',' + Math.round(spot.x + spot.width) : null;
+        if (v === layer.getAttribute('data-pi-col')) return;
+        if (v) layer.setAttribute('data-pi-col', v);
+        else layer.removeAttribute('data-pi-col');
+    }
+
+    /** Where our layer's (0, 0) is on screen: its children are placed in page coordinates from there. */
+    function eyeOrigin() {
+        const r = eyeLayer().getBoundingClientRect();
+        return { x: r.left, y: r.top };
     }
 
     /* ------------------------------------------------------------- watch */
@@ -22084,50 +24301,142 @@
     function drawProfile() {
         const id = Number(profileIdOf(location.href));
         const anchor = profileAnchor();
+        const part = eyeLayerPart('profile');
         if (!id || !anchor) return;
         ep.extras.set(id, { ...(ep.extras.get(id) || {}), level: profileLevel() });
-        // The watch button stays while you use it (a redraw would close its picker); it's replaced when it changed.
-        const ws = watchState(id);
-        const sig = [ws.watching ? 1 : 0, ws.tag || '', ws.full ? 1 : 0].join('|');
-        const old = anchor.parentNode.querySelector('.pi-watch');
-        const keepWatch = old && old.getAttribute('data-pi-watch') === sig && old.getAttribute('data-pi-player') === String(id);
-        removeChips(anchor.parentNode, { watch: !keepWatch });
-        const chip = chipEl(view(id), { id });
-        anchor.parentNode.insertBefore(chip, anchor.nextSibling);
-        if (keepWatch) chip.after(old);
-        else {
-            const wc = watchControl(ws, watchHandlers(id));
-            wc.setAttribute('data-pi-player', String(id));
-            chip.after(wc);
+        const spot = eyeCardSpot(eyeViewW(), eyeTornPage());
+        if (spot.mode === 'none') {
+            // No room beside Torn's page: nothing (owner: never a line on Torn's page).
+            fill(part, []);
+            ep.sig.profile = '';
+            return;
         }
+        const next = eyeProfileCard(view(id), spot.mode, { id, watch: { state: watchState(id), on: watchHandlers(id) } });
+        // The card stays while it says the same (a redraw would close the watch reason picker).
+        let card = part.firstElementChild;
+        if (!card || ep.sig.profile !== next.outerHTML) {
+            ep.sig.profile = next.outerHTML;
+            fill(part, [next]);
+            card = next;
+        }
+        const o = eyeOrigin();
+        const t = anchor.getBoundingClientRect();
+        card.style.width = spot.width + 'px';
+        card.style.left = Math.round(spot.x - o.x) + 'px';
+        card.style.top = Math.round(t.top - o.y) + 'px';
     }
 
     function drawMini() {
         const id = miniProfileId();
         const root = document.getElementById('profile-mini-root');
         if (!id || !root) return;
-        const at = root.querySelector('.profile-container .description .last-action') || root.querySelector('.description') || root;
-        removeChips(root);
-        at.appendChild(chipEl(view(id), { mini: true, id }));
+        for (const el of root.querySelectorAll('.pi-mini-line')) el.remove();
+        // The popup's last line, inside its width.
+        const at = root.querySelector('.mini-profile-wrapper') || root.querySelector('.profile-container') || root;
+        // At most one thing glows on a page: the mini-profile only when nothing else does.
+        at.appendChild(eyeMiniLine(view(id), { id, glow: !document.querySelector('.pi-eye.pi-glow') }));
     }
 
     /* ------------------------------------------------------ faction + war */
 
-    function drawFaction() {
-        const rows = readFactionRows();
-        for (const r of rows) ep.extras.set(r.id, { level: r.level, name: r.name });
-        for (const r of rows) {
-            for (const c of r.cell.querySelectorAll('.pi-chip')) c.remove();
-            r.cell.appendChild(chipEl(view(r.id), { mini: true, id: r.id }));
+    /** A row's state and when it is out, from what Torn's row shows ("Hospital 01:17:00"). */
+    function eyeRowMember(r, nowS) {
+        const secs = eyeStatusSeconds(r.status);
+        return { id: r.id, level: r.level, status: { state: r.status, until: secs ? nowS + secs : 0 } };
+    }
+
+    /**
+     * Tags and edges for one list, on our layer. `rows` in the order to judge them (war: our order); the first ready
+     * row with a band glows when `glow`.
+     */
+    function eyeDrawList(name, rows, byId, nowS, { glow, note }) {
+        const part = eyeLayerPart(name);
+        const spot = eyeListSpot();
+        const items = [];
+        let glowed = !glow;
+        let fromFfs = false;
+        for (const s of rows) {
+            const r = byId.get(s.id);
+            if (!r || s.state === 'fallen') continue;
+            const v = view(s.id);
+            if (!eyeShown(v)) continue;
+            if (v.est && v.est.source === 'ffscouter') fromFfs = true;
+            const ready = s.state === 'okay' || s.state === 'early';
+            const on = ready && !glowed;
+            if (on) glowed = true;
+            const edge = eyeEdgeBar(v.band, !ready);
+            const tag = spot.mode === 'none' ? null : eyeRowTag(v, { mode: spot.mode, state: s.state, outInS: s.until > nowS ? s.until - nowS : null, outAt: s.until > nowS ? s.until : null, glow: on });
+            items.push({ row: r.el, edge, tag });
         }
+        const summary = spot.mode === 'none' ? null : eyeSummaryTag(eyeSummary(rows, nowS), { note, fromFfs, short: spot.mode !== 'full' });
+        const kids = [summary, ...items.map((i) => i.edge), ...items.map((i) => i.tag)].filter(Boolean);
+        fill(part, kids);
+        ep.lists[name] = { items, summary, spotMode: spot.mode, first: rows.length ? byId.get(rows[0].id) : null, rowsEl: [...byId.values()].map((r) => r.el) };
+        eyePlaceList(name);
+        return glowed && glow;
+    }
+
+    /** Put a list's edges and tags level with their rows, and its summary above the first row. */
+    function eyePlaceList(name) {
+        const L = ep.lists[name];
+        if (!L) return;
+        const spot = eyeListSpot();
+        eyeMarkColumn(spot);
+        const o = eyeOrigin();
+        let topRow = Infinity;
+        for (const el of L.rowsEl) {
+            const r = el.getBoundingClientRect();
+            if (r.height > 0) topRow = Math.min(topRow, r.top);
+        }
+        for (const it of L.items) {
+            const r = it.row.getBoundingClientRect();
+            const shown = r.height > 0 && r.width > 0;
+            it.edge.style.display = shown ? '' : 'none';
+            if (it.tag) it.tag.style.display = shown ? '' : 'none';
+            if (!shown) continue;
+            it.edge.style.left = Math.round(r.left - o.x) + 'px';
+            it.edge.style.top = Math.round(r.top - o.y + 2) + 'px';
+            it.edge.style.height = Math.max(4, Math.round(r.height - 4)) + 'px';
+            if (it.tag) {
+                it.tag.style.maxWidth = spot.width + 'px';
+                it.tag.style.left = Math.round(spot.x - o.x) + 'px';
+                it.tag.style.top = Math.round(r.top - o.y + (r.height - (it.tag.offsetHeight || 26)) / 2) + 'px';
+            }
+        }
+        if (L.summary) {
+            L.summary.style.display = Number.isFinite(topRow) ? '' : 'none';
+            L.summary.style.maxWidth = spot.width + 'px';
+            L.summary.style.left = Math.round(spot.x - o.x) + 'px';
+            if (Number.isFinite(topRow)) L.summary.style.top = Math.round(topRow - o.y - (L.summary.offsetHeight || 28) - 8) + 'px';
+        }
+    }
+
+    /**
+     * The war list as it is now, and who is out early: kept from reading to reading (eyeNextEarly) until the hospital end
+     * they left before passes or their state changes. Called every second and on each draw; the same reading twice
+     * changes nothing.
+     */
+    function eyeWarReading(rows, nowS) {
+        const members = rows.map((r) => eyeRowMember(r, nowS));
+        ep.war.early = eyeNextEarly(ep.war.early, ep.war.prev, members, nowS, memberState);
+        ep.war.prev = members;
+        return { members, early: ep.war.early };
     }
 
     function drawWar() {
         const rows = readWarRows(document, 'enemy');
-        if (!rows.length) return;
+        if (!rows.length) {
+            eyeClearPart('war');
+            delete ep.lists.war;
+            return false;
+        }
         const list = rows[0].el.parentNode;
+        // What the row itself shows goes into the fight (round 7: a war row's level was never passed on, so a player
+        // with an estimate but no profile read was fought with a level 1's life and came out Stomp).
+        for (const r of rows) ep.extras.set(r.id, { ...(ep.extras.get(r.id) || {}), level: r.level, name: r.name });
         const nowS = Math.floor(Date.now() / 1000);
-        const members = ep.war.members || rows.map((r) => ({ id: r.id, level: r.level, status: { state: r.status } }));
+        const { members, early } = eyeWarReading(rows, nowS);
+        ep.drawn.war = members;
         const bands = {};
         const respect = {};
         for (const m of members) {
@@ -22137,45 +24446,36 @@
                 respect[m.id] = v.respect || 0;
             }
         }
-        const early = ep.war.prev ? outEarly(ep.war.prev, members, nowS) : new Set();
-        const sorted = sortWar(members, { bands, respect, early, nowS });
+        const sorted = sortWar(members, { bands, respect, early: new Set(early.keys()), nowS });
         ep.drawing = true;
         try {
-            removeChips(list.parentNode);
             const byId = new Map(rows.map((r) => [r.id, r]));
-            // Shown in our order with CSS (flex order); Torn's rows stay where React put them.
+            // Shown in our order with CSS (flex order); Torn's rows stay where React put them, unchanged.
             list.classList.add('pi-warlist');
             sorted.forEach((s, i) => {
                 const r = byId.get(s.id);
-                if (r) r.el.style.order = String(i);
+                if (r && r.el.style.order !== String(i)) r.el.style.order = String(i);
             });
-            const flights = flightsSeen();
-            const nowMs = Date.now();
-            for (const s of sorted) {
-                const r = byId.get(s.id);
-                if (!r) continue;
-                r.cell.appendChild(chipEl(view(s.id), { mini: true, id: s.id }));
-                // The row's edge in its band colour; a traveller's estimated landing next to Torn's status.
-                if (EDGES.includes('pi-edge-' + s.band)) r.el.classList.add('pi-edge-' + s.band);
-                if (s.state === 'traveling' && ep.war.members) {
-                    const parts = statusParts(s.m, { now: nowMs, seenAt: flights[s.id] ? flights[s.id].at : null });
-                    const st = r.el.querySelector('.status');
-                    if (st && parts.at) st.appendChild(Object.assign(document.createElement('span'), { className: 'pi-mark pi-landtag', textContent: 'lands ~' + tornClock(parts.at) }));
-                }
-                if (s.state === 'early') {
-                    r.el.classList.add('pi-early');
-                    const st = r.el.querySelector('.status');
-                    if (st) st.appendChild(Object.assign(document.createElement('span'), { className: 'pi-mark pi-earlytag', textContent: 'out early' }));
-                }
-            }
-            const fromFfs = sorted.some((s) => {
-                const v = view(s.id);
-                return v && v.est && v.est.source === 'ffscouter';
-            });
-            list.parentNode.insertBefore(warSummaryEl(warSummary(sorted, nowS), ep.war.at ? Math.round((Date.now() - ep.war.at) / 1000) : null, fromFfs), list);
+            // Torn's pages read nothing for the war (owner, round 6): what this page shows; the live read is on the Torn Eye tab.
+            return eyeDrawList('war', sorted, byId, nowS, { glow: true, note: 'Torn Eye · from this page · live war mode on Pumping Iron’s Torn Eye tab' });
         } finally {
             ep.drawing = false;
         }
+    }
+
+    function drawFaction(glow) {
+        const rows = readFactionRows();
+        if (!rows.length) {
+            eyeClearPart('faction');
+            delete ep.lists.faction;
+            return;
+        }
+        for (const r of rows) ep.extras.set(r.id, { ...(ep.extras.get(r.id) || {}), level: r.level, name: r.name });
+        const nowS = Math.floor(Date.now() / 1000);
+        const members = rows.map((r) => eyeRowMember(r, nowS));
+        ep.drawn.faction = members;
+        const list = members.map((m) => ({ id: m.id, state: memberState(m), until: m.status.until }));
+        eyeDrawList('faction', list, new Map(rows.map((r) => [r.id, r])), nowS, { glow, note: 'Torn Eye · from what is already known (nothing is asked on this page)' });
     }
 
     /* ------------------------------------------------------------- attack */
@@ -22183,15 +24483,32 @@
     function drawAttack() {
         const id = Number(attackTargetOf(location.href));
         if (!id) return;
-        const panel = attackPanel();
-        const root = document.getElementById('attack-root');
-        const r = root ? root.getBoundingClientRect() : null;
-        const x = r && r.right + 262 < window.innerWidth ? r.right + 12 : window.innerWidth - 262;
-        panel.style.left = Math.max(8, x) + 'px';
-        panel.style.top = (r ? Math.max(8, r.top) : 110) + 'px';
+        const spot = eyeCardSpot(eyeViewW(), eyeTornPage());
+        const old = document.getElementById('pi-eyecard');
         const v = view(id);
-        const ws = watchState(id);
-        fill(panel, attackPanelContent(v, { ...ep.attack, watch: { ...ws, full: getWatch().list.length >= WATCH_MAX && !ws.watching, toggle: () => toggleFor(id) } }));
+        if (spot.mode === 'none') {
+            if (old) old.remove();
+            ep.sig.attack = '';
+        } else {
+            const ws = watchState(id);
+            const next = eyeFightCard(v, spot.mode, { ...ep.attack, watch: { ...ws, full: getWatch().list.length >= WATCH_MAX && !ws.watching, toggle: () => toggleFor(id) } });
+            let card = old;
+            if (!card || ep.sig.attack !== next.outerHTML) {
+                ep.sig.attack = next.outerHTML;
+                if (old) old.replaceWith(next);
+                else (document.body || document.documentElement).appendChild(next);
+                card = next;
+            }
+            // Beside the fight, level with its top; the training panel docks under it.
+            const root = attackRoot();
+            const r = root ? root.getBoundingClientRect() : null;
+            card.style.width = spot.width + 'px';
+            card.style.left = Math.round(spot.x) + 'px';
+            const top = Math.round(r && r.height ? Math.max(8, r.top) : 80);
+            card.style.top = top + 'px';
+            // Never taller than the window (it scrolls inside instead).
+            card.style.maxHeight = Math.max(80, window.innerHeight - top - 8) + 'px';
+        }
         // What Torn Eye said before this fight: the fight learner compares it with how the fight went.
         if (v && v.forecast && Number.isFinite(v.forecast.pWin)) {
             const list = get(K.eyePredictions, []) || [];
@@ -22215,33 +24532,82 @@
 
     /* ------------------------------------------------------------- wiring */
 
+    function eyeClearAll() {
+        for (const el of document.querySelectorAll('#pi-eye-layer, #pi-eyecard, .pi-mini-line')) el.remove();
+        ep.sig = {};
+        ep.lists = {};
+        ep.drawn = { war: null, faction: null };
+        // Torn's war rows back in their own order.
+        for (const list of document.querySelectorAll('.pi-warlist')) {
+            list.classList.remove('pi-warlist');
+            for (const li of list.children) li.style.order = '';
+        }
+    }
+
     function drawAll() {
-        // Taking turns with Torn Trading, or Torn Eye chips switched off in Settings: nothing of ours on Torn's page.
+        // Taking turns with Torn Trading, or Torn Eye switched off in Settings: nothing of ours on Torn's page.
         if (isPaused() || !getSettings().eyeChips) {
-            removeChips(document);
-            for (const el of document.querySelectorAll('#pi-attack')) el.remove();
-            // Torn's war rows back in their own order.
-            for (const list of document.querySelectorAll('.pi-warlist')) {
-                list.classList.remove('pi-warlist');
-                for (const li of list.children) li.style.order = '';
-            }
+            eyeClearAll();
             return;
         }
         if (!isVisible()) return;
         const p = detectPage(location.href);
+        // Faction and war lists (and the mini-profile) show what is already stored: read it once, from this site's own
+        // IndexedDB, when one of them first shows. No request; the draw runs again when it is in.
+        if (!eyeReady() && (p === PAGE_FACTION || miniProfileId())) loadEyeCache().catch(() => {});
         if (p === PAGE_PROFILE) drawProfile();
         if (p === PAGE_FACTION) {
-            if (document.getElementById('faction_war_list_id')) drawWar();
-            drawFaction();
+            const glowed = document.getElementById('faction_war_list_id') ? drawWar() : false;
+            drawFaction(!glowed);
         }
         if (p === PAGE_ATTACK) drawAttack();
         drawMini();
+        if (!Object.keys(ep.lists).length) eyeMarkColumn(null);
+        ep.layoutSig = eyeLayoutSig();
+    }
+
+    /** Only the positions, after a resize or when Torn's page moved (no rebuild). */
+    function eyePlaceAll() {
+        if (isPaused() || !getSettings().eyeChips || !isVisible()) return;
+        const p = detectPage(location.href);
+        if (p === PAGE_PROFILE || p === PAGE_ATTACK) {
+            drawAll();
+            return;
+        }
+        // A list whose tags need another size is drawn again; otherwise they only move.
+        const mode = eyeListSpot().mode;
+        if (Object.values(ep.lists).some((L) => L.spotMode !== mode)) {
+            drawAll();
+            return;
+        }
+        for (const name of Object.keys(ep.lists)) eyePlaceList(name);
+        ep.layoutSig = eyeLayoutSig();
+    }
+
+    /** Where things are now: the window, Torn's page and the first row or title we sit level with. */
+    function eyeLayoutSig() {
+        const pg = eyeTornPage();
+        const p = detectPage(location.href);
+        let y = '';
+        if (p === PAGE_PROFILE) {
+            const a = profileAnchor();
+            y = a ? Math.round(a.getBoundingClientRect().top + window.scrollY) : '';
+        } else if (p === PAGE_ATTACK) {
+            const a = attackRoot();
+            y = a ? Math.round(a.getBoundingClientRect().top) : '';
+        } else {
+            y = Object.values(ep.lists).map((L) => (L.first ? Math.round(L.first.el.getBoundingClientRect().top + window.scrollY) + ':' + L.rowsEl.length : '')).join(',');
+        }
+        // The panel's side too: the list tags leave its margin (eyeListSpot).
+        const pr = p === PAGE_FACTION ? eyePanelRect() : null;
+        return [eyeViewW(), Math.round(pg.left), Math.round(pg.right), y, pr ? Math.round(pr.left) + ':' + Math.round(pr.right) : ''].join('|');
     }
 
     function bootEyePage() {
         ensureMarkCss();
         ensureEyeCss();
-        bindCard(document, (id) => view(id));
+        // The hover card: in the free space, and on faction and war pages clear of the panel like the tags beside it.
+        bindCard(document, (id) => view(id), () => eyeCardSpot(eyeViewW(), eyeTornPage(), detectPage(location.href) === PAGE_FACTION ? eyePanelRect() : null));
         const p = detectPage(location.href);
         if (p === PAGE_ATTACK) {
             // unsafeWindow is the page's own window in Tampermonkey; the harness has only window.
@@ -22272,14 +24638,42 @@
             lastSig = '';
             drawAll();
         });
-        // Faction and war lists render after the page: a cheap look each second (row ids only) draws their chips then.
+        // A resized window re-places everything (once per frame).
+        let resizeQueued = false;
+        window.addEventListener('resize', () => {
+            if (resizeQueued) return;
+            resizeQueued = true;
+            const run = () => {
+                resizeQueued = false;
+                eyePlaceAll();
+            };
+            if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+            else setTimeout(run, 16);
+        });
+        // Faction and war lists render after the page: a cheap look each second (row ids only) draws their tags then.
+        // On the pages we draw beside, the same look notices Torn's page moving (it settles after load) and re-places.
         let rowsSig = '';
         setInterval(() => {
-            if (!isVisible() || isPaused() || !getSettings().eyeChips || detectPage(location.href) !== PAGE_FACTION) return;
-            const sig = readFactionRows().map((r) => r.id).join(',') + '|' + readWarRows().map((r) => r.id + ':' + r.status).join(',');
-            if (sig === rowsSig) return;
-            rowsSig = sig;
-            drawAll();
+            if (!isVisible() || isPaused() || !getSettings().eyeChips) return;
+            const pg = detectPage(location.href);
+            if (pg !== PAGE_FACTION && pg !== PAGE_PROFILE && pg !== PAGE_ATTACK) return;
+            if (pg === PAGE_FACTION) {
+                // Round 7 review: the status text carries Torn's hospital clock, so a signature of it changed every second
+                // and every tag was rebuilt (focus lost, "out early" forgotten). Now: each row's state, who is out early,
+                // and a hospital end that really moved; the "out in" clocks move on by themselves (eyeTickOut).
+                const nowS = Math.floor(Date.now() / 1000);
+                const faction = readFactionRows().map((r) => eyeRowMember(r, nowS));
+                const warRows = readWarRows(document, 'enemy');
+                const war = warRows.length ? eyeWarReading(warRows, nowS) : { members: [], early: new Map() };
+                const sig = eyeRowsSig(faction, memberState) + '|' + eyeRowsSig(war.members, memberState, war.early);
+                if (sig !== rowsSig || eyeUntilMoved(ep.drawn.faction, faction) || eyeUntilMoved(ep.drawn.war, war.members)) {
+                    rowsSig = sig;
+                    drawAll();
+                    return;
+                }
+                eyeTickOut(document.getElementById('pi-eye-layer'), nowS);
+            }
+            if (eyeLayoutSig() !== ep.layoutSig) eyePlaceAll();
         }, 1000);
         // The mini-profile popup is added to the body on the first hover, then re-drawn for each player.
         let watchedRoot = null;
@@ -22291,7 +24685,7 @@
                 new MutationObserver(onMini).observe(root, { childList: true, subtree: true });
             }
             const id = miniProfileId();
-            const shown = document.querySelector('#profile-mini-root .pi-chip');
+            const shown = document.querySelector('#profile-mini-root .pi-mini-line');
             if (id && (!shown || shown.getAttribute('data-pi-player') !== String(id)) && !(ep.miniAt && ep.miniId === id && Date.now() - ep.miniAt < 500)) {
                 ep.miniId = id;
                 ep.miniAt = Date.now();

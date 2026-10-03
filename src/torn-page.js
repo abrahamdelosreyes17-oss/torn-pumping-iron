@@ -13,7 +13,7 @@ import { Overlay } from './ui/overlay.js';
 import { ensureMarkCss, clearMarks, drawGymMarks, outline } from './ui/marks/marks.js';
 import { gymRoot, gymLoading, readStatBoxes, readGymButtons, gymListSummary, readEnergyBar, readHappyBar, barsActed } from './sources/dom/gym.js';
 import { readItemRows, readBazaarCards, readItemMarketRows, readPointsRows } from './sources/dom/market.js';
-import { planGymPage, pageReading, nextSession, gymPanel, isBoostStep, boostProgress, nextOverdose, REHAB_COST, TRAVEL_URL, DUE_SLACK_MS } from './core/gympage.js';
+import { planGymPage, pageReading, nextSession, gymPanel, isBoostStep, boostProgress, nextOverdose, nextBarsSeen, agedCooldowns, boostHappyTrained, REHAB_COST, TRAVEL_URL, DUE_SLACK_MS } from './core/gympage.js';
 import { unlockEnergyAfter } from './core/gyms.js';
 import { needsForWindow, shownTypes, typeOf } from './ui/app/buy.js';
 import { itemContext } from './core/model.js';
@@ -44,6 +44,14 @@ function tradingRect() {
     return panel ? panel.getBoundingClientRect() : null;
 }
 
+/** The column Torn Eye's list tags use ({left, right} on screen), from its layer's data-pi-col; null: none. */
+function eyeColumn() {
+    const layer = document.getElementById('pi-eye-layer');
+    const v = layer && layer.getAttribute('data-pi-col');
+    const [left, right] = v ? v.split(',').map(Number) : [];
+    return Number.isFinite(left) && Number.isFinite(right) ? { left, right } : null;
+}
+
 /* ---------------------------------------------------------------- pill */
 
 /** Why there's no state yet (key refused, too limited, Torn not answering), or null. */
@@ -52,20 +60,24 @@ function currentProblem() {
 }
 
 /** The bars as Torn's sidebar shows them now (they move before our next read), else the model's. */
-function liveReads(m) {
+function liveReads(m, now = Date.now()) {
     const happy = readHappyBar() || (m && m.strip && m.strip.happy ? { current: m.strip.happy.current, max: m.strip.happy.max } : null);
     const energy = readEnergyBar() || (m && m.strip ? m.strip.energy : null);
-    return { happy, energy, boosterLeft: m && m.strip && m.strip.booster ? m.strip.booster.left : 0, drugLeft: m && m.strip && m.strip.drug ? m.strip.drug.left : 0 };
+    return { happy, energy, ...agedCooldowns(m, now) };
 }
 
 /** GM key: an overdose seen on the bars ({at, until}), so every tab stops its jump marks. */
 export const OVERDOSE_KEY = 'overdose';
 
-/** An overdose seen on the bars, kept until the drug cooldown it started is over. */
+/**
+ * An overdose seen on the bars (gympage.js nextOverdose: the bars at 0 with the overdose's long cooldown, or a fall
+ * training can't explain), kept while fresh readings still look like it and until the drug cooldown it started is over.
+ */
 function overdoseOf(m, reads = liveReads(m), now = Date.now()) {
     if (!m || !m.ready) return null;
     const prev = get(OVERDOSE_KEY, null);
-    const next = nextOverdose(prev, reads, now);
+    const next = nextOverdose(prev, reads, now, tp.barsSeen);
+    tp.barsSeen = nextBarsSeen(tp.barsSeen, reads, now);
     if (JSON.stringify(next) !== JSON.stringify(prev)) set(OVERDOSE_KEY, next);
     return next;
 }
@@ -114,7 +126,7 @@ function overlayView(m, page) {
         v.pillText = gp.pill;
     }
     // A jump or a daily boost due now: its checklist, ticked from the bars (every Torn page).
-    const boost = next && isBoostStep(next) && next.at <= now + DUE_SLACK_MS ? boostProgress(next, reads) : null;
+    const boost = next && isBoostStep(next) && next.at <= now + DUE_SLACK_MS ? boostProgress(next, { ...reads, happyTrained: boostHappyTrained(get(K.gymSession, null), next, m.pc && m.pc.perks ? m.pc.perks.happyLossMult : 1, now) }) : null;
     if (next) {
         const due = next.at <= now;
         if (!v.pillText) {
@@ -279,6 +291,8 @@ function watchBars() {
     const check = () => {
         if (isPaused() || !isVisible()) return;
         const now = look();
+        // The last reading with something in the bars: an overdose is a fall from it that training can't explain.
+        tp.barsSeen = nextBarsSeen(tp.barsSeen, now, Date.now());
         if (barsActed(last, now)) readSoon();
         last = now;
     };
@@ -423,6 +437,8 @@ export function bootTornPage() {
         dockTo: () => (detectPage(location.href) === PAGE_ATTACK ? document.getElementById('pi-eyecard') : null),
         // A profile's Torn Eye card that had to take the panel's margin: the panel folds under it instead of covering it.
         dockIfShared: () => document.getElementById('pi-eyecard'),
+        // Torn Eye's tags on faction and war lists (eye-page.js notes their column on its layer): never the same margin.
+        avoidColumn: eyeColumn,
     });
     tp.overlay.mount();
     gmMenu('Reset overlay position', () => {

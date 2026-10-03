@@ -244,7 +244,7 @@ test('paused, the cause: a tab opened before Torn Trading was turned off keeps i
     for (; t < T0 + 10 * MIN; t += 5000) lookOnce(oldTab, t);
     assert.equal(isPaused(t), true, 'ten minutes after it was turned off, still paused');
     assert.equal(tradingWhere(t).count, 1);
-    // That tab reloaded (or closed): no host, its entry goes; the pause ends 60 s after its last mark.
+    // That tab reloaded (or closed): no host, its entry goes; the pause ends 2 min after its last mark.
     lookOnce({ getElementById: () => null }, t);
     const w = tradingWhere(t);
     assert.equal(w.count, 0);

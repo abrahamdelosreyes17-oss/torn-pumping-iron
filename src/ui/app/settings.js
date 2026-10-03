@@ -360,7 +360,7 @@ export function renderSettings(m, ctx) {
         h('p', { class: 'num' }, ['Expand or collapse the panel: ', h('b', { class: 'white', text: 'Alt+`' }), ' · drag it by its bar; it stays in the empty margin beside Torn’s page, left of it first, so NPC Arbitrage keeps the right.']),
         h('div', { class: 'opts' }, [settingsCheck('Bazaar prices from TornW3B', s.w3b !== false, (v) => ctx.setSettings({ w3b: v })), settingsCheck('Animations', s.motion !== false, (v) => ctx.setSettings({ motion: v }))]),
         h('p', {}, ['Bazaar prices come from ', h('a', { href: W3B_SITE_URL, target: '_blank', rel: 'noopener', text: 'TornW3B' }), ' (item ids only, never a key; ', h('a', { href: W3B_TERMS_URL, target: '_blank', rel: 'noopener', text: 'their terms' }), '). Off: Item Market and points market only.']),
-        h('p', {}, [h('b', { class: 'white', text: 'Pumping Iron pauses while Torn Trading (NPC Arbitrage / Torn Bids) runs' }), ': the two never share Torn’s API limit or mark the same pages. While paused it asks Torn nothing, draws nothing on Torn’s pages and shows a warning sign; it starts again by itself within a minute of Torn Trading being turned off.']),
+        h('p', {}, [h('b', { class: 'white', text: 'Pumping Iron pauses while Torn Trading (NPC Arbitrage / Torn Bids) runs' }), ': the two never share Torn’s API limit or mark the same pages. While paused it asks Torn nothing, draws nothing on Torn’s pages and shows a warning sign; it starts again by itself about 2 minutes after the last tab running Torn Trading is reloaded or closed.']),
     ]);
 
     const displaySec = settingsSection('Display', null, [

@@ -23,7 +23,7 @@ import { XANAX, SAMPLE_PRICES, ITEMS, XANAX_CD_MIN, GAME_CONSOLE, POINTS } from 
 import { xanaxCdOf } from './drugcd.js';
 import { realGains } from './gains.js';
 import { HAPPY_CAP } from './gain.js';
-import { JUMP_STACK } from './strategies.js';
+import { JUMP_STACK, CONSOLE_STACK, stackRoom } from './strategies.js';
 import { budgetOf, effectivePickBy, affordLine, autoWaitLine, unlockDays, unlockEnergyLeft } from './auto.js';
 import { makePause, runSliced } from './slices.js';
 
@@ -504,6 +504,43 @@ export function drugNotBefore(skipped, now, cdMin = XANAX_CD_MIN) {
 }
 
 /**
+ * Energy the day plan keeps on purpose right now (round 7 review): the gym page and the panel never say to train it.
+ * Read from what the day plan does (plan.js), not a new rule:
+ *   jump     Xanax stacked for a jump (energy above the maximum on a jump plan): all of it waits for the jump;
+ *   boost    the daily choco boost's held Xanax ("Xanax #N · keep the energy for the boost"): all of it waits;
+ *   console  the console jump before its stack: the bar stays under the 3 Xanax (strategies.js stackRoom), so the
+ *            plan trains only what is above it (with a 100–150 bar: nothing);
+ *   war      energy kept for a faction war (Settings › Keep for war days): the plan trains above it.
+ * @returns {{why:'jump'|'boost'|'console'|'war', amount:number, all:boolean, stacked:number, stackTo:number, war:string|null}|null}
+ *   amount: the energy kept now (never more than there is); all: none of the energy is to be trained now
+ */
+export function keptEnergyOf({ strategy, energy, stacking = false, stacked = 0, holding = false, warKeep = 0, warName = null }) {
+    const e = Math.max(0, Number(energy) || 0);
+    if (!(e > 0)) return null;
+    const isConsole = strategy === 'consoleJump' || strategy === 'consoleJumpToy';
+    const stackTo = isConsole ? CONSOLE_STACK : JUMP_STACK;
+    let why = null;
+    let amount = 0;
+    if (stacking) {
+        why = 'jump';
+        amount = e;
+    } else if (holding) {
+        why = 'boost';
+        amount = e;
+    } else if (isConsole) {
+        why = 'console';
+        amount = Math.min(e, stackRoom(CONSOLE_STACK));
+    }
+    const war = Math.min(e, Math.max(0, Number(warKeep) || 0));
+    if (war > amount) {
+        why = 'war';
+        amount = war;
+    }
+    if (!why || !(amount > 0)) return null;
+    return { why, amount, all: amount >= e, stacked: why === 'jump' ? Math.max(1, Math.min(stackTo, Number(stacked) || 0)) : 0, stackTo, war: why === 'war' ? warName || null : null };
+}
+
+/**
  * Round 6: the numbers come from the saved plan (`compare`: every plan's result, or on Torn's pages the small part;
  * `rec`: its recommendation; `warn`: plans whose pick warns). `lite` (Torn's pages): only what those pages show is
  * worked out (today's steps, the 48 h look-ahead, the strip, the gym page's next two days); no ladder, no 30-day
@@ -615,6 +652,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
     const xanaxPlanned = today.filter(isDrugEntry).length + steps.filter((s) => (s.items || []).some((it) => it.id === XANAX) && s.at < tornDayStart(now) + DAY).length;
     // Xanax stacked for a jump: energy is above the maximum, so a refill (it only fills to the maximum) would add nothing.
     const stackingNow = (STRATEGIES[plan.strategy] || {}).kind === 'jump' && over > 0;
+    const energyKept = keptEnergyOf({ strategy: plan.strategy, energy, stacking: stackingNow, stacked: ctx.stackedSoFar, holding: ctx.holding, warKeep, warName: warOn && warOn.name });
     const strip = {
         energy: { current: energy, max: e.maximum, fullAt },
         happy: { current: happyAt(state, now, { bliss: pc.perks.bliss }), max: state.happy.maximum, property: statics.property && statics.property.property ? statics.property.property.name : null },
@@ -782,6 +820,8 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         events,
         pickBy,
         keepEnergy: warKeep,
+        // Energy the plan keeps on purpose now (null: none): what every "train now" surface leaves alone.
+        energyKept,
         noRefill: Boolean(ctx.noRefill),
         auto: auto ? { ...auto, afford: affordLine(auto, recRow ? recRow.cost / horizon : 0), wait: autoWaitLine(auto) } : null,
         // The saved plan: its dates and where it stands (null: no plan yet), and the days its numbers cover.

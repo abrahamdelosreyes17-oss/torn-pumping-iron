@@ -349,7 +349,9 @@ const tornRect = async (page) => {
     return { left: Math.min(c.left, s.left), right: Math.max(c.right, s.right) };
 };
 const glows = (page) => page.evaluate(() => document.querySelectorAll('.pi-glow').length);
-const panelRect = (page) => page.evaluate(() => { const h = document.getElementById('pi-overlay'); const w = h && h.shadowRoot && h.shadowRoot.querySelector('.wrap'); if (!w) return null; const r = w.getBoundingClientRect(); return r.width ? { left: r.left, right: r.right, top: r.top, bottom: r.bottom } : null; });
+const panelRect = (page) => page.evaluate(() => { const h = document.getElementById('pi-overlay'); const w = h && h.shadowRoot && h.shadowRoot.querySelector('.wrap'); if (!w) return null; const r = w.getBoundingClientRect(); return r.width ? { left: r.left, right: r.right, top: r.top, bottom: r.bottom, fit: w.getAttribute('data-fit'), docked: w.classList.contains('docked') } : null; });
+// Round 7 review: the panel is never over Torn's page (sidebar + content): in a margin, or the smallest tag in the window's top corner.
+const panelClear = (pr, torn) => Boolean(pr) && (pr.right <= torn.left + 1 || pr.left >= torn.right - 1 || (pr.fit === 'mini' && pr.top <= 5));
 {
     const { page, errors, tornHits } = await open('page=profile&XID=605123&fixture=profile&ffs=1&who=owner', { wait: 6000 });
     const card = () => page.evaluate(() => {
@@ -358,7 +360,7 @@ const panelRect = (page) => page.evaluate(() => { const h = document.getElementB
         const r = c.getBoundingClientRect();
         return { mode: c.getAttribute('data-pi-mode'), text: c.textContent.replace(/\s+/g, ' ').trim(), left: r.left, right: r.right, top: r.top, bottom: r.bottom, titleTop: document.querySelector('.content-title').getBoundingClientRect().top, font: getComputedStyle(c.querySelector('.pi-band')).fontFamily };
     });
-    for (const [w, mode, side, shift] of [[1600, 'full', 'right', 0], [1366, 'mid', 'right', 0], [1280, 'small', 'right', 0], [1440, 'full', 'left', 120]]) {
+    for (const [w, mode, side, shift] of [[1600, 'full', 'right', 0], [1366, 'mid', 'right', 0], [1280, 'small', 'right', 0], [1200, 'small', 'right', 0], [1440, 'full', 'left', 120]]) {
         await page.setViewportSize({ width: w, height: 900 });
         await tornLayout(page, shift);
         const c = await card();
@@ -372,6 +374,7 @@ const panelRect = (page) => page.evaluate(() => { const h = document.getElementB
         await page.waitForTimeout(1300);
         const pr = await panelRect(page);
         ok(!overlaps(c, pr), 'eye profile ' + w + ' px: the training panel never covers the card (panel ' + JSON.stringify(pr) + ')');
+        ok(panelClear(pr, torn), 'eye profile ' + w + ' px: the training panel is never over Torn’s page (panel ' + JSON.stringify(pr) + ', Torn ' + Math.round(torn.left) + '–' + Math.round(torn.right) + ')');
         if (mode === 'full' && side === 'right') {
             ok(/^Stomp/.test(c.text) && /FFScouter 3 d/.test(c.text) && /Watch/.test(c.text), 'eye profile: full card with the band, the source and Watch (' + c.text + ')');
             const i = [c.text.indexOf('Respect'), c.text.indexOf('HP kept'), c.text.indexOf('Win')];
@@ -481,6 +484,47 @@ const panelRect = (page) => page.evaluate(() => { const h = document.getElementB
     const torn2 = await tornRect(page);
     ok(narrow.Rival && narrow.Rival.left >= torn2.right && /%/.test(narrow.Rival.text), 'war 1280 px: the tag stays in the free space (' + JSON.stringify(narrow.Rival) + ')');
     await page.screenshot({ path: resolve(shots, 'torn-eye-war-1280.png'), fullPage: true });
+    // Round 7 review (6): the panel and Torn Eye's list tags never share a margin. Torn's page off centre (112 px on the
+    // right, 352 on the left, where the panel is): the tags take the right; the panel keeps out of their column.
+    const ourTags = () => page.evaluate(() => [...document.querySelectorAll('#pi-eye-layer .pi-rowtag, #pi-eye-layer .pi-sum')].filter((t) => t.style.display !== 'none').map((t) => { const r = t.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }; }));
+    for (const [w, shift] of [[1600, 0], [1280, 0], [1440, 120]]) {
+        await page.setViewportSize({ width: w, height: 900 });
+        await tornLayout(page, shift);
+        await page.waitForTimeout(2300);
+        const pr = await panelRect(page);
+        const ts = await ourTags();
+        const tw = await tornRect(page);
+        const hit = ts.filter((t) => pr && t.left < pr.right && pr.left < t.right);
+        ok(ts.length > 0 && hit.length === 0 && panelClear(pr, tw) && ts.every((t) => t.left >= tw.right - 1 || t.right <= tw.left + 1), 'war ' + w + ' px' + (shift ? ' (Torn’s page off centre)' : '') + ': the panel never shares a column with Torn Eye’s tags, neither is over Torn’s page (panel ' + JSON.stringify(pr) + ', tags ' + JSON.stringify(ts.slice(0, 2)) + ', Torn ' + Math.round(tw.left) + '–' + Math.round(tw.right) + ')');
+    }
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await tornLayout(page, 0);
+    await page.waitForTimeout(1300);
+    // Round 7 review (5): the hospital clock ticking in Torn's status cell no longer rebuilds every tag each second.
+    await page.evaluate(() => {
+        const t = document.querySelector('#pi-eye-layer [data-pi-part="war"] .pi-rowtag[data-pi-player="424242"]');
+        if (t) t.__probe = 1;
+    });
+    for (const clock of ['01:16:58', '01:16:57', '01:16:56']) {
+        await page.evaluate((c) => {
+            const li = [...document.querySelectorAll('#faction_war_list_id li.enemy')].find((x) => /Brix/.test(x.textContent));
+            li.querySelector('.status').textContent = 'Hospital ' + c;
+        }, clock);
+        await page.waitForTimeout(1050);
+    }
+    const kept = await page.evaluate(() => { const t = document.querySelector('#pi-eye-layer [data-pi-part="war"] .pi-rowtag[data-pi-player="424242"]'); return Boolean(t && t.__probe); });
+    ok(kept, 'war: a ticking hospital clock does not rebuild the tags (focus and hover stay)');
+    // Out early: Brix leaves hospital with over an hour left. It stays "out early" (it lasted a second before).
+    await page.evaluate(() => {
+        const li = [...document.querySelectorAll('#faction_war_list_id li.enemy')].find((x) => /Brix/.test(x.textContent));
+        li.querySelector('.status').textContent = 'Okay';
+    });
+    await page.waitForTimeout(1500);
+    const e1 = (await tags()).Brix;
+    await page.waitForTimeout(3200);
+    const e2 = (await tags()).Brix;
+    const sum2 = await page.evaluate(() => { const s = document.querySelector('#pi-eye-layer [data-pi-part="war"] .pi-sum'); return s ? s.textContent.replace(/\s+/g, ' ').trim() : ''; });
+    ok(e1 && /out early/.test(e1.text) && e2 && /out early/.test(e2.text) && !e2.dim && /\(1 out early\)/.test(sum2), 'war: "out early" stays until the hospital end it left (' + JSON.stringify([e1 && e1.text, e2 && e2.text, sum2]) + ')');
     // Round 6 (owner): no Torn Eye reads for faction or war lists on Torn's pages (the Torn Eye tab does war mode).
     const calls = await page.evaluate(() => window.__calls.filter((c) => /faction|\/profile|get-stats/.test(c)).length);
     ok(calls === 0, 'war: nothing asked on a faction page (' + calls + ')');
@@ -505,10 +549,17 @@ const panelRect = (page) => page.evaluate(() => { const h = document.getElementB
     await page.waitForTimeout(400);
     const small = await card();
     ok(small && small.mode === 'small' && small.left >= (await tornRect(page)).right, 'attack 1280 px: the smallest card, still beside Torn’s page (' + JSON.stringify(small) + ')');
-    // Docking the panel under #pi-eyecard is the panel's side (src/ui/overlay.js): reported here, not failed.
-    const panel2 = await panelRect(page);
-    console.log('NOTE attack 1280 px: the training panel ' + (overlaps(small, panel2) ? 'COVERS' : 'does not cover') + ' the fight card (panel ' + JSON.stringify(panel2) + ')');
-    await page.screenshot({ path: resolve(shots, 'torn-eye-attack-1280.png') });
+    // Round 7 review: the dock forced 160 px under a ~100 px card and reached over the fight (52 px at 1200 px).
+    for (const w of [1280, 1200]) {
+        await page.setViewportSize({ width: w, height: 900 });
+        await page.waitForTimeout(1400);
+        const c = await card();
+        const pr = await panelRect(page);
+        const t = await tornRect(page);
+        ok(c && c.left >= t.right && !overlaps(c, pr), 'attack ' + w + ' px: the card beside Torn’s page, the training panel never over it (card ' + JSON.stringify(c && { l: Math.round(c.left), r: Math.round(c.right), b: Math.round(c.bottom) }) + ', panel ' + JSON.stringify(pr) + ')');
+        ok(panelClear(pr, t), 'attack ' + w + ' px: the training panel is never over Torn’s page (panel ' + JSON.stringify(pr) + ', Torn ' + Math.round(t.left) + '–' + Math.round(t.right) + ')');
+        await page.screenshot({ path: resolve(shots, 'torn-eye-attack-' + w + '.png') });
+    }
     await page.setViewportSize({ width: 1600, height: 900 });
     await page.waitForTimeout(300);
     await page.evaluate(() => fetch('fixtures/attackData.json?sid=attackData').then((r) => r.json()));
@@ -541,15 +592,15 @@ const panelRect = (page) => page.evaluate(() => { const h = document.getElementB
         return { paused: sh.querySelector('.wrap').classList.contains('paused'), head: sh.querySelector('.head').textContent, body: sh.querySelector('.body').textContent, marks: document.querySelectorAll('li.pi-on, .pi-strip, .pi-panel').length };
     });
     ok(state.paused && /Paused · Torn Trading is on/.test(state.head), 'turns: the panel shows the warning sign (' + state.head + ')');
-    ok(/Still seen in 1 tab: Gym\./.test(state.body) && /Reload or close it\. Pumping Iron starts again 60 s after the last one\./.test(state.body) && /Last seen\d+ s ago/.test(state.body), 'turns: the amber card says where Torn Trading is still seen, and when (' + state.body + ')');
+    ok(/Still seen in 1 tab: Gym\./.test(state.body) && /Reload or close it\. Pumping Iron starts again 2 min after the last one\./.test(state.body) && /Last seen\d+ s ago/.test(state.body), 'turns: the amber card says where Torn Trading is still seen, and when (' + state.body + ')');
     ok(state.marks === 0, 'turns: nothing of ours left on Torn’s page (' + state.marks + ')');
     await page.screenshot({ path: resolve(shots, 'torn-paused.png') });
     await page.waitForTimeout(6000);
     const n2 = await page.evaluate(() => window.__calls.length);
     ok(n2 === n1, 'turns: no request while paused (' + (n2 - n1) + ')');
     // The open bug, its cause: Torn Trading turned off in Tampermonkey stays in a tab opened before (its host too),
-    // so that tab marks it seen again: last seen over a minute ago, and paused again within one look (5 s).
-    await page.evaluate(() => window.GM_setValue('pumpingIron.v1.tradingSeenAt', JSON.stringify(Date.now() - 61000)));
+    // so that tab marks it seen again: last seen over two minutes ago, and paused again within one look (5 s).
+    await page.evaluate(() => window.GM_setValue('pumpingIron.v1.tradingSeenAt', JSON.stringify(Date.now() - 121000)));
     await page.waitForTimeout(5500);
     const again = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.querySelector('.wrap').classList.contains('paused'));
     ok(again, 'turns (cause): a tab that still has Torn Trading keeps the pause on; the card names it instead of promising a minute');
@@ -558,8 +609,8 @@ const panelRect = (page) => page.evaluate(() => { const h = document.getElementB
     await page.waitForTimeout(6000);
     const gone = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.querySelector('.body').textContent);
     ok(/Torn Trading isn’t seen any more\. Starting again in \d:\d\d\./.test(gone), 'turns: once it is gone the card counts down (' + gone + ')');
-    // Last seen over a minute ago.
-    await page.evaluate(() => window.GM_setValue('pumpingIron.v1.tradingSeenAt', JSON.stringify(Date.now() - 61000)));
+    // Last seen over two minutes ago (the grace outlasts a hidden tab's once-a-minute timers).
+    await page.evaluate(() => window.GM_setValue('pumpingIron.v1.tradingSeenAt', JSON.stringify(Date.now() - 121000)));
     await page.waitForTimeout(6000);
     const back = await page.evaluate(() => ({ paused: document.getElementById('pi-overlay').shadowRoot.querySelector('.wrap').classList.contains('paused'), marks: document.querySelectorAll('li.pi-on').length }));
     ok(!back.paused && back.marks === 1, 'turns: back by itself, marks drawn again (' + JSON.stringify(back) + ')');
@@ -570,12 +621,16 @@ const panelRect = (page) => page.evaluate(() => { const h = document.getElementB
 /* The attack page: the panel folds to one line directly under Torn Eye's fight card (#pi-eyecard), never on top of it. */
 {
     const { page, errors } = await open('page=attack&user2ID=424242&fixture=attack&ffs=1&who=owner', { wait: 5000 });
-    // Torn Eye's card (its builder's #pi-eyecard; a stand-in where this build has none).
+    // Torn's page measured (976 px centred) and a window with room beside it: the dock stays in the card's margin.
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await tornLayout(page);
+    await page.waitForTimeout(1300);
+    // Torn Eye's card (its builder's #pi-eyecard; a stand-in in the free space where this build has none).
     await page.evaluate(() => {
         if (document.getElementById('pi-eyecard')) return;
         const d = document.createElement('div');
         d.id = 'pi-eyecard';
-        d.style.cssText = 'position:fixed;right:20px;top:90px;width:300px;height:260px;background:#101214;border:1px solid #3a4046;border-radius:10px;z-index:2147482000';
+        d.style.cssText = 'position:fixed;right:12px;top:90px;width:288px;height:260px;background:#101214;border:1px solid #3a4046;border-radius:10px;z-index:2147482000';
         document.body.appendChild(d);
     });
     await page.waitForTimeout(1600);
@@ -589,8 +644,21 @@ const panelRect = (page) => page.evaluate(() => { const h = document.getElementB
     ok(dock.folded && dock.wrap.t >= dock.card.b && dock.wrap.t - dock.card.b <= 10 && !overlaps && dock.wrap.l === dock.card.l && dock.wrap.w === dock.card.w, 'attack: the panel folds to one line under the fight card, never over it (' + JSON.stringify(dock) + ')');
     const saved = await page.evaluate(() => _store['pumpingIron.v1.overlayCollapsed'] || null);
     ok(saved !== 'true', 'attack: folding there is not saved as your choice (' + saved + ')');
-    // No fight card: the usual panel.
-    await page.evaluate(() => document.getElementById('pi-eyecard').remove());
+    // A card over Torn's page itself (a stand-in): the panel never docks there; it takes its own place.
+    await page.evaluate(() => {
+        const c = document.getElementById('pi-eyecard');
+        c.style.cssText = 'position:fixed;left:700px;top:90px;width:300px;height:260px;background:#101214;border:1px solid #3a4046;border-radius:10px;z-index:2147482000';
+        c.classList.remove('pi-fixed');
+    });
+    await page.waitForTimeout(1600);
+    const over = await panelRect(page);
+    ok(over && !over.docked && panelClear(over, await tornRect(page)), 'attack: a card over Torn’s page is never docked under (panel ' + JSON.stringify(over) + ')');
+    // No fight card (and no room for one: Torn's page as wide as the window): the usual panel.
+    await page.evaluate(() => {
+        document.getElementById('torn-layout').remove();
+        dispatchEvent(new Event('resize'));
+        document.getElementById('pi-eyecard').remove();
+    });
     await page.waitForTimeout(1600);
     const free = await page.evaluate(() => { const w = document.getElementById('pi-overlay').shadowRoot.querySelector('.wrap'); const r = w.getBoundingClientRect(); const c = (document.querySelector('.content-wrapper') || document.body).getBoundingClientRect(); return !w.classList.contains('docked') && (r.right <= c.left + 1 || r.left >= c.right - 1 || (w.getAttribute('data-fit') === 'mini' && r.top <= 5)); });
     ok(free, 'attack: without the card the panel is back to normal');

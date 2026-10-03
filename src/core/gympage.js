@@ -36,6 +36,11 @@ export function partsText(parts) {
     return (parts || []).map(partText).join(' → ');
 }
 
+/** All the energy there is now is kept for the plan (a jump's stack, a held boost Xanax, a console jump's bar). */
+export function keptAll(m) {
+    return Boolean((m && m.energyKept && m.energyKept.all) || (m && m.strip && m.strip.refill && m.strip.refill.stacking));
+}
+
 /**
  * The train step the gym page walks through: the first step with trains
  * that is due now; else the energy you have now, split the same way.
@@ -44,10 +49,14 @@ export function partsText(parts) {
 export function currentTrainStep(m, now = m.now) {
     const due = (m.steps || []).find((s) => s.parts && s.parts.length && s.at <= now + DUE_SLACK_MS);
     if (due) return due;
-    // Xanax stacked for a jump (energy above the maximum on a jump plan): that energy waits for the jump, so the page
-    // never says to train it now (round 7: between stacks it said "Train DEX × 100" with the jump's energy).
+    // Energy the plan keeps on purpose (model.js keptEnergyOf): Xanax stacked for a jump, the daily choco boost's held
+    // Xanax, the console jump's bar under its stack, a war's reserve. It waits, so the page never says to train it now
+    // (round 7: between stacks it said "Train DEX × 100" with the jump's energy; the review: the same after "Xanax #2 ·
+    // keep the energy for the boost" and before a console jump's stack). Only what is above it is trained.
     if (m.strip && m.strip.refill && m.strip.refill.stacking) return null;
-    const energy = m.strip.energy.current;
+    const kept = m.energyKept || null;
+    if (kept && kept.all) return null;
+    const energy = Math.max(0, m.strip.energy.current - (kept ? kept.amount : 0));
     const r = splitSession({
         stats: m.pc.stats,
         shares: m.shares,
@@ -96,8 +105,9 @@ export function startSession(step, reading, m, now) {
         happy0: reading.happy,
         last: { stats: { ...reading.stats }, energy: reading.energy },
         spent,
-        // Energy the step leaves on purpose (kept for a war, or a stop that keeps a specialist gym): not a sign of a new session.
-        spare: Math.max(0, Number(m.keepEnergy) || 0),
+        // Energy the step leaves on purpose (kept for a war, the console jump's bar, or a stop that keeps a specialist
+        // gym): not a sign of a new session.
+        spare: Math.max(0, Number(m.keepEnergy) || 0, m.energyKept && !m.energyKept.all ? Number(m.energyKept.amount) || 0 : 0),
     };
 }
 
@@ -183,6 +193,8 @@ export function needsNewSession(session, reading, m, now) {
  * @returns {object|null}
  */
 export function nextSession(prev, m, reading, now, ctx = {}) {
+    // A walk-through of "the energy you have now" ends once the plan keeps that energy (a Xanax stacked or held).
+    if (prev && prev.stepId === 'now' && keptAll(m)) prev = null;
     if (!needsNewSession(prev, reading, m, now)) return advanceSession(prev, reading, ctx);
     const step = currentTrainStep(m, now);
     return step ? startSession(step, reading, m, now) : null;
@@ -206,6 +218,41 @@ function eatWordsOf(text) {
 }
 
 /**
+ * How far above its maximum happy must be to count the boosters as eaten: the plan's share of the boost (plan.js
+ * MID_BOOST_*: a stack of Xanax adds a few hundred), but never more than half the boost itself. Round 7 review: a small
+ * candy boost (Candy Kisses × 4 = +200, with the Xanax +275) never reached the 300 floor, so the page stayed on a red
+ * "EAT FIRST" with Fill held for the whole boost. Half of it is still more than its Xanax (+75) for any boost over 150.
+ */
+export function eatenOver(boostHappy) {
+    const b = Math.max(0, Number(boostHappy) || 0);
+    const over = Math.max(MID_BOOST_MIN, MID_BOOST_SHARE * b);
+    return b > 0 ? Math.min(over, b / 2) : over;
+}
+
+/** Happy the session's trains took so far (0.5 a train energy, by your perks): added back when the boost is judged. */
+export function sessionHappyTrained(session, happyLossMult = 1) {
+    if (!session || !session.spent) return 0;
+    return HAPPY_LOSS_PER_ENERGY * (Number(happyLossMult) || 1) * spentTotal(session);
+}
+
+/** The same, only for a session of this boost (started within its tick window, a few hours old at most). */
+export function boostHappyTrained(session, step, happyLossMult = 1, now = Date.now()) {
+    if (!session || !step || !Number.isFinite(session.at) || !(now - session.at < SESSION_MAX_MS)) return 0;
+    const from = (Number.isFinite(step.tick) ? step.tick : step.at) - 15 * 60e3;
+    return session.at >= from ? sessionHappyTrained(session, happyLossMult) : 0;
+}
+
+/**
+ * The model's cooldowns as they are now: the model measured them at m.now (up to a read ago), so the time since is
+ * taken off (round 7 review: a cooldown that had just ended still counted as running until the next read).
+ */
+export function agedCooldowns(m, now = Date.now()) {
+    const age = m && Number.isFinite(m.now) ? Math.max(0, now - m.now) : 0;
+    const left = (x) => (x && Number.isFinite(x.left) ? Math.max(0, x.left - age) : 0);
+    return { boosterLeft: left(m && m.strip && m.strip.booster), drugLeft: left(m && m.strip && m.strip.drug) };
+}
+
+/**
  * A boost or jump step and how far it is, from the bars (round 7). Not eaten: happy not above its maximum (by the
  * share of the boost the plan uses to tell a boost under way: plan.js MID_BOOST_*; a stack of Xanax adds a few hundred).
  * Eaten: happy above it and the booster cooldown running. The drug (Ecstasy or Xanax): its cooldown running once the
@@ -214,7 +261,7 @@ function eatWordsOf(text) {
  * @param {object} reads - {happy:{current,max}|null, boosterLeft:ms, drugLeft:ms, trained:boolean}
  * @returns {{jump, eaten, drugIn, ready, eat, drug, deadline, gain, list:{id, text, done, next}[]}}
  */
-export function boostProgress(step, { happy = null, boosterLeft = 0, drugLeft = 0, trained = false } = {}) {
+export function boostProgress(step, { happy = null, boosterLeft = 0, drugLeft = 0, trained = false, happyTrained = 0 } = {}) {
     const acts = Array.isArray(step.actions) ? step.actions : [];
     const act = (id) => acts.find((a) => a.id === id) || null;
     const eatA = act('eat');
@@ -222,9 +269,11 @@ export function boostProgress(step, { happy = null, boosterLeft = 0, drugLeft = 
     const drugA = act('drug');
     const items = step.items || [];
     const boostHappy = items.reduce((a, it) => a + (ITEMS[it.id] && ITEMS[it.id].kind === 'booster' ? (ITEMS[it.id].happy || 0) * (it.qty || 0) : 0), 0);
-    const over = Math.max(MID_BOOST_MIN, MID_BOOST_SHARE * boostHappy);
+    const over = eatenOver(boostHappy);
     const live = happy && Number.isFinite(happy.current) && Number.isFinite(happy.max);
-    const eaten = live ? happy.current >= happy.max + over && (boosterLeft > 0 || Boolean(step.mid)) : Boolean(step.mid || (eatA && eatA.done));
+    // The happy the step's trains took so far is added back: training it all must not read as "not eaten" again.
+    const h = live ? happy.current + Math.max(0, Number(happyTrained) || 0) : 0;
+    const eaten = live ? h >= happy.max + over && (boosterLeft > 0 || Boolean(step.mid)) : Boolean(step.mid || (eatA && eatA.done));
     const drugToTake = items.some((it) => it.id === XANAX || it.id === ECSTASY);
     const drugIn = !drugA ? eaten : eaten && (Boolean(drugA.done) || (drugLeft > 0 && !(step.mid && drugToTake)));
     const drug = drugA ? drugA.text.replace(/^Take the /, '') : null;
@@ -245,18 +294,68 @@ export function boostProgress(step, { happy = null, boosterLeft = 0, drugLeft = 
     return { jump: step.kind === 'jump', eaten, drugIn, ready: eaten && drugIn, eat: eatA ? eatWordsOf(eatA.text) : null, drug, deadline: step.deadline || null, gain: step.gain || 0, list };
 }
 
-/** An overdose seen on the bars: happy and energy at 0 right after a drug (its cooldown running). */
-export function isOverdose({ happy = null, energy = null, drugLeft = 0 } = {}) {
-    return Boolean(happy && energy) && happy.current === 0 && energy.current === 0 && drugLeft > 0;
+/*
+ * The overdose (owner: "happiness goes to 0"). Torn's overdose sets energy, happy (and nerve) to 0; a Xanax overdose
+ * also sets about a day of drug cooldown (docs/research-addiction-rehab.md). Round 7 review: happy 0 + energy 0 with a
+ * drug cooldown running is also a player with a small happy maximum who took a Xanax and trained it all (training
+ * costs 0.4–0.6 happy an energy), and the flag was kept for hours. So the bars at 0 count only with one more sign:
+ *   - a drug cooldown longer than any Xanax's (6–8 h): the overdose's ~24 h; or
+ *   - a sudden fall: minutes ago the bars held more happy than training all that energy could take.
+ * Once seen it is checked against every fresh reading: it ends with the cooldown, and as soon as the bars hold more
+ * than regeneration alone gives back since (a refill, a can, a drug: the plan goes on).
+ */
+
+/** A drug cooldown longer than this is no Xanax's (360–480 min) or Ecstasy's: an overdose's (~24 h). */
+export const OD_CD_MS = 9 * 3600e3;
+/** The reading before the fall counts for this long. */
+export const OD_FALL_MS = 15 * 60e3;
+/** The most happy a train energy can cost (Torn: 0.4–0.6), and a little slack. */
+export const OD_TRAIN_LOSS = 0.6;
+export const OD_SLACK = 25;
+/** Regeneration back from 0, generously (5 a tick, a tick every 5 minutes), plus a tick of slack. */
+const OD_REGEN_PER_MS = 5 / (5 * 60e3);
+
+const barNum = (b) => (b && Number.isFinite(b.current) ? b.current : null);
+
+/** The last reading with something in the bars ({at, happy, energy}), for the next one to compare with. */
+export function nextBarsSeen(prevSeen, { happy = null, energy = null } = {}, now) {
+    const h = barNum(happy);
+    const e = barNum(energy);
+    if (h === null || e === null || (h === 0 && e === 0)) return prevSeen || null;
+    return { at: now, happy: h, energy: e };
+}
+
+/**
+ * An overdose seen on the bars: happy and energy at 0, a drug cooldown running, and either the overdose's long
+ * cooldown or a fall training can't explain (`before`: nextBarsSeen's last reading).
+ */
+export function isOverdose({ happy = null, energy = null, drugLeft = 0 } = {}, { before = null, now = 0 } = {}) {
+    if (barNum(happy) !== 0 || barNum(energy) !== 0 || !(drugLeft > 0)) return false;
+    if (drugLeft > OD_CD_MS) return true;
+    if (!before || !Number.isFinite(before.at) || now < before.at || now - before.at > OD_FALL_MS) return false;
+    return before.happy > 0 && before.happy > OD_TRAIN_LOSS * Math.max(0, before.energy) + OD_SLACK;
+}
+
+/** The bars still look like the overdose: no more than regeneration gives back since it was seen. */
+function stillOverdosed(od, { happy = null, energy = null, drugLeft = null } = {}, now) {
+    if (drugLeft !== null && Number.isFinite(drugLeft) && !(drugLeft > 0)) return false;
+    const back = OD_REGEN_PER_MS * Math.max(0, now - od.at) + 5;
+    const h = barNum(happy);
+    const e = barNum(energy);
+    return !((h !== null && h > back) || (e !== null && e > back));
 }
 
 /**
  * The overdose kept across reads (the bars climb again a tick later): {at, until: the drug cooldown's end} once seen,
- * until that cooldown is over; null otherwise.
+ * while fresh readings still look like it (stillOverdosed) and until that cooldown is over; null otherwise.
+ * @param {object|null} prev - the stored overdose
+ * @param {object} reads - {happy, energy, drugLeft}
+ * @param {number} now
+ * @param {object|null} [before] - nextBarsSeen's last reading with something in the bars
  */
-export function nextOverdose(prev, reads, now) {
-    if (prev && Number.isFinite(prev.until) && now < prev.until && now >= (prev.at || 0)) return prev;
-    return isOverdose(reads) ? { at: now, until: now + reads.drugLeft } : null;
+export function nextOverdose(prev, reads, now, before = null) {
+    if (prev && Number.isFinite(prev.until) && now < prev.until && now >= (prev.at || 0)) return stillOverdosed(prev, reads || {}, now) ? prev : null;
+    return isOverdose(reads, { before, now }) ? { at: now, until: now + reads.drugLeft } : null;
 }
 
 /**
@@ -268,15 +367,33 @@ export function nextOverdose(prev, reads, now) {
  *   ready     the boosters and the drug are in: steady green, train it all
  *   right     the right gym, train now (steady green)
  *   done      the session is done; idle: nothing to train now
+ *   kept      nothing to train now because the plan keeps the energy (a jump's stack, the boost's held Xanax, the
+ *             console jump's bar, a war's reserve): the strip says how much and why; no train mark
  */
-export function gymPageState({ step = null, cur = null, here = false, done = false, reads = {}, overdose = null, stacking = null, now = 0 } = {}) {
+export function gymPageState({ step = null, cur = null, here = false, done = false, reads = {}, overdose = null, stacking = null, kept = null, now = 0 } = {}) {
     if (stacking) return { kind: 'stacking', since: Number(stacking.since) || null, boost: null };
     if (overdose && now < overdose.until) return { kind: 'overdose', at: overdose.at, cost: REHAB_COST, boost: null };
     const boost = isBoostStep(step) ? boostProgress(step, { ...reads, trained: done }) : null;
+    if (!cur && !done && kept && kept.amount > 0) return { kind: 'kept', kept, boost };
     if (!cur) return { kind: done ? 'done' : 'idle', boost };
     if (!here) return { kind: 'wrong', boost };
     if (boost && !boost.ready) return { kind: 'eat', boost };
     return { kind: boost ? 'ready' : 'right', boost };
+}
+
+const KEPT_FOR = { jump: 'the jump', boost: 'the boost', console: 'the console jump', war: 'the war' };
+
+/** "Keeping 650 energy for the jump" */
+export function keptHead(k) {
+    return 'Keeping ' + fmtInt(k.amount) + ' energy for ' + (KEPT_FOR[k.why] || 'the plan');
+}
+
+/** Why it is kept, in a few words. */
+export function keptWhy(k) {
+    if (k.why === 'jump') return 'Xanax ' + k.stacked + ' of ' + k.stackTo + ' stacked · don’t train it now';
+    if (k.why === 'boost') return 'the Xanax waits for the boost after the tick · don’t train it now';
+    if (k.why === 'console') return 'it stays in the bar under the ' + k.stackTo + ' Xanax · don’t train it';
+    return 'kept for ' + (k.war || 'the enemy faction') + ' · Settings › Keep for war days';
 }
 
 /** "EDVD × 5, then the Ecstasy, then train it all" */
@@ -307,6 +424,8 @@ export function planGymPage(m, page = {}, session = null, now = m.now) {
     const out = { strip: [], parts: [], current: null, done: false, nextGym: null, switchHint: null, perStat, pill: null, gym, hereGym: null, state: { kind: 'idle', boost: null }, line: null };
     if (!gym) return out;
     const due = currentTrainStep(m, now);
+    // "The energy you have now" while the plan keeps that energy: no walk-through (nextSession does the same).
+    if (session && session.stepId === 'now' && keptAll(m)) session = null;
     if (!session) session = due ? startSession(due, reading, m, now) : null;
     const prog = session ? sessionProgress(session) : { parts: [], current: null, done: false };
     out.parts = prog.parts;
@@ -314,8 +433,10 @@ export function planGymPage(m, page = {}, session = null, now = m.now) {
     out.done = Boolean(session) && prog.done;
     const cur = prog.current;
     const here = Boolean(cur) && cur.gymId === selectedId;
-    const reads = page.reads || { happy: m.strip.happy ? { current: m.strip.happy.current, max: m.strip.happy.max } : null, energy: m.strip.energy, boosterLeft: m.strip.booster ? m.strip.booster.left : 0, drugLeft: m.strip.drug ? m.strip.drug.left : 0 };
-    const state = gymPageState({ step: due, cur, here, done: out.done, reads, overdose: page.overdose || null, stacking: m.stacking || null, now });
+    const reads0 = page.reads || { happy: m.strip.happy ? { current: m.strip.happy.current, max: m.strip.happy.max } : null, energy: m.strip.energy, ...agedCooldowns(m, now) };
+    // The boost is judged with the happy this step's trains took added back (they don't un-eat it).
+    const reads = isBoostStep(due) ? { ...reads0, happyTrained: boostHappyTrained(session, due, m.pc.perks && m.pc.perks.happyLossMult, now) } : reads0;
+    const state = gymPageState({ step: due, cur, here, done: out.done, reads, overdose: page.overdose || null, stacking: m.stacking || null, kept: m.energyKept || null, now });
     out.state = state;
     const off = state.kind === 'stacking' || state.kind === 'overdose';
 
@@ -427,6 +548,11 @@ export function planGymPage(m, page = {}, session = null, now = m.now) {
     } else if (state.kind === 'done') {
         out.line = { tone: 'plain', head: 'Session done', text: m.build.name, src: nextGymWords };
         out.pill = 'Session done';
+    } else if (state.kind === 'kept') {
+        // No pill: the panel keeps the plan's next step and its countdown ("Xanax #3 of 4 · don't train").
+        const k = state.kept;
+        const next = (m.steps || []).find((s) => s.at > now - DUE_SLACK_MS) || null;
+        out.line = { tone: 'plain', head: keptHead(k), text: keptWhy(k), src: next ? 'next: ' + tornClock(next.at) + ' ' + String(next.label || '').split(' · ')[0] : null };
     } else {
         out.pill = energy < gym.energy ? 'Energy ' + fmtInt(energy) + ' · wait for the next step' : null;
         out.line = { tone: 'plain', head: out.pill || 'Nothing to train now', text: m.build.name, src: nextGymWords };

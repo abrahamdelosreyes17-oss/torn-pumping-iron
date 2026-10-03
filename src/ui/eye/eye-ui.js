@@ -182,21 +182,36 @@ export function eyeStatusSeconds(text) {
 export const EYE_FREE = { full: 300, mid: 160, left: 130, least: 80 };
 export const EYE_CARD_W = 300;
 
-function eyeSide(viewW, page) {
+/** The least free width a list's tags can use (the 'tiny' tag, 58 px, and its 6 px a side). */
+export const EYE_ROW_LEAST = 70;
+
+/**
+ * The side Torn Eye uses: the right, unless it is narrow and the left is wider. `avoid` (round 7 review): the training
+ * panel's rect; when it sits in that side's free space and the other side has at least `least` px, the other side, so
+ * the panel and Torn Eye's tags never share a margin (both stay off Torn's page).
+ */
+function eyeSide(viewW, page, avoid = null, least = 0) {
     const right = Math.max(0, Math.floor(viewW - page.right));
     const left = Math.max(0, Math.floor(page.left));
     const useLeft = right < EYE_FREE.left && left > right;
-    return { side: useLeft ? 'left' : 'right', free: useLeft ? left : right };
+    let side = useLeft ? 'left' : 'right';
+    if (avoid && avoid.width > 0 && avoid.height > 0) {
+        const takes = (s) => (s === 'right' ? avoid.right > page.right && avoid.left < viewW : avoid.left < page.left && avoid.right > 0);
+        const other = side === 'right' ? 'left' : 'right';
+        if (takes(side) && !takes(other) && (other === 'right' ? right : left) >= least) side = other;
+    }
+    return { side, free: side === 'left' ? left : right };
 }
 
 /**
  * Where a card goes in the free space beside Torn's page (never on it).
  * @param {number} viewW - the window's width without its scrollbar
  * @param {{left: number, right: number}} page - Torn's page (sidebar + content)
+ * @param {DOMRect|null} [avoid] - the training panel, whose margin the card leaves when the other one has room
  * @returns {{mode: 'full'|'mid'|'small'|'none', side: 'left'|'right', free: number, x: number, width: number}}
  */
-export function eyeCardSpot(viewW, page) {
-    const { side, free } = eyeSide(viewW, page);
+export function eyeCardSpot(viewW, page, avoid = null) {
+    const { side, free } = eyeSide(viewW, page, avoid, EYE_FREE.least);
     if (free < EYE_FREE.least) return { mode: 'none', side, free, x: 0, width: 0 };
     const mode = free >= EYE_FREE.full ? 'full' : free >= EYE_FREE.mid ? 'mid' : 'small';
     const pad = mode === 'full' ? 12 : mode === 'mid' ? 8 : 6;
@@ -209,8 +224,8 @@ export function eyeCardSpot(viewW, page) {
  * Where list tags go, level with each row: 'full' (band word and the three numbers), 'short' (the three numbers;
  * the edge carries the band), 'tiny' (HP kept), 'none' (no room: only the row edges).
  */
-export function eyeRowSpot(viewW, page) {
-    const { side, free } = eyeSide(viewW, page);
+export function eyeRowSpot(viewW, page, avoid = null) {
+    const { side, free } = eyeSide(viewW, page, avoid, EYE_ROW_LEAST);
     const pad = free >= EYE_FREE.mid ? 10 : 6;
     const w = Math.min(250, free - 2 * pad);
     const mode = w >= 190 ? 'full' : w >= 118 ? 'short' : w >= 58 ? 'tiny' : 'none';
@@ -243,17 +258,20 @@ function eyeFigSpans(v, mode) {
 /**
  * A list row's tag. `state` is the row's: ready rows show the numbers; a row in hospital (dimmed) when it is out.
  * @param {object} v - eyeView()
- * @param {object} o - {mode, state: 'okay'|'early'|'hospital'|'traveling'|'abroad'|'jail', outInS, landText, glow}
+ * @param {object} o - {mode, state: 'okay'|'early'|'hospital'|'traveling'|'abroad'|'jail', outInS, outAt, landText, glow}
+ *   outAt: when they are out (epoch seconds): the "out in" clock is then moved on by eyeTickOut, not by a redraw
  */
-export function eyeRowTag(v, { mode = 'full', state = 'okay', outInS = null, landText = null, glow = false } = {}) {
+export function eyeRowTag(v, { mode = 'full', state = 'okay', outInS = null, outAt = null, landText = null, glow = false } = {}) {
     const ready = state === 'okay' || state === 'early';
     const kids = [h('span', { class: 'pi-edge' })];
     if (mode === 'full') kids.push(h('span', { class: 'pi-band', text: eyeBandWord(v.band) }));
     if (ready) {
         kids.push(...eyeFigSpans(v, mode));
         if (state === 'early' && mode !== 'tiny') kids.push(h('span', { class: 'pi-src', text: 'out early' }));
+    } else if (state === 'hospital' && Number.isFinite(outInS)) {
+        kids.push(h('span', { class: 'pi-fig' }, ['out in ', h('span', { 'data-pi-out-at': Number.isFinite(outAt) ? String(outAt) : null, text: eyeHmm(outInS) })]));
     } else {
-        const what = state === 'hospital' ? (Number.isFinite(outInS) ? 'out in ' + eyeHmm(outInS) : 'in hospital') : state === 'traveling' ? landText || 'traveling' : state === 'abroad' ? 'abroad' : state === 'jail' ? 'in jail' : state;
+        const what = state === 'hospital' ? 'in hospital' : state === 'traveling' ? landText || 'traveling' : state === 'abroad' ? 'abroad' : state === 'jail' ? 'in jail' : state;
         kids.push(h('span', { class: 'pi-fig', text: what }));
     }
     const cls = 'pi-mark pi-eye pi-tag pi-rowtag' + (mode !== 'full' ? ' pi-short' : '') + (ready ? '' : ' pi-dimmed') + (glow && ready ? ' pi-glow' : '');
@@ -274,7 +292,8 @@ export function eyeSummary(rows, nowS) {
     const ready = rows.filter((r) => r.state === 'okay' || r.state === 'early').length;
     const hosp = rows.filter((r) => r.state === 'hospital');
     const outs = hosp.filter((r) => r.until > nowS).map((r) => r.until - nowS);
-    return { ready, early: rows.filter((r) => r.state === 'early').length, hospital: hosp.length, nextOutS: outs.length ? Math.min(...outs) : null, traveling: rows.filter((r) => r.state === 'traveling').length };
+    const nextOutS = outs.length ? Math.min(...outs) : null;
+    return { ready, early: rows.filter((r) => r.state === 'early').length, hospital: hosp.length, nextOutS, nextOutAt: nextOutS === null ? null : nowS + nextOutS, traveling: rows.filter((r) => r.state === 'traveling').length };
 }
 
 /** "2 ready · 1 out in 1:17 · 0 traveling". */
@@ -292,10 +311,77 @@ export function eyeSummaryTag(s, { note = '', fromFfs = false, short = false } =
     eyeSummaryText(s).split(' · ').forEach((p, i) => {
         if (i) words.push(' · ');
         const m = p.match(/^(\d+)(.*)$/);
-        words.push(m ? h('span', {}, [h('b', { text: m[1] }), m[2]]) : h('span', { text: p }));
+        // "1 out in 1:17": its clock moves on by eyeTickOut (no redraw every second).
+        const out = m && Number.isFinite(s.nextOutAt) && /^ out in /.test(m[2]);
+        words.push(out ? h('span', {}, [h('b', { text: m[1] }), ' out in ', h('span', { 'data-pi-out-at': String(s.nextOutAt), text: m[2].replace(/^ out in /, '') })]) : m ? h('span', {}, [h('b', { text: m[1] }), m[2]]) : h('span', { text: p }));
     });
     if (fromFfs) words.push(h('span', { class: 'pi-src' }, [' · stats: ', h('a', { href: FFS_SITE_URL, target: '_blank', rel: 'noopener', text: 'FFScouter' })]));
     return h('div', { class: 'pi-mark pi-eye pi-tag pi-sum' + (short ? ' pi-short' : ''), title: note || 'Torn Eye' }, [h('span', { class: 'pi-edge' }), short ? null : eyeMk(), h('span', { class: 'pi-sumtext' }, words)]);
+}
+
+/** Move every "out in" clock on (they carry data-pi-out-at); only the ones whose minute changed are written. */
+export function eyeTickOut(root, nowS) {
+    if (!root || !root.querySelectorAll) return 0;
+    let n = 0;
+    for (const el of root.querySelectorAll('[data-pi-out-at]')) {
+        const text = eyeHmm(Math.max(0, Number(el.getAttribute('data-pi-out-at')) - nowS));
+        if (el.textContent !== text) {
+            el.textContent = text;
+            n++;
+        }
+    }
+    return n;
+}
+
+/*
+ * "Out early" (round 7 review: it lasted about a second). A member is out early when the last reading had them in
+ * hospital with an end still ahead and this one shows them okay. Before, only the reading just before counted, and
+ * the list was redrawn every second (the hospital clock in the status text ticks), so the next draw forgot them. They
+ * are now kept until the hospital end they had passes, or their state changes again.
+ */
+
+/**
+ * @param {Map<number, number>|null} prevEarly - id → the hospital end they left before (epoch seconds)
+ * @param {object[]|null} prevMembers - the last reading ({id, status: {state, until}})
+ * @param {object[]} members - this reading
+ * @param {number} nowS
+ * @param {function} stateOf - war.js memberState
+ * @returns {Map<number, number>}
+ */
+export function eyeNextEarly(prevEarly, prevMembers, members, nowS, stateOf) {
+    const before = new Map((prevMembers || []).map((m) => [Number(m.id), m]));
+    const out = new Map();
+    for (const m of members || []) {
+        const id = Number(m.id);
+        if (stateOf(m) !== 'okay') continue;
+        const kept = prevEarly && prevEarly.get(id);
+        if (Number.isFinite(kept) && kept > nowS) {
+            out.set(id, kept);
+            continue;
+        }
+        const p = before.get(id);
+        const until = p && stateOf(p) === 'hospital' ? Number(p.status && p.status.until) || 0 : 0;
+        if (until > nowS + 30) out.set(id, until);
+    }
+    return out;
+}
+
+/**
+ * What a list's look depends on, without the ticking clocks: each row's id and state. `early`: the ids out early now.
+ * A hospital end that moved is eyeUntilMoved's (read from a clock that ticks, it wobbles by a second).
+ */
+export function eyeRowsSig(members, stateOf, early = null) {
+    const rows = (members || []).map((m) => m.id + ':' + stateOf(m));
+    return rows.join(',') + (early && early.size ? '|early:' + [...early.keys()].sort((a, b) => a - b).join(',') : '');
+}
+
+/** Did any row's hospital end move by more than `slack` seconds (hospitalised again, a revive)? */
+export function eyeUntilMoved(prevMembers, members, slack = 30) {
+    const before = new Map((prevMembers || []).map((m) => [Number(m.id), Number(m.status && m.status.until) || 0]));
+    return (members || []).some((m) => {
+        const was = before.get(Number(m.id));
+        return was !== undefined && Math.abs((Number(m.status && m.status.until) || 0) - was) > slack;
+    });
 }
 
 /* ------------------------------------------------------------ watch */
