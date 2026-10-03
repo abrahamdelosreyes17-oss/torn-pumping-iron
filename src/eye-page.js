@@ -10,7 +10,7 @@ import { addPrediction } from './core/learndata.js';
 import { onModel, isVisible } from './runtime.js';
 import { isPaused, onPauseChange } from './turns.js';
 import { installAttackHook } from './platform/page-hook.js';
-import { wantPlayers, eyeView, onEye, saveGear, flightsSeen, getWatch, toggleWatch, setWatchTag } from './eye-service.js';
+import { wantPlayers, eyeView, sharedView, eyeReady, loadEyeCache, onEye, saveGear, flightsSeen, getWatch, toggleWatch, setWatchTag } from './eye-service.js';
 import { WATCH_MAX } from './core/eye/watch.js';
 import { parseAttackData } from './core/eye/gear.js';
 import { sortWar, warSummary, outEarly, statusParts } from './core/eye/war.js';
@@ -24,7 +24,15 @@ import { detectPage, profileIdOf, attackTargetOf, PAGE_PROFILE, PAGE_FACTION, PA
 const ep = { extras: new Map(), war: { factionId: null, members: null, prev: null, at: 0, polling: false }, attack: { gearVisible: false, gearSaved: false }, drawing: false };
 
 function view(id) {
-    return eyeView(id, ep.extras.get(id) || {}, { war: Boolean(ep.war.members) });
+    const x = ep.extras.get(id) || {};
+    const v = eyeView(id, x, { war: Boolean(ep.war.members) });
+    // No estimate on this site: what the Torn Eye tab's war mode worked out, when it did.
+    return v && v.est ? v : sharedView(id, x) || v;
+}
+
+/** A list row gets a chip only when there is something to say (round 7: a column of "No data" chips said nothing). */
+function known(v) {
+    return Boolean(v && v.band && v.band !== 'none');
 }
 
 const EDGES = ['pi-edge-stomp', 'pi-edge-good', 'pi-edge-tough', 'pi-edge-cant'];
@@ -96,7 +104,8 @@ function drawFaction() {
     for (const r of rows) ep.extras.set(r.id, { level: r.level, name: r.name });
     for (const r of rows) {
         for (const c of r.cell.querySelectorAll('.pi-chip')) c.remove();
-        r.cell.appendChild(chipEl(view(r.id), { mini: true, id: r.id }));
+        const v = view(r.id);
+        if (known(v)) r.cell.appendChild(chipEl(v, { mini: true, id: r.id }));
     }
 }
 
@@ -104,6 +113,9 @@ function drawWar() {
     const rows = readWarRows(document, 'enemy');
     if (!rows.length) return;
     const list = rows[0].el.parentNode;
+    // What the row itself shows goes into the fight (round 7: a war row's level was never passed on, so a player
+    // with an estimate but no profile read was fought with a level 1's life and came out Stomp).
+    for (const r of rows) ep.extras.set(r.id, { ...(ep.extras.get(r.id) || {}), level: r.level, name: r.name });
     const nowS = Math.floor(Date.now() / 1000);
     const members = ep.war.members || rows.map((r) => ({ id: r.id, level: r.level, status: { state: r.status } }));
     const bands = {};
@@ -132,7 +144,8 @@ function drawWar() {
         for (const s of sorted) {
             const r = byId.get(s.id);
             if (!r) continue;
-            r.cell.appendChild(chipEl(view(s.id), { mini: true, id: s.id }));
+            const v = view(s.id);
+            if (known(v)) r.cell.appendChild(chipEl(v, { mini: true, id: s.id }));
             // The row's edge in its band colour; a traveller's estimated landing next to Torn's status.
             if (EDGES.includes('pi-edge-' + s.band)) r.el.classList.add('pi-edge-' + s.band);
             if (s.state === 'traveling' && ep.war.members) {
@@ -207,6 +220,9 @@ function drawAll() {
     }
     if (!isVisible()) return;
     const p = detectPage(location.href);
+    // Faction and war lists (and the mini-profile) show what is already stored: read it once, from this site's own
+    // IndexedDB, when one of them first shows. No request; the draw runs again when it is in.
+    if (!eyeReady() && (p === PAGE_FACTION || miniProfileId())) loadEyeCache().catch(() => {});
     if (p === PAGE_PROFILE) drawProfile();
     if (p === PAGE_FACTION) {
         if (document.getElementById('faction_war_list_id')) drawWar();

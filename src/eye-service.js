@@ -21,7 +21,7 @@ import { forecast, respectFor, fairFight, bssOf, DEFAULT_GEAR } from './core/eye
 import { bandOf, chipFigures } from './core/eye/bands.js';
 import { gearSummary, myGear } from './core/eye/gear.js';
 import { lifeFromLevel, targetParams, targetQueries, listIgnoresFf, mergeTargetLists, inFfRange, selectTargets, listRowAsFfs, TARGETS_PER_MINUTE } from './core/eye/targets.js';
-import { trackFlights } from './core/eye/war.js';
+import { trackFlights, warBandOf } from './core/eye/war.js';
 import { makePause } from './core/slices.js';
 import { watchOf, addWatch, removeWatch, tagWatch, dismissOffer, isWatched, dueForRead, readEvents, watchOffers, EVENT_KEEP_MS } from './core/eye/watch.js';
 
@@ -37,6 +37,8 @@ export const TARGETS_KEY = 'eyeTargets';
 export const WATCH_KEY = 'eyeWatch';
 export const WATCH_STATE_KEY = 'eyeWatchState';
 export const FLIGHTS_KEY = 'eyeFlights';
+/** GM storage: the bands the Torn Eye tab's war mode worked out (warBandTable in core/eye/war.js), for Torn's war page. */
+export const WAR_BANDS_KEY = 'eyeWarBands';
 
 const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(), timer: null, listeners: [], mem: new Map(), fc: new Map(), flushing: null, again: false, todo: new Map(), working: false, idling: false, side: null };
 
@@ -88,6 +90,20 @@ function saveSoon() {
     }, 1500);
 }
 
+/**
+ * Load the stored estimates without asking anybody (round 7): a local IndexedDB read. Torn's faction and war lists
+ * ask about nobody (the 1.3.0 rule), so nothing else loaded them there and every row said "No data".
+ * @returns {Promise<boolean>} whether this call was the one that loaded them (listeners are told once)
+ */
+export function loadEyeCache() {
+    if (eye.cache) return Promise.resolve(false);
+    const first = !eye.loading;
+    return cache().then(() => {
+        if (first) notify();
+        return first;
+    });
+}
+
 export function onEye(fn) {
     eye.listeners.push(fn);
 }
@@ -125,7 +141,7 @@ export async function clearEye() {
     await idbSet('eye', eye.cache).catch(() => {});
     set('myAttacks', null);
     pageSet(TARGETS_KEY, null);
-    for (const k of [WATCH_KEY, 'eyeWarAuto']) set(k, null);
+    for (const k of [WATCH_KEY, 'eyeWarAuto', WAR_BANDS_KEY]) set(k, null);
     pageSet(WATCH_STATE_KEY, null);
     pageSet(FLIGHTS_KEY, null);
     notify();
@@ -400,8 +416,22 @@ export function eyeView(id, extra = {}, { war = false, later = false } = {}) {
         figures: chipFigures(main, est, respect),
         source: est ? est.sourceText : null,
         status: prof.status || null,
+        // When that status was read (a profile read; none for one the watch list left): a list trusts only a fresh one.
+        statusAt: r.profileAt || null,
         pending,
     };
+}
+
+/**
+ * A player this site holds no estimate for, as the Torn Eye tab's war mode judged them (round 7): the webpage's
+ * estimates live in the webpage's own IndexedDB, and Torn's pages don't ask about war rows. Band, win and HP kept
+ * only; null when war mode has nothing on them (or it is over a day old).
+ */
+export function sharedView(id, extra = {}, now = Date.now()) {
+    const b = warBandOf(getShared(WAR_BANDS_KEY, null), id, now);
+    if (!b) return null;
+    const f = b.win === null ? null : { pWin: b.win / 100, keep: b.keep === null ? null : b.keep / 100, turns: null };
+    return { id, name: extra.name || null, level: extra.level || null, life: extra.life || null, est: null, forecast: f, plain: null, withGear: null, gear: null, band: b.band, respect: null, ours: null, figures: chipFigures(f, null, null), source: 'war mode', status: null, pending: false, shared: { at: b.at } };
 }
 
 /** Work between two breaks while queued fights are worked out: a click or a scroll never waits longer. */

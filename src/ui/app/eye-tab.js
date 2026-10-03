@@ -12,7 +12,7 @@
 import { h, t } from '../dom.js';
 import { BAND_WORDS, BAND_COLORS } from '../../core/eye/bands.js';
 import { sortWar, warSummary, statusParts, activityOf, ACTIVITY_COLORS, ACTIVITY_WORDS, WAR_KIND_WORDS } from '../../core/eye/war.js';
-import { TARGET_FF, needsRefetch, targetDetails, targetsMessage, isBeatable, OLD_ESTIMATE_DAYS } from '../../core/eye/targets.js';
+import { TARGET_FF, needsRefetch, targetDetails, targetsMessage, isBeatable, hitText, OLD_ESTIMATE_DAYS } from '../../core/eye/targets.js';
 import { WATCH_TAGS, WATCH_MAX, TAG_MAX, headsUps } from '../../core/eye/watch.js';
 import { profileUrl, attackUrl } from '../../sources/route.js';
 import { FFS_SITE_URL } from '../../api/ffscouter.js';
@@ -86,12 +86,16 @@ export function sortTargets(rows, key) {
     return [...rows].sort((a, b) => val(b) - val(a));
 }
 
-function stateOf(r, now) {
+/**
+ * Where a target row is: 'hospital', 'travel', 'okay', or 'unknown' when nothing was read (round 7: a stored target
+ * has no status of its own, and "nothing read" used to count as Okay). A player you just beat counts as in hospital.
+ */
+export function stateOf(r, now) {
     const st = r.status || {};
     const s = String(st.state || st.description || '').toLowerCase();
-    if ((r.hospitalUntil && r.hospitalUntil > now) || s.includes('hospital')) return 'hospital';
+    if ((r.hospitalUntil && r.hospitalUntil > now) || s.includes('hospital') || (r.hit && r.hit.kind === 'hit')) return 'hospital';
     if (s.includes('travel') || s.includes('abroad') || s.startsWith('in ')) return 'travel';
-    return 'okay';
+    return s ? (s.includes('okay') ? 'okay' : 'other') : 'unknown';
 }
 
 /** Apply the ticks (and, whatever the ticks, the hard rule: only players you beat). */
@@ -147,10 +151,14 @@ function ago(ts, now) {
 
 function statusCell(r, now) {
     if (r.hospitalUntil && r.hospitalUntil > now) return h('td', { class: 'cdn', text: 'Hospital ' + countdown(r.hospitalUntil - now) });
+    // Your own hit, or the attack page you opened: known without asking Torn.
+    if (r.hit) return h('td', { class: r.hit.kind === 'hit' ? 'cdn' : 'muted', text: hitText(r.hit, now) });
     const st = r.status || {};
     const d = st.description || st.state;
     if (d && !/^okay$/i.test(d)) return h('td', { class: /hospital/i.test(d) ? 'cdn' : null, text: d });
-    return h('td', { text: 'Okay' });
+    if (d) return h('td', { text: 'Okay' });
+    // Nothing read: the list asks Torn about nobody, so it can't say "Okay" (they may be abroad).
+    return h('td', { class: 'muted', title: 'Not read. A target’s status shows when the watch list, the war list or a profile read it in the last 15 minutes.', text: '—' });
 }
 
 /** A war-style status cell: "Hospital · out 14:32 TCT (3:10)", "→ Mexico, lands ~15:05 (est.)". */
@@ -221,7 +229,13 @@ function targetsTable(rows, { now, chain = false, ctx }) {
         : ['Band', 'Player', 'Lvl', 'Win', 'HP kept', 'Respect', 'Status', 'Active', 'Estimate from', '', ''];
     const right = [2, 3, 4, 5, 7];
     const open = ctx.ui.eyeOpen;
-    const rowOf = (r, i) => {
+    const down = (r) => {
+        const s = stateOf(r, now);
+        return s === 'hospital' || s === 'travel';
+    };
+    // The bright Attack button goes to the first player you can hit now, not to one you just put in hospital.
+    const firstUp = rows.find((r) => !r.hit && !down(r)) || null;
+    const rowOf = (r) => {
         const body = [];
         const win = h('td', { class: 'r', text: r.forecast ? pct(r.forecast.pWin) : '—' });
         const keep = h('td', { class: 'r', text: r.forecast && r.forecast.keep !== null ? (r.est && r.est.confidence === 'exact' ? '' : '~') + pct(r.forecast.keep) : '—' });
@@ -232,10 +246,11 @@ function targetsTable(rows, { now, chain = false, ctx }) {
         cells.push(statusCell(r, now), h('td', { class: 'r muted', text: ago(r.lastAction, now) }));
         if (!chain) cells.push(h('td', { class: 'muted', text: sourceShort(r, now) }));
         cells.push(h('td', { class: 'r', style: 'width:40px' }, [starBtn(ctx, r)]));
-        cells.push(h('td', { class: 'r' }, [attackBtn(r.id, i === 0, false)]));
+        cells.push(h('td', { class: 'r' }, [attackBtn(r.id, r === firstUp, false)]));
         const d = detailsText(targetDetails(r.stored || {}, r));
         const isOpen = open === r.id;
-        body.push(h('tr', { class: 'click' + (isOpen ? ' sel' : ''), tabindex: '0', title: d, 'aria-expanded': String(isOpen), onclick: () => { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); }, onkeydown: (ev) => { if (ev.key === 'Enter') { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); } } }, cells));
+        // A player you just hit, in hospital or away: greyed (still there, so the list doesn't jump).
+        body.push(h('tr', { class: 'click' + (isOpen ? ' sel' : '') + (r.hit || down(r) ? ' whatif' : ''), tabindex: '0', title: d, 'aria-expanded': String(isOpen), onclick: () => { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); }, onkeydown: (ev) => { if (ev.key === 'Enter') { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); } } }, cells));
         if (isOpen) body.push(h('tr', { class: 'sub' }, [h('td', { colspan: String(head.length), class: 'muted', style: 'font-size:12px' }, [d])]));
         return body;
     };
@@ -246,7 +261,7 @@ function targetsTable(rows, { now, chain = false, ctx }) {
         let at = ROWS_FIRST;
         const more = () => {
             if (!tbody.isConnected) return;
-            for (const tr of rows.slice(at, at + ROWS_FIRST).flatMap((r, j) => rowOf(r, at + j))) tbody.appendChild(tr);
+            for (const tr of rows.slice(at, at + ROWS_FIRST).flatMap(rowOf)) tbody.appendChild(tr);
             at += ROWS_FIRST;
             if (at < rows.length) setTimeout(more, 0);
         };

@@ -248,6 +248,39 @@ export function statusParts(m, { now = Date.now(), seenAt = null, early = false 
     return { kind: st, pre: s.description || st, at: null, cd: false, post: '', cls: null, soonAt: null };
 }
 
+/* ------------------------------------------------ round 7: what war mode read, for Torn's own war page */
+
+/** The table is small on purpose (Tampermonkey hands it to every Torn page): at most this many players. */
+export const WAR_BANDS_MAX = 150;
+
+/** A band older than this is not shown on Torn's page (stats move slowly; a day-old band is still a fair guide). */
+export const WAR_BANDS_KEEP_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The bands the Torn Eye tab's war mode worked out, as a small table for shared storage: Torn's war page asks
+ * nothing (the 1.3.0 rule), so it shows these. Players with no estimate are left out.
+ * @param {object[]} rows - {id, band, win (0–100|null), keep (0–100|null)}
+ * @returns {{at, fid, p: {[id]: [band, win, keep]}}}
+ */
+export function warBandTable(rows, { fid = null, now = Date.now() } = {}) {
+    const p = {};
+    let n = 0;
+    for (const r of rows || []) {
+        if (!r || !(Number(r.id) > 0) || !r.band || r.band === 'none' || !BAND_ORDER.includes(r.band)) continue;
+        if (n++ >= WAR_BANDS_MAX) break;
+        p[Number(r.id)] = [r.band, Number.isFinite(r.win) ? Math.round(r.win) : null, Number.isFinite(r.keep) ? Math.round(r.keep) : null];
+    }
+    return { at: now, fid: Number(fid) || null, p };
+}
+
+/** One player's band from that table, or null when it has none or the table is too old. */
+export function warBandOf(table, id, now = Date.now()) {
+    if (!table || !table.p || !(now - (Number(table.at) || 0) < WAR_BANDS_KEEP_MS)) return null;
+    const e = table.p[Number(id)];
+    if (!Array.isArray(e) || !BAND_ORDER.includes(e[0]) || e[0] === 'none') return null;
+    return { band: e[0], win: Number.isFinite(e[1]) ? e[1] : null, keep: Number.isFinite(e[2]) ? e[2] : null, at: Number(table.at) };
+}
+
 /** The status cell as one line: "Hospital · out 14:32 TCT (3:10)", "→ Mexico, lands ~15:05 (est.)". */
 export function statusText(parts, { now = Date.now(), clockFn, tct = true, countdownFn } = {}) {
     if (!parts.at) return parts.pre + parts.post;
