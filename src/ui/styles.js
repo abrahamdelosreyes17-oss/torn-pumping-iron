@@ -456,6 +456,11 @@ svg.ch .grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
 .stackbox ul { margin: 12px 0 16px; padding: 0; list-style: none; color: var(--muted); }
 .stackbox li { padding: 4px 0; }
 .stackbox li b { color: var(--text); }
+/* ---- Round 7: the recommended plan you're not on pulses (Settings › Animations off / reduced motion: held still) ---- */
+.lead.rec-nudge { animation: pi-rec 1.4s ease-in-out infinite; }
+.still .lead.rec-nudge { animation: none; box-shadow: 0 0 0 2px color-mix(in srgb, var(--chalk) 55%, transparent); }
+@media (prefers-reduced-motion: reduce) { .lead.rec-nudge { animation: none; box-shadow: 0 0 0 2px color-mix(in srgb, var(--chalk) 55%, transparent); } }
+@keyframes pi-rec { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--chalk) 55%, transparent), 0 0 24px color-mix(in srgb, var(--chalk) 25%, transparent); } }
 /* ---- Round 7: Torn Eye list ---- */
 .eye-chips { display: inline-flex; gap: 8px; flex-wrap: wrap; }
 .eye-chip { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line2); background: transparent; color: var(--text); font: 600 13px var(--sans); cursor: pointer; }

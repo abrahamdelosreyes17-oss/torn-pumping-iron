@@ -195,7 +195,16 @@ export function needsNewSession(session, reading, m, now) {
 export function nextSession(prev, m, reading, now, ctx = {}) {
     // A walk-through of "the energy you have now" ends once the plan keeps that energy (a Xanax stacked or held).
     if (prev && prev.stepId === 'now' && keptAll(m)) prev = null;
-    if (!needsNewSession(prev, reading, m, now)) return advanceSession(prev, reading, ctx);
+    if (!needsNewSession(prev, reading, m, now)) {
+        const moved = advanceSession(prev, reading, ctx);
+        // The energy is spent: a session with no drug to take can't train once more, so it's over and the page follows
+        // the plan's next step (the owner, 2026-10-03: 10 energy left, the page said "Train DEX × 9", the webpage
+        // "Take Xanax #1"). Its count of trains can lag Torn's; the bar can't.
+        const cur = sessionProgress(moved).current;
+        if (!(cur && !moved.drug && Number.isFinite(reading.energy) && reading.energy < cur.perTrain)) return moved;
+        const step = currentTrainStep(m, now);
+        return step && step.id !== prev.stepId ? startSession(step, reading, m, now) : null;
+    }
     const step = currentTrainStep(m, now);
     return step ? startSession(step, reading, m, now) : null;
 }
@@ -474,16 +483,20 @@ export function planGymPage(m, page = {}, session = null, now = m.now) {
             const waitWord = canNow < n ? (canNow === 0 ? ' · energy ' + fmtInt(energy) + (session.drug ? ', take the Xanax first' : ', wait for more') : ' · ' + canNow + ' now, the rest after more energy') : '';
             const b = state.boost;
             const eat = state.kind === 'eat';
+            // No energy for one train yet: the step's Xanax comes first (or more energy); never "Train this" then.
+            const noE = canNow === 0 && !eat;
             perStat[k] = {
                 kind: 'train',
+                // Drawn dashed grey, Fill held (marks.js).
+                noEnergy: noE,
                 // right / ready: steady green; eat: pulses red, Fill waits.
                 mark: state.kind,
-                hold: eat,
+                hold: eat || noE,
                 trains: n,
                 fill: eat ? 0 : canNow,
                 fillN: n,
                 gain: Math.round(gain),
-                tab: eat ? 'Eat first' : state.kind === 'ready' ? 'Train it all · about ' + fmtSigned(Math.round(b.gain || gain)) : 'Train this · ' + fmtInt(n) + ' train' + (n === 1 ? '' : 's') + (cur.done > 0 ? ' left' : '') + ' · about ' + fmtSigned(gain),
+                tab: eat ? 'Eat first' : noE ? (session.drug ? 'Take the Xanax first' : 'Wait for energy') + ' · then ' + STAT_LABEL[k] + ' × ' + fmtInt(n) : state.kind === 'ready' ? 'Train it all · about ' + fmtSigned(Math.round(b.gain || gain)) : 'Train this · ' + fmtInt(n) + ' train' + (n === 1 ? '' : 's') + (cur.done > 0 ? ' left' : '') + ' · about ' + fmtSigned(gain),
                 text: fmtInt(n) + ' train' + (n === 1 ? '' : 's') + (cur.done > 0 ? ' left' : ''),
                 sub: eat ? b.list.filter((x) => !x.done && (x.id === 'eat' || x.id === 'drug' || x.id === 'jp')).map((x) => x.text).join(' + ') + ' first' : (allEnergy ? 'all ' + (state.kind === 'ready' ? fmtInt(energy) + ' ' : 'your ') + 'energy' : fmtInt(n * cur.perTrain) + ' energy') + ' · about ' + fmtSigned(gain) + waitWord,
                 warn: cur.stopAt !== undefined ? 'Stop at ' + n + ' trains. More puts you under the rule for ' + cur.stopReason + ' and you lose it.' : null,
@@ -584,6 +597,9 @@ export function gymPanel(plan) {
     }
     if (st.kind === 'eat') return { tone: 'red', title: what + (b.deadline ? ' · ' + tornClock(b.deadline) : ''), step: (b.list.find((x) => x.next) || { text: 'Eat first' }).text, sub: [when, 'seen from your bars'].filter(Boolean).join(' · '), checklist: b.list, action: null };
     if (st.kind === 'ready') return { tone: 'green', title: what + ' · now', step: 'Train it all: ' + STAT_LABEL[cur.stat] + ' × ' + cur.left, sub: [when, 'about ' + fmtSigned(Math.round(b.gain))].filter(Boolean).join(' · '), checklist: b.list, action: null };
+    const ps = cur && plan.perStat && plan.perStat[cur.stat];
+    // No energy for a train yet (the step's Xanax first): the panel says that, never "Train" (the owner, 2026-10-03).
+    if (st.kind === 'right' && ps && ps.noEnergy) return { tone: null, title: 'Next', step: ps.tab.split(' · then ')[0], sub: 'then ' + STAT_LABEL[cur.stat] + ' × ' + cur.left + (cur.gymName ? ' at ' + cur.gymName : ''), checklist: null, action: null };
     if (st.kind === 'right') return { tone: 'green', title: 'Now', step: 'Train ' + STAT_LABEL[cur.stat] + ' × ' + cur.left, sub: [cur.gymName, plan.perStat[cur.stat] && plan.perStat[cur.stat].gain ? 'about ' + fmtSigned(plan.perStat[cur.stat].gain) : null].filter(Boolean).join(' · '), checklist: null, action: null };
     return null;
 }

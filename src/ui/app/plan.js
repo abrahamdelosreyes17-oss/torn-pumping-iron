@@ -250,7 +250,7 @@ function recommendedCard(m, ctx, rec, compare, days) {
                     ? h('span', { class: 'c-good', text: 'You’re on it.' })
                     : m.saved && !ctx.plan.strategyPicked
                       ? h('span', { class: 'muted', text: 'Your saved plan follows ' + ((STRATEGIES[using] || {}).short || using).toLowerCase() + ' for these days and switches on its dates.' })
-                      : h('a', { href: '#', onclick: (e) => { e.preventDefault(); ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Back to the saved plan' }),
+                      : null,
             ]),
         ]),
         ctx.plan.pickBy === 'auto' && a && a.wait ? h('div', { class: 'warnb', style: 'margin-top:10px' }, [h('b', { text: a.needsKey ? 'Auto mode needs a Full key' : 'Reading your income' }), h('p', { text: a.wait }), a.needsKey ? h('div', { class: 'acts' }, [h('button', { class: 'btn primary sm', type: 'button', onclick: () => ctx.go('settings'), text: 'Add it in Settings' })]) : null]) : null,
@@ -275,7 +275,15 @@ function recommendedCard(m, ctx, rec, compare, days) {
             ]),
         );
     }
-    return h('div', { class: 'lead' }, kids);
+    // Not on the recommended plan (your own pick): the card pulses and asks once: use it, or keep yours (the owner,
+    // 2026-10-03). "No" stops the pulse for this page visit.
+    const nudge = using !== rec.recommended && !(m.saved && !ctx.plan.strategyPicked) && ctx.ui.recNo !== rec.recommended;
+    if (using !== rec.recommended && !(m.saved && !ctx.plan.strategyPicked))
+        kids.splice(2, 0, h('div', { class: 'acts', style: 'margin-top:16px' }, [
+            h('button', { class: 'btn primary', type: 'button', onclick: () => { ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Use ' + S.short.toLowerCase() }),
+            nudge ? h('button', { class: 'btn', type: 'button', onclick: () => { ctx.ui.recNo = rec.recommended; ctx.rerender(); }, text: 'No, keep ' + ((STRATEGIES[using] || {}).short || using).toLowerCase() }) : null,
+        ]));
+    return h('div', { class: 'lead' + (nudge ? ' rec-nudge' : '') }, kids);
 }
 
 /**

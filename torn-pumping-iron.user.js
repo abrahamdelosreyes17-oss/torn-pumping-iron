@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Pumping Iron
 // @namespace    torn-pumping-iron
-// @version      1.4.0
+// @version      1.4.1
 // @description  Gym planner and fight scout for Torn: what to take, what to train, what to buy, who you can beat. Reads the API and the page you're on; never acts for you.
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
@@ -48,8 +48,8 @@
 (function () {
     'use strict';
 
-    const PI_BUILD_VERSION = '1.4.0';
-    const PI_BUILD_HASH = '123af26485d1';
+    const PI_BUILD_VERSION = '1.4.1';
+    const PI_BUILD_HASH = 'd91f97491f66';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -13225,6 +13225,11 @@
     .stackbox ul { margin: 12px 0 16px; padding: 0; list-style: none; color: var(--muted); }
     .stackbox li { padding: 4px 0; }
     .stackbox li b { color: var(--text); }
+    /* ---- Round 7: the recommended plan you're not on pulses (Settings › Animations off / reduced motion: held still) ---- */
+    .lead.rec-nudge { animation: pi-rec 1.4s ease-in-out infinite; }
+    .still .lead.rec-nudge { animation: none; box-shadow: 0 0 0 2px color-mix(in srgb, var(--chalk) 55%, transparent); }
+    @media (prefers-reduced-motion: reduce) { .lead.rec-nudge { animation: none; box-shadow: 0 0 0 2px color-mix(in srgb, var(--chalk) 55%, transparent); } }
+    @keyframes pi-rec { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--chalk) 55%, transparent), 0 0 24px color-mix(in srgb, var(--chalk) 25%, transparent); } }
     /* ---- Round 7: Torn Eye list ---- */
     .eye-chips { display: inline-flex; gap: 8px; flex-wrap: wrap; }
     .eye-chip { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line2); background: transparent; color: var(--text); font: 600 13px var(--sans); cursor: pointer; }
@@ -13790,7 +13795,16 @@
     function nextSession(prev, m, reading, now, ctx = {}) {
         // A walk-through of "the energy you have now" ends once the plan keeps that energy (a Xanax stacked or held).
         if (prev && prev.stepId === 'now' && keptAll(m)) prev = null;
-        if (!needsNewSession(prev, reading, m, now)) return advanceSession(prev, reading, ctx);
+        if (!needsNewSession(prev, reading, m, now)) {
+            const moved = advanceSession(prev, reading, ctx);
+            // The energy is spent: a session with no drug to take can't train once more, so it's over and the page follows
+            // the plan's next step (the owner, 2026-10-03: 10 energy left, the page said "Train DEX × 9", the webpage
+            // "Take Xanax #1"). Its count of trains can lag Torn's; the bar can't.
+            const cur = sessionProgress(moved).current;
+            if (!(cur && !moved.drug && Number.isFinite(reading.energy) && reading.energy < cur.perTrain)) return moved;
+            const step = currentTrainStep(m, now);
+            return step && step.id !== prev.stepId ? startSession(step, reading, m, now) : null;
+        }
         const step = currentTrainStep(m, now);
         return step ? startSession(step, reading, m, now) : null;
     }
@@ -14069,16 +14083,20 @@
                 const waitWord = canNow < n ? (canNow === 0 ? ' · energy ' + fmtInt(energy) + (session.drug ? ', take the Xanax first' : ', wait for more') : ' · ' + canNow + ' now, the rest after more energy') : '';
                 const b = state.boost;
                 const eat = state.kind === 'eat';
+                // No energy for one train yet: the step's Xanax comes first (or more energy); never "Train this" then.
+                const noE = canNow === 0 && !eat;
                 perStat[k] = {
                     kind: 'train',
+                    // Drawn dashed grey, Fill held (marks.js).
+                    noEnergy: noE,
                     // right / ready: steady green; eat: pulses red, Fill waits.
                     mark: state.kind,
-                    hold: eat,
+                    hold: eat || noE,
                     trains: n,
                     fill: eat ? 0 : canNow,
                     fillN: n,
                     gain: Math.round(gain),
-                    tab: eat ? 'Eat first' : state.kind === 'ready' ? 'Train it all · about ' + fmtSigned(Math.round(b.gain || gain)) : 'Train this · ' + fmtInt(n) + ' train' + (n === 1 ? '' : 's') + (cur.done > 0 ? ' left' : '') + ' · about ' + fmtSigned(gain),
+                    tab: eat ? 'Eat first' : noE ? (session.drug ? 'Take the Xanax first' : 'Wait for energy') + ' · then ' + STAT_LABEL[k] + ' × ' + fmtInt(n) : state.kind === 'ready' ? 'Train it all · about ' + fmtSigned(Math.round(b.gain || gain)) : 'Train this · ' + fmtInt(n) + ' train' + (n === 1 ? '' : 's') + (cur.done > 0 ? ' left' : '') + ' · about ' + fmtSigned(gain),
                     text: fmtInt(n) + ' train' + (n === 1 ? '' : 's') + (cur.done > 0 ? ' left' : ''),
                     sub: eat ? b.list.filter((x) => !x.done && (x.id === 'eat' || x.id === 'drug' || x.id === 'jp')).map((x) => x.text).join(' + ') + ' first' : (allEnergy ? 'all ' + (state.kind === 'ready' ? fmtInt(energy) + ' ' : 'your ') + 'energy' : fmtInt(n * cur.perTrain) + ' energy') + ' · about ' + fmtSigned(gain) + waitWord,
                     warn: cur.stopAt !== undefined ? 'Stop at ' + n + ' trains. More puts you under the rule for ' + cur.stopReason + ' and you lose it.' : null,
@@ -14179,6 +14197,9 @@
         }
         if (st.kind === 'eat') return { tone: 'red', title: what + (b.deadline ? ' · ' + tornClock(b.deadline) : ''), step: (b.list.find((x) => x.next) || { text: 'Eat first' }).text, sub: [when, 'seen from your bars'].filter(Boolean).join(' · '), checklist: b.list, action: null };
         if (st.kind === 'ready') return { tone: 'green', title: what + ' · now', step: 'Train it all: ' + STAT_LABEL[cur.stat] + ' × ' + cur.left, sub: [when, 'about ' + fmtSigned(Math.round(b.gain))].filter(Boolean).join(' · '), checklist: b.list, action: null };
+        const ps = cur && plan.perStat && plan.perStat[cur.stat];
+        // No energy for a train yet (the step's Xanax first): the panel says that, never "Train" (the owner, 2026-10-03).
+        if (st.kind === 'right' && ps && ps.noEnergy) return { tone: null, title: 'Next', step: ps.tab.split(' · then ')[0], sub: 'then ' + STAT_LABEL[cur.stat] + ' × ' + cur.left + (cur.gymName ? ' at ' + cur.gymName : ''), checklist: null, action: null };
         if (st.kind === 'right') return { tone: 'green', title: 'Now', step: 'Train ' + STAT_LABEL[cur.stat] + ' × ' + cur.left, sub: [cur.gymName, plan.perStat[cur.stat] && plan.perStat[cur.stat].gain ? 'about ' + fmtSigned(plan.perStat[cur.stat].gain) : null].filter(Boolean).join(' · '), checklist: null, action: null };
         return null;
     }
@@ -15610,7 +15631,7 @@
                         ? h('span', { class: 'c-good', text: 'You’re on it.' })
                         : m.saved && !ctx.plan.strategyPicked
                           ? h('span', { class: 'muted', text: 'Your saved plan follows ' + ((STRATEGIES[using] || {}).short || using).toLowerCase() + ' for these days and switches on its dates.' })
-                          : h('a', { href: '#', onclick: (e) => { e.preventDefault(); ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Back to the saved plan' }),
+                          : null,
                 ]),
             ]),
             ctx.plan.pickBy === 'auto' && a && a.wait ? h('div', { class: 'warnb', style: 'margin-top:10px' }, [h('b', { text: a.needsKey ? 'Auto mode needs a Full key' : 'Reading your income' }), h('p', { text: a.wait }), a.needsKey ? h('div', { class: 'acts' }, [h('button', { class: 'btn primary sm', type: 'button', onclick: () => ctx.go('settings'), text: 'Add it in Settings' })]) : null]) : null,
@@ -15635,7 +15656,15 @@
                 ]),
             );
         }
-        return h('div', { class: 'lead' }, kids);
+        // Not on the recommended plan (your own pick): the card pulses and asks once: use it, or keep yours (the owner,
+        // 2026-10-03). "No" stops the pulse for this page visit.
+        const nudge = using !== rec.recommended && !(m.saved && !ctx.plan.strategyPicked) && ctx.ui.recNo !== rec.recommended;
+        if (using !== rec.recommended && !(m.saved && !ctx.plan.strategyPicked))
+            kids.splice(2, 0, h('div', { class: 'acts', style: 'margin-top:16px' }, [
+                h('button', { class: 'btn primary', type: 'button', onclick: () => { ctx.ui.planPick = null; ctx.setPlan({ strategy: rec.recommended, strategyPicked: true }); }, text: 'Use ' + S.short.toLowerCase() }),
+                nudge ? h('button', { class: 'btn', type: 'button', onclick: () => { ctx.ui.recNo = rec.recommended; ctx.rerender(); }, text: 'No, keep ' + ((STRATEGIES[using] || {}).short || using).toLowerCase() }) : null,
+            ]));
+        return h('div', { class: 'lead' + (nudge ? ' rec-nudge' : '') }, kids);
     }
 
     /**
@@ -22378,7 +22407,10 @@
     .check.done i { background: #3fbf5a; border-color: #3fbf5a; color: #101214; }
     .check.next { color: #fff; font-weight: 700; }
     .check.next i { border-color: var(--b); }
-    .cta { display: block; height: 32px; line-height: 32px; text-align: center; border-radius: 6px; border: 0; background: #efebe2; color: #15171a; font: 700 13px 'Segoe UI', system-ui, sans-serif; cursor: pointer; text-decoration: none; }
+    .acts { display: flex; flex-wrap: wrap; gap: 8px; }
+    .cta { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; height: 34px; padding: 0 12px; border-radius: 6px; border: 0; background: #efebe2; color: #15171a; font: 700 13px/1 'Segoe UI', system-ui, sans-serif; white-space: nowrap; cursor: pointer; text-decoration: none; }
+    .cta.web { flex: 0 1 auto; background: transparent; color: #e3e5e8; border: 1px solid #3a4046; font-weight: 600; }
+    .cta.web:hover { border-color: #939aa1; }
     .cta:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
     .warn { color: #e8a33d; font-size: 12px; font-weight: 700; }
     /* Sized to the free space beside Torn's page (fitTier): narrower with smaller type, then one tag, then the smallest. */
@@ -22784,7 +22816,7 @@
             this.wrap.classList.toggle('paused', Boolean(v.paused));
             const cdText = v.pillNow || (v.cdAt ? countdown(v.cdAt - now) : '');
             this.headInfo.textContent = v.pillText || 'Pumping Iron';
-            // One way to the webpage always: the big button when there is no Torn page to go to, else a small ↗ here.
+            // Also a small ↗ in the bar (the folded panel has only the bar).
             const link = v.action && v.action.href;
             const app = link ? h('button', { class: 'app open', type: 'button', title: 'Open Pumping Iron', 'aria-label': 'Open Pumping Iron', onclick: () => this.onOpen(), text: '↗' }) : null;
             fill(this.head, [v.paused ? h('span', { class: 'plate', text: '!', 'aria-label': 'Paused' }) : h('span', { class: 'plate' }, [h('i')]), cdText ? h('span', { class: 'cd', 'data-cd': v.cdAt && !v.pillNow ? String(v.cdAt) : null, text: cdText }) : null, this.headInfo, app, this.colBtn]);
@@ -22810,7 +22842,8 @@
                 kids.push(h('div', { class: 'meter' }, [h('i', { style: 'width:' + Math.min(100, (100 * v.energy.current) / Math.max(1, v.energy.max)) + '%' })]));
             }
             if (v.later && v.later.length) kids.push(h('div', { class: 'later', text: 'then ' + v.later.join(' · ') }));
-            kids.push(link ? h('a', { class: 'cta go', href: v.action.href, text: v.action.text }) : h('button', { class: 'cta open', type: 'button', onclick: () => this.onOpen(), text: 'Open Pumping Iron' }));
+            // The webpage is always one click away (the owner): beside the Torn page's button, or the only button.
+            kids.push(h('div', { class: 'acts' }, link ? [h('a', { class: 'cta go', href: v.action.href, text: v.action.text }), h('button', { class: 'cta web open', type: 'button', title: 'Open Pumping Iron', onclick: () => this.onOpen(), text: 'Pumping Iron ↗' })] : [h('button', { class: 'cta open', type: 'button', onclick: () => this.onOpen(), text: 'Open Pumping Iron' })]));
             fill(this.body, kids);
             if (wasOff || !this.placed) {
                 this.placed = true;

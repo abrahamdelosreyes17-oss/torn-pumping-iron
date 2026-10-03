@@ -208,3 +208,26 @@ test('dragging keeps it inside a margin (never over Torn’s page), and the spot
     const wide = spots(1920, { left: 472, right: 1448 });
     assert.equal(pointOf(saved, wide, 900).x, 1908 - PANEL_W);
 });
+
+test('the energy is spent: a session with no drug ends even when its train count lags (owner 2026-10-03: 10 energy, "Train DEX × 9")', () => {
+    const m = twoGyms();
+    let r = pageReading(m, [], { current: 400 });
+    const s = nextSession(null, m, r, T0);
+    assert.equal(s.drug, false);
+    // Torn shows 12 trains, but the bar says it's all gone (trains the page missed).
+    r = { ...trained(r, 'def', 12, 8), energy: 2 };
+    const s2 = nextSession(s, m, r, T0 + 60e3);
+    assert.ok(s2 === null || s2.stepId !== s.stepId, 'the old walk-through is over');
+});
+
+test('no energy for one train on a step that starts with its Xanax: "Take the Xanax first", Fill held, never Train', () => {
+    const m = twoGyms();
+    const r = pageReading(m, [], { current: 400 });
+    const s = { ...startSession(currentTrainStep(m), r, m, T0), drug: true };
+    const low = { ...r, energy: 2 };
+    const p = planGymPage(m, { selectedId: 8, reading: low }, advanceSession(s, low), T0 + 60e3);
+    assert.equal(p.perStat.def.noEnergy, true);
+    assert.equal(p.perStat.def.hold, true);
+    assert.equal(p.perStat.def.fill, 0);
+    assert.match(p.perStat.def.tab, /^Take the Xanax first · then DEF × 30$/);
+});
