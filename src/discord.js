@@ -13,6 +13,7 @@ import { isPaused } from './turns.js';
 import { fetchDiscord } from './api/torn.js';
 import { workerBase, newSecret, stepsForWorker, workerSync, workerTest, workerForget, workerLink, workerLoginStart, workerLoginStatus, workerLoginCancel, DEFAULT_WORKER } from './api/worker.js';
 import { gmOpenTab } from './platform/gm.js';
+import { normBand } from './core/eye/bands.js';
 
 /** Set by the runtime: a Discord skip redraws this tab's model. */
 let onSkippedChange = null;
@@ -45,13 +46,12 @@ export function setTargetsForSync(list, bands) {
 /* Torn Eye's war and watch list for the Worker (ROUND4-PLAN §B8, §I): the lead sends them with the plan. */
 const EYE_SYNC_WAR_MAX = 100;
 const EYE_SYNC_WATCH_MAX = 50;
-const EYE_BANDS = ['stomp', 'good', 'tough', 'cant', 'none'];
 
 function eyeSyncRow(r, withTag = false) {
     const id = Number(r && r.id);
     if (!(id > 0)) return null;
     const pct = (x) => (x === null || x === undefined || !Number.isFinite(Number(x)) ? null : Math.max(0, Math.min(100, Math.round(Number(x)))));
-    const row = { id, name: r.name ? String(r.name).slice(0, 40) : null, level: Number(r.level) > 0 ? Math.round(Number(r.level)) : null, band: EYE_BANDS.includes(r.band) ? r.band : 'none', win: pct(r.win), keep: pct(r.keep) };
+    const row = { id, name: r.name ? String(r.name).slice(0, 40) : null, level: Number(r.level) > 0 ? Math.round(Number(r.level)) : null, band: normBand(r.band), win: pct(r.win), keep: pct(r.keep) };
     if (withTag) row.tag = r.tag ? String(r.tag).slice(0, 24) : null;
     return row;
 }

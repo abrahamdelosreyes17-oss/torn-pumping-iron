@@ -3,19 +3,19 @@ import assert from 'node:assert/strict';
 
 import { runCron, handle } from '../src/index.js';
 import { handleInteraction } from '../src/interactions.js';
-import { findWar, membersOf, playerNow, snapEntry, playerEvents, landingOf, estimator, warPages, eyeTurn, FLIGHT_MIN } from '../src/war.js';
+import { findWar, membersOf, playerNow, snapEntry, playerEvents, landingOf, estimator, warPages, eyeTurn, FLIGHT_MIN, BEATABLE } from '../src/war.js';
 import { linkedEnv, botEnv, world, tornState, jsonRes, T0, body, command, ctx, press, req, KEY, PLAN, DISCORD_USER } from './helpers.js';
 
 const WARS = { wars: { ranked: { war_id: 555, start: T0 - 3600, end: 0, target: 3000, winner: null, factions: [{ id: 777, name: 'Our Gym', score: 100, chain: 12 }, { id: 888, name: 'Red Fist', score: 90, chain: 3 }] }, raids: [], territory: [] } };
 const NO_WAR = { wars: { ranked: null, raids: [], territory: [] } };
-const BANDS = { 1: 'stomp', 2: 'good', 3: 'stomp', 4: 'cant', 5: 'stomp' };
+const BANDS = { 1: 'stomp', 2: 'good', 3: 'stomp', 4: 'low', 5: 'stomp' };
 /** What the userscript syncs for the enemy faction (PUT /plan `war`): win % for the pings. */
-const WAR_LIST = { factionId: 888, members: [{ id: 1, name: 'Easy_Okay', level: 10, band: 'stomp', win: 99, keep: 90 }, { id: 2, name: 'Soon_Out', level: 12, band: 'good', win: 95, keep: 70 }, { id: 3, name: 'Later_Out', level: 15, band: 'stomp', win: 98, keep: 85 }, { id: 4, name: 'Tank', level: 80, band: 'cant', win: 2, keep: 0 }] };
+const WAR_LIST = { factionId: 888, members: [{ id: 1, name: 'Easy_Okay', level: 10, band: 'stomp', win: 99, keep: 90 }, { id: 2, name: 'Soon_Out', level: 12, band: 'good', win: 95, keep: 70 }, { id: 3, name: 'Later_Out', level: 15, band: 'stomp', win: 98, keep: 85 }, { id: 4, name: 'Tank', level: 80, band: 'low', win: 2, keep: 0 }] };
 
 const la = (status, ago = 600) => ({ status, timestamp: T0 - ago, relative: '' });
 const m = (id, name, level, state, { until = 0, description = state, online = 'Offline' } = {}) => ({ id, name, level, last_action: la(online), status: { state, description, until } });
 
-/** The enemy at 10:48: one Stomp out, one Good out in 2.5 min, one Stomp out in 30 min, a Can't win out in 100 s, a flyer, one with no data out in a minute. */
+/** The enemy at 10:48: one Stomp out, one Good out in 2.5 min, one Stomp out in 30 min, one under 50% HP kept out in 100 s, a flyer, one with no data out in a minute. */
 function members({ early = false, online = 'Offline', flyer = 'Traveling to Mexico', flyerState = 'Traveling' } = {}) {
     return {
         members: [
@@ -92,11 +92,15 @@ test('per-player changes: out soon, lands soon, out early, came online (pure)', 
 });
 
 test('the band: the synced war list first, then Torn Eye’s bands', () => {
-    const est = estimator({ factionId: 888, members: [{ id: 1, band: 'good', win: 90 }, { id: 2, band: 'none', win: null }] }, 888, { 1: 'cant', 2: 'tough', 3: 'stomp' });
+    const est = estimator({ factionId: 888, members: [{ id: 1, band: 'good', win: 90 }, { id: 2, band: 'none', win: null }] }, 888, { 1: 'low', 2: 'fair', 3: 'stomp', 5: 'tough', 6: 'cant' });
     assert.equal(est(1).band, 'good');
     assert.equal(est(1).win, 90);
-    assert.equal(est(2).band, 'tough', 'no data in the war list: Torn Eye’s band');
+    assert.equal(est(2).band, 'fair', 'no data in the war list: Torn Eye’s band');
     assert.equal(est(3).band, 'stomp');
+    // Round 7: an older userscript's Tough and Can't win read as under 50% (never pinged).
+    assert.equal(est(5).band, 'low');
+    assert.equal(est(6).band, 'low');
+    assert.ok(BEATABLE.has('fair') && !BEATABLE.has('low') && !BEATABLE.has('tough'));
     assert.equal(est(4).band, 'none');
     assert.equal(estimator({ factionId: 111, members: [{ id: 1, band: 'good' }] }, 888, {})(1).band, 'none', 'a list for another faction is not used');
 });
@@ -128,7 +132,7 @@ test('/war: the whole faction with online status, out-at times and flights; band
     const msg = f.calls.find((x) => x.url.endsWith('/@original')).body;
     assert.match(msg.content, /^\*\*War vs Red Fist\*\*\n1 you can beat out now · next out 10:49 · 1 away/);
     assert.match(msg.content, /\*\*Hit now\*\* \(1\)\n\*\*Stomp\*\* · Easy_Okay · Lv 10 · win 99% · online/);
-    assert.match(msg.content, /\*\*In hospital\*\* \(4\)\n\*\*No data\*\* · Nobody_Knows · Lv 30 · out 10:49 \(<t:\d+:R>\) · offline 10 min\n\*\*Can’t win\*\* · Tank · Lv 80 · win 2% · out 10:49/);
+    assert.match(msg.content, /\*\*In hospital\*\* \(4\)\n\*\*No data\*\* · Nobody_Knows · Lv 30 · out 10:49 \(<t:\d+:R>\) · offline 10 min\n\*\*Under 50%\*\* · Tank · Lv 80 · win 2% · out 10:49/);
     assert.match(msg.content, /\*\*Good\*\* · Soon_Out · Lv 12 · win 95% · out 10:50/);
     assert.match(msg.content, /\*\*Stomp\*\* · Flyer · Lv 20 · ← from Mexico, lands by ~11:14 \(est\.\)/);
     assert.doesNotMatch(msg.content, /Page/);
@@ -201,7 +205,7 @@ test('cron in a war: pings ahead about enemies you can beat only; one message fo
     assert.deepEqual(titles, ['Soon_Out out of hospital in 3 min', 'War vs Red Fist: 1 you can beat is out now']);
     assert.match(p[0].body.embeds[0].description, /^Out 10:50 TCT \(<t:\d+:R>\)\n\*\*Good\*\* · win 95% · Lv 12 · vs Red Fist/);
     assert.match(p[0].body.content, /Soon_Out out of hospital in 3 min/, 'the notification says it');
-    // Tank (Can't win, out in 100 s) and Nobody_Knows (no data, out in 60 s): no ping.
+    // Tank (under 50%, out in 100 s) and Nobody_Knows (no data, out in 60 s): no ping.
     assert.doesNotMatch(JSON.stringify(p[0].body), /Tank|Nobody_Knows/);
     assert.deepEqual(p[0].body.components[0].components.map((b) => b.label), ['Done: stop war pings', 'Attack Soon_Out', 'Attack Easy_Okay']);
     const w = JSON.parse(user().war);
@@ -356,7 +360,7 @@ const WATCHED = [
 ];
 const profileOf = (states) => (id) => ({ profile: { id, name: 'P' + id, level: 30, ...states[id] } });
 
-test('watch list: hospital out soon and came online, with the tag; Can’t win never; no data says so', async () => {
+test('watch list: hospital out soon and came online, with the tag; under 50% never (an older userscript’s Can’t win too); no data says so', async () => {
     const { env, user } = await linkedEnv();
     await handle(req('PUT', '/plan', { body: { watch: WATCHED } }), env);
     const states = {

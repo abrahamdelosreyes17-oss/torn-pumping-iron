@@ -10,9 +10,8 @@ import { normalizeState, DAY, HOUR, MIN } from '../src/core/bars.js';
 import { unlockedGyms } from '../src/core/gyms.js';
 import { BUILDS } from '../src/core/builds.js';
 import { XANAX_CD_MIN } from '../src/core/items.js';
-import { orderedBands } from '../src/ui/app/settings.js';
 import { importFiles, cleanSample } from '../src/core/learndata.js';
-import { DEFAULT_BAND_LIMITS } from '../src/core/eye/bands.js';
+import { BAND_KEEP } from '../src/core/eye/bands.js';
 
 const T0 = Date.UTC(2026, 8, 29, 10, 48);
 const state = (o = {}) => normalizeState({
@@ -46,14 +45,8 @@ test('B-13: special refills spread over the horizon again once it has passed (ne
     assert.equal(specialDaysLeft(30, 45), 30);
 });
 
-test('B-14: Torn Eye colour bands stay in order after an edit', () => {
-    const l = JSON.parse(JSON.stringify(DEFAULT_BAND_LIMITS));
-    const a = orderedBands({ ...l, stomp: { ...l.stomp, win: 50 } }, 'stomp');
-    assert.ok(a.stomp.win >= a.good.win && a.good.win >= a.tough.win, JSON.stringify(a));
-    const b = orderedBands({ ...l, tough: { ...l.tough, win: 95 } }, 'tough');
-    assert.ok(b.stomp.win >= b.good.win && b.good.win >= b.tough.win, JSON.stringify(b));
-    const c = orderedBands({ ...l, good: { ...l.good, keep: 90 } }, 'good');
-    assert.ok(c.stomp.keep >= c.good.keep);
+test('B-14 (round 7): Torn Eye\'s bands are fixed, not set by you: Stomp ≥ Good ≥ Fair by the HP you keep', () => {
+    assert.ok(BAND_KEEP.stomp > BAND_KEEP.good && BAND_KEEP.good > BAND_KEEP.fair && BAND_KEEP.fair === 50, JSON.stringify(BAND_KEEP));
 });
 
 test('S-4: an imported export is cleaned: bad rows dropped, huge train counts refused', () => {

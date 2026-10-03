@@ -13,7 +13,7 @@ export const APP_CSS = `
   --chalk:#efebe2; --on-chalk:#15171a;
   --str:#e5534b; --def:#4a8ff0; --spd:#f0c02f; --dex:#43b86c;
   --good:#9bdc8a; --warn:#e8a33d; --bad:#ff6b5e; --link:#8fb8e8;
-  --b-stomp:#3fbf5a; --b-good:#a6e08a; --b-tough:#f0a040; --b-cant:#ff5a4e; --b-none:#6c737a;
+  --b-stomp:#3fbf5a; --b-good:#a6e08a; --b-fair:#f0c02f; --b-low:#ff6b5e; --b-none:#6c737a;
   --serif: "Source Serif 4", Georgia, "Times New Roman", serif; --sans: Inter, "Segoe UI", system-ui, sans-serif; --display: var(--serif);
 }
 * { box-sizing: border-box; }
@@ -238,7 +238,7 @@ details.dis[open] > summary::before { content: "▾ "; }
 .chip .dot { width: 12px; height: 12px; border-radius: 50%; box-shadow: inset 0 0 0 3px currentColor; background: #111; flex: none; }
 .chip b { font-weight: 600; }
 .chip .src { color: var(--dim); font-size: 12px; }
-.b-stomp { color: var(--b-stomp); } .b-good { color: var(--b-good); } .b-tough { color: var(--b-tough); } .b-cant { color: var(--b-cant); } .b-none { color: var(--b-none); }
+.b-stomp { color: var(--b-stomp); } .b-good { color: var(--b-good); } .b-fair { color: var(--b-fair); } .b-low { color: var(--b-low); } .b-none { color: var(--b-none); }
 .chip .figs { color: var(--text); }
 .band { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; white-space: nowrap; }
 .band .dot { width: 10px; height: 10px; border-radius: 50%; box-shadow: inset 0 0 0 3px currentColor; background: #111; }
@@ -452,8 +452,35 @@ svg.ch .grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
 .pane > div.chain.on { border-color: color-mix(in srgb, var(--warn) 55%, transparent); }
 .chain.on .chain-state { color: var(--warn); }
 .stackbox { padding: 24px; border-radius: 10px; background: var(--card2); }
-.stackbox .big { font: 600 22px/1.2 var(--display); color: var(--white); }
+.stackbox .big { font: 600 22px/1.2 var(--serif); color: var(--white); }
 .stackbox ul { margin: 12px 0 16px; padding: 0; list-style: none; color: var(--muted); }
 .stackbox li { padding: 4px 0; }
 .stackbox li b { color: var(--text); }
+/* ---- Round 7: Torn Eye list ---- */
+.eye-chips { display: inline-flex; gap: 8px; flex-wrap: wrap; }
+.eye-chip { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line2); background: transparent; color: var(--text); font: 600 13px var(--sans); cursor: pointer; }
+.eye-chip i { width: 9px; height: 9px; border-radius: 50%; }
+.eye-chip span { color: var(--muted); font-weight: normal; }
+.eye-chip[aria-pressed="true"] { border-color: var(--chalk); background: #2a2c2e; }
+.eye-chip:focus-visible { outline: 2px solid var(--chalk); outline-offset: 2px; }
+.eye-rule { margin-left: auto; color: var(--muted); font-size: 13px; }
+.eye-rule b { color: var(--text); }
+.tbl.eyelist th.key { color: var(--white); }
+.tbl.eyelist td.resp b { font-size: 14px; }
+.tbl.eyelist td.st-ok { color: var(--good); }
+.tbl.eyelist td.st-wait { color: var(--warn); }
+.tbl.eyelist .checking { color: var(--dim); }
+.tbl.eyelist .checking::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--dim); border-top-color: transparent; margin-right: 6px; vertical-align: -1px; animation: pi-eye-spin 1s linear infinite; }
+.still .tbl.eyelist .checking::before { animation: none; }
+@media (prefers-reduced-motion: reduce) { .tbl.eyelist .checking::before { animation: none; } }
+@keyframes pi-eye-spin { to { transform: rotate(360deg); } }
+.eye-pager { display: flex; align-items: center; gap: 8px; margin-top: 16px; color: var(--muted); font-size: 13px; flex-wrap: wrap; }
+.eye-pager button { min-width: 30px; height: 28px; padding: 0 9px; border-radius: 6px; border: 1px solid var(--line2); background: transparent; color: var(--text); font: 600 13px var(--sans); cursor: pointer; }
+.eye-pager button.on { background: var(--chalk); color: var(--on-chalk); border-color: var(--chalk); }
+.eye-pager button:disabled { opacity: .35; cursor: default; }
+.eye-pager button:focus-visible { outline: 2px solid var(--chalk); outline-offset: 2px; }
+.eye-pager .sp { margin-left: auto; }
+.eye-bg { display: flex; align-items: center; gap: 8px; margin-top: 16px; color: var(--muted); font-size: 13px; }
+.eye-bg .track { flex: 0 0 180px; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.eye-bg .fill { height: 100%; background: var(--chalk); }
 `;

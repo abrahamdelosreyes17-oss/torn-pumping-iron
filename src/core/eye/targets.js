@@ -14,20 +14,27 @@
  * other slices of that level band are skipped: they'd be the same list.
  *
  * Then the owner's hard rule: every candidate goes through our fight model
- * and only players you beat (Stomp, Good or Tough) are ever stored. The
- * list is sorted by the most respect you can win.
+ * and only players you beat keeping half your HP or more (Stomp, Good or
+ * Fair, round 7) are ever stored. One order everywhere: most respect, then
+ * most HP kept, then the highest win.
  */
 
 import { estimatePlayer } from './estimate.js';
 import { forecast, respectFor, fairFight, bssOf } from './fight.js';
-import { bandOf } from './bands.js';
+import { bandOf, isListedBand } from './bands.js';
 import { memberState, travelOf } from './war.js';
 
 /** The full range: no respect cap (owner). Torn caps fair fight at 3. */
 export const TARGET_FF = { min: 1.0, max: 3.0 };
 
-/** Bumped when the way lists are asked changes: an older stored list is asked again once. */
-export const TARGETS_VERSION = 2;
+/** Bumped when the way lists are asked or judged changes: an older stored list is asked again once (3: round 7's bands). */
+export const TARGETS_VERSION = 3;
+
+/** What the list is asked with (round 7: the Level range and the Show ticks are gone; inactive players, any faction). */
+export const TARGET_LOAD = { minLevel: 1, maxLevel: 100, inactiveOnly: 1, factionless: null };
+
+/** [calibrate] The list is asked again by itself when the Torn Eye tab is open and the stored one is this old (no Refresh button). */
+export const TARGETS_REFRESH_MS = 6 * 60 * 60 * 1000;
 
 export const FF_SLICES = [
     [1.0, 1.5],
@@ -42,10 +49,11 @@ export const TARGETS_PER_MINUTE = 20;
 /** An estimate older than this is marked "old". */
 export const OLD_ESTIMATE_DAYS = 180;
 
-export const BEATABLE = ['stomp', 'good', 'tough'];
+/** Only these are ever listed or pinged (round 7: HP kept 50% or more over the fights you win). */
+export const BEATABLE = ['stomp', 'good', 'fair'];
 
 export function isBeatable(band) {
-    return BEATABLE.includes(band);
+    return isListedBand(band);
 }
 
 /** [calibrate] Max life from level when no profile was read: Torn's base plus typical merits and perks. */
@@ -107,20 +115,20 @@ export function inFfRange(row) {
     return !Number.isFinite(ff) || (ff >= TARGET_FF.min && ff <= TARGET_FF.max);
 }
 
-/** Most respect first; then the surer win. */
+/** The one order (round 7, the owner): most respect, then most HP kept, then the highest win. Rows {respect, keep, win} (0–100). */
 export function byRespect(a, b) {
-    return (b.respect || 0) - (a.respect || 0) || (b.win ?? -1) - (a.win ?? -1);
+    return (b.respect || 0) - (a.respect || 0) || (b.keep ?? -1) - (a.keep ?? -1) || (b.win ?? -1) - (a.win ?? -1);
 }
 
 /**
  * The hard rule: judge every candidate, keep only the ones you beat.
  * @param {object[]} rows - merged list rows
  * @param {function} judge - row => {band, win (0–100), keep (0–100|null), respect, ours (fair fight), source, ageDays} | null
- * @returns {{kept: object[], dropped: {cant, none, range}}}
+ * @returns {{kept: object[], dropped: {low, none, range}}} low: you'd keep under 50% HP (or never win)
  */
 export function selectTargets(rows, judge) {
     const kept = [];
-    const dropped = { cant: 0, none: 0, range: 0 };
+    const dropped = { low: 0, none: 0, range: 0 };
     for (const r of rows || []) {
         if (!inFfRange(r)) {
             dropped.range++;
@@ -128,7 +136,7 @@ export function selectTargets(rows, judge) {
         }
         const j = judge(r);
         if (!j || !j.band || j.band === 'none') dropped.none++;
-        else if (!isBeatable(j.band)) dropped.cant++;
+        else if (!isBeatable(j.band)) dropped.low++;
         else kept.push({ ...r, ...j });
     }
     kept.sort(byRespect);
@@ -151,15 +159,15 @@ export function listRowAsFfs(row, now = Date.now()) {
 
 /**
  * A plain judge (no cache, no gear, no learner): the tests' and a fallback.
- * @param {object} o - {me: {str,spd,def,dex}, myLife, row, ffs (normalizeFfsRow), limits, now}
+ * @param {object} o - {me: {str,spd,def,dex}, myLife, row, ffs (normalizeFfsRow), now}
  */
-export function judgeTarget({ me, myLife = 7500, row, ffs = null, limits = undefined, now = Date.now() }) {
+export function judgeTarget({ me, myLife = 7500, row, ffs = null, now = Date.now() }) {
     const est = estimatePlayer({ me, ffs: ffs || listRowAsFfs(row, now), now });
     if (!est) return null;
     const f = forecast({ me: { ...me, life: myLife }, target: { id: row.playerId, life: lifeFromLevel(row.level), bss: est.bss } });
     const ours = fairFight(est.bss, bssOf(me));
     return {
-        band: bandOf(f, limits),
+        band: bandOf(f),
         win: Math.round(f.pWin * 100),
         keep: f.keep === null ? null : Math.round(f.keep * 100),
         respect: row.level ? respectFor(row.level, ours) : null,
@@ -188,8 +196,12 @@ export function targetDetails(row, view = null) {
 
 /* ------------------------------------------------ round 7: where a target is, from what was already read */
 
-/** A status read is believed this long; a hospital stay until its own time, a flight until it lands. */
-export const STATUS_FRESH_MS = 15 * 60 * 1000;
+/**
+ * A status read is believed this long; a hospital stay until its own time, a flight until it lands. 25 min (round 7,
+ * was 15): one pass over 600 targets at 30 a minute takes 20 min, so a row read in the last pass is still known when
+ * the next one reaches it.
+ */
+export const STATUS_FRESH_MS = 25 * 60 * 1000;
 
 /**
  * Where a player is, from reads already made, or null when nothing fresh is known. A stored target has no status of
@@ -281,9 +293,165 @@ export function targetsMessage({ paused = false, error = null, loading = false, 
     if (stored && !(stored.list || []).length) {
         const d = stored.dropped || {};
         const parts = [];
-        if (d.cant) parts.push(d.cant + ' can’t-win dropped');
+        if (d.low) parts.push(d.low + ' under 50% HP kept dropped');
         if (d.none) parts.push(d.none + ' with no estimate');
         return { kind: 'empty', text: 'FFScouter found nobody you can beat in range' + (parts.length ? ' · ' + parts.join(' · ') : '') };
     }
     return { kind: 'none', text: stored ? '' : 'No targets yet.' };
+}
+
+/* ------------------------------------------------ round 7: the list (mockups/round7/torn-eye-targets.html) */
+
+/** Rows a page; only these are built (round 7: 300 rows drawn at once held the click up). */
+export const PAGE_SIZE = 20;
+
+/** The band chips, in order. */
+export const BAND_CHIPS = ['all', 'stomp', 'good', 'fair'];
+
+/** The one order on the rows the tab draws (forecast 0..1): most respect, then most HP kept, then the highest win. */
+export function byOrder(a, b) {
+    const k = (r) => (r.forecast && Number.isFinite(r.forecast.keep) ? r.forecast.keep : -1);
+    const w = (r) => (r.forecast && Number.isFinite(r.forecast.pWin) ? r.forecast.pWin : -1);
+    return (b.respect || 0) - (a.respect || 0) || k(b) - k(a) || w(b) - w(a);
+}
+
+/**
+ * Where a target row is, from what is known: 'hospital' (FFScouter's out-time, a read, or your own hit in the last
+ * hour), 'travel' (flying or abroad), 'jail', 'okay', 'other', or 'unknown' when nothing fresh was read.
+ */
+export function rowState(r, now = Date.now()) {
+    const st = (r && r.status) || {};
+    const s = String(st.state || st.description || '').toLowerCase();
+    if ((r.hospitalUntil && r.hospitalUntil > now) || s.includes('hospital') || (r.hit && r.hit.kind === 'hit')) return 'hospital';
+    if (s.includes('travel') || s.includes('abroad') || s.startsWith('in ')) return 'travel';
+    if (s.includes('jail') || s.includes('federal')) return 'jail';
+    return s ? (s.includes('okay') ? 'okay' : 'other') : 'unknown';
+}
+
+/** "Ready now" hides these: in hospital (or hit by you in the last hour), flying or abroad, in jail. Unknown stays. */
+export function isReadyNow(r, now = Date.now()) {
+    const s = rowState(r, now);
+    return !(s === 'hospital' || s === 'travel' || s === 'jail');
+}
+
+/**
+ * The Targets view's rows: only listed bands (the hard rule, whatever was stored), the band chip, "Ready now", the one
+ * order. Counts per chip are of every listed row (before "Ready now"); `hidden` is what "Ready now" took out.
+ * @param {object[]} rows - {band, respect, forecast, status, hospitalUntil, hit}
+ * @param {object} o - {band: 'all'|'stomp'|'good'|'fair', ready: boolean, now}
+ * @returns {{rows: object[], counts: {all, stomp, good, fair}, hidden: number}}
+ */
+export function listTargets(rows, { band = 'all', ready = true, now = Date.now() } = {}) {
+    const listed = (rows || []).filter((r) => r && isBeatable(r.band));
+    const counts = { all: listed.length, stomp: 0, good: 0, fair: 0 };
+    for (const r of listed) counts[r.band]++;
+    const inBand = BAND_CHIPS.includes(band) && band !== 'all' ? listed.filter((r) => r.band === band) : listed;
+    const out = ready ? inBand.filter((r) => isReadyNow(r, now)) : inBand;
+    return { rows: [...out].sort(byOrder), counts, hidden: inBand.length - out.length };
+}
+
+/** One page of rows: {rows, page (0-based, clamped), pages, from, to (1-based, for "21–40")}. */
+export function pageOf(rows, page = 0, per = PAGE_SIZE) {
+    const n = (rows || []).length;
+    const pages = Math.max(1, Math.ceil(n / per));
+    const p = Math.max(0, Math.min(pages - 1, Math.floor(Number(page) || 0)));
+    const slice = (rows || []).slice(p * per, p * per + per);
+    return { rows: slice, page: p, pages, from: n ? p * per + 1 : 0, to: p * per + slice.length };
+}
+
+/** The pager's numbers: the first three, the last two, the ones next to this page, '…' between (0-based). */
+export function pagerItems(page, pages) {
+    const out = [];
+    for (let p = 0; p < pages; p++) {
+        if (p < 3 || p > pages - 3 || Math.abs(p - page) <= 1) out.push(p);
+        else if (out[out.length - 1] !== '…') out.push('…');
+    }
+    return out;
+}
+
+/* ------------------------------------------------ round 7: statuses the Torn Trading way (its updateSellPresence) */
+
+/** Each player is asked again after this (Torn Trading's SELL_PRESENCE_REFRESH_MS). */
+export const STATUS_REFRESH_MS = 10 * 60 * 1000;
+/** The player you opened to attack: again after this (Trading's open item, SELL_PRESENCE_OPEN_REFRESH_MS). */
+export const STATUS_OPEN_REFRESH_MS = 90 * 1000;
+/** At most this many asked a minute (Trading's SELL_PRESENCE_PER_MIN), in Torn Eye's API lane. */
+export const STATUS_PER_MIN = 30;
+/** At most this many asked at once (Trading's SELL_PRESENCE_MAX_PENDING). */
+export const STATUS_MAX_PENDING = 3;
+/** A failed read is not asked again sooner (Trading's PRESENCE_RETRY_MS). */
+export const STATUS_RETRY_MS = 2 * 60 * 1000;
+/** Statuses kept across reloads and tabs: 600 targets (FFScouter's finder asked 12 × 50) and a few more. */
+export const STATUS_KEEP = 640;
+
+/** Who is asked first: the player opened to attack, then the page on screen, then every other row in the list's order. */
+export function statusOrder({ open = [], page = [], all = [] } = {}) {
+    const seen = new Set();
+    const out = [];
+    for (const id of [...open, ...page, ...all]) {
+        const n = Number(id);
+        if (n > 0 && !seen.has(n)) {
+            seen.add(n);
+            out.push(n);
+        }
+    }
+    return out;
+}
+
+/**
+ * Which players to ask now (Trading's updateSellPresence, pure): in order, skipping one asked or read lately (any
+ * read counts: the war list, the watch list, a flight, our own), one pending, one failed lately; never more than 3 at
+ * once or 30 in a minute.
+ * @param {object} o - {order: id[], open: Set, readAt: id => ms|0, pending: Set, retryAt: Map, asked: ms[], now}
+ * @returns {{ask: number[], asked: number[]}} asked: the minute's ask times, these included
+ */
+export function statusesToAsk({ order = [], open = new Set(), readAt = () => 0, pending = new Set(), retryAt = new Map(), asked = [], now = Date.now() } = {}) {
+    const minute = asked.filter((t) => now - t < 60000);
+    const ask = [];
+    let busy = pending.size;
+    for (const id of order) {
+        if (busy >= STATUS_MAX_PENDING || minute.length >= STATUS_PER_MIN) break;
+        if (pending.has(id) || now < (retryAt.get(id) || 0)) continue;
+        const every = open.has(id) ? STATUS_OPEN_REFRESH_MS : STATUS_REFRESH_MS;
+        if (now - (readAt(id) || 0) < every) continue;
+        ask.push(id);
+        minute.push(now);
+        busy++;
+    }
+    return { ask, asked: minute };
+}
+
+/**
+ * The progress line's numbers: how many of the list's players have a status known now, and about how long the rest
+ * take at 30 a minute.
+ * @param {number[]} ids - every row of the stored list
+ * @param {function} known - id => boolean
+ */
+export function statusProgress(ids, known) {
+    const total = (ids || []).length;
+    const checked = (ids || []).filter((id) => known(id)).length;
+    return { checked, total, leftMin: Math.ceil((total - checked) / STATUS_PER_MIN) };
+}
+
+/** "Statuses: 40 of 600 checked · this page first · the rest in about 19 min" (the mockup's words). */
+export function statusLine({ checked, total, leftMin }) {
+    if (!total) return '';
+    if (checked >= total) return 'Statuses: all ' + total + ' checked · each again every 10 min';
+    return 'Statuses: ' + checked + ' of ' + total + ' checked · this page first · the rest in about ' + Math.max(1, leftMin) + ' min';
+}
+
+/**
+ * The statuses kept across reloads and tabs ({id: [status, at]}): two tabs' merged, the newest read of each player
+ * kept, the newest STATUS_KEEP players, none over a day old.
+ */
+export function mergeStatuses(a, b, now = Date.now()) {
+    const out = {};
+    for (const src of [a, b]) {
+        for (const [id, v] of Object.entries(src || {})) {
+            if (!Array.isArray(v) || !v[0] || !(Number(v[1]) > 0) || !(now - Number(v[1]) < 24 * 3600e3)) continue;
+            if (!out[id] || out[id][1] < Number(v[1])) out[id] = [v[0], Number(v[1])];
+        }
+    }
+    const kept = Object.entries(out).sort((x, y) => y[1][1] - x[1][1]).slice(0, STATUS_KEEP);
+    return Object.fromEntries(kept);
 }

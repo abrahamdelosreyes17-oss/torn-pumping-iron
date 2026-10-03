@@ -18,7 +18,8 @@ import { judgeTarget, selectTargets, targetQueries, levelBands, needsRefetch, ta
 import { enemiesFromWars, activityOf, trackFlights, statusParts, statusText, sortWar, memberState, FLIGHT_MIN } from '../src/core/eye/war.js';
 import { addWatch, removeWatch, tagWatch, normTag, dueForRead, readEvents, headsUps, watchOffers, dismissOffer, WATCH_MAX, TAG_MAX, WATCH_POLL_MS, WATCH_SLOW_MS } from '../src/core/eye/watch.js';
 import { importTargets, TARGETS_KEY, WATCH_KEY, WATCH_STATE_KEY, slimAttacks, pollWatch, toggleWatch, getWatch, watchStates, rememberFlights, flightsSeen, setWatchTag, watchOffersNow } from '../src/eye-service.js';
-import { shouldAutoLoad, detailsText, filterTargets, EYE_TICKS, EYE_MODES, DEFAULT_EYE_FILTERS } from '../src/ui/app/eye-tab.js';
+import { shouldAutoLoad, detailsText, EYE_TICKS, EYE_MODES, DEFAULT_EYE_FILTERS } from '../src/ui/app/eye-tab.js';
+import { listTargets, TARGETS_REFRESH_MS } from '../src/core/eye/targets.js';
 import { setEyeForSync, eyeSyncPayload } from '../src/discord.js';
 import { countdown, tornClock } from '../src/core/bars.js';
 
@@ -88,15 +89,15 @@ test('the owner\'s case: the strongest-first level-100 list (1.1.1) is all can\'
     assert.ok(rows.every((r) => r.level === 100));
     const { kept, dropped } = selectTargets(rows, (r) => judgeTarget({ me: OWNER, myLife: OWNER_LIFE, row: r }));
     assert.equal(kept.length, 0, 'nothing he can\'t beat is kept');
-    assert.equal(dropped.cant, 50);
-    assert.equal(targetsMessage({ stored: { list: [], dropped } }).text, 'FFScouter found nobody you can beat in range · 50 can’t-win dropped');
+    assert.equal(dropped.low, 50);
+    assert.equal(targetsMessage({ stored: { list: [], dropped } }).text, 'FFScouter found nobody you can beat in range · 50 under 50% HP kept dropped');
 });
 
 test('the fight model is right for the owner: fair fight 2.0 at level 100 is a sure win, 3.0 is not', () => {
     const at = (ff, id) => judgeTarget({ me: OWNER, myLife: OWNER_LIFE, row: { playerId: id, level: 100, fairFight: ff } });
     assert.equal(at(2.0, 1).win, 100);
     assert.equal(at(2.0, 1).band, 'stomp');
-    assert.equal(at(3.0, 2).band, 'cant');
+    assert.equal(at(3.0, 2).band, 'low');
 });
 
 test('asks: 4 fair-fight slices × up to 3 level bands, the full 1.0–3.0, highest levels first', () => {
@@ -134,9 +135,11 @@ test('import (the owner, strongest-first FFScouter): only beatable players are s
     assert.equal(calls.filter((u) => u.pathname.endsWith('/get-targets')).length, 12);
     assert.ok(calls.filter((u) => u.pathname.endsWith('/get-stats')).length >= 1, 'estimates asked before judging');
     assert.ok(out.list.length >= 20, out.list.length + ' kept');
-    assert.ok(out.list.every((r) => isBeatable(r.band)), 'never a can\'t-win row: ' + [...new Set(out.list.map((r) => r.band))]);
-    assert.ok(out.dropped.cant > 0, 'the strong ones were dropped, not stored');
+    assert.ok(out.list.every((r) => isBeatable(r.band)), 'never a row under 50% HP kept: ' + [...new Set(out.list.map((r) => r.band))]);
+    assert.ok(out.list.every((r) => r.keep >= 50), 'every stored row keeps half your HP or more');
+    assert.ok(out.dropped.low > 0, 'the strong ones were dropped, not stored');
     assert.ok(out.list.every((r, i) => i === 0 || (r.respect || 0) <= (out.list[i - 1].respect || 0)), 'most respect first');
+    assert.ok(out.list.every((r, i) => i === 0 || r.respect !== out.list[i - 1].respect || r.keep <= out.list[i - 1].keep), 'then most HP kept');
     assert.ok(out.list[0].respect > 3, 'no respect cap: the best is above 3 (' + out.list[0].respect.toFixed(2) + ')');
     assert.ok(new Set(out.list.map((r) => r.level)).size > 5, 'not only level 100');
     assert.ok(out.list.every((r) => Number.isFinite(r.fairFight) && Number.isFinite(r.ours)), 'both fair fights kept for the details');
@@ -175,19 +178,27 @@ test('a list stored the old way (1.1.0 no range, 1.1.1 1.3–2.6) loads again on
     assert.equal(needsRefetch({ minLevel: 1, maxLevel: 100 }), true);
     assert.equal(shouldAutoLoad({ ...base, stored: { params: { minFf: 1.3, maxFf: 2.6 }, list: [{}] } }), true);
     assert.equal(shouldAutoLoad({ ...base, stored: null }), true);
-    assert.equal(shouldAutoLoad({ ...base, stored: { params: targetParams({}), list: [] } }), false, 'a new list, even empty, is not asked again');
+    const now = 5e12;
+    assert.equal(shouldAutoLoad({ ...base, now, stored: { at: now - 60000, params: targetParams({}), list: [] } }), false, 'a new list, even empty, is not asked again');
     assert.equal(shouldAutoLoad({ ...base, stored: null, autoLoaded: true }), false, 'once');
     assert.equal(shouldAutoLoad({ ...base, stored: null, paused: true }), false);
     assert.equal(shouldAutoLoad({ ...base, mode: 'war', stored: null }), false);
+    assert.equal(shouldAutoLoad({ ...base, mode: 'chain', stored: null }), false, 'Chain is gone');
     assert.equal(shouldAutoLoad({ ...base, stored: null, ready: false }), false, 'waits for your stats');
+    // Round 7: no Refresh button, so an old list is asked again by itself (and not again for the same while).
+    const old = { at: now - TARGETS_REFRESH_MS - 1, params: targetParams({}), list: [{}] };
+    assert.equal(shouldAutoLoad({ ...base, now, stored: old }), true);
+    assert.equal(shouldAutoLoad({ ...base, now, stored: old, autoLoaded: now - 60000 }), false);
+    assert.equal(shouldAutoLoad({ ...base, now, stored: old, autoLoaded: now - TARGETS_REFRESH_MS - 1 }), true);
 });
 
-test('Targets and Chain: no "Hide can\'t win" tick, and a can\'t-win row never shows', () => {
-    assert.ok(!EYE_TICKS.some(([k]) => k === 'hideCant'));
-    assert.deepEqual(EYE_MODES.map(([k]) => k), ['targets', 'chain', 'war', 'watched']);
-    assert.equal(DEFAULT_EYE_FILTERS.sort, 'respect');
-    const rows = [{ id: 1, band: 'stomp' }, { id: 2, band: 'cant' }, { id: 3, band: 'none' }, { id: 4, band: 'tough' }];
-    assert.deepEqual(filterTargets(rows, {}, { now: 0 }).map((r) => r.id), [1, 4]);
+test('round 7: three views (Chain is gone), no Sort and no Show ticks on Targets, and a row under 50% never shows', () => {
+    assert.deepEqual(EYE_MODES.map(([k]) => k), ['targets', 'war', 'watched']);
+    assert.deepEqual(EYE_TICKS.map(([k]) => k), ['warHideLow', 'warHideHosp', 'warHideTravel'], 'only War keeps its ticks');
+    assert.equal(DEFAULT_EYE_FILTERS.sort, undefined);
+    assert.equal(DEFAULT_EYE_FILTERS.ready, true, '"Ready now" on by default');
+    const rows = [{ id: 1, band: 'stomp' }, { id: 2, band: 'low' }, { id: 3, band: 'none' }, { id: 4, band: 'fair' }, { id: 5, band: 'tough' }, { id: 6, band: 'cant' }];
+    assert.deepEqual(listTargets(rows, { now: 0 }).rows.map((r) => r.id).sort(), [1, 4]);
 });
 
 test('row details: our fair fight, FFScouter\'s from its list, age ("old" past 180 days), source', () => {
@@ -373,7 +384,7 @@ test('pollWatch: one profile per due player through the Torn client, a war list 
 /* ----------------------------------------------------------------- sync */
 
 test('sync: war (≤100) and watch (≤50) rows for the Worker, band/win/keep cleaned; sig changes with them', () => {
-    const members = Array.from({ length: 120 }, (_, i) => ({ id: i + 1, name: 'M' + i, level: 50, band: i === 0 ? 'weird' : 'good', win: i === 1 ? 104.4 : 91.6, keep: null }));
+    const members = Array.from({ length: 120 }, (_, i) => ({ id: i + 1, name: 'M' + i, level: 50, band: i === 0 ? 'weird' : i === 2 ? 'fair' : i === 3 ? 'low' : i === 4 ? 'cant' : 'good', win: i === 1 ? 104.4 : 91.6, keep: null }));
     const watch = Array.from({ length: 60 }, (_, i) => ({ id: 1000 + i, name: 'W' + i, level: 10, band: 'stomp', win: 100, keep: 88, tag: 'a much too long reason for the worker' }));
     setEyeForSync({ war: { factionId: 7777, members }, watch });
     const p = eyeSyncPayload();
@@ -381,6 +392,7 @@ test('sync: war (≤100) and watch (≤50) rows for the Worker, band/win/keep cl
     assert.equal(p.war.members.length, 100);
     assert.deepEqual(p.war.members[0], { id: 1, name: 'M0', level: 50, band: 'none', win: 92, keep: null });
     assert.equal(p.war.members[1].win, 100);
+    assert.deepEqual(p.war.members.slice(2, 5).map((r) => r.band), ['fair', 'low', 'low'], 'round 7 bands; an old "can’t win" goes as under 50%');
     assert.equal(p.watch.length, 50);
     assert.deepEqual(Object.keys(p.watch[0]), ['id', 'name', 'level', 'band', 'win', 'keep', 'tag']);
     assert.equal(p.watch[0].tag.length, 24);

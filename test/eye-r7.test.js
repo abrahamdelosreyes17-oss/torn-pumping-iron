@@ -8,8 +8,12 @@ import { pi } from '../src/runtime.js';
 import { set } from '../src/platform/store.js';
 import { warBandTable, warBandOf, WAR_BANDS_MAX, WAR_BANDS_KEEP_MS } from '../src/core/eye/war.js';
 import { eyeView, eyeReady, loadEyeCache, sharedView, onEye, WAR_BANDS_KEY } from '../src/eye-service.js';
-import { knownStatus, STATUS_FRESH_MS, ownHits, hitText, OWN_HIT_MS, ATTACK_OPENED_MS } from '../src/core/eye/targets.js';
-import { filterTargets, stateOf } from '../src/ui/app/eye-tab.js';
+import { knownStatus, STATUS_FRESH_MS, ownHits, hitText, OWN_HIT_MS, ATTACK_OPENED_MS, listTargets } from '../src/core/eye/targets.js';
+import { stateOf } from '../src/ui/app/eye-tab.js';
+
+/** The rows "Ready now" keeps (round 7: one chip instead of the Hide hospital and Hide traveling ticks). */
+const ready = (rows, now) => listTargets(rows, { ready: true, now }).rows.map((r) => r.id);
+const all = (rows, now) => listTargets(rows, { ready: false, now }).rows.map((r) => r.id);
 
 const ME = { str: 49.3e6, spd: 13.8e6, def: 39.5e6, dex: 39.5e6 };
 
@@ -36,14 +40,15 @@ test('war mode\'s bands as a small table: no "No data" rows, a cap, whole number
     const t = warBandTable(
         [
             { id: 1, band: 'stomp', win: 99.6, keep: 91.2 },
-            { id: 2, band: 'cant', win: 12, keep: null },
+            { id: 2, band: 'low', win: 12, keep: null },
             { id: 3, band: 'none', win: null, keep: null },
             { id: 0, band: 'good', win: 95, keep: 60 },
             { id: 5, band: 'whatever', win: 95, keep: 60 },
+            { id: 6, band: 'fair', win: 80, keep: 55 },
         ],
         { fid: 7777, now: 1000 },
     );
-    assert.deepEqual(t, { at: 1000, fid: 7777, p: { 1: ['stomp', 100, 91], 2: ['cant', 12, null] } });
+    assert.deepEqual(t, { at: 1000, fid: 7777, p: { 1: ['stomp', 100, 91], 2: ['low', 12, null], 6: ['fair', 80, 55] } });
     const many = warBandTable(Array.from({ length: 400 }, (_, i) => ({ id: i + 1, band: 'good', win: 95, keep: 60 })), { fid: 1, now: 1 });
     assert.equal(Object.keys(many.p).length, WAR_BANDS_MAX);
     assert.ok(JSON.stringify(many).length < 4000, 'small enough for shared storage (' + JSON.stringify(many).length + ' characters)');
@@ -58,12 +63,15 @@ test('a band from the table: there, not too old, never "No data"', () => {
     assert.equal(warBandOf(null, 9, 6000), null);
     assert.equal(warBandOf({ at: 5000, p: { 9: ['none', null, null] } }, 9, 6000), null);
     assert.equal(warBandOf({ at: 5000, p: { 9: 'good' } }, 9, 6000), null);
+    // A table an older version wrote (Tough, Can't win): read as under 50% until war mode writes it again.
+    assert.equal(warBandOf({ at: 5000, p: { 9: ['cant', 3, null] } }, 9, 6000).band, 'low');
+    assert.equal(warBandOf({ at: 5000, p: { 9: ['tough', 70, 20] } }, 9, 6000).band, 'low');
 });
 
 test('Torn\'s page shows what war mode read for a player it holds no estimate for', () => {
     const now = Date.now();
     assert.equal(sharedView(515151, { name: 'Flyer', level: 40 }, now), null, 'nothing shared yet');
-    set(WAR_BANDS_KEY, warBandTable([{ id: 515151, band: 'good', win: 93, keep: 55 }, { id: 777001, band: 'cant', win: 4, keep: null }], { fid: 7777, now: now - 60000 }));
+    set(WAR_BANDS_KEY, warBandTable([{ id: 515151, band: 'good', win: 93, keep: 55 }, { id: 777001, band: 'low', win: 4, keep: null }], { fid: 7777, now: now - 60000 }));
     const v = sharedView(515151, { name: 'Flyer', level: 40 }, now);
     assert.equal(v.band, 'good');
     assert.equal(v.name, 'Flyer');
@@ -84,12 +92,16 @@ test('the cause: a stored target has no status of its own, so it read as Okay an
     // A row as the Torn Eye tab builds it from the stored list: FFScouter's list carries no status, and nothing reads one.
     const row = { id: 1, band: 'good', forecast: { pWin: 0.95, keep: 0.8 }, hospitalUntil: null, status: null };
     assert.equal(stateOf(row, T0), 'unknown', 'not "okay": nothing was read');
-    assert.deepEqual(filterTargets([row], { hideTravel: true }, { now: T0 }).map((r) => r.id), [1], 'nothing known: it can only stay');
+    assert.deepEqual(ready([row], T0), [1], 'nothing known: it can only stay');
     // The same player, seen flying by the watch list 5 minutes ago.
     const st = knownStatus([{ status: { state: 'Traveling', description: 'Traveling to Mexico' }, at: T0 - 5 * MIN }], { now: T0 });
     assert.equal(st.state, 'travel');
-    assert.deepEqual(filterTargets([{ ...row, status: st.status }], { hideTravel: true }, { now: T0 }), []);
+    assert.deepEqual(ready([{ ...row, status: st.status }], T0), []);
     assert.equal(stateOf({ ...row, status: st.status }, T0), 'travel');
+    // Abroad and jail too (round 7, "Ready now").
+    assert.deepEqual(ready([{ ...row, status: { state: 'Abroad', description: 'In Mexico' } }], T0), []);
+    assert.equal(stateOf({ ...row, status: { state: 'Jail', description: 'In jail for 5 mins' } }, T0), 'jail');
+    assert.deepEqual(ready([{ ...row, status: { state: 'Jail', description: 'In jail for 5 mins' } }], T0), []);
 });
 
 test('what was already read about a player: the newest read wins, and an old one is dropped', () => {
@@ -156,6 +168,6 @@ test('a player you just hit is greyed, counts as in hospital for the ticks, and 
     ];
     assert.equal(stateOf(rows[0], T0), 'hospital');
     assert.equal(stateOf(rows[1], T0), 'unknown', 'an opened attack page is not a hit');
-    assert.deepEqual(filterTargets(rows, { hideHosp: true }, { now: T0 }).map((r) => r.id), [9, 11]);
-    assert.deepEqual(filterTargets(rows, {}, { now: T0 }).map((r) => r.id), [5, 9, 11], 'greyed, not hidden, without the tick');
+    assert.deepEqual(ready(rows, T0), [9, 11], '"Ready now" hides a player you hit in the last hour');
+    assert.deepEqual(all(rows, T0), [5, 9, 11], 'greyed, not hidden, with "Ready now" off');
 });

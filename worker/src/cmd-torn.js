@@ -9,7 +9,7 @@ import { Q, parse } from './db.js';
 import { reply, defer, linkButton, row as actionRow } from './discord.js';
 import { keyFor, KeyError } from './keys.js';
 import { userState, playerBasic, factionWars, factionMembers, factionChain, pauseUser, tornErrorText, TornError } from './torn.js';
-import { findWar, membersOf, playerNow, estimator, warPages, warGroups, chainText, BEATABLE, MAX_WAR_MEMBERS, MAX_WATCH } from './war.js';
+import { findWar, membersOf, playerNow, estimator, warPages, warGroups, chainText, BEATABLE, BAND_WORDS, normBand, MAX_WAR_MEMBERS, MAX_WATCH } from './war.js';
 import { bestPrice, buyMessage, itemName, MAX_WATCHES } from './market.js';
 import { ITEMS } from './commands.js';
 import { clock, rel, dur, money, PAGES } from './format.js';
@@ -101,7 +101,6 @@ export async function watchCmd(user, i, env, fetchImpl, ctx, nowS) {
 
 /* ---------- /targets and /target ---------- */
 
-const BANDS = ['stomp', 'good', 'tough', 'cant', 'none'];
 const posInt = (v) => (Number.isInteger(Number(v)) && Number(v) > 0 && Number(v) < 1e9 ? Number(v) : null);
 const pct = (v) => (v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Math.max(0, Math.min(100, Number(v))));
 
@@ -113,18 +112,17 @@ export function cleanTargets(t, nowS) {
     if (!t || typeof t !== 'object') return null;
     const list = (Array.isArray(t.list) ? t.list : [])
         .slice(0, 50)
-        .map((x) => ({ id: posInt(x && x.id), name: String((x && x.name) || '').slice(0, 40), level: posInt(x && x.level), band: BANDS.includes(x && x.band) ? x.band : 'none', win: pct(x && x.win), keep: pct(x && x.keep) }))
+        .map((x) => ({ id: posInt(x && x.id), name: String((x && x.name) || '').slice(0, 40), level: posInt(x && x.level), band: normBand(x && x.band), win: pct(x && x.win), keep: pct(x && x.keep) }))
         .filter((x) => x.id);
     const bands = {};
-    for (const [id, b] of Object.entries(t.bands && typeof t.bands === 'object' ? t.bands : {}).slice(0, 500)) if (posInt(id) && BANDS.includes(b)) bands[posInt(id)] = b;
+    for (const [id, b] of Object.entries(t.bands && typeof t.bands === 'object' ? t.bands : {}).slice(0, 500)) if (posInt(id) && normBand(b) !== 'none') bands[posInt(id)] = normBand(b);
     return { at: nowS, list, bands };
 }
 
-const BAND_WORDS = { stomp: 'Stomp', good: 'Good', tough: 'Tough', cant: 'Can’t win', none: 'No data' };
 
 /** One player as the userscript syncs it: {id, name, level, band, win, keep} (+ tag on the watch list). */
 function cleanPlayer(x, withTag) {
-    const p = { id: posInt(x && x.id), name: x && x.name ? String(x.name).slice(0, 40) : null, level: posInt(x && x.level), band: BANDS.includes(x && x.band) ? x.band : 'none', win: pct(x && x.win), keep: pct(x && x.keep) };
+    const p = { id: posInt(x && x.id), name: x && x.name ? String(x.name).slice(0, 40) : null, level: posInt(x && x.level), band: normBand(x && x.band), win: pct(x && x.win), keep: pct(x && x.keep) };
     if (withTag) p.tag = x && x.tag ? String(x.tag).slice(0, 24) : null;
     return p;
 }

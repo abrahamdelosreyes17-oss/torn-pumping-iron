@@ -295,7 +295,7 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
 {
     // Round 7 (I.1): the rows show what is already known and ask nothing. Known here: Rival, whose profile was opened
     // first (this site's own stored estimate), and Flyer, whom the Torn Eye tab's war mode judged (the shared table).
-    const warBands = { at: Date.parse('2026-09-29T10:40:00Z'), fid: 7777, p: { 515151: ['cant', 3, null], 605123: ['stomp', 100, 97] } };
+    const warBands = { at: Date.parse('2026-09-29T10:40:00Z'), fid: 7777, p: { 515151: ['low', 3, null], 605123: ['stomp', 100, 97] } };
     const { page, errors } = await open('page=profile&XID=424242&fixture=profile&ffs=1&who=owner', { wait: 8000, seed: { 'pumpingIron.v1.eyeWarBands': JSON.stringify(warBands) } });
     await page.goto('http://127.0.0.1:8783/test/harness-live.html?key=1&at=2026-09-29T10:48:00Z&wait=100000&plan=1&follow=steady&page=faction&ID=7777&fixture=faction&ffs=1&who=owner');
     await page.waitForTimeout(6500);
@@ -307,8 +307,8 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     const sum = (await text(page, '.pi-warsum'))[0] || '';
     ok(/1 attackable now/.test(sum) && /1 traveling/.test(sum) && /live war mode on Pumping Iron’s Torn Eye tab/.test(sum), 'war: summary line (' + sum + ')');
     const chips = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll('#faction_war_list_id li.enemy')].map((li) => [li.querySelector('.member a[href*="XID"]').getAttribute('aria-label').replace('View profile of ', ''), (li.querySelector('.pi-chip') || { textContent: '' }).textContent.replace(/\s+/g, ' ').trim()])));
-    ok(/^(Stomp|Good|Tough|Can't win)/.test(chips.Rival), 'war: the estimate stored by an earlier page shows on its row (' + chips.Rival + ')');
-    ok(/^Can't win/.test(chips.Flyer), 'war: a player only war mode judged shows its band (' + chips.Flyer + ')');
+    ok(/^(Stomp|Good|Fair|Under 50%)/.test(chips.Rival), 'war: the estimate stored by an earlier page shows on its row (' + chips.Rival + ')');
+    ok(/^Under 50%/.test(chips.Flyer), 'war: a player only war mode judged shows its band (' + chips.Flyer + ')');
     ok(chips.Mira_Vex === '' && chips.Brix === '', 'war: no chip where nothing is known, never "No data" (' + JSON.stringify(chips) + ')');
     const flyerChip = page.locator('#faction_war_list_id li.enemy .pi-chip[data-pi-player="515151"]');
     await flyerChip.scrollIntoViewIfNeeded();
@@ -334,7 +334,7 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     const { page, errors } = await open('page=attack&user2ID=424242&fixture=attack&ffs=1&who=owner', { wait: 6000 });
     const panel = () => page.evaluate(() => document.getElementById('pi-attack').shadowRoot.querySelector('.panel').textContent);
     const before = await panel();
-    ok(/Torn Eye/.test(before) && /(Stomp|Good|Tough|Can't win)/.test(before) && /isn.t shown yet/.test(before), 'attack: panel before Start Fight (' + before.slice(0, 90) + ')');
+    ok(/Torn Eye/.test(before) && /(Stomp|Good|Fair|Under 50%)/.test(before) && /isn.t shown yet/.test(before), 'attack: panel before Start Fight (' + before.slice(0, 90) + ')');
     await page.evaluate(() => fetch('fixtures/attackData.json?sid=attackData').then((r) => r.json()));
     await page.waitForTimeout(2200); // the cache is written 1.5 s after the last change
     const after = await panel();
