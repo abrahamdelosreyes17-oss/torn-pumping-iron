@@ -8,12 +8,12 @@ import { gmMenu, gmOpenTab } from './platform/gm.js';
 import { K, get, set, getKey, getSettings, getPlan, getPrices } from './platform/store.js';
 import { keyProblem } from './ui/key-status.js';
 import { onModel, isVisible, refresh, pi, beatFocus, readSoon } from './runtime.js';
-import { isPaused, onPauseChange } from './turns.js';
+import { isPaused, tradingWhere } from './turns.js';
 import { Overlay } from './ui/overlay.js';
 import { ensureMarkCss, clearMarks, drawGymMarks, outline } from './ui/marks/marks.js';
 import { gymRoot, gymLoading, readStatBoxes, readGymButtons, gymListSummary, readEnergyBar, readHappyBar, barsActed } from './sources/dom/gym.js';
 import { readItemRows, readBazaarCards, readItemMarketRows, readPointsRows } from './sources/dom/market.js';
-import { planGymPage, pageReading, nextSession } from './core/gympage.js';
+import { planGymPage, pageReading, nextSession, gymPanel, isBoostStep, boostProgress, nextOverdose, REHAB_COST, TRAVEL_URL, DUE_SLACK_MS } from './core/gympage.js';
 import { unlockEnergyAfter } from './core/gyms.js';
 import { needsForWindow, shownTypes, typeOf } from './ui/app/buy.js';
 import { itemContext } from './core/model.js';
@@ -24,7 +24,7 @@ import { trainsText } from './ui/app/common.js';
 import { tornClock } from './core/bars.js';
 import { fmtInt } from './core/format.js';
 import { POINTS } from './core/items.js';
-import { detectPage, bazaarOwnerId, itemMarketItemOf, APP_PAGE_URL, PAGE_GYM, PAGE_ITEMS, PAGE_BAZAAR, PAGE_ITEM_MARKET, PAGE_POINTS, PAGE_PROFILE, PAGE_FACTION, PAGE_ATTACK } from './sources/route.js';
+import { detectPage, bazaarOwnerId, itemMarketItemOf, gymUrl, itemsUrl, pointsUrl, APP_PAGE_URL, PAGE_GYM, PAGE_ITEMS, PAGE_BAZAAR, PAGE_ITEM_MARKET, PAGE_POINTS, PAGE_PROFILE, PAGE_FACTION, PAGE_ATTACK } from './sources/route.js';
 
 const tp = { overlay: null, model: null, observer: null, gymSig: '', lastGymPlan: null };
 
@@ -51,6 +51,37 @@ function currentProblem() {
     return keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: (get(K.userStatic, {}) || {}).keyInfo || null });
 }
 
+/** The bars as Torn's sidebar shows them now (they move before our next read), else the model's. */
+function liveReads(m) {
+    const happy = readHappyBar() || (m && m.strip && m.strip.happy ? { current: m.strip.happy.current, max: m.strip.happy.max } : null);
+    const energy = readEnergyBar() || (m && m.strip ? m.strip.energy : null);
+    return { happy, energy, boosterLeft: m && m.strip && m.strip.booster ? m.strip.booster.left : 0, drugLeft: m && m.strip && m.strip.drug ? m.strip.drug.left : 0 };
+}
+
+/** GM key: an overdose seen on the bars ({at, until}), so every tab stops its jump marks. */
+export const OVERDOSE_KEY = 'overdose';
+
+/** An overdose seen on the bars, kept until the drug cooldown it started is over. */
+function overdoseOf(m, reads = liveReads(m), now = Date.now()) {
+    if (!m || !m.ready) return null;
+    const prev = get(OVERDOSE_KEY, null);
+    const next = nextOverdose(prev, reads, now);
+    if (JSON.stringify(next) !== JSON.stringify(prev)) set(OVERDOSE_KEY, next);
+    return next;
+}
+
+/** The step's one action on Torn: the page it is done on (none when you are on it). */
+export function stepAction(step, page, boost = null) {
+    if (!step) return null;
+    const items = (step.items || []).filter((it) => it.qty > 0);
+    const trains = Boolean(step.parts && step.parts.length);
+    if (boost) return boost.ready ? (page === PAGE_GYM ? null : { text: 'Open the gym', href: gymUrl() }) : page === PAGE_ITEMS ? null : { text: 'Open Items', href: itemsUrl() };
+    if (items.some((it) => it.id === POINTS)) return page === PAGE_POINTS ? null : { text: 'Open Points', href: pointsUrl() };
+    if (items.length) return page === PAGE_ITEMS ? null : { text: 'Open Items', href: itemsUrl() };
+    if (trains && page !== PAGE_GYM) return { text: 'Open the gym', href: gymUrl() };
+    return null;
+}
+
 function overlayView(m, page) {
     const s = getSettings();
     const relevant = [PAGE_GYM, PAGE_ITEMS, PAGE_BAZAAR, PAGE_ITEM_MARKET, PAGE_POINTS].includes(page);
@@ -61,18 +92,31 @@ function overlayView(m, page) {
         if (p) return { pillText: p.short, cardStep: p.title, cardSub: p.text, warn: p.kind === 'retry' ? null : 'Open Pumping Iron › Settings' };
         return hasKey ? { pillText: 'Reading your state…', cardStep: 'Asking Torn for your bars, stats and gym.' } : { pillText: 'Open to set up', cardStep: 'Add your Torn key in Pumping Iron’s Settings.' };
     }
+    const now = Date.now();
     const next = m.next;
-    const later = m.steps.slice(1, 3).map((x) => tornClock(x.at) + ' · ' + x.label + (trainsText(x.trains) ? ', ' + trainsText(x.trains) : ''));
-    const v = { energy: m.strip.energy, happy: m.strip.happy, later };
+    const later = m.steps.slice(1, 3).map((x) => tornClock(x.at) + ' ' + x.label.split(' · ')[0] + (trainsText(x.trains) ? ', ' + trainsText(x.trains) : ''));
+    const energy = readEnergyBar() || m.strip.energy;
+    // Stacking energy for a chain (Home's "I'm stacking"): no training steps, the energy is kept.
+    if (m.stacking) {
+        return { tone: 'amber', label: 'Stacking', pillText: 'Stacking for a chain · training paused', cardStep: 'Stacking for a chain', cardSub: 'Training paused · energy now ' + fmtInt(energy.current) + ' / ' + fmtInt(energy.max) + ', kept', energy, later: [] };
+    }
+    const reads = liveReads(m);
+    if (overdoseOf(m, reads, now)) {
+        return { tone: 'amber', label: 'Overdosed', pillText: 'Overdosed · fly to Switzerland', cardStep: 'Fly to Switzerland', cardSub: 'Rehab there: about $' + fmtInt(REHAB_COST) + ' a session. The plan is worked out again after rehab.', later: [], action: { text: 'Open Travel', href: TRAVEL_URL } };
+    }
+    const v = { energy, later };
     // On the gym page the bar follows the walk-through. Round 7: once the session is done and the next step is still
     // ahead, it moves on to that step and its countdown (it stayed on "Now · Session done").
-    const sessionOver = page === PAGE_GYM && tp.lastGymPlan && tp.lastGymPlan.done && next && next.at > Date.now();
-    if (page === PAGE_GYM && tp.lastGymPlan && tp.lastGymPlan.pill && !sessionOver) {
+    const gp = page === PAGE_GYM ? tp.lastGymPlan : null;
+    const sessionOver = gp && gp.done && next && next.at > now;
+    if (gp && gp.pill && !sessionOver) {
         v.pillNow = 'Now';
-        v.pillText = tp.lastGymPlan.pill;
+        v.pillText = gp.pill;
     }
+    // A jump or a daily boost due now: its checklist, ticked from the bars (every Torn page).
+    const boost = next && isBoostStep(next) && next.at <= now + DUE_SLACK_MS ? boostProgress(next, reads) : null;
     if (next) {
-        const due = next.at <= Date.now();
+        const due = next.at <= now;
         if (!v.pillText) {
             if (due) {
                 v.pillNow = 'Now';
@@ -82,25 +126,47 @@ function overlayView(m, page) {
                 v.pillText = next.label.split(' · ')[0];
             }
         } else if (!due) v.cdAt = next.at;
+        // A chalk edge only when it's time to act.
+        v.tone = due || boost ? 'chalk' : null;
+        v.label = due || boost ? 'Now' : 'Next';
         v.cardStep = (sessionOver ? 'Session done. Next: ' : '') + stepWords(next);
         v.cardSub = next.gain ? 'about +' + fmtInt(next.gain) + (next.energy ? ' · ' + fmtInt(next.energy) + ' energy' : '') : null;
-        if (next.strict && next.warnAt !== null && Date.now() >= next.warnAt) v.warn = 'Strict: ' + (next.note || 'on the tick');
+        if (next.strict && next.warnAt !== null && now >= next.warnAt) v.warn = 'Strict: ' + (next.note || 'on the tick');
+        v.action = stepAction(next, page, boost);
+        if (boost) {
+            v.checklist = boost.list;
+            v.tone = boost.ready ? 'green' : 'red';
+            v.label = (boost.jump ? 'Jump' : 'Boost') + (boost.ready ? ' · now' : boost.deadline ? ' · finish before ' + tornClock(boost.deadline) : '');
+        }
     } else {
         v.pillText = 'Done for today';
         v.cardStep = 'Nothing left today';
+        v.label = 'Today';
+    }
+    // The gym page's own states (overlays.html §6): the right gym, the wrong one, eat first, ready.
+    const panel = gp && !sessionOver ? gymPanel(gp) : null;
+    if (panel) {
+        Object.assign(v, { tone: panel.tone, label: panel.title, cardStep: panel.step, cardSub: panel.sub, checklist: panel.checklist, action: panel.action });
+        v.warn = null;
     }
     return v;
 }
 
-/** The panel while Torn Trading runs: a warning sign, why, how to switch, and the plan's last steps. */
-export function pausedView(m) {
+/**
+ * The panel while Torn Trading runs: an amber card that says where it is still seen and when it was last seen (round 7:
+ * it said "starts again by itself within a minute", which isn't so while a tab opened before Torn Trading was turned
+ * off still runs it), then the plan's next steps.
+ */
+export function pausedView(m, seen = tradingWhere()) {
     const steps = m && m.ready ? m.steps.slice(0, 2).map((x) => x.label.split(' · ')[0] + ' at ' + tornClock(x.at)) : [];
     return {
         paused: true,
+        tone: 'amber',
+        label: 'Paused · Torn Trading is on',
         pillText: 'Paused · Torn Trading is on',
-        cardStep: 'Pumping Iron and Torn Trading can’t run at the same time: they’d share Torn’s 100 calls a minute and mark the same listings.',
-        cardSub: 'To use Pumping Iron: turn off Torn Trading in Tampermonkey (or close its Torn Bids tab). Pumping Iron starts again by itself within a minute. Nothing is asked from Torn while paused.',
-        later: steps.length ? ['Your plan’s next steps: ' + steps.join(' · ')] : [],
+        cardStep: '',
+        seen,
+        later: steps.length ? [steps.join(' · ')] : [],
     };
 }
 
@@ -151,9 +217,11 @@ function drawGym(m) {
     const prev = get(K.gymSession, null);
     const session = nextSession(prev, m, reading, now, { table: m.pc.table, perks: m.pc.perks.mult });
     if (JSON.stringify(session) !== JSON.stringify(prev)) set(K.gymSession, session);
-    const plan = planGymPage(m, { selectedId: sum.selectedId || m.state.gymId, boxes, reading }, session, now);
+    // Round 7: the gym page's states come from the same reads (the sidebar's happy and energy, the model's cooldowns).
+    const reads = liveReads(m);
+    const plan = planGymPage(m, { selectedId: sum.selectedId || m.state.gymId, boxes, reading, reads, overdose: overdoseOf(m, reads, now) }, session, now);
     tp.lastGymPlan = plan;
-    drawGymMarks(root, plan, boxes, (stat) => readStatBoxes(gymRoot()).find((b) => b.stat === stat), buttons);
+    drawGymMarks(root, plan, boxes, (stat) => readStatBoxes(gymRoot()).find((b) => b.stat === stat), buttons, { motion: getSettings().motion !== false });
     // Our own drawing is not Torn changing the page: those records are dropped, and what Torn shows now is remembered.
     if (tp.observer) tp.observer.takeRecords();
     tp.gymSig = gymPageSig(root);
@@ -164,7 +232,7 @@ function gymPageSig(root) {
     const boxes = readStatBoxes(root).map((b) => b.stat + ':' + b.value + ':' + (b.locked ? 1 : 0)).join(',');
     const sel = gymListSummary(readGymButtons(root)).selectedId;
     // Our marks' count too: Torn re-rendering a box (a message, same value) wipes its panel without changing a value.
-    return [boxes, sel, JSON.stringify(readEnergyBar()), gymLoading(root) ? 1 : 0, root.querySelectorAll('.pi-mark').length].join('|');
+    return [boxes, sel, JSON.stringify(readEnergyBar()), JSON.stringify(readHappyBar()), gymLoading(root) ? 1 : 0, root.querySelectorAll('.pi-mark').length].join('|');
 }
 
 function watchGym() {
@@ -245,8 +313,13 @@ function drawItems(m) {
     if (idx < 0) return;
     const step = m.steps[idx];
     const n = m.done.length + idx + 1;
+    // At most one thing glows on a page: the first one marked.
+    let glow = true;
     for (const it of step.items) {
-        for (const row of readItemRows().filter((r) => r.itemId === Number(it.id))) outline(row.el, 'Step ' + n + ' of today · ' + step.label.split(' · ')[0]);
+        for (const row of readItemRows().filter((r) => r.itemId === Number(it.id))) {
+            outline(row.el, 'Step ' + n + ' of today · ' + step.label.split(' · ')[0], { glow });
+            glow = false;
+        }
     }
 }
 
@@ -284,25 +357,31 @@ function drawMarket(m, page) {
     if (want.length) loadPrices(want).catch(() => {});
     const fills = chosenFills(m);
     const label = (r) => 'Take ' + fmtInt(r.qty) + ' · $' + fmtInt(r.subtotal);
+    // The chosen listing with its chalk tab ("TAKE 3 · $2,479,500"); at most one thing glows on a page: the first.
+    let glow = true;
+    const mark = (el, text) => {
+        outline(el, text, { glow });
+        glow = false;
+    };
     if (page === PAGE_BAZAAR) {
         const owner = bazaarOwnerId(location.href);
         const cards = readBazaarCards();
         for (const f of fills) for (const r of f.fill.rows) if (r.source === SOURCE_BAZAAR && r.sellerId === owner) {
             const card = cards.find((c) => c.itemId === Number(f.id) && c.price === r.price);
-            if (card) outline(card.el, label(r));
+            if (card) mark(card.el, label(r));
         }
     } else if (page === PAGE_ITEM_MARKET) {
         const item = Number(itemMarketItemOf(location.href));
         const rows = readItemMarketRows();
         for (const f of fills) if (Number(f.id) === item) for (const r of f.fill.rows) if (r.source === SOURCE_ITEM_MARKET) {
             const row = rows.find((x) => x.price === r.price);
-            if (row) outline(row.el, label(r));
+            if (row) mark(row.el, label(r));
         }
     } else if (page === PAGE_POINTS) {
         const rows = readPointsRows();
         for (const f of fills) if (f.id === POINTS) for (const r of f.fill.rows) if (r.source === SOURCE_POINTS) {
             const row = rows.find((x) => (r.listingId && x.listingId === r.listingId) || x.price === r.price);
-            if (row) outline(row.el, label(r));
+            if (row) mark(row.el, label(r));
         }
     }
 }
@@ -339,6 +418,8 @@ export function bootTornPage() {
         saveCollapsed: (v) => set(K.overlayCollapsed, v),
         pageRect,
         avoidRect: tradingRect,
+        // The attack page: folded to one line under Torn Eye's fight card, never on top of it (round 7).
+        dockTo: () => (detectPage(location.href) === PAGE_ATTACK ? document.getElementById('pi-eyecard') : null),
     });
     tp.overlay.mount();
     gmMenu('Reset overlay position', () => {
@@ -356,6 +437,15 @@ export function bootTornPage() {
             tp.overlay.update(view);
         }
     };
+    // The paused card follows where Torn Trading is still seen (another tab reloaded or closed) without a new model.
+    const showPaused = (m) => {
+        const pv = pausedView(m);
+        const s = JSON.stringify(pv);
+        if (s !== lastView) {
+            lastView = s;
+            tp.overlay.update(pv);
+        }
+    };
     onModel((m) => {
         tp.model = m;
         if (!isVisible()) return;
@@ -365,11 +455,7 @@ export function bootTornPage() {
                 lastSig = 'paused';
                 clearAll();
             }
-            const pv = JSON.stringify(pausedView(m));
-            if (pv !== lastView) {
-                lastView = pv;
-                tp.overlay.update(pausedView(m));
-            }
+            showPaused(m);
             return;
         }
         const p = detectPage(location.href);
@@ -377,7 +463,9 @@ export function bootTornPage() {
         const planSig = m && m.ready && m.saved ? m.saved.createdAt + ':' + (m.saved.recalibratedAt || 0) : '';
         // What you hold is read after the first draw (the slow data): the marks take it off, so it redraws them.
         const heldSig = JSON.stringify((get(K.userStatic, {}) || {}).inventory || {});
-        const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), JSON.stringify(getPlan()), planSig, heldSig, Object.values(getPrices()).map((x) => x.at).join(), pageRowsCount(p)].join('|');
+        // Stacking for a chain, or an overdose seen on the bars: the gym page's marks change at once.
+        const stateSig = JSON.stringify([(m && m.stacking) || null, overdoseOf(m)]);
+        const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), JSON.stringify(getPlan()), planSig, heldSig, stateSig, Object.values(getPrices()).map((x) => x.at).join(), pageRowsCount(p)].join('|');
         if (sig !== lastSig) {
             lastSig = sig;
             if (p === PAGE_GYM) {
@@ -388,7 +476,10 @@ export function bootTornPage() {
         }
         tp.showView(m);
     });
-    setInterval(() => tp.overlay.tick(), 1000);
+    setInterval(() => {
+        tp.overlay.tick();
+        if (isVisible() && isPaused()) showPaused(tp.model);
+    }, 1000);
     watchBars();
     // Torn's pages change the hash without a load (Item Market search, items tabs).
     window.addEventListener('hashchange', () => {

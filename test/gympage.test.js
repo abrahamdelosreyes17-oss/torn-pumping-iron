@@ -39,16 +39,20 @@ test('the friend at Gun Shop with 275 energy: one part, DEX × 27 here, the rest
     assert.equal(p.nextGym, null);
 });
 
-test('in a gym the current part isn\'t in: that gym\'s button is outlined ("Next: Gun Shop · DEX × 15"), one strip line, no box greyed', () => {
+test('in a gym the current part isn\'t in (round 7: "wrong gym"): that gym pulses, this one is red, the stat waits dashed, Fill waits', () => {
     // At Pour Femme (6): DEX 3.8 there, but the part is at Gun Shop (6.2).
     const m = model({ stats: FRIEND, energy: 150, gymId: 18 });
     const p = planGymPage(m, { selectedId: 6 });
+    assert.equal(p.state.kind, 'wrong');
     assert.deepEqual(p.nextGym, { id: 18, label: 'Next: Gun Shop · DEX × 15', group: 'a heavyweight gym' });
-    assert.equal(p.switchHint, 'This session trains at Gun Shop: open it · then DEX × 15');
-    assert.equal(p.pill, 'This session trains at Gun Shop: open it · then DEX × 15');
-    assert.ok(Object.values(p.perStat).every((x) => x.kind === 'away'), 'nothing to Fill here');
-    // Round 6 (owner: "it's just greyed out, I can still click it"): Torn's boxes get nothing; the strip says where.
-    assert.ok(Object.values(p.perStat).every((x) => x.text === ''), 'nothing on the boxes');
+    assert.deepEqual({ id: p.hereGym.id, wrong: p.hereGym.wrong }, { id: 6, wrong: true });
+    assert.equal(p.switchHint, 'you’re in Pour Femme (DEX 3.8) · switch to Gun Shop (DEX 6.2)');
+    assert.deepEqual({ tone: p.line.tone, head: p.line.head, text: p.line.text }, { tone: 'red', head: 'Wrong gym', text: 'you’re in Pour Femme (DEX 3.8) · switch to Gun Shop (DEX 6.2)' });
+    assert.equal(p.pill, 'Wrong gym · switch to Gun Shop');
+    // The stat the part trains: dashed grey with "After you switch", Fill 15 shown but waiting.
+    assert.deepEqual({ kind: p.perStat.dex.kind, fill: p.perStat.dex.fill, fillN: p.perStat.dex.fillN, tab: p.perStat.dex.tab }, { kind: 'wait', fill: 0, fillN: 15, tab: 'After you switch: DEX × 15' });
+    // Round 6 (owner: "it's just greyed out, I can still click it"): the other boxes get nothing; the strip says where.
+    assert.ok(['str', 'spd', 'def'].every((k) => p.perStat[k].kind === 'away' && p.perStat[k].text === ''), 'nothing on the other boxes');
 });
 
 test('the page and the API disagree on the gym you are in: the page wins (Torn\'s API lags a gym switch)', () => {
@@ -106,8 +110,10 @@ test('the walk-through moves on with every train Torn shows: part 1 ticks, then 
     p = planGymPage(m, { selectedId: 8, reading: r }, s, T0 + 120e3);
     assert.deepEqual(p.parts.map((x) => x.state), ['done', 'current']);
     assert.deepEqual(p.nextGym, { id: 9, label: 'Next: Knuckle Heads · STR × 25', group: 'a middleweight gym' });
-    assert.ok(Object.values(p.perStat).every((x) => x.kind === 'away'));
+    assert.equal(p.perStat.str.kind, 'wait', 'STR waits for the switch');
+    assert.ok(['spd', 'def', 'dex'].every((k) => p.perStat[k].kind === 'away'));
     assert.equal(p.perStat.def.text, 'Done ✓ · DEF × 30');
+    assert.equal(p.perStat.def.tag, 'done ✓');
     // At Knuckle Heads: STR outlined, Fill 25.
     p = planGymPage(m, { selectedId: 9, reading: r }, s, T0 + 150e3);
     assert.equal(p.perStat.str.kind, 'train');
@@ -176,11 +182,13 @@ test('the panel lives in the empty LEFT margin first, so NPC Arbitrage keeps the
     assert.deepEqual(list.map((s) => s.side), ['left', 'right']);
     assert.equal(list[0].width, 296, 'the left margin is 12..308: a little under the usual 300');
     assert.deepEqual(pointOf(null, list, 784), { spot: list[0], x: 12, y: DEFAULT_TOP });
-    // 1280 wide: Torn's page fills all but ~150 px each side, so it floats at the right edge.
+    // 1280 wide: Torn's page fills all but ~150 px each side. Round 7 (the owner): never over Torn's page, so it is one
+    // tag 128 px wide in the left margin (it floated over the page's right edge before).
     const narrow = spots(1280, { left: 152, right: 1128 });
-    assert.equal(narrow.length, 1);
-    assert.equal(narrow[0].side, 'float');
-    assert.equal(pointOf(null, narrow, 700).x, 1276 - PANEL_W);
+    assert.deepEqual(narrow.map((s) => [s.side, s.width, s.tier]), [['left', 128, 'compact'], ['right', 128, 'compact']]);
+    assert.equal(pointOf(null, narrow, 700).x, 12);
+    assert.ok(pointOf(null, narrow, 700).x + narrow[0].width <= 152, 'it ends before Torn’s page');
+    assert.equal(PANEL_W, 300);
 });
 
 test('dragging keeps it inside a margin (never over Torn’s page), and the spot survives a resize', () => {
