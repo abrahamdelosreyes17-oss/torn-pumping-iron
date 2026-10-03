@@ -1,6 +1,8 @@
 # HANDOFF: Torn Pumping Iron
 
-**Released: 1.3.0 (2026-09-30, round 6): the lag fix (Torn page load 2.0–2.3 s → 0.14–0.26 s of script at 4× CPU; no background re-planning; Tampermonkey store 696 → 58 KB), Create plan / Recalibrate on the Plan page (the owner's pick: mockup A's card + C's months; clicks verified in ux-check), long plans (gyms, events, a range), the certain income, Torn Eye asks only about the player viewed or attacked, the gym page never greyed. Pinned: https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/f0b448ab325e6d2bddb467a7ac7da617a1aefad3/torn-pumping-iron.user.js (the Worker and gh-pages didn't change).**
+**Released: 1.4.0 (2026-10-03, round 7): Torn Eye targets Stomp first (100 + a reserve, asked from your stomp edge, a hit drops out), bands by HP kept, statuses the Torn Trading way; overlays that never go over Torn's pages and fit the free space; the gym page states; Stacking for a chain; the new type (Source Serif 4 + Inter); the engine's jump cycle, Torn day and plan span. Pinned: https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/ebda05d035b21cfe1a52f8819feafc4bc6a6d4e0/torn-pumping-iron.user.js (the Worker is not deployed yet: ask; gh-pages didn't change).**
+
+**1.3.0 (2026-09-30, round 6): the lag fix (Torn page load 2.0–2.3 s → 0.14–0.26 s of script at 4× CPU; no background re-planning; Tampermonkey store 696 → 58 KB), Create plan / Recalibrate on the Plan page (the owner's pick: mockup A's card + C's months; clicks verified in ux-check), long plans (gyms, events, a range), the certain income, Torn Eye asks only about the player viewed or attacked, the gym page never greyed. Pinned: https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/f0b448ab325e6d2bddb467a7ac7da617a1aefad3/torn-pumping-iron.user.js (the Worker and gh-pages didn't change).**
 
 1.2.3 (2026-09-30): the lag fix (the plan comparison kept between pages), bot pings early (energy, booster) and without a plan, the synced plan used for up to 48 h, trains on your phone from Torn's log. Details in the newest session entry.**
 
@@ -30,7 +32,7 @@
 - Company what-ifs, receipts and the what-if graph, unlock goal, war reserve.
 
 Links:
-- Install (pinned 1.3.0): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/f0b448ab325e6d2bddb467a7ac7da617a1aefad3/torn-pumping-iron.user.js
+- Install (pinned 1.4.0): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/ebda05d035b21cfe1a52f8819feafc4bc6a6d4e0/torn-pumping-iron.user.js
 - Bot: deployed with 1.2.3 (Worker version c96ec8b1), first run clean.
 - Auto-update URL (`@updateURL`): https://raw.githubusercontent.com/abrahamdelosreyes17-oss/torn-pumping-iron/main/torn-pumping-iron.user.js
 - Webpage: https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html (gh-pages branch; unchanged since 1.0.0, `site/` didn't change)
