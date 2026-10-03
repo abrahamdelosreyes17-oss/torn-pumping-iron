@@ -271,78 +271,206 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     await page.close();
 }
 
-/* Torn Eye: a profile chip with its card, the mini-profile, war mode, the attack page. */
+/* Torn Eye (round 7, mockups/round7/overlays.html): the profile card in the free space beside Torn's page (full,
+   narrower, smallest, the left side), the mini-profile's last line, war and faction rows untouched with an edge and
+   a tag on our own layer, the attack page's fight card (#pi-eyecard). The fixtures carry no Torn CSS: Torn's layout
+   (a 182 px sidebar and the 784 px content, 976 px centred) is put in by tornLayout(). */
+async function tornLayout(page, shift = 0) {
+    await page.evaluate((sh) => {
+        let st = document.getElementById('torn-layout');
+        if (!st) {
+            st = document.createElement('style');
+            st.id = 'torn-layout';
+            document.head.appendChild(st);
+        }
+        st.textContent = '#out{display:none} .content-wrapper{box-sizing:border-box;width:784px;margin:0 0 0 calc(50% - 296px + ' + sh + 'px)!important;background:#191919} #sidebarroot{position:absolute;top:40px;left:calc(50% - 488px + ' + sh + 'px);width:182px;height:400px;background:#222}';
+        if (!document.getElementById('sidebarroot')) {
+            const s = document.createElement('div');
+            s.id = 'sidebarroot';
+            document.body.prepend(s);
+        }
+        dispatchEvent(new Event('resize'));
+    }, shift);
+    await page.waitForTimeout(300);
+}
+const overlaps = (a, b) => Boolean(a && b && a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom);
+const rectOf = (page, sel) => page.evaluate((s) => { const e = document.querySelector(s); if (!e) return null; const r = e.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom }; }, sel);
+const tornRect = async (page) => {
+    const c = await rectOf(page, '.content-wrapper');
+    const s = await rectOf(page, '#sidebarroot');
+    return { left: Math.min(c.left, s.left), right: Math.max(c.right, s.right) };
+};
+const glows = (page) => page.evaluate(() => document.querySelectorAll('.pi-glow').length);
+const panelRect = (page) => page.evaluate(() => { const h = document.getElementById('pi-overlay'); const w = h && h.shadowRoot && h.shadowRoot.querySelector('.wrap'); if (!w) return null; const r = w.getBoundingClientRect(); return r.width ? { left: r.left, right: r.right, top: r.top, bottom: r.bottom } : null; });
 {
     const { page, errors, tornHits } = await open('page=profile&XID=605123&fixture=profile&ffs=1&who=owner', { wait: 6000 });
-    const chip = (await text(page, '.content-title + .pi-chip'))[0] || '';
-    ok(/^Stomp/.test(chip) && /win 100%/.test(chip) && /FFScouter 3 d/.test(chip), 'eye: profile chip after the title (' + chip + ')');
-    ok(!/FF|fair fight/i.test(chip), 'eye: never says FF or fair fight');
-    const box = await page.locator('.content-title + .pi-chip').boundingBox();
-    await page.mouse.move(box.x + 20, box.y + 10);
-    await page.waitForTimeout(200);
-    const card = (await text(page, '.pi-eyecard'))[0] || '';
-    ok(/HP you keep, by their likely build/.test(card) && /FFScouter/.test(card), 'eye: hover card with builds and the FFScouter credit');
+    const card = () => page.evaluate(() => {
+        const c = document.querySelector('#pi-eye-layer [data-pi-part="profile"] .pi-card');
+        if (!c) return null;
+        const r = c.getBoundingClientRect();
+        return { mode: c.getAttribute('data-pi-mode'), text: c.textContent.replace(/\s+/g, ' ').trim(), left: r.left, right: r.right, top: r.top, bottom: r.bottom, titleTop: document.querySelector('.content-title').getBoundingClientRect().top, font: getComputedStyle(c.querySelector('.pi-band')).fontFamily };
+    });
+    for (const [w, mode, side, shift] of [[1600, 'full', 'right', 0], [1366, 'mid', 'right', 0], [1280, 'small', 'right', 0], [1440, 'full', 'left', 120]]) {
+        await page.setViewportSize({ width: w, height: 900 });
+        await tornLayout(page, shift);
+        const c = await card();
+        const torn = await tornRect(page);
+        ok(c && c.mode === mode, 'eye profile ' + w + ' px: the ' + mode + ' card (' + (c && c.mode) + ', free ' + Math.round(side === 'right' ? w - torn.right : torn.left) + ' px)');
+        if (!c) continue;
+        ok(side === 'right' ? c.left >= torn.right && c.right <= w : c.right <= torn.left && c.left >= 0, 'eye profile ' + w + ' px: in the free space on the ' + side + ', never on Torn’s page (' + Math.round(c.left) + '–' + Math.round(c.right) + ', Torn ' + Math.round(torn.left) + '–' + Math.round(torn.right) + ')');
+        ok(Math.abs(c.top - c.titleTop) <= 2, 'eye profile ' + w + ' px: level with the profile title (' + Math.round(c.top) + ' vs ' + Math.round(c.titleTop) + ')');
+        ok(/Segoe UI|system-ui/.test(c.font.split(',')[0]), 'eye profile: Segoe UI / system-ui (' + c.font + ')');
+        // Docking the panel under #pi-eyecard is the panel's side (src/ui/overlay.js): reported here, not failed.
+        const pr = await panelRect(page);
+        if (overlaps(c, pr)) console.log('NOTE eye profile ' + w + ' px: the training panel COVERS the card (panel ' + JSON.stringify(pr) + ')');
+        if (mode === 'full' && side === 'right') {
+            ok(/^Stomp/.test(c.text) && /FFScouter 3 d/.test(c.text) && /Watch/.test(c.text), 'eye profile: full card with the band, the source and Watch (' + c.text + ')');
+            const i = [c.text.indexOf('Respect'), c.text.indexOf('HP kept'), c.text.indexOf('Win')];
+            ok(i[0] >= 0 && i[0] < i[1] && i[1] < i[2] && /Win\s?100%/.test(c.text), 'eye profile: respect, HP kept, win in that order (' + i + ')');
+            ok(!/\bFF\b|fair fight/i.test(c.text), 'eye: never says FF or fair fight');
+        }
+        if (mode === 'small') {
+            ok(/^Stomp\s?Resp/.test(c.text) && !/FFScouter|Watch/.test(c.text), 'eye profile: the smallest card is the band word and the three numbers (' + c.text + ')');
+            const box = await page.locator('#pi-eye-layer .pi-card').boundingBox();
+            await page.mouse.move(box.x + 20, box.y + 10);
+            await page.waitForTimeout(200);
+            const hover = (await text(page, '.pi-hovercard'))[0] || '';
+            ok(/HP you keep, by their likely build/.test(hover) && /FFScouter/.test(hover), 'eye profile: hovering the smallest card shows the builds and the FFScouter credit');
+            const hr = await rectOf(page, '.pi-hovercard');
+            ok(hr && hr.left >= torn.right && hr.right <= w, 'eye profile: the hover card fits the free space too, never over Torn’s page (' + JSON.stringify(hr) + ')');
+            await page.mouse.move(5, 5);
+        }
+        await page.screenshot({ path: resolve(shots, 'torn-eye-profile-' + w + '-' + mode + '-' + side + '.png') });
+    }
+    ok((await glows(page)) <= 1, 'eye profile: at most one thing glows (' + (await glows(page)) + ')');
     // Round 6 (owner): Torn's pages ask only about the player viewed or attacked; a mini-profile shows what is known.
-    const mini = (await text(page, '#profile-mini-root .pi-chip'))[0] || '';
-    ok(mini.length > 0, 'eye: mini-profile chip from what is known (' + mini + ')');
+    const mini = await page.evaluate(() => {
+        const m = document.querySelector('#profile-mini-root .pi-mini-line');
+        if (!m) return null;
+        const r = m.getBoundingClientRect();
+        const p = document.querySelector('#profile-mini-root .mini-profile-wrapper').getBoundingClientRect();
+        return { text: m.textContent.replace(/\s+/g, ' ').trim(), inside: r.left >= p.left - 0.5 && r.right <= p.right + 0.5, last: m.parentNode.lastElementChild === m };
+    });
+    ok(mini && mini.text.length > 0 && mini.inside && mini.last, 'eye: the mini-profile gets one tag as its last line, inside its width (' + JSON.stringify(mini) + ')');
     const asked = await page.evaluate(() => window.__calls.filter((c) => /\/user\/\d+\/profile/.test(c)).map((c) => c.match(/\/user\/(\d+)\//)[1]));
     ok(asked.every((id) => id === '605123'), 'eye: the only player asked about is the one viewed (' + [...new Set(asked)] + ')');
     ok(errors.length === 0, 'eye: no page errors ' + JSON.stringify(errors));
     ok(tornHits() === 0, 'eye: nothing loaded from torn.com');
-    await page.screenshot({ path: resolve(shots, 'torn-eye-profile.png'), fullPage: true });
     await page.close();
 }
 {
     // Round 7 (I.1): the rows show what is already known and ask nothing. Known here: Rival, whose profile was opened
-    // first (this site's own stored estimate), and Flyer, whom the Torn Eye tab's war mode judged (the shared table).
-    const warBands = { at: Date.parse('2026-09-29T10:40:00Z'), fid: 7777, p: { 515151: ['cant', 3, null], 605123: ['stomp', 100, 97] } };
+    // first (this site's own stored estimate), Flyer, whom the Torn Eye tab's war mode judged a fight you lose, and
+    // Brix (in hospital), judged Good.
+    const warBands = { at: Date.parse('2026-09-29T10:40:00Z'), fid: 7777, p: { 515151: ['low', 3, null], 605123: ['stomp', 100, 97], 777001: ['good', 92, 81] } };
     const { page, errors } = await open('page=profile&XID=424242&fixture=profile&ffs=1&who=owner', { wait: 8000, seed: { 'pumpingIron.v1.eyeWarBands': JSON.stringify(warBands) } });
+    await page.setViewportSize({ width: 1600, height: 900 });
     await page.goto('http://127.0.0.1:8783/test/harness-live.html?key=1&at=2026-09-29T10:48:00Z&wait=100000&plan=1&follow=steady&page=faction&ID=7777&fixture=faction&ffs=1&who=owner');
     await page.waitForTimeout(6500);
+    await tornLayout(page);
     // Shown order (CSS order on Torn's rows; the DOM itself is untouched).
     const order = await page.evaluate(() => [...document.querySelectorAll('#faction_war_list_id li.enemy')].sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top).map((li) => li.querySelector('.member a[href*="XID"]').getAttribute('aria-label').replace('View profile of ', '')));
     const domOrder = await page.evaluate(() => [...document.querySelectorAll('#faction_war_list_id li.enemy .member a[href*="XID"]')].map((a) => a.getAttribute('aria-label').replace('View profile of ', '')));
     ok(JSON.stringify(domOrder) === JSON.stringify(['Flyer', 'Mira_Vex', 'Rival', 'Brix']), "war: Torn's rows are not moved in the page");
     ok(order[0] === 'Rival' && order[3] === 'Flyer', 'war: Okay first, Traveling last, from what the page shows (' + order + ')');
-    const sum = (await text(page, '.pi-warsum'))[0] || '';
-    ok(/1 attackable now/.test(sum) && /1 traveling/.test(sum) && /live war mode on Pumping Iron’s Torn Eye tab/.test(sum), 'war: summary line (' + sum + ')');
-    const chips = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll('#faction_war_list_id li.enemy')].map((li) => [li.querySelector('.member a[href*="XID"]').getAttribute('aria-label').replace('View profile of ', ''), (li.querySelector('.pi-chip') || { textContent: '' }).textContent.replace(/\s+/g, ' ').trim()])));
-    ok(/^(Stomp|Good|Tough|Can't win)/.test(chips.Rival), 'war: the estimate stored by an earlier page shows on its row (' + chips.Rival + ')');
-    ok(/^Can't win/.test(chips.Flyer), 'war: a player only war mode judged shows its band (' + chips.Flyer + ')');
-    ok(chips.Mira_Vex === '' && chips.Brix === '', 'war: no chip where nothing is known, never "No data" (' + JSON.stringify(chips) + ')');
-    const flyerChip = page.locator('#faction_war_list_id li.enemy .pi-chip[data-pi-player="515151"]');
-    await flyerChip.scrollIntoViewIfNeeded();
+    const inside = await page.evaluate(() => document.querySelectorAll('#faction_war_list_id .pi-mark, .members-list .pi-mark').length + [...document.querySelectorAll('#faction_war_list_id li, .members-list li')].filter((li) => /\bpi-/.test(li.className)).length);
+    ok(inside === 0, "war: Torn's rows untouched: nothing of ours inside them or on them (" + inside + ')');
+    const tags = () => page.evaluate(() => {
+        const out = {};
+        for (const li of document.querySelectorAll('#faction_war_list_id li.enemy')) {
+            const a = li.querySelector('.member a[href*="XID"]');
+            const id = a.getAttribute('href').match(/XID=(\d+)/)[1];
+            const name = a.getAttribute('aria-label').replace('View profile of ', '');
+            const t = document.querySelector('#pi-eye-layer [data-pi-part="war"] .pi-rowtag[data-pi-player="' + id + '"]');
+            const r = li.getBoundingClientRect();
+            const tr = t ? t.getBoundingClientRect() : null;
+            out[name] = t ? { text: t.textContent.replace(/\s+/g, ' ').trim(), dim: t.classList.contains('pi-dimmed'), level: tr.top >= r.top - 1 && tr.bottom <= r.bottom + 1, glow: t.classList.contains('pi-glow'), left: tr.left } : null;
+        }
+        return out;
+    });
+    const t1 = await tags();
+    const torn = await tornRect(page);
+    ok(t1.Rival && /^(Stomp|Good|Fair|Tough)/.test(t1.Rival.text) && t1.Rival.level && t1.Rival.left >= torn.right, 'war: the estimate stored by an earlier page shows as a tag in the free space, level with its row (' + JSON.stringify(t1.Rival) + ')');
+    ok(t1.Flyer === null, 'war: a fight you lose (under half your HP kept) is never shown (' + JSON.stringify(t1.Flyer) + ')');
+    ok(t1.Mira_Vex === null, 'war: no tag where nothing is known, never "No data"');
+    ok(t1.Brix && t1.Brix.dim && /^Good\s?in hospital$/.test(t1.Brix.text), "war: a hospital row's tag is dimmed (" + JSON.stringify(t1.Brix) + ')');
+    ok(t1.Rival && t1.Rival.glow && t1.Brix && !t1.Brix.glow, 'war: the best ready row is the one that glows');
+    // Torn's status cell shows the clock: "out in 1:17".
+    await page.evaluate(() => {
+        const li = [...document.querySelectorAll('#faction_war_list_id li.enemy')].find((x) => /Brix/.test(x.textContent));
+        li.querySelector('.status').textContent = 'Hospital 01:17:00';
+    });
+    await page.waitForTimeout(1600);
+    const t2 = await tags();
+    ok(t2.Brix && /^Good\s?out in 1:1[67]$/.test(t2.Brix.text), 'war: "out in 1:17" from Torn\'s clock (' + JSON.stringify(t2.Brix) + ')');
+    const sum = await page.evaluate(() => { const s = document.querySelector('#pi-eye-layer [data-pi-part="war"] .pi-sum'); return s ? { text: s.textContent.replace(/\s+/g, ' ').trim(), title: s.title, bottom: s.getBoundingClientRect().bottom } : null; });
+    const firstRow = await page.evaluate(() => Math.min(...[...document.querySelectorAll('#faction_war_list_id li.enemy')].map((li) => li.getBoundingClientRect().top)));
+    ok(sum && /^1 ready · 1 out in 1:1[67] · 1 traveling/.test(sum.text) && /live war mode on Pumping Iron’s Torn Eye tab/.test(sum.title) && sum.bottom <= firstRow, 'war: the summary tag on top (' + JSON.stringify(sum) + ')');
+    const edge = await page.evaluate(() => [...document.querySelectorAll('#pi-eye-layer [data-pi-part="war"] .pi-edgebar')].map((e) => Math.round(e.getBoundingClientRect().width)));
+    ok(edge.length === 2 && edge.every((w) => w === 4), 'war: a 4 px band edge on our own layer for each tagged row (' + edge + ')');
+    const rivalTag = page.locator('#pi-eye-layer .pi-rowtag[data-pi-player="424242"]');
+    await rivalTag.scrollIntoViewIfNeeded();
     await page.waitForTimeout(200);
-    const flyer = await flyerChip.boundingBox();
-    await page.mouse.move(flyer.x + 10, flyer.y + 8);
+    const rb = await rivalTag.boundingBox();
+    await page.mouse.move(rb.x + 10, rb.y + 8);
     await page.waitForTimeout(200);
-    const warCard = (await text(page, '.pi-eyecard'))[0] || '';
-    ok(/Win 3%/.test(warCard) && /From war mode on Pumping Iron’s Torn Eye tab, 8 min ago/.test(warCard), 'war: its card says where the band came from (' + warCard + ')');
+    const warCard = (await text(page, '.pi-hovercard'))[0] || '';
+    ok(/HP you keep, by their likely build|Their exact stats/.test(warCard), 'war: its hover card (' + warCard.slice(0, 80) + ')');
+    const wh = await rectOf(page, '.pi-hovercard');
+    ok(wh && wh.left >= torn.right, 'war: the hover card stays in the free space (' + JSON.stringify(wh) + ')');
     await page.mouse.move(5, 5);
-    const yours = await page.evaluate(() => document.querySelectorAll('#faction_war_list_id li.your .pi-chip').length);
+    const yours = await page.evaluate(() => [...document.querySelectorAll('#faction_war_list_id li.your a[href*="XID"]')].map((a) => a.getAttribute('href').match(/XID=(\d+)/)[1]).filter((id) => document.querySelector('#pi-eye-layer [data-pi-part="war"] [data-pi-player="' + id + '"]')).length);
     ok(yours === 0, 'war: your own side is left alone');
-    const memberChips = await page.evaluate(() => document.querySelectorAll('.members-list .table-body .pi-chip').length);
-    ok(memberChips === 1, 'faction list: a chip on the member something is known about, none on the others or the fallen one (' + memberChips + ')');
+    const memberTags = await page.evaluate(() => document.querySelectorAll('#pi-eye-layer [data-pi-part="faction"] .pi-rowtag').length);
+    ok(memberTags === 1, 'faction list: a tag for the member something is known about, none on the others or the fallen one (' + memberTags + ')');
+    ok((await glows(page)) <= 1, 'war: at most one thing glows (' + (await glows(page)) + ')');
+    await page.screenshot({ path: resolve(shots, 'torn-eye-war.png'), fullPage: true });
+    // A narrower window: the tags get shorter, never onto Torn's page.
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(400);
+    const narrow = await tags();
+    const torn2 = await tornRect(page);
+    ok(narrow.Rival && narrow.Rival.left >= torn2.right && /%/.test(narrow.Rival.text), 'war 1280 px: the tag stays in the free space (' + JSON.stringify(narrow.Rival) + ')');
+    await page.screenshot({ path: resolve(shots, 'torn-eye-war-1280.png'), fullPage: true });
     // Round 6 (owner): no Torn Eye reads for faction or war lists on Torn's pages (the Torn Eye tab does war mode).
     const calls = await page.evaluate(() => window.__calls.filter((c) => /faction|\/profile|get-stats/.test(c)).length);
     ok(calls === 0, 'war: nothing asked on a faction page (' + calls + ')');
     ok(errors.length === 0, 'war: no page errors ' + JSON.stringify(errors));
-    await page.screenshot({ path: resolve(shots, 'torn-eye-war.png'), fullPage: true });
     await page.close();
 }
 {
     const { page, errors } = await open('page=attack&user2ID=424242&fixture=attack&ffs=1&who=owner', { wait: 6000 });
-    const panel = () => page.evaluate(() => document.getElementById('pi-attack').shadowRoot.querySelector('.panel').textContent);
-    const before = await panel();
-    ok(/Torn Eye/.test(before) && /(Stomp|Good|Tough|Can't win)/.test(before) && /isn.t shown yet/.test(before), 'attack: panel before Start Fight (' + before.slice(0, 90) + ')');
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await tornLayout(page);
+    const card = () => page.evaluate(() => { const c = document.getElementById('pi-eyecard'); if (!c) return null; const r = c.getBoundingClientRect(); return { text: c.textContent.replace(/\s+/g, ' ').trim(), mode: c.getAttribute('data-pi-mode'), left: r.left, right: r.right, top: r.top, bottom: r.bottom }; });
+    const before = await card();
+    const torn = await tornRect(page);
+    ok(before && /^(Stomp|Good|Fair|Tough)/.test(before.text) && /gear shows once the fight starts/.test(before.text), 'attack: the fight card before Start Fight (' + (before && before.text.slice(0, 140)) + ')');
+    const i = before ? [before.text.indexOf('Respect'), before.text.indexOf('HP kept'), before.text.indexOf('Win')] : [];
+    ok(before && i[0] >= 0 && i[0] < i[1] && i[1] < i[2], 'attack: respect, HP kept, win in that order');
+    ok(before && before.left >= torn.right, 'attack: beside the fight, never on Torn’s page');
+    const panel = await panelRect(page);
+    ok(!overlaps(before, panel), 'attack 1600 px: the training panel does not cover the fight card (panel ' + JSON.stringify(panel) + ')');
+    await page.screenshot({ path: resolve(shots, 'torn-eye-attack-1600.png') });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(400);
+    const small = await card();
+    ok(small && small.mode === 'small' && small.left >= (await tornRect(page)).right, 'attack 1280 px: the smallest card, still beside Torn’s page (' + JSON.stringify(small) + ')');
+    // Docking the panel under #pi-eyecard is the panel's side (src/ui/overlay.js): reported here, not failed.
+    const panel2 = await panelRect(page);
+    console.log('NOTE attack 1280 px: the training panel ' + (overlaps(small, panel2) ? 'COVERS' : 'does not cover') + ' the fight card (panel ' + JSON.stringify(panel2) + ')');
+    await page.screenshot({ path: resolve(shots, 'torn-eye-attack-1280.png') });
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await page.waitForTimeout(300);
     await page.evaluate(() => fetch('fixtures/attackData.json?sid=attackData').then((r) => r.json()));
     await page.waitForTimeout(2200); // the cache is written 1.5 s after the last change
-    const after = await panel();
-    ok(/saved for next time/.test(after) && /AK-47/.test(after), 'attack: gear read from attackData and saved (' + after.slice(0, 160) + ')');
+    const after = await card();
+    ok(after && /saved for next time/.test(after.text) && /AK-47/.test(after.text), 'attack: gear read from attackData and saved (' + (after && after.text.slice(0, 200)) + ')');
     const stored = await page.evaluate(() => new Promise((res) => { const r = indexedDB.open('pumpingIron', 1); r.onsuccess = () => { const tx = r.result.transaction('kv', 'readonly'); const g = tx.objectStore('kv').get('eye'); g.onsuccess = () => res(g.result && g.result.gear && Object.keys(g.result.gear)); }; r.onerror = () => res(null); }));
     ok(Array.isArray(stored) && stored.includes('424242'), 'attack: gear kept in IndexedDB for next time');
+    ok((await glows(page)) <= 1, 'attack: at most one thing of Torn Eye glows (' + (await glows(page)) + ')');
     ok(errors.length === 0, 'attack: no page errors ' + JSON.stringify(errors));
-    await page.screenshot({ path: resolve(shots, 'torn-eye-attack.png'), fullPage: true });
+    await page.screenshot({ path: resolve(shots, 'torn-eye-attack.png') });
     await page.close();
 }
 

@@ -1,8 +1,16 @@
 /*
- * Torn Eye on torn.com: chips on profiles, the mini-profile popup and
- * faction lists; war mode on ranked-war lists (the enemy faction read every
- * 10 s while the tab is visible); the attack page's panel and the
- * read-only attackData reader that saves their gear.
+ * Torn Eye on torn.com (round 7, the owner's pick in mockups/round7/overlays.html):
+ *   - a profile: a card in the free space beside Torn's page, level with the
+ *     profile's title (full, narrower or smallest by the room there; the
+ *     left-hand space when the right one is too narrow); never a line on
+ *     Torn's page;
+ *   - the mini-profile popup: one tag as its last line;
+ *   - faction and ranked-war lists: Torn's rows untouched; a band edge on our
+ *     own layer and a tag per row in the free space, level with the row, and
+ *     a summary tag on top (war rows are still shown in our order with CSS);
+ *   - the attack page: the fight card (#pi-eyecard) beside the fight, and the
+ *     read-only attackData reader that saves their gear.
+ * Re-placed when the window is resized or Torn's page moves.
  */
 
 import { K, get, set, getSettings } from './platform/store.js';
@@ -10,37 +18,46 @@ import { addPrediction } from './core/learndata.js';
 import { onModel, isVisible } from './runtime.js';
 import { isPaused, onPauseChange } from './turns.js';
 import { installAttackHook } from './platform/page-hook.js';
-import { wantPlayers, eyeView, sharedView, eyeReady, loadEyeCache, onEye, saveGear, flightsSeen, getWatch, toggleWatch, setWatchTag } from './eye-service.js';
+import { wantPlayers, eyeView, sharedView, eyeReady, loadEyeCache, onEye, saveGear, getWatch, toggleWatch, setWatchTag } from './eye-service.js';
 import { WATCH_MAX } from './core/eye/watch.js';
 import { parseAttackData } from './core/eye/gear.js';
-import { sortWar, warSummary, outEarly, statusParts } from './core/eye/war.js';
-import { profileLevel, profileAnchor, readFactionRows, readWarRows, miniProfileId } from './sources/dom/eye.js';
-import { ensureEyeCss, chipEl, bindCard, warSummaryEl, attackPanel, attackPanelContent, watchControl } from './ui/eye/eye-ui.js';
-import { tornClock } from './core/bars.js';
+import { sortWar, outEarly, memberState } from './core/eye/war.js';
+import { profileLevel, profileAnchor, readFactionRows, readWarRows, miniProfileId, attackRoot } from './sources/dom/eye.js';
+import { ensureEyeCss, bindCard, eyeCardSpot, eyeRowSpot, eyeProfileCard, eyeFightCard, eyeMiniLine, eyeRowTag, eyeEdgeBar, eyeSummary, eyeSummaryTag, eyeStatusSeconds, eyeShown, eyeLayer, eyeLayerPart, eyeClearPart } from './ui/eye/eye-ui.js';
 import { ensureMarkCss } from './ui/marks/marks.js';
 import { fill } from './ui/dom.js';
 import { detectPage, profileIdOf, attackTargetOf, PAGE_PROFILE, PAGE_FACTION, PAGE_ATTACK } from './sources/route.js';
 
-const ep = { extras: new Map(), war: { factionId: null, members: null, prev: null, at: 0, polling: false }, attack: { gearVisible: false, gearSaved: false }, drawing: false };
+const ep = { extras: new Map(), war: { prev: null }, attack: { gearVisible: false, gearSaved: false }, drawing: false, sig: {}, lists: {}, layoutSig: '' };
 
 function view(id) {
     const x = ep.extras.get(id) || {};
-    const v = eyeView(id, x, { war: Boolean(ep.war.members) });
+    const v = eyeView(id, x, { war: false });
     // No estimate on this site: what the Torn Eye tab's war mode worked out, when it did.
     return v && v.est ? v : sharedView(id, x) || v;
 }
 
-/** A list row gets a chip only when there is something to say (round 7: a column of "No data" chips said nothing). */
-function known(v) {
-    return Boolean(v && v.band && v.band !== 'none');
+/* ------------------------------------------------------------- where Torn's page is */
+
+/** Torn's page (sidebar + content) on screen; a centred 976 px page when it can't be measured. */
+function eyeTornPage() {
+    const parts = [document.querySelector('.content-wrapper'), document.getElementById('sidebarroot'), document.getElementById('sidebar')].filter(Boolean);
+    const rects = parts.map((el) => el.getBoundingClientRect()).filter((r) => r.width > 0 && r.height > 0);
+    if (rects.length) return { left: Math.min(...rects.map((r) => r.left)), right: Math.max(...rects.map((r) => r.right)) };
+    const vw = eyeViewW();
+    const w = Math.min(vw, 976);
+    return { left: (vw - w) / 2, right: (vw + w) / 2 };
 }
 
-const EDGES = ['pi-edge-stomp', 'pi-edge-good', 'pi-edge-tough', 'pi-edge-cant'];
+/** The window's width without its scrollbar. */
+function eyeViewW() {
+    return (document.documentElement && document.documentElement.clientWidth) || window.innerWidth;
+}
 
-function removeChips(scope, { watch = true } = {}) {
-    for (const el of scope.querySelectorAll('.pi-chip, .pi-warsum, .pi-earlytag, .pi-landtag' + (watch ? ', .pi-watch' : ''))) el.remove();
-    for (const el of scope.querySelectorAll('.pi-early')) el.classList.remove('pi-early');
-    for (const el of scope.querySelectorAll('.' + EDGES.join(', .'))) el.classList.remove(...EDGES);
+/** Where our layer's (0, 0) is on screen: its children are placed in page coordinates from there. */
+function eyeOrigin() {
+    const r = eyeLayer().getBoundingClientRect();
+    return { x: r.left, y: r.top };
 }
 
 /* ------------------------------------------------------------- watch */
@@ -70,54 +87,128 @@ function watchHandlers(id) {
 function drawProfile() {
     const id = Number(profileIdOf(location.href));
     const anchor = profileAnchor();
+    const part = eyeLayerPart('profile');
     if (!id || !anchor) return;
     ep.extras.set(id, { ...(ep.extras.get(id) || {}), level: profileLevel() });
-    // The watch button stays while you use it (a redraw would close its picker); it's replaced when it changed.
-    const ws = watchState(id);
-    const sig = [ws.watching ? 1 : 0, ws.tag || '', ws.full ? 1 : 0].join('|');
-    const old = anchor.parentNode.querySelector('.pi-watch');
-    const keepWatch = old && old.getAttribute('data-pi-watch') === sig && old.getAttribute('data-pi-player') === String(id);
-    removeChips(anchor.parentNode, { watch: !keepWatch });
-    const chip = chipEl(view(id), { id });
-    anchor.parentNode.insertBefore(chip, anchor.nextSibling);
-    if (keepWatch) chip.after(old);
-    else {
-        const wc = watchControl(ws, watchHandlers(id));
-        wc.setAttribute('data-pi-player', String(id));
-        chip.after(wc);
+    const spot = eyeCardSpot(eyeViewW(), eyeTornPage());
+    if (spot.mode === 'none') {
+        // No room beside Torn's page: nothing (owner: never a line on Torn's page).
+        fill(part, []);
+        ep.sig.profile = '';
+        return;
     }
+    const next = eyeProfileCard(view(id), spot.mode, { id, watch: { state: watchState(id), on: watchHandlers(id) } });
+    // The card stays while it says the same (a redraw would close the watch reason picker).
+    let card = part.firstElementChild;
+    if (!card || ep.sig.profile !== next.outerHTML) {
+        ep.sig.profile = next.outerHTML;
+        fill(part, [next]);
+        card = next;
+    }
+    const o = eyeOrigin();
+    const t = anchor.getBoundingClientRect();
+    card.style.width = spot.width + 'px';
+    card.style.left = Math.round(spot.x - o.x) + 'px';
+    card.style.top = Math.round(t.top - o.y) + 'px';
 }
 
 function drawMini() {
     const id = miniProfileId();
     const root = document.getElementById('profile-mini-root');
     if (!id || !root) return;
-    const at = root.querySelector('.profile-container .description .last-action') || root.querySelector('.description') || root;
-    removeChips(root);
-    at.appendChild(chipEl(view(id), { mini: true, id }));
+    for (const el of root.querySelectorAll('.pi-mini-line')) el.remove();
+    // The popup's last line, inside its width.
+    const at = root.querySelector('.mini-profile-wrapper') || root.querySelector('.profile-container') || root;
+    // At most one thing glows on a page: the mini-profile only when nothing else does.
+    at.appendChild(eyeMiniLine(view(id), { id, glow: !document.querySelector('.pi-eye.pi-glow') }));
 }
 
 /* ------------------------------------------------------ faction + war */
 
-function drawFaction() {
-    const rows = readFactionRows();
-    for (const r of rows) ep.extras.set(r.id, { level: r.level, name: r.name });
-    for (const r of rows) {
-        for (const c of r.cell.querySelectorAll('.pi-chip')) c.remove();
-        const v = view(r.id);
-        if (known(v)) r.cell.appendChild(chipEl(v, { mini: true, id: r.id }));
+/** A row's state and when it is out, from what Torn's row shows ("Hospital 01:17:00"). */
+function eyeRowMember(r, nowS) {
+    const secs = eyeStatusSeconds(r.status);
+    return { id: r.id, level: r.level, status: { state: r.status, until: secs ? nowS + secs : 0 } };
+}
+
+/**
+ * Tags and edges for one list, on our layer. `rows` in the order to judge them (war: our order); the first ready
+ * row with a band glows when `glow`.
+ */
+function eyeDrawList(name, rows, byId, nowS, { glow, note }) {
+    const part = eyeLayerPart(name);
+    const spot = eyeRowSpot(eyeViewW(), eyeTornPage());
+    const items = [];
+    let glowed = !glow;
+    let fromFfs = false;
+    for (const s of rows) {
+        const r = byId.get(s.id);
+        if (!r || s.state === 'fallen') continue;
+        const v = view(s.id);
+        if (!eyeShown(v)) continue;
+        if (v.est && v.est.source === 'ffscouter') fromFfs = true;
+        const ready = s.state === 'okay' || s.state === 'early';
+        const on = ready && !glowed;
+        if (on) glowed = true;
+        const edge = eyeEdgeBar(v.band, !ready);
+        const tag = spot.mode === 'none' ? null : eyeRowTag(v, { mode: spot.mode, state: s.state, outInS: s.until > nowS ? s.until - nowS : null, glow: on });
+        items.push({ row: r.el, edge, tag });
+    }
+    const summary = spot.mode === 'none' ? null : eyeSummaryTag(eyeSummary(rows, nowS), { note, fromFfs, short: spot.mode !== 'full' });
+    const kids = [summary, ...items.map((i) => i.edge), ...items.map((i) => i.tag)].filter(Boolean);
+    fill(part, kids);
+    ep.lists[name] = { items, summary, spotMode: spot.mode, first: rows.length ? byId.get(rows[0].id) : null, rowsEl: [...byId.values()].map((r) => r.el) };
+    eyePlaceList(name);
+    return glowed && glow;
+}
+
+/** Put a list's edges and tags level with their rows, and its summary above the first row. */
+function eyePlaceList(name) {
+    const L = ep.lists[name];
+    if (!L) return;
+    const spot = eyeRowSpot(eyeViewW(), eyeTornPage());
+    const o = eyeOrigin();
+    let topRow = Infinity;
+    for (const el of L.rowsEl) {
+        const r = el.getBoundingClientRect();
+        if (r.height > 0) topRow = Math.min(topRow, r.top);
+    }
+    for (const it of L.items) {
+        const r = it.row.getBoundingClientRect();
+        const shown = r.height > 0 && r.width > 0;
+        it.edge.style.display = shown ? '' : 'none';
+        if (it.tag) it.tag.style.display = shown ? '' : 'none';
+        if (!shown) continue;
+        it.edge.style.left = Math.round(r.left - o.x) + 'px';
+        it.edge.style.top = Math.round(r.top - o.y + 2) + 'px';
+        it.edge.style.height = Math.max(4, Math.round(r.height - 4)) + 'px';
+        if (it.tag) {
+            it.tag.style.maxWidth = spot.width + 'px';
+            it.tag.style.left = Math.round(spot.x - o.x) + 'px';
+            it.tag.style.top = Math.round(r.top - o.y + (r.height - (it.tag.offsetHeight || 26)) / 2) + 'px';
+        }
+    }
+    if (L.summary) {
+        L.summary.style.display = Number.isFinite(topRow) ? '' : 'none';
+        L.summary.style.maxWidth = spot.width + 'px';
+        L.summary.style.left = Math.round(spot.x - o.x) + 'px';
+        if (Number.isFinite(topRow)) L.summary.style.top = Math.round(topRow - o.y - (L.summary.offsetHeight || 28) - 8) + 'px';
     }
 }
 
 function drawWar() {
     const rows = readWarRows(document, 'enemy');
-    if (!rows.length) return;
+    if (!rows.length) {
+        eyeClearPart('war');
+        delete ep.lists.war;
+        return false;
+    }
     const list = rows[0].el.parentNode;
     // What the row itself shows goes into the fight (round 7: a war row's level was never passed on, so a player
     // with an estimate but no profile read was fought with a level 1's life and came out Stomp).
     for (const r of rows) ep.extras.set(r.id, { ...(ep.extras.get(r.id) || {}), level: r.level, name: r.name });
     const nowS = Math.floor(Date.now() / 1000);
-    const members = ep.war.members || rows.map((r) => ({ id: r.id, level: r.level, status: { state: r.status } }));
+    const members = rows.map((r) => eyeRowMember(r, nowS));
     const bands = {};
     const respect = {};
     for (const m of members) {
@@ -128,45 +219,38 @@ function drawWar() {
         }
     }
     const early = ep.war.prev ? outEarly(ep.war.prev, members, nowS) : new Set();
+    ep.war.prev = members;
     const sorted = sortWar(members, { bands, respect, early, nowS });
     ep.drawing = true;
     try {
-        removeChips(list.parentNode);
         const byId = new Map(rows.map((r) => [r.id, r]));
-        // Shown in our order with CSS (flex order); Torn's rows stay where React put them.
+        // Shown in our order with CSS (flex order); Torn's rows stay where React put them, unchanged.
         list.classList.add('pi-warlist');
         sorted.forEach((s, i) => {
             const r = byId.get(s.id);
-            if (r) r.el.style.order = String(i);
+            if (r && r.el.style.order !== String(i)) r.el.style.order = String(i);
         });
-        const flights = flightsSeen();
-        const nowMs = Date.now();
-        for (const s of sorted) {
-            const r = byId.get(s.id);
-            if (!r) continue;
-            const v = view(s.id);
-            if (known(v)) r.cell.appendChild(chipEl(v, { mini: true, id: s.id }));
-            // The row's edge in its band colour; a traveller's estimated landing next to Torn's status.
-            if (EDGES.includes('pi-edge-' + s.band)) r.el.classList.add('pi-edge-' + s.band);
-            if (s.state === 'traveling' && ep.war.members) {
-                const parts = statusParts(s.m, { now: nowMs, seenAt: flights[s.id] ? flights[s.id].at : null });
-                const st = r.el.querySelector('.status');
-                if (st && parts.at) st.appendChild(Object.assign(document.createElement('span'), { className: 'pi-mark pi-landtag', textContent: 'lands ~' + tornClock(parts.at) }));
-            }
-            if (s.state === 'early') {
-                r.el.classList.add('pi-early');
-                const st = r.el.querySelector('.status');
-                if (st) st.appendChild(Object.assign(document.createElement('span'), { className: 'pi-mark pi-earlytag', textContent: 'out early' }));
-            }
-        }
-        const fromFfs = sorted.some((s) => {
-            const v = view(s.id);
-            return v && v.est && v.est.source === 'ffscouter';
-        });
-        list.parentNode.insertBefore(warSummaryEl(warSummary(sorted, nowS), ep.war.at ? Math.round((Date.now() - ep.war.at) / 1000) : null, fromFfs), list);
+        // Torn's pages read nothing for the war (owner, round 6): what this page shows; the live read is on the Torn Eye tab.
+        return eyeDrawList('war', sorted, byId, nowS, { glow: true, note: 'Torn Eye · from this page · live war mode on Pumping Iron’s Torn Eye tab' });
     } finally {
         ep.drawing = false;
     }
+}
+
+function drawFaction(glow) {
+    const rows = readFactionRows();
+    if (!rows.length) {
+        eyeClearPart('faction');
+        delete ep.lists.faction;
+        return;
+    }
+    for (const r of rows) ep.extras.set(r.id, { ...(ep.extras.get(r.id) || {}), level: r.level, name: r.name });
+    const nowS = Math.floor(Date.now() / 1000);
+    const list = rows.map((r) => {
+        const m = eyeRowMember(r, nowS);
+        return { id: r.id, state: memberState(m), until: m.status.until };
+    });
+    eyeDrawList('faction', list, new Map(rows.map((r) => [r.id, r])), nowS, { glow, note: 'Torn Eye · from what is already known (nothing is asked on this page)' });
 }
 
 /* ------------------------------------------------------------- attack */
@@ -174,15 +258,32 @@ function drawWar() {
 function drawAttack() {
     const id = Number(attackTargetOf(location.href));
     if (!id) return;
-    const panel = attackPanel();
-    const root = document.getElementById('attack-root');
-    const r = root ? root.getBoundingClientRect() : null;
-    const x = r && r.right + 262 < window.innerWidth ? r.right + 12 : window.innerWidth - 262;
-    panel.style.left = Math.max(8, x) + 'px';
-    panel.style.top = (r ? Math.max(8, r.top) : 110) + 'px';
+    const spot = eyeCardSpot(eyeViewW(), eyeTornPage());
+    const old = document.getElementById('pi-eyecard');
     const v = view(id);
-    const ws = watchState(id);
-    fill(panel, attackPanelContent(v, { ...ep.attack, watch: { ...ws, full: getWatch().list.length >= WATCH_MAX && !ws.watching, toggle: () => toggleFor(id) } }));
+    if (spot.mode === 'none') {
+        if (old) old.remove();
+        ep.sig.attack = '';
+    } else {
+        const ws = watchState(id);
+        const next = eyeFightCard(v, spot.mode, { ...ep.attack, watch: { ...ws, full: getWatch().list.length >= WATCH_MAX && !ws.watching, toggle: () => toggleFor(id) } });
+        let card = old;
+        if (!card || ep.sig.attack !== next.outerHTML) {
+            ep.sig.attack = next.outerHTML;
+            if (old) old.replaceWith(next);
+            else (document.body || document.documentElement).appendChild(next);
+            card = next;
+        }
+        // Beside the fight, level with its top; the training panel docks under it.
+        const root = attackRoot();
+        const r = root ? root.getBoundingClientRect() : null;
+        card.style.width = spot.width + 'px';
+        card.style.left = Math.round(spot.x) + 'px';
+        const top = Math.round(r && r.height ? Math.max(8, r.top) : 80);
+        card.style.top = top + 'px';
+        // Never taller than the window (it scrolls inside instead).
+        card.style.maxHeight = Math.max(80, window.innerHeight - top - 8) + 'px';
+    }
     // What Torn Eye said before this fight: the fight learner compares it with how the fight went.
     if (v && v.forecast && Number.isFinite(v.forecast.pWin)) {
         const list = get(K.eyePredictions, []) || [];
@@ -206,16 +307,21 @@ function onAttackData(json) {
 
 /* ------------------------------------------------------------- wiring */
 
+function eyeClearAll() {
+    for (const el of document.querySelectorAll('#pi-eye-layer, #pi-eyecard, .pi-mini-line')) el.remove();
+    ep.sig = {};
+    ep.lists = {};
+    // Torn's war rows back in their own order.
+    for (const list of document.querySelectorAll('.pi-warlist')) {
+        list.classList.remove('pi-warlist');
+        for (const li of list.children) li.style.order = '';
+    }
+}
+
 function drawAll() {
-    // Taking turns with Torn Trading, or Torn Eye chips switched off in Settings: nothing of ours on Torn's page.
+    // Taking turns with Torn Trading, or Torn Eye switched off in Settings: nothing of ours on Torn's page.
     if (isPaused() || !getSettings().eyeChips) {
-        removeChips(document);
-        for (const el of document.querySelectorAll('#pi-attack')) el.remove();
-        // Torn's war rows back in their own order.
-        for (const list of document.querySelectorAll('.pi-warlist')) {
-            list.classList.remove('pi-warlist');
-            for (const li of list.children) li.style.order = '';
-        }
+        eyeClearAll();
         return;
     }
     if (!isVisible()) return;
@@ -225,17 +331,53 @@ function drawAll() {
     if (!eyeReady() && (p === PAGE_FACTION || miniProfileId())) loadEyeCache().catch(() => {});
     if (p === PAGE_PROFILE) drawProfile();
     if (p === PAGE_FACTION) {
-        if (document.getElementById('faction_war_list_id')) drawWar();
-        drawFaction();
+        const glowed = document.getElementById('faction_war_list_id') ? drawWar() : false;
+        drawFaction(!glowed);
     }
     if (p === PAGE_ATTACK) drawAttack();
     drawMini();
+    ep.layoutSig = eyeLayoutSig();
+}
+
+/** Only the positions, after a resize or when Torn's page moved (no rebuild). */
+function eyePlaceAll() {
+    if (isPaused() || !getSettings().eyeChips || !isVisible()) return;
+    const p = detectPage(location.href);
+    if (p === PAGE_PROFILE || p === PAGE_ATTACK) {
+        drawAll();
+        return;
+    }
+    // A list whose tags need another size is drawn again; otherwise they only move.
+    const mode = eyeRowSpot(eyeViewW(), eyeTornPage()).mode;
+    if (Object.values(ep.lists).some((L) => L.spotMode !== mode)) {
+        drawAll();
+        return;
+    }
+    for (const name of Object.keys(ep.lists)) eyePlaceList(name);
+    ep.layoutSig = eyeLayoutSig();
+}
+
+/** Where things are now: the window, Torn's page and the first row or title we sit level with. */
+function eyeLayoutSig() {
+    const pg = eyeTornPage();
+    const p = detectPage(location.href);
+    let y = '';
+    if (p === PAGE_PROFILE) {
+        const a = profileAnchor();
+        y = a ? Math.round(a.getBoundingClientRect().top + window.scrollY) : '';
+    } else if (p === PAGE_ATTACK) {
+        const a = attackRoot();
+        y = a ? Math.round(a.getBoundingClientRect().top) : '';
+    } else {
+        y = Object.values(ep.lists).map((L) => (L.first ? Math.round(L.first.el.getBoundingClientRect().top + window.scrollY) + ':' + L.rowsEl.length : '')).join(',');
+    }
+    return [eyeViewW(), Math.round(pg.left), Math.round(pg.right), y].join('|');
 }
 
 export function bootEyePage() {
     ensureMarkCss();
     ensureEyeCss();
-    bindCard(document, (id) => view(id));
+    bindCard(document, (id) => view(id), () => eyeCardSpot(eyeViewW(), eyeTornPage()));
     const p = detectPage(location.href);
     if (p === PAGE_ATTACK) {
         // unsafeWindow is the page's own window in Tampermonkey; the harness has only window.
@@ -266,14 +408,34 @@ export function bootEyePage() {
         lastSig = '';
         drawAll();
     });
-    // Faction and war lists render after the page: a cheap look each second (row ids only) draws their chips then.
+    // A resized window re-places everything (once per frame).
+    let resizeQueued = false;
+    window.addEventListener('resize', () => {
+        if (resizeQueued) return;
+        resizeQueued = true;
+        const run = () => {
+            resizeQueued = false;
+            eyePlaceAll();
+        };
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+        else setTimeout(run, 16);
+    });
+    // Faction and war lists render after the page: a cheap look each second (row ids only) draws their tags then.
+    // On the pages we draw beside, the same look notices Torn's page moving (it settles after load) and re-places.
     let rowsSig = '';
     setInterval(() => {
-        if (!isVisible() || isPaused() || !getSettings().eyeChips || detectPage(location.href) !== PAGE_FACTION) return;
-        const sig = readFactionRows().map((r) => r.id).join(',') + '|' + readWarRows().map((r) => r.id + ':' + r.status).join(',');
-        if (sig === rowsSig) return;
-        rowsSig = sig;
-        drawAll();
+        if (!isVisible() || isPaused() || !getSettings().eyeChips) return;
+        const pg = detectPage(location.href);
+        if (pg !== PAGE_FACTION && pg !== PAGE_PROFILE && pg !== PAGE_ATTACK) return;
+        if (pg === PAGE_FACTION) {
+            const sig = readFactionRows().map((r) => r.id + ':' + r.status).join(',') + '|' + readWarRows().map((r) => r.id + ':' + r.status).join(',');
+            if (sig !== rowsSig) {
+                rowsSig = sig;
+                drawAll();
+                return;
+            }
+        }
+        if (eyeLayoutSig() !== ep.layoutSig) eyePlaceAll();
     }, 1000);
     // The mini-profile popup is added to the body on the first hover, then re-drawn for each player.
     let watchedRoot = null;
@@ -285,7 +447,7 @@ export function bootEyePage() {
             new MutationObserver(onMini).observe(root, { childList: true, subtree: true });
         }
         const id = miniProfileId();
-        const shown = document.querySelector('#profile-mini-root .pi-chip');
+        const shown = document.querySelector('#profile-mini-root .pi-mini-line');
         if (id && (!shown || shown.getAttribute('data-pi-player') !== String(id)) && !(ep.miniAt && ep.miniId === id && Date.now() - ep.miniAt < 500)) {
             ep.miniId = id;
             ep.miniAt = Date.now();
