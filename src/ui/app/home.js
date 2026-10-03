@@ -164,7 +164,7 @@ export function nextDays(m, settings) {
                     return h('tr', {}, [
                         h('td', { class: 't', style: 'width:130px;white-space:nowrap', text: day(st.at) + ' ' + clock(st.at, settings) }),
                         h('td', {}, [h('b', { class: 'w', text: st.label }), st.note ? h('br') : null, st.note ? h('small', { class: 'muted', text: st.note }) : null]),
-                        h('td', { style: 'width:150px' }, [h('span', { class: k.length === 1 ? 's-' + k[0] : null, text: trainsText(st.trains) || '—' })]),
+                        h('td', { style: 'width:190px' }, [h('span', { class: k.length === 1 ? 's-' + k[0] : null, text: trainsText(st.trains) || '—' })]),
                         h('td', { class: 'r', style: 'width:110px', text: st.gain ? fmtSigned(st.gain) : '' }),
                     ]);
                 }),
@@ -243,7 +243,7 @@ function weekChart(m, ctx) {
     const used = STATS.filter((k) => days.some((d) => d[k]));
     const legend = h('span', { class: 'legend2' }, used.map((k) => h('span', {}, [h('i', { style: 'background:' + STAT_COLOR[k] }), STAT_LABEL[k]])));
     return h('div', {}, [
-        h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('lab', fromPlan ? 'Next 7 days · what your plan gains a day (today: what is left)' : 'Next 7 days · stats gained a day'), legend]),
+        h('div', { class: 'row', style: 'justify-content:space-between;margin-bottom:6px' }, [t('ct', fromPlan ? 'Next 7 days · gained a day' : 'Next 7 days · stats gained a day'), legend]),
         stackBars(perDay, days.map((_, i) => DAYS[(start + i) % 7]), { w: 1000, h: 84, top: totals.map((v) => '+' + fmtShort(v)), label: 'Stats gained each of the next 7 days' }),
     ]);
 }
@@ -411,7 +411,7 @@ export function renderHome(m, ctx) {
     });
     const steps = rows.length
         ? h('table', { class: 'tbl num', style: 'margin-top:8px' }, [
-              h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Step' }), h('th', { style: 'width:150px', text: 'Train' }), h('th', { class: 'r', style: 'width:110px', text: 'Gain' }), h('th', { class: 'r', style: 'width:110px', text: 'In' })])]),
+              h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Step' }), h('th', { style: 'width:190px', text: 'Train' }), h('th', { class: 'r', style: 'width:110px', text: 'Gain' }), h('th', { class: 'r', style: 'width:110px', text: 'In' })])]),
               h('tbody', {}, rows),
           ])
         : null;
