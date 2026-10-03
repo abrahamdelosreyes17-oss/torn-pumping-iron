@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Pumping Iron
 // @namespace    torn-pumping-iron
-// @version      1.3.0
+// @version      1.4.0
 // @description  Gym planner and fight scout for Torn: what to take, what to train, what to buy, who you can beat. Reads the API and the page you're on; never acts for you.
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
@@ -48,8 +48,8 @@
 (function () {
     'use strict';
 
-    const PI_BUILD_VERSION = '1.3.0';
-    const PI_BUILD_HASH = '31b2d8636a1c';
+    const PI_BUILD_VERSION = '1.4.0';
+    const PI_BUILD_HASH = '123af26485d1';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -18606,24 +18606,31 @@
 
     /* ===== src/core/eye/targets.js ===== */
     /*
-     * Torn Eye's target list (ROUND4-PLAN §A). FFScouter's finder answers the
-     * strongest accounts first, 50 at most, so one ask with no slices gave the
-     * owner 50 level-100 players he can't beat. We ask in slices instead:
+     * Torn Eye's target list (ROUND4-PLAN §A; round 7, the owner, 2026-10-03). FFScouter's finder answers the strongest
+     * accounts inside the asked range first, 50 at most. We want Stomps with the most respect: respect grows with fair
+     * fight and level, and a Stomp (you keep 99% HP or more) is a much weaker player, so the best Stomps sit just under
+     * "the stomp edge", the strength at which you'd start losing HP.
      *
-     *   - fair fight 1.0–1.5, 1.5–2.0, 2.0–2.5 and 2.5–3.0 (FFScouter's own
-     *     figure against you). Strongest-first inside a slice is the top of that
-     *     slice, so every difficulty shows up, from sure wins to the most respect;
-     *   - the level range cut in up to 3 bands, so it isn't only level 100.
+     *   - The edges come from our own fight model (findEdges): for each level band (the level range in up to 3), the fair
+     *     fight at which a typical player of the band's top level stops being a Stomp, a Good and a Fair for you. Worked
+     *     out once per your-stats key (eye-service.js myEdges).
+     *   - Each ask is one level band and one zone: Stomp is fair fight 1.0 up to the stomp edge, Good from there to the
+     *     good edge, Fair to the fair edge. Strongest-first inside a zone is its top, so each answer is the most respect
+     *     that zone has; the next ask of that band starts just under the weakest player the last one gave (a cursor), or
+     *     the zone is done when an answer comes back short.
+     *   - Which ask next: the open band whose top could give the most respect (high levels first, then lower); Stomp
+     *     first, Good and Fair only once Stomps run short (the Stomp zone is done, or the Stomps so far won't reach 100
+     *     in the asks left).
+     *   - Every answer is judged at once, and the asking stops as soon as the list holds 100 Stomps and a full reserve
+     *     (200 in all), or after TARGET_ASKS_MAX asks (~300 players looked at). FFScouter allows 25 a minute on its
+     *     finder; we pace to 20. If FFScouter ignores the fair-fight range (an answer far outside itself), that level
+     *     band is not asked again: it'd be the same list.
      *
-     * 4 × 3 = 12 asks at most (FFScouter allows 25 a minute on its target
-     * finder; we pace to 20), then the estimates (≤ 205 per ask). If FFScouter
-     * ignores the fair-fight range (a slice answers far outside itself), the
-     * other slices of that level band are skipped: they'd be the same list.
-     *
-     * Then the owner's hard rule: every candidate goes through our fight model
-     * and only players you beat keeping half your HP or more (Stomp, Good or
-     * Fair, round 7) are ever stored. One order everywhere: most respect, then
-     * most HP kept, then the highest win.
+     * Then the owner's hard rule: every candidate goes through our fight model and only players you beat keeping half
+     * your HP or more (Stomp, Good or Fair) are ever stored. At most 200 are kept: the active list (the first 100 in the
+     * order, the only ones shown and whose statuses are read) and a quiet reserve of up to 100 more. A player you hit
+     * drops out at once and the next one slides in; when the reserve runs low, one more ask follows (refillTargets).
+     * One order: band first (Stomp, Good, Fair), then the most respect, then the most HP kept, then the highest win.
      */
 
 
@@ -18634,21 +18641,36 @@
     /** The full range: no respect cap (owner). Torn caps fair fight at 3. */
     const TARGET_FF = { min: 1.0, max: 3.0 };
 
-    /** Bumped when the way lists are asked or judged changes: an older stored list is asked again once (3: round 7's bands). */
-    const TARGETS_VERSION = 3;
+    /** Bumped when the way lists are asked or judged changes: an older stored list is asked again once (4: the stomp edge, 100 + 100). */
+    const TARGETS_VERSION = 4;
 
     /** What the list is asked with (round 7: the Level range and the Show ticks are gone; inactive players, any faction). */
     const TARGET_LOAD = { minLevel: 1, maxLevel: 100, inactiveOnly: 1, factionless: null };
 
-    /** [calibrate] The list is asked again by itself when the Torn Eye tab is open and the stored one is this old (no Refresh button). */
+    /**
+     * [calibrate] The list is asked again by itself when the Torn Eye tab is open and the stored one is this old (no
+     * Refresh button). Kept as the fallback beside the refill: the refill only replaces players you hit, while your stats
+     * grow every day (the stored players' fair fight against you falls, so each gives less respect, and the best Stomps
+     * just under the edge are other players by then) and the inactive players change.
+     */
     const TARGETS_REFRESH_MS = 6 * 60 * 60 * 1000;
 
-    const FF_SLICES = [
-        [1.0, 1.5],
-        [1.5, 2.0],
-        [2.0, 2.5],
-        [2.5, 3.0],
-    ];
+    /** The active list: shown, statuses read (the owner: "at most 100 targets"). */
+    const ACTIVE_MAX = 100;
+    /** The quiet reserve behind it: stored and fight-judged, never shown, no status reads. */
+    const RESERVE_MAX = 100;
+    /** Everything stored. */
+    const LIST_MAX = ACTIVE_MAX + RESERVE_MAX;
+    /** [calibrate] Fewer than this in reserve: one more FFScouter ask, quietly. */
+    const RESERVE_LOW = 20;
+    /** [calibrate] A refill is not tried again sooner (one that found nobody new included). */
+    const REFILL_GAP_MS = 2 * 60 * 1000;
+    /** A list load asks FFScouter's finder this many times at most (6 × 50: ~300 players looked at). */
+    const TARGET_ASKS_MAX = 6;
+    /** FFScouter's finder answers 50 at most. */
+    const ASK_LIMIT = 50;
+    /** [calibrate] A player you hit is not brought back by a refill or a reload for this long. */
+    const GONE_KEEP_MS = 24 * 60 * 60 * 1000;
 
     /** FFScouter's target finder: 25 a minute per IP; we keep to 20. */
     const TARGETS_PER_MINUTE = 20;
@@ -18683,15 +18705,6 @@
         return out;
     }
 
-    /** The asks for one load: each level band (highest first: more respect) × each fair-fight slice. */
-    function targetQueries({ minLevel = 1, maxLevel = 100, inactiveOnly = 1, factionless = null } = {}) {
-        const out = [];
-        for (const [a, b] of levelBands(minLevel, maxLevel).reverse()) {
-            for (const [f0, f1] of FF_SLICES) out.push({ minLevel: a, maxLevel: b, minFf: f0, maxFf: f1, inactiveOnly, factionless });
-        }
-        return out;
-    }
-
     /** The params stored with a list; a list stored without this version is asked again once. */
     function targetParams({ minLevel = 1, maxLevel = 100, inactiveOnly = 1, factionless = null } = {}) {
         return { v: TARGETS_VERSION, minLevel, maxLevel, inactiveOnly, factionless, minFf: TARGET_FF.min, maxFf: TARGET_FF.max };
@@ -18709,13 +18722,6 @@
         return out / known.length > 0.5;
     }
 
-    /** One list from many asks, each player once (the first answer wins). */
-    function mergeTargetLists(lists) {
-        const seen = new Map();
-        for (const list of lists || []) for (const r of list || []) if (r && r.playerId > 0 && !seen.has(r.playerId)) seen.set(r.playerId, r);
-        return [...seen.values()];
-    }
-
     /** FFScouter's own fair fight from the list: outside 1.0–3.0 it isn't a player we asked for. Unknown stays. */
     function inFfRange(row) {
         const ff = row ? row.fairFight : null;
@@ -18730,10 +18736,228 @@
         return Math.round((Number(respect) || 0) * 100);
     }
 
-    /** The one order (round 7, the owner): most respect, then most HP kept, then the highest win. Rows {respect, keep, win} (0–100). */
-    function byRespect(a, b) {
+    /** Where a band falls in the order: Stomp, Good, Fair, then anything else. */
+    function bandRank(band) {
+        const i = ['stomp', 'good', 'fair'].indexOf(band);
+        return i < 0 ? 3 : i;
+    }
+
+    /**
+     * The one order on stored rows (the owner, 2026-10-03): band first (Stomp, Good, Fair), then the most respect, then
+     * the most HP kept, then the highest win. Rows {band, respect, keep, win (0–100)}.
+     */
+    function byStored(a, b) {
         const pc = (v) => (Number.isFinite(v) ? Math.round(v) : -1);
-        return shownRespect(b.respect) - shownRespect(a.respect) || pc(b.keep) - pc(a.keep) || pc(b.win) - pc(a.win);
+        return bandRank(a.band) - bandRank(b.band) || shownRespect(b.respect) - shownRespect(a.respect) || pc(b.keep) - pc(a.keep) || pc(b.win) - pc(a.win);
+    }
+
+    /** Players you hit lately ({id: when}), without the ones older than GONE_KEEP_MS. */
+    function goneNow(gone, now = Date.now()) {
+        const out = {};
+        for (const [id, at] of Object.entries(gone || {})) if (Number(at) > 0 && now - Number(at) < GONE_KEEP_MS) out[id] = Number(at);
+        return out;
+    }
+
+    /**
+     * What is kept of a stored list: in the order, without the players you hit lately, at most LIST_MAX (the active 100
+     * and the reserve). A list stored by an older version (600 players) is cut the same way.
+     */
+    function cutTargets(list, { gone = null, now = Date.now() } = {}) {
+        const g = goneNow(gone, now);
+        return (list || []).filter((r) => r && r.playerId > 0 && !g[r.playerId]).sort(byStored).slice(0, LIST_MAX);
+    }
+
+    /**
+     * The live rows (judged again now, in byOrder) split: the active list (the first ACTIVE_MAX) and the reserve behind it.
+     * A row under 50% HP kept (your stats or colours changed) or one you hit is not listed: the next one slides in.
+     * @param {object[]} rows - {band, respect, forecast, hit}
+     */
+    function splitTargets(rows) {
+        const listed = (rows || []).filter((r) => r && isBeatable(r.band) && !(r.hit && r.hit.kind === 'hit')).sort(byOrder);
+        return { active: listed.slice(0, ACTIVE_MAX), reserve: listed.slice(ACTIVE_MAX, LIST_MAX) };
+    }
+
+    /**
+     * A player you hit drops out of the stored list at once (the owner: "hit → drop → refill"), remembered in `gone` so a
+     * refill or a reload doesn't bring them back for GONE_KEEP_MS.
+     * @param {object} stored - the stored list {list, gone, …}
+     * @param {Map<number, {kind}>} hits - ownHits(): only real hits (`kind: 'hit'`) drop a row, not an attack page opened
+     * @returns {object|null} the stored list without them, or null when nobody was hit
+     */
+    function dropHits(stored, hits, now = Date.now()) {
+        if (!stored || !Array.isArray(stored.list)) return null;
+        const out = [];
+        const gone = goneNow(stored.gone, now);
+        let n = 0;
+        for (const r of stored.list) {
+            const h = r && hits && hits.get(Number(r.playerId));
+            if (h && h.kind === 'hit') {
+                gone[r.playerId] = now;
+                n++;
+            } else out.push(r);
+        }
+        return n ? { ...stored, list: out, gone } : null;
+    }
+
+    /* ------------------------------------------------ the stomp edge (the owner, 2026-10-03) */
+
+    /** The probe's id (it seeds the Monte Carlo, so the same stats give the same edges every time). */
+    const EDGE_PROBE_ID = 1000003;
+    /** Bisection steps between fair fight 1 and 3: 2 / 2⁸ ≈ 0.008. */
+    const EDGE_STEPS = 8;
+    /** [calibrate] Edges when your stats aren't known yet: roughly the old slices. */
+    const FALLBACK_EDGES = { stomp: 2.0, good: 2.5, fair: 3.0 };
+
+    /**
+     * HP kept (whole percent, as bandOf reads it; 0 when you never win) against a typical player of this level whose
+     * strength is the given fair fight against you. The likely builds of fight.js at that battle-stat score.
+     * @param {object} o - {me: {str,spd,def,dex}, myLife, gearMe, level, ff, adjust: forecast => {pWin, keep} (what the fight learner kept)}
+     */
+    function keepAt({ me, myLife = 7500, gearMe, level = 100, ff, adjust = null }) {
+        const bss = (3 / 8) * (Math.max(1, ff) - 1) * bssOf(me);
+        let f = forecast({ me: { ...me, life: myLife }, target: { id: EDGE_PROBE_ID, life: lifeFromLevel(level), bss }, gearMe });
+        if (adjust) f = { ...f, ...adjust(f) };
+        if (!(f.pWin > 0) || !Number.isFinite(f.keep)) return 0;
+        return Math.round(f.keep * 100);
+    }
+
+    /**
+     * The fair fight at which you'd stop keeping `keep`% of your HP against a typical player of this level: the highest
+     * fair fight (1–3, two decimals) still at or over it. 3 when even the strongest keeps it; 1 when nobody does. Our fight
+     * model's HP kept falls as the other player gets stronger, so a bisection finds it.
+     */
+    function edgeFor(probe, keep) {
+        const at = (ff) => probe(ff) >= keep;
+        if (at(TARGET_FF.max)) return TARGET_FF.max;
+        if (!at(TARGET_FF.min)) return TARGET_FF.min;
+        let lo = TARGET_FF.min;
+        let hi = TARGET_FF.max;
+        for (let i = 0; i < EDGE_STEPS; i++) {
+            const mid = (lo + hi) / 2;
+            if (at(mid)) lo = mid;
+            else hi = mid;
+        }
+        return Math.floor(lo * 100) / 100;
+    }
+
+    /**
+     * The stomp, good and fair edges of each level band (the band's top level: its strongest players, the most life), in
+     * fair-fight terms, the figure FFScouter's finder is asked with.
+     * @param {object} o - {me, myLife, gearMe, adjust, minLevel, maxLevel}
+     * @returns {{minLevel, maxLevel, level, stomp, good, fair}[]} highest levels first
+     */
+    function findEdges({ me, myLife = 7500, gearMe, adjust = null, minLevel = 1, maxLevel = 100 }) {
+        return levelBands(minLevel, maxLevel)
+            .reverse()
+            .map(([a, b]) => {
+                const memo = new Map();
+                const probe = (ff) => {
+                    const k = Math.round(ff * 1000);
+                    if (!memo.has(k)) memo.set(k, keepAt({ me, myLife, gearMe, level: b, ff, adjust }));
+                    return memo.get(k);
+                };
+                const stomp = edgeFor(probe, BAND_KEEP.stomp);
+                const good = Math.max(stomp, edgeFor(probe, BAND_KEEP.good));
+                const fair = Math.max(good, edgeFor(probe, BAND_KEEP.fair));
+                return { minLevel: a, maxLevel: b, level: b, stomp, good, fair };
+            });
+    }
+
+    /** The edges when your stats aren't known: FALLBACK_EDGES for every level band. */
+    function fallbackEdges({ minLevel = 1, maxLevel = 100 } = {}) {
+        return levelBands(minLevel, maxLevel)
+            .reverse()
+            .map(([a, b]) => ({ minLevel: a, maxLevel: b, level: b, ...FALLBACK_EDGES }));
+    }
+
+    /* ------------------------------------------------ the asks: zones under each edge, a cursor each */
+
+    /** The zones, in the order they are asked: Stomp under the stomp edge, then Good, then Fair. */
+    const ZONES = ['stomp', 'good', 'fair'];
+
+    const round2 = (v) => Math.round(v * 100) / 100;
+
+    /** Where a band's zone starts (its weakest fair fight). */
+    function zoneBottom(b, zone) {
+        return zone === 'stomp' ? TARGET_FF.min : zone === 'good' ? b.edges.stomp : b.edges.good;
+    }
+
+    /**
+     * A new plan from the edges (stored with the list, so a refill goes on where the load stopped). Each band's zone has a
+     * cursor (`top`: the next ask's highest fair fight) and is `dry` once an answer comes back short.
+     */
+    function askPlan(edges) {
+        return {
+            bands: (edges || []).map((e) => {
+                const b = { minLevel: e.minLevel, maxLevel: e.maxLevel, edges: { stomp: e.stomp, good: e.good, fair: e.fair }, top: { stomp: e.stomp, good: e.good, fair: e.fair }, dry: {}, skip: false };
+                for (const z of ZONES) b.dry[z] = !(b.top[z] > zoneBottom(b, z) + 0.005);
+                return b;
+            }),
+            asks: { stomp: 0, good: 0, fair: 0 },
+            ffIgnored: false,
+        };
+    }
+
+    /** Whether any band still has this zone to ask. */
+    function zoneOpen(plan, zone) {
+        return Boolean(plan && plan.bands.some((b) => !b.skip && !b.dry[zone]));
+    }
+
+    /**
+     * Which zone the next ask is in. Stomp first; Good and Fair only once Stomps run short: the Stomp zone is done, or
+     * (after two Stomp asks) the Stomps so far won't reach ACTIVE_MAX at this rate in the asks left. null: nothing left.
+     * @param {object} o - {stomps: Stomps kept so far, asked, cap}
+     */
+    function pickZone(plan, { stomps = 0, asked = 0, cap = TARGET_ASKS_MAX } = {}) {
+        const open = zoneOpen(plan, 'stomp');
+        const n = plan ? plan.asks.stomp : 0;
+        const short = !open || (n >= 2 && stomps + (cap - asked) * (stomps / n) < ACTIVE_MAX);
+        if (open && !short) return 'stomp';
+        for (const z of ['good', 'fair']) if (zoneOpen(plan, z)) return z;
+        return open ? 'stomp' : null;
+    }
+
+    /**
+     * The next ask in a zone: the open band whose top could give the most respect (respect is base(level) × fair fight,
+     * so high levels first, then lower), from the zone's bottom up to its cursor. null when the zone is done.
+     */
+    function nextAsk(plan, zone, { inactiveOnly = 1, factionless = null } = {}) {
+        let best = -1;
+        let worth = -Infinity;
+        (plan ? plan.bands : []).forEach((b, i) => {
+            if (b.skip || b.dry[zone]) return;
+            const w = (1 + b.maxLevel / 200) * b.top[zone];
+            if (w > worth) {
+                worth = w;
+                best = i;
+            }
+        });
+        if (best < 0) return null;
+        const b = plan.bands[best];
+        return { minLevel: b.minLevel, maxLevel: b.maxLevel, minFf: round2(zoneBottom(b, zone)), maxFf: round2(b.top[zone]), inactiveOnly, factionless, zone, band: best };
+    }
+
+    /**
+     * Move the plan on after an answer: FFScouter ignored the range (that band is not asked again), the zone ran out (a
+     * short answer), or the cursor goes just under the weakest player the answer gave.
+     */
+    function noteAnswer(plan, q, rows, limit = ASK_LIMIT) {
+        const b = plan.bands[q.band];
+        plan.asks[q.zone] = (plan.asks[q.zone] || 0) + 1;
+        if (listIgnoresFf(rows, q)) {
+            b.skip = true;
+            plan.ffIgnored = true;
+            return plan;
+        }
+        if ((rows || []).length < limit) {
+            b.dry[q.zone] = true;
+            return plan;
+        }
+        const ffs = rows.map((r) => r && r.fairFight).filter((v) => Number.isFinite(v) && v <= q.maxFf + 0.05);
+        const low = ffs.length ? Math.min(...ffs) : q.maxFf - 0.1;
+        b.top[q.zone] = round2(Math.min(low, q.maxFf) - 0.01);
+        if (!(b.top[q.zone] > zoneBottom(b, q.zone) + 0.005)) b.dry[q.zone] = true;
+        return plan;
     }
 
     /**
@@ -18755,7 +18979,7 @@
             else if (!isBeatable(j.band)) dropped.low++;
             else kept.push({ ...r, ...j });
         }
-        kept.sort(byRespect);
+        kept.sort(byStored);
         return { kept, dropped };
     }
 
@@ -18813,11 +19037,11 @@
     /* ------------------------------------------------ round 7: where a target is, from what was already read */
 
     /**
-     * A status read is believed this long; a hospital stay until its own time, a flight until it lands. 25 min (round 7,
-     * was 15): one pass over 600 targets at 30 a minute takes 20 min, so a row read in the last pass is still known when
-     * the next one reaches it.
+     * A status read is believed this long; a hospital stay until its own time, a flight until it lands. 15 min: one pass
+     * over the active 100 at 30 a minute takes under 4 min and each player is read again every 10 min, so a row read in
+     * the last pass is still known when the next one reaches it (25 min while the list was 600).
      */
-    const STATUS_FRESH_MS = 25 * 60 * 1000;
+    const STATUS_FRESH_MS = 15 * 60 * 1000;
 
     /**
      * Where a player is, from reads already made, or null when nothing fresh is known. A stored target has no status of
@@ -18882,8 +19106,8 @@
     const HIT_RESULTS = ['Hospitalized', 'Attacked', 'Mugged'];
 
     /**
-     * [calibrate] A player you beat is greyed this long. Torn's hospital times vary with the hit and aren't in the
-     * attack row; the next list load brings the real out-time (FFScouter's `hospital_until`).
+     * [calibrate] An attack of yours counts as a hit this long (Torn's hospital times vary with the hit and aren't in the
+     * attack row): a target you hit inside it drops out of the list (dropHits) and is kept out for GONE_KEEP_MS.
      */
     const OWN_HIT_MS = 60 * 60 * 1000;
 
@@ -18949,12 +19173,15 @@
     /** The band chips, in order. */
     const BAND_CHIPS = ['all', 'stomp', 'good', 'fair'];
 
-    /** The one order on the rows the tab draws (forecast 0..1): most respect, then most HP kept, then the highest win. */
+    /**
+     * The one order on the rows the tab draws (forecast 0..1), and on the targets synced to Discord: band first (Stomp,
+     * Good, Fair), then the most respect, then the most HP kept, then the highest win.
+     */
     function byOrder(a, b) {
         // Compared as the row shows them (respect to 2 decimals, HP kept and win in whole percents), so the tie-breaks apply.
         const k = (r) => (r.forecast && Number.isFinite(r.forecast.keep) ? Math.round(r.forecast.keep * 100) : -1);
         const w = (r) => (r.forecast && Number.isFinite(r.forecast.pWin) ? Math.round(r.forecast.pWin * 100) : -1);
-        return shownRespect(b.respect) - shownRespect(a.respect) || k(b) - k(a) || w(b) - w(a);
+        return bandRank(a.band) - bandRank(b.band) || shownRespect(b.respect) - shownRespect(a.respect) || k(b) - k(a) || w(b) - w(a);
     }
 
     /** A hospital or jail read whose own out-time has passed: they are out (or about to be), so it says nothing now. */
@@ -19030,8 +19257,8 @@
     const STATUS_MAX_PENDING = 3;
     /** A failed read is not asked again sooner (Trading's PRESENCE_RETRY_MS). */
     const STATUS_RETRY_MS = 2 * 60 * 1000;
-    /** Statuses kept across reloads and tabs: 600 targets (FFScouter's finder asked 12 × 50) and a few more. */
-    const STATUS_KEEP = 640;
+    /** Statuses kept across reloads and tabs: the active 100 and the reserve that slides in behind it, and a few more. */
+    const STATUS_KEEP = 240;
 
     /** Who is asked first: the player opened to attack, then the page on screen, then every other row in the list's order. */
     function statusOrder({ open = [], page = [], all = [] } = {}) {
@@ -19081,7 +19308,7 @@
     /**
      * The progress line's numbers: how many of the list's players have a status known now, and about how long the rest
      * take at 30 a minute.
-     * @param {number[]} ids - every row of the stored list
+     * @param {number[]} ids - every row of the active list (the reserve's statuses are never read)
      * @param {function} known - id => boolean
      */
     function statusProgress(ids, known) {
@@ -19090,7 +19317,7 @@
         return { checked, total, leftMin: Math.ceil((total - checked) / STATUS_PER_MIN) };
     }
 
-    /** "Statuses: 40 of 600 checked · this page first · the rest in about 19 min" (the mockup's words). */
+    /** "Statuses: 37 of 100 checked · this page first · the rest in about 3 min" (the mockup's words; the active list only). */
     function statusLine({ checked, total, leftMin }) {
         if (!total) return '';
         if (checked >= total) return 'Statuses: all ' + total + ' checked · each again every 10 min';
@@ -19301,9 +19528,11 @@
      * hospital out-times, landings, jail) and Watched (the players you chose to keep an eye on). Chain is gone (round 7:
      * it was the same list as Targets).
      *
-     * Targets: the band chips (All / Stomp / Good / Fair, with counts) and "Ready now" (on by default); one order for
-     * everything, most respect, then most HP kept, then the highest win; 20 rows a page, only those drawn; the statuses
-     * read the Torn Trading way (eye-service.js `pumpStatuses`), this page first, then the rest quietly.
+     * Targets: the active list (at most 100; a quiet reserve of up to 100 more waits behind it, never shown), the band
+     * chips (All / Stomp / Good / Fair, with counts) and "Ready now" (on by default); one order (the owner, 2026-10-03):
+     * band first (Stomp, Good, Fair), then the most respect, then the most HP kept, then the highest win; 20 rows a page,
+     * only those drawn; the statuses read the Torn Trading way (eye-service.js `pumpStatuses`), this page first, then the
+     * rest of the active list quietly. A player you hit drops out and the next one slides in; a low reserve refills.
      */
 
 
@@ -19354,6 +19583,20 @@
         if (!(ready && mode === 'targets' && Boolean(hasFfs) && !paused && !loading && !error)) return false;
         if (typeof autoLoaded === 'number' ? now - autoLoaded < TARGETS_REFRESH_MS : autoLoaded) return false;
         return !stored || needsRefetch(stored.params) || !(now - (Number(stored.at) || 0) < TARGETS_REFRESH_MS);
+    }
+
+    /**
+     * One more FFScouter ask, quietly, when the reserve behind the active list runs low (players you hit dropped out):
+     * same gates as a load (Targets showing, FFScouter connected, your stats in, not paused, no load or error), a list
+     * asked the current way with asks left in its plan, and not within REFILL_GAP_MS of the last try (this page's or the
+     * list's own, so two tabs don't both ask).
+     */
+    function shouldRefill({ mode, hasFfs, paused, stored, loading, error, reserve, refilledAt = 0, ready = true, now = Date.now() }) {
+        if (!(ready && mode === 'targets' && Boolean(hasFfs) && !paused && !loading && !error)) return false;
+        if (!stored || !Array.isArray(stored.list) || needsRefetch(stored.params) || !stored.plan || stored.plan.done) return false;
+        if (!Number.isFinite(reserve) || reserve >= RESERVE_LOW) return false;
+        const last = Math.max(Number(refilledAt) || 0, Number(stored.refilledAt) || 0, Number(stored.at) || 0);
+        return !(now - last < REFILL_GAP_MS);
     }
 
     /** Where a target row is (core/eye/targets.js rowState): 'hospital', 'travel', 'jail', 'okay', 'other' or 'unknown'. */
@@ -19411,13 +19654,12 @@
     }
 
     /**
-     * The status cell: what was read, your own hit, or "checking" while the statuses are being read. FFScouter's
-     * out-time comes only while no read is newer than the list (app-page.js eyeRows, targetStatus), as in rowState.
+     * The status cell: what was read, the attack page you opened, or "checking" while the statuses are being read.
+     * FFScouter's out-time comes only while no read is newer than the list (app-page.js eyeRows, targetStatus), as in
+     * rowState. A player you hit isn't here: they dropped out of the list (core/eye/targets.js splitTargets).
      */
     function statusCell(r, now, checking) {
         if (r.hospitalUntil && r.hospitalUntil > now) return h('td', { class: 'cdn', text: 'Hospital · ' + countdown(r.hospitalUntil - now) });
-        // Your own hit: known without asking Torn.
-        if (r.hit && r.hit.kind === 'hit') return h('td', { class: 'cdn', text: hitText(r.hit, now) });
         // A hospital or jail read whose out-time has passed says nothing now (rowState: unknown).
         const st = r.status && !statusOver(r.status, now) ? r.status : {};
         const d = st.description || st.state;
@@ -19499,7 +19741,7 @@
             const s = rowState(r, now);
             return s === 'hospital' || s === 'travel' || s === 'jail';
         };
-        // The bright Attack button goes to the first player known to be free now, never one you just put in hospital.
+        // The bright Attack button goes to the first player known to be free now, not one whose attack page you just opened.
         const firstUp = rows.find((r) => !r.hit && rowState(r, now) === 'okay') || null;
         const statuses = ctx.eye.statuses;
         const rowOf = (r) => {
@@ -19525,8 +19767,8 @@
             ];
             const d = detailsText(targetDetails(r.stored || {}, r));
             const isOpen = open === r.id;
-            // A player you just hit, in hospital, away or in jail: greyed (still listed when "Ready now" is off).
-            const grey = (r.hit && r.hit.kind === 'hit') || down(r);
+            // In hospital, away or in jail: greyed (still listed when "Ready now" is off).
+            const grey = down(r);
             body.push(h('tr', { class: 'click' + (isOpen ? ' sel' : '') + (grey ? ' whatif' : ''), tabindex: '0', title: d, 'aria-expanded': String(isOpen), onclick: () => { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); }, onkeydown: (ev) => { if (ev.key === 'Enter') { ctx.ui.eyeOpen = isOpen ? null : r.id; ctx.rerender(); } } }, cells));
             if (isOpen) body.push(h('tr', { class: 'sub' }, [h('td', { colspan: String(head.length), class: 'muted', style: 'font-size:12px' }, [d])]));
             return body;
@@ -19562,8 +19804,8 @@
             { class: 'eye-chips', role: 'group', 'aria-label': 'Band' },
             BAND_CHIPS.map((b) => h('button', { type: 'button', class: 'eye-chip', 'aria-pressed': String(f.band === b), onclick: () => set('band', b) }, [b === 'all' ? null : h('i', { style: 'background:' + BAND_COLORS[b] }), CHIP_WORDS[b], h('span', { text: ' ' + list.counts[b] })])),
         );
-        const ready = h('button', { type: 'button', class: 'eye-chip', 'data-act': 'ready', 'aria-pressed': String(f.ready), title: 'Hides hospital, abroad, traveling, jail and players you hit in the last hour', onclick: () => set('ready', !f.ready) }, ['Ready now', f.ready && list.hidden ? h('span', { text: ' · ' + list.hidden + ' hidden' }) : null]);
-        return [bands, h('div', { class: 'eye-chips' }, [ready]), h('span', { class: 'eye-rule' }, ['Order: ', h('b', { text: 'respect' }), ' › ', h('b', { text: 'HP kept' }), ' › ', h('b', { text: 'win' })])];
+        const ready = h('button', { type: 'button', class: 'eye-chip', 'data-act': 'ready', 'aria-pressed': String(f.ready), title: 'Hides hospital, abroad, traveling and jail (players you hit leave the list)', onclick: () => set('ready', !f.ready) }, ['Ready now', f.ready && list.hidden ? h('span', { text: ' · ' + list.hidden + ' hidden' }) : null]);
+        return [bands, h('div', { class: 'eye-chips' }, [ready]), h('span', { class: 'eye-rule' }, ['Order: ', h('b', { text: 'band' }), ' › ', h('b', { text: 'respect' }), ' › ', h('b', { text: 'HP kept' }), ' › ', h('b', { text: 'win' })])];
     }
 
     /** War and Watched rows share one layout: band edge, online dot, status with out-times and landings, win and HP kept. */
@@ -19748,6 +19990,10 @@
         if (shouldAutoLoad({ mode, hasFfs: ctx.flags.hasFfs, paused: ctx.paused, stored, loading: e.loading(), error: e.error(), autoLoaded: ui.eyeAutoLoaded, ready: Boolean(m && m.ready), now })) {
             ui.eyeAutoLoaded = now;
             setTimeout(reload, 0);
+        } else if (e.refill && e.reserve && mode === 'targets' && shouldRefill({ mode, hasFfs: ctx.flags.hasFfs, paused: ctx.paused, stored, loading: e.loading(), error: e.error(), reserve: e.reserve(), refilledAt: ui.eyeRefillAt, ready: Boolean(m && m.ready), now })) {
+            // The reserve ran low (players you hit dropped out): one more ask, quietly.
+            ui.eyeRefillAt = now;
+            setTimeout(() => e.refill(), 0);
         }
 
         // Heads-ups for the watch list show in every mode.
@@ -19832,7 +20078,8 @@
             const statuses = e.statuses || null;
             // Read only with FFScouter connected (readsTargetStatuses): without it no "checking" and no progress line.
             const checking = Boolean(statuses && ctx.flags.hasFfs && statuses.active());
-            // Statuses: the players opened to attack, then this page, then every other listed row in the one order.
+            // Statuses: the players opened to attack, then this page, then every other row of the active list in the one
+            // order (the reserve is never asked about).
             const everyone = listTargets(rowsAll, { band: 'all', ready: false, now }).rows;
             // Without FFScouter there is no list to read statuses for: nothing asked (round 7 review).
             if (statuses && ctx.flags.hasFfs) {
@@ -19842,7 +20089,7 @@
             let body;
             if (!ctx.flags.hasFfs) body = h('p', { class: 'muted', style: 'margin:0' }, ['Targets come from FFScouter. ', h('a', { href: '#settings', onclick: (ev) => { ev.preventDefault(); ctx.go('settings'); }, text: 'Connect it in Settings' }), '; chips on Torn’s pages work without it (your fights and public stats).']);
             else if (!rows.length) {
-                const text = msg.kind !== 'none' ? msg.text : list.counts.all ? (f.ready && list.hidden ? 'Nobody ready now: ' + list.hidden + ' hidden (hospital, away, jail or just hit).' : 'Nobody in this band.') : 'No targets yet.';
+                const text = msg.kind !== 'none' ? msg.text : list.counts.all ? (f.ready && list.hidden ? 'Nobody ready now: ' + list.hidden + ' hidden (hospital, away or jail).' : 'Nobody in this band.') : 'No targets yet.';
                 body = h('p', { class: msg.kind === 'dead' || msg.kind === 'error' ? 'c-bad' : 'muted', style: 'margin:0' }, [text, msg.kind === 'dead' ? h('span', {}, [' · ', h('a', { href: '#settings', onclick: (ev) => { ev.preventDefault(); ctx.go('settings'); }, text: 'check it in Settings' })]) : null]);
             } else body = targetsTable(pg.rows, { now, ctx, checking });
             const notes = [];
@@ -19854,7 +20101,7 @@
             }
             // A load that failed still says so above an older list.
             const warnLine = rows.length && (msg.kind === 'error' || msg.kind === 'dead' || msg.kind === 'wait' || msg.kind === 'paused') ? h('div', { class: 'why', style: 'margin-bottom:8px', text: msg.text + (stored && stored.at ? ' · showing the list from ' + clock(stored.at, ctx.settings) : '') }) : null;
-            // "Statuses: 40 of 600 checked · this page first · the rest in about 19 min" (every listed row, whatever the chips).
+            // "Statuses: 37 of 100 checked · this page first · the rest in about 3 min" (the active list, whatever the chips).
             // Only rows with a status actually read count as checked (not the list's out-time or your own hit).
             const known = new Set(everyone.filter((r) => statusChecked(r, now)).map((r) => r.id));
             const prog = statusProgress(everyone.map((r) => r.id), (id) => known.has(id));
@@ -20553,7 +20800,8 @@
      */
     function warmFights(rows) {
         if (!eye.cache || !(pi.model && pi.model.ready)) return false;
-        for (const r of rows) if (!eye.todo.has(r.id)) eyeView(r.id, r.extra, { later: 'idle' });
+        // Only what is kept (the active list and the reserve): an older stored list of 600 is never worked out whole.
+        for (const r of (rows || []).slice(0, LIST_MAX)) if (!eye.todo.has(r.id)) eyeView(r.id, r.extra, { later: 'idle' });
         return true;
     }
 
@@ -20645,59 +20893,138 @@
         };
     }
 
+    /** The stomp, good and fair edges for your stats as they fight, worked out once per your-stats key (findEdges). */
+    const edgeMemo = { key: '', edges: null };
+
     /**
-     * Load Torn Eye's targets: FFScouter asked in slices, merged, the fair
-     * fight range checked, every player judged by the fight model, and only
-     * the ones you beat stored (most respect first). Throws on a refused key,
-     * a pause or an FFScouter error; the stored list is then left as it was.
-     * @param {object} input - {minLevel, maxLevel, inactiveOnly, factionless}
-     * @param {object} [deps] - {client, judge, store, sleep, now} (tests)
+     * Your edges (core/eye/targets.js findEdges): your stats with merits, your life, your gear and what the fight learner
+     * kept, the same side every fight of the list is judged with. null until your stats are in.
      */
-    async function importTargets(input = {}, { client = null, judge = null, store = (v) => pageSet(TARGETS_KEY, v), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() } = {}) {
+    function myEdges({ minLevel = 1, maxLevel = 100 } = {}) {
+        const m = pi.model;
+        if (!m || !m.ready) return null;
+        const { meStats, gMe, myLife, meKey, fm } = yourSide(m);
+        const key = JSON.stringify([meKey, myLife, gMe, fm || null, minLevel, maxLevel]);
+        if (edgeMemo.key !== key) {
+            const adjust = fm ? (f) => applyFightModel(fm, { pWin: f.pWin, keep: f.keep }) : null;
+            edgeMemo.edges = findEdges({ me: meStats, myLife, gearMe: gMe, adjust, minLevel, maxLevel });
+            edgeMemo.key = key;
+        }
+        return edgeMemo.edges;
+    }
+
+    /** What is stored of a judged row. */
+    function slimTarget(r) {
+        return { playerId: r.playerId, name: r.name, level: r.level, fairFight: r.fairFight, bsEstimate: r.bsEstimate, lastAction: r.lastAction, hospitalUntil: r.hospitalUntil, band: r.band, win: r.win, keep: r.keep, respect: r.respect, ours: r.ours, source: r.source, ageDays: r.ageDays };
+    }
+
+    /** One ask of FFScouter's finder, paced, then its new players' estimates and our judgement (each answer at once). */
+    async function askOnce(ffs, q, { judge, seen, sleep, now }) {
+        if (isPaused()) throw takingTurnsError();
+        await paceTargets(sleep, now);
+        const rows = await fetchFfsTargets(ffs, { ...q, limit: ASK_LIMIT });
+        const fresh = (rows || []).filter((r) => r && r.playerId > 0 && !seen.has(r.playerId));
+        for (const r of fresh) seen.add(r.playerId);
+        await ensureFfsStats(fresh.filter(inFfRange), ffs);
+        return { rows, ...selectTargets(fresh, judge || viewJudge) };
+    }
+
+    function addDropped(a, b) {
+        return { low: (a.low || 0) + (b.low || 0), none: (a.none || 0) + (b.none || 0), range: (a.range || 0) + (b.range || 0) };
+    }
+
+    /**
+     * Load Torn Eye's targets (the owner, 2026-10-03): FFScouter asked just under your stomp edge, high levels first,
+     * then lower, each answer judged by the fight model at once; the asking stops once the list holds 100 Stomps and a
+     * full reserve, or after TARGET_ASKS_MAX asks; Good and Fair only once Stomps run short. Only the ones you beat are
+     * stored, at most LIST_MAX, in the one order, with the plan's cursors (a refill goes on from them). Throws on a
+     * refused key, a pause or an FFScouter error; the stored list is then left as it was.
+     * @param {object} input - {minLevel, maxLevel, inactiveOnly, factionless}
+     * @param {object} [deps] - {client, judge, edges, load, store, sleep, now} (tests)
+     */
+    async function importTargets(input = {}, { client = null, judge = null, edges = null, load = () => pageGet(TARGETS_KEY, null), store = (v) => pageSet(TARGETS_KEY, v), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() } = {}) {
         const ffs = client || sharedFfsClient();
         if (!judge && !(pi.model && pi.model.ready)) throw new Error('Waiting for your stats from Torn.');
         const params = targetParams(input);
-        const lists = [];
-        const skip = new Set();
+        const plan = askPlan(edges || myEdges(params) || fallbackEdges(params));
+        // Players you hit lately stay out (a reload doesn't bring them back).
+        const prev = load();
+        const gone = goneNow(prev && prev.gone, now());
+        const seen = new Set(Object.keys(gone).map(Number));
+        const kept = new Map();
+        let dropped = { low: 0, none: 0, range: 0 };
         let asked = 0;
-        let ffIgnored = false;
-        for (const q of targetQueries(params)) {
-            const band = q.minLevel + '-' + q.maxLevel;
-            if (skip.has(band)) continue;
-            if (isPaused()) throw takingTurnsError();
-            await paceTargets(sleep, now);
-            const rows = await fetchFfsTargets(ffs, { ...q, limit: 50 });
+        for (;;) {
+            const stomps = [...kept.values()].filter((r) => r.band === 'stomp').length;
+            const zone = asked < TARGET_ASKS_MAX ? pickZone(plan, { stomps, asked }) : null;
+            // Enough: 100 Stomps and a full reserve; or a full list once Stomps ran short.
+            if (!zone || (kept.size >= LIST_MAX && (stomps >= ACTIVE_MAX || zone !== 'stomp'))) break;
+            const q = nextAsk(plan, zone, params);
+            const got = await askOnce(ffs, q, { judge, seen, sleep, now });
             asked++;
-            lists.push(rows);
-            // FFScouter ignored the range: the other slices of this level band would be the same list.
-            if (listIgnoresFf(rows, q)) {
-                ffIgnored = true;
-                skip.add(band);
-            }
+            noteAnswer(plan, q, got.rows);
+            dropped = addDropped(dropped, got.dropped);
+            for (const r of got.kept) kept.set(r.playerId, slimTarget(r));
         }
-        const merged = mergeTargetLists(lists);
-        await ensureFfsStats(merged.filter(inFfRange), ffs);
-        const { kept, dropped } = selectTargets(merged, judge || viewJudge);
-        const list = kept.map((r) => ({
-            playerId: r.playerId,
-            name: r.name,
-            level: r.level,
-            fairFight: r.fairFight,
-            bsEstimate: r.bsEstimate,
-            lastAction: r.lastAction,
-            hospitalUntil: r.hospitalUntil,
-            band: r.band,
-            win: r.win,
-            keep: r.keep,
-            respect: r.respect,
-            ours: r.ours,
-            source: r.source,
-            ageDays: r.ageDays,
-        }));
-        const out = { at: now(), params, list, dropped, asked, found: merged.length, ffIgnored };
+        const list = cutTargets([...kept.values()], { gone, now: now() });
+        const out = { at: now(), params, list, dropped, asked, found: seen.size - Object.keys(gone).length, ffIgnored: plan.ffIgnored, plan, gone };
         store(out);
         notify();
         return out;
+    }
+
+    /**
+     * One more ask, quietly, when the reserve runs low (the owner: "hit → drop → refill"): the stored plan goes on from
+     * its cursors (Stomp first, then Good, then Fair), the answer is judged, and the new players join the list in the
+     * order (at most LIST_MAX kept). Marks the plan `done` when nothing is left to ask. Throws as importTargets does.
+     * @param {object} [deps] - {client, judge, load, store, sleep, now} (tests)
+     * @returns {Promise<{added: number, done: boolean}|null>} null when there is no list (or one asked the old way)
+     */
+    async function refillTargets({ client = null, judge = null, load = () => pageGet(TARGETS_KEY, null), store = (v) => pageSet(TARGETS_KEY, v), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() } = {}) {
+        const ffs = client || sharedFfsClient();
+        if (!judge && !(pi.model && pi.model.ready)) throw new Error('Waiting for your stats from Torn.');
+        const stored = load();
+        if (!stored || !Array.isArray(stored.list) || !stored.plan || needsRefetch(stored.params)) return null;
+        const plan = JSON.parse(JSON.stringify(stored.plan));
+        // Not short of Stomps here: the reserve wants the best that is left, Stomp first.
+        const zone = pickZone(plan, { stomps: ACTIVE_MAX });
+        if (!zone) {
+            store({ ...stored, plan: { ...plan, done: true }, refilledAt: now() });
+            return { added: 0, done: true };
+        }
+        const q = nextAsk(plan, zone, stored.params);
+        const seen = new Set([...stored.list.map((r) => r.playerId), ...Object.keys(goneNow(stored.gone, now())).map(Number)]);
+        const got = await askOnce(ffs, q, { judge, seen, sleep, now });
+        noteAnswer(plan, q, got.rows);
+        plan.done = !pickZone(plan, { stomps: ACTIVE_MAX });
+        // What is stored now (a hit may have dropped a row meanwhile), with the new players.
+        const latest = load() || stored;
+        const list = cutTargets([...(latest.list || []), ...got.kept.map(slimTarget)], { gone: latest.gone, now: now() });
+        store({ ...latest, list, plan, dropped: addDropped(latest.dropped || {}, got.dropped), asked: (latest.asked || 0) + 1, found: (latest.found || 0) + got.rows.length, ffIgnored: Boolean(latest.ffIgnored || plan.ffIgnored), refilledAt: now() });
+        notify();
+        return { added: got.kept.length, done: plan.done };
+    }
+
+    /**
+     * The players you hit drop out of the stored list at once (dropHits), from your attacks (read hourly, and 3 min after
+     * an attack page opened) — no call. The webpage's tab calls it every 2 s while it is open; safe to call often.
+     * @returns {number} how many dropped
+     */
+    function dropHitTargets(now = Date.now()) {
+        const stored = pageGet(TARGETS_KEY, null);
+        const hits = ownHits((getShared('myAttacks', null) || {}).list || [], getShared(K.eyePredictions, []) || [], now);
+        const out = dropHits(stored, hits, now);
+        if (!out) return 0;
+        pageSet(TARGETS_KEY, out);
+        notify();
+        return stored.list.length - out.list.length;
+    }
+
+    /** The stored targets as kept: in the order, without the players you hit, at most LIST_MAX (an old 600 list is cut). */
+    function storedTargets(now = Date.now()) {
+        const stored = pageGet(TARGETS_KEY, null);
+        if (!stored || !Array.isArray(stored.list)) return [];
+        return cutTargets(stored.list, { gone: stored.gone, now });
     }
 
     /* ------------------------------------------------------ flights (war and watch) */
@@ -21327,11 +21654,11 @@
     }
 
     /**
-     * Targets for the Torn Eye tab: FFScouter asked in slices, each player
-     * judged by the fight model, only the ones you beat stored (eye-service).
+     * Targets for the Torn Eye tab: FFScouter asked just under your stomp edge, each answer judged by the fight model,
+     * only the ones you beat stored, the active 100 and a reserve (eye-service).
      */
     async function loadTargets(params) {
-        if (!getKey(K.ffsKey) || isPaused() || page.eye.loading) return;
+        if (!getKey(K.ffsKey) || isPaused() || page.eye.loading || page.eye.refilling) return;
         page.eye.loading = true;
         page.eye.error = null;
         page.app.render(true);
@@ -21343,6 +21670,23 @@
         }
         page.eye.loading = false;
         page.app.render(true);
+    }
+
+    /**
+     * The reserve ran low (players you hit dropped out): one more FFScouter ask, quietly (no "loading", an error kept to
+     * itself; the tab tries again after REFILL_GAP_MS). Visible tab, an FFScouter key, never while Torn Trading runs or
+     * while a load or another refill is under way; paced with the loads (20 a minute).
+     */
+    async function refillQuietly() {
+        if (!getKey(K.ffsKey) || isPaused() || !isVisible() || page.eye.loading || page.eye.refilling) return;
+        page.eye.refilling = true;
+        try {
+            await refillTargets({ client: ffsClient() });
+        } catch {
+            // Quiet: the list stays as it is; the 6 h reload or the next refill tries again.
+        } finally {
+            page.eye.refilling = false;
+        }
     }
 
     /*
@@ -21436,8 +21780,29 @@
         return watchMemo;
     }
 
-    /** Stored targets, judged again now: only players you still beat show (your stats or colours may have changed). */
+    /**
+     * Stored targets, judged again now, split into the active list (the first 100 in the order: shown, statuses read,
+     * synced to Discord) and the quiet reserve behind it. Only players you still beat are listed (your stats or colours
+     * may have changed) and a player you just hit is out at once: the next one slides in. Worked out once per draw.
+     */
+    let listsMemo = null;
+    function eyeLists() {
+        if (!listsMemo) {
+            listsMemo = splitTargets(judgedTargets());
+            Promise.resolve().then(() => {
+                listsMemo = null;
+            });
+        }
+        return listsMemo;
+    }
+
+    /** The active list (Targets, the bot's /targets). */
     function eyeRows() {
+        return eyeLists().active;
+    }
+
+    /** Every kept target (at most 200, an older 600 list cut in the order), judged again now. */
+    function judgedTargets() {
         const stored = pageGet(TARGETS_KEY, null);
         if (!stored || !Array.isArray(stored.list)) return [];
         // Where each target is, from reads already made (round 7): the list itself asks Torn about nobody, so a row's
@@ -21449,7 +21814,7 @@
         const warBy = new Map((war.membersFid === fid ? war.members || [] : []).map((mm) => [Number(mm.id), mm]));
         // Who you just hit: your attacks (read hourly) and the attack pages you opened since.
         const hits = ownHits((getShared('myAttacks', null) || {}).list || [], getShared(K.eyePredictions, []) || [], now);
-        const rows = stored.list.map((x) => {
+        return cutTargets(stored.list, { gone: stored.gone, now }).map((x) => {
             // A fight not worked out yet isn't simulated inside the draw: the row shows what the list stored until it is.
             const live = eyeView(x.playerId, { level: x.level, name: x.name }, { later: true });
             const v = live && !live.pending ? live : null;
@@ -21465,7 +21830,6 @@
             const hit = hits.get(Number(x.playerId)) || null;
             return { ...base, name: x.name, level: x.level, hospitalUntil: ts.hospitalUntil, lastAction: x.lastAction, id: x.playerId, stored: x, status: ts.status, statusAt: ts.statusAt, hit };
         });
-        return rows.filter((r) => isBeatable(r.band));
     }
 
     /*
@@ -21506,8 +21870,8 @@
         if (fightsPending()) return;
         eyeSyncAt = Date.now();
         const row = (id, name, level, v, extra = {}) => ({ id, name: name || (v && v.name) || null, level: level || (v && v.level) || null, band: v ? v.band : 'none', win: v && v.forecast ? Math.round(v.forecast.pWin * 100) : null, keep: v && v.forecast && v.forecast.keep !== null && v.forecast.keep !== undefined ? Math.round(v.forecast.keep * 100) : null, ...extra });
-        // The bot's /targets: the first 50 in the one order (respect, HP kept, win).
-        const rows = eyeRows().sort(byOrder);
+        // The bot's /targets: the first 50 of the active list, in the one order (band, respect, HP kept, win).
+        const rows = eyeRows();
         const bands = {};
         for (const r of rows) if (r.band) bands[r.id] = r.band;
         const fid = warFid();
@@ -21757,8 +22121,12 @@
             },
             eye: {
                 rows: eyeRows,
+                /** How many wait in the quiet reserve behind the active list. */
+                reserve: () => eyeLists().reserve.length,
                 stored: () => pageGet(TARGETS_KEY, null),
                 load: (params) => loadTargets(params).catch(() => {}),
+                /** The reserve ran low: one more ask, quietly. */
+                refill: () => refillQuietly().catch(() => {}),
                 loading: () => page.eye.loading,
                 error: () => page.eye.error,
                 sources: () => ({ fights: ((get('myAttacks', null) || {}).list || []).length, ffsFree: page.ffs ? page.ffs.stats().remaining : 60, gear: page.eye.gear }),
@@ -21859,8 +22227,8 @@
         const eyeTab = () => {
             const open = page.app.tab === 'eye';
             if (open && !eyeOpen) {
-                const stored = pageGet(TARGETS_KEY, null);
-                if (stored && Array.isArray(stored.list)) wantPlayers(stored.list.map((x) => x.playerId));
+                const kept = storedTargets();
+                if (kept.length) wantPlayers(kept.map((x) => x.playerId));
             }
             eyeOpen = open;
         };
@@ -21872,10 +22240,11 @@
         // their fights are worked out while the page is idle. Local numbers only: nothing is asked unless the tab is open.
         let warmed = false;
         const warm = () => {
-            if (warmed || page.app.tab === 'eye') return;
-            const stored = pageGet(TARGETS_KEY, null);
-            if (!archivesReady() || !stored || !Array.isArray(stored.list)) return;
-            warmed = warmFights(stored.list.map((x) => ({ id: x.playerId, extra: { level: x.level, name: x.name } })));
+            if (warmed || page.app.tab === 'eye' || !archivesReady()) return;
+            // Only the kept targets (the active list and the reserve, at most 200): an older 600 list is cut first.
+            const kept = storedTargets();
+            if (!kept.length) return;
+            warmed = warmFights(kept.map((x) => ({ id: x.playerId, extra: { level: x.level, name: x.name } })));
         };
         Promise.all([loadArchives(), gearCount()]).then(() => setTimeout(warm, 1500)).catch(() => {});
         onModel(() => warm());
@@ -21908,6 +22277,8 @@
             // Nothing of Torn Eye's runs unless its tab is open (owner, round 6: it only runs on the Torn Eye tab).
             eyeTab();
             if (page.app.tab !== 'eye') return;
+            // A target you hit is out of the stored list (the draw already leaves it out); a low reserve then refills.
+            dropHitTargets();
             pollOwnWars().catch(() => {});
             pollWarTab().catch(() => {});
             // The Watched view reads its players every 60 s while it shows (the war list just read costs nothing).
