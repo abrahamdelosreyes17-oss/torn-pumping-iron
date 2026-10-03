@@ -71,7 +71,10 @@ export const OVERLAY_CSS = `
 .check.done i { background: #3fbf5a; border-color: #3fbf5a; color: #101214; }
 .check.next { color: #fff; font-weight: 700; }
 .check.next i { border-color: var(--b); }
-.cta { display: block; height: 32px; line-height: 32px; text-align: center; border-radius: 6px; border: 0; background: #efebe2; color: #15171a; font: 700 13px 'Segoe UI', system-ui, sans-serif; cursor: pointer; text-decoration: none; }
+.acts { display: flex; flex-wrap: wrap; gap: 8px; }
+.cta { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; height: 34px; padding: 0 12px; border-radius: 6px; border: 0; background: #efebe2; color: #15171a; font: 700 13px/1 'Segoe UI', system-ui, sans-serif; white-space: nowrap; cursor: pointer; text-decoration: none; }
+.cta.web { flex: 0 1 auto; background: transparent; color: #e3e5e8; border: 1px solid #3a4046; font-weight: 600; }
+.cta.web:hover { border-color: #939aa1; }
 .cta:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .warn { color: #e8a33d; font-size: 12px; font-weight: 700; }
 /* Sized to the free space beside Torn's page (fitTier): narrower with smaller type, then one tag, then the smallest. */
@@ -477,7 +480,7 @@ export class Overlay {
         this.wrap.classList.toggle('paused', Boolean(v.paused));
         const cdText = v.pillNow || (v.cdAt ? countdown(v.cdAt - now) : '');
         this.headInfo.textContent = v.pillText || 'Pumping Iron';
-        // One way to the webpage always: the big button when there is no Torn page to go to, else a small ↗ here.
+        // Also a small ↗ in the bar (the folded panel has only the bar).
         const link = v.action && v.action.href;
         const app = link ? h('button', { class: 'app open', type: 'button', title: 'Open Pumping Iron', 'aria-label': 'Open Pumping Iron', onclick: () => this.onOpen(), text: '↗' }) : null;
         fill(this.head, [v.paused ? h('span', { class: 'plate', text: '!', 'aria-label': 'Paused' }) : h('span', { class: 'plate' }, [h('i')]), cdText ? h('span', { class: 'cd', 'data-cd': v.cdAt && !v.pillNow ? String(v.cdAt) : null, text: cdText }) : null, this.headInfo, app, this.colBtn]);
@@ -503,7 +506,8 @@ export class Overlay {
             kids.push(h('div', { class: 'meter' }, [h('i', { style: 'width:' + Math.min(100, (100 * v.energy.current) / Math.max(1, v.energy.max)) + '%' })]));
         }
         if (v.later && v.later.length) kids.push(h('div', { class: 'later', text: 'then ' + v.later.join(' · ') }));
-        kids.push(link ? h('a', { class: 'cta go', href: v.action.href, text: v.action.text }) : h('button', { class: 'cta open', type: 'button', onclick: () => this.onOpen(), text: 'Open Pumping Iron' }));
+        // The webpage is always one click away (the owner): beside the Torn page's button, or the only button.
+        kids.push(h('div', { class: 'acts' }, link ? [h('a', { class: 'cta go', href: v.action.href, text: v.action.text }), h('button', { class: 'cta web open', type: 'button', title: 'Open Pumping Iron', onclick: () => this.onOpen(), text: 'Pumping Iron ↗' })] : [h('button', { class: 'cta open', type: 'button', onclick: () => this.onOpen(), text: 'Open Pumping Iron' })]));
         fill(this.body, kids);
         if (wasOff || !this.placed) {
             this.placed = true;

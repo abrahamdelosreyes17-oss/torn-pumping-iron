@@ -277,9 +277,10 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     ok(/3:[45]\d\s*Xanax #1/.test(bar.replace(/\s+/g, ' ')), 'panel: countdown and step in the bar (' + bar + ')');
     const box = await page.evaluate(`(() => { const r = ${q('.head')}.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })()`);
     ok(Math.abs(box.h - 36) <= 1, 'panel: bar 36 px tall (' + box.h + ')');
-    const body = await page.evaluate(`({ shown: getComputedStyle(${q('.body')}).display !== 'none', text: ${q('.body')}.textContent, go: ${q('.cta.go')} && ${q('.cta.go')}.getAttribute('href'), goText: ${q('.cta')}.textContent, ctas: ${q('.body')}.querySelectorAll('.cta').length })`);
+    const body = await page.evaluate(`({ shown: getComputedStyle(${q('.body')}).display !== 'none', text: ${q('.body')}.textContent, go: ${q('.cta.go')} && ${q('.cta.go')}.getAttribute('href'), goText: ${q('.cta')}.textContent, ctas: ${q('.body')}.querySelectorAll('.cta').length, web: ${q('.body')}.querySelectorAll('.cta.web').length, mid: (() => { const c = ${q('.cta.go')}; const r = c.getBoundingClientRect(); const t = document.createRange(); t.selectNodeContents(c); const tr = t.getBoundingClientRect(); return Math.round(Math.abs((tr.top + tr.bottom) / 2 - (r.top + r.bottom) / 2)); })() })`);
     ok(body.shown && /Take Xanax #1, then train (STR|SPD|DEF|DEX)/.test(body.text), 'panel: expanded by default with the step');
-    ok(body.ctas === 1 && body.goText === 'Open Items' && body.go === 'https://www.torn.com/item.php', 'panel: one action button, "Open Items" for the Xanax (' + JSON.stringify(body) + ')');
+    ok(body.ctas === 2 && body.web === 1 && body.goText === 'Open Items' && body.go === 'https://www.torn.com/item.php', 'panel: the action button, "Open Items" for the Xanax, and the webpage beside it (' + JSON.stringify(body) + ')');
+    ok(body.mid <= 1, 'panel: the button text is centred (' + body.mid + ' px off)');
     const look = await page.evaluate(`(() => { const w = ${q('.wrap')}; const s = getComputedStyle(w); return { bg: s.backgroundColor, tone: w.getAttribute('data-tone'), font: s.fontFamily }; })()`);
     ok(look.bg === 'rgb(16, 18, 20)' && /Segoe UI/.test(look.font), 'panel: near-black, Segoe UI (' + JSON.stringify(look) + ')');
     ok(look.tone === '', 'panel: no chalk edge while the step is still ahead (' + look.tone + ')');
