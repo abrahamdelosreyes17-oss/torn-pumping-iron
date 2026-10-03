@@ -125,8 +125,8 @@ const TABS = {
     plan: ['Auto (from your income)', 'Auto mode needs a Full key', 'month plan ·', 'Re-plan', 'New plan…', 'Recommended', 'Steady training', 'Per $1M', 'Other plans', 'Why it isn’t the pick', 'Where your energy comes from', 'Natural energy', 'Build', 'High stat', "Hank's", 'pick yours', 'Ignorance Is Bliss', 'what-if'],
     buy: ['Buy for', 'Your list', 'Xanax', 'Iron_Monk', 'Points market', 'Deals', '7-day prices', 'You hold', 'TornW3B'],
     progress: ['Total stats against the plan', 'Each stat', 'Gained against plan', 'Receipts', 'Energy trained', '$ per 1,000 stats', 'What if you’d done another plan', 'the comparison appears after two days', 'Last trains', 'This week', 'Budget', 'Force Training'],
-    eye: ['Targets', 'Chain', 'War', 'How sure', 'FFScouter', 'Gear seen', 'Your side'],
-    settings: ['Torn API key', 'How this key is used', 'Full key (Auto mode)', 'Keep for war days', 'Discord pings', 'Log in with Discord', 'FFScouter', 'data policy', 'TornStats', 'Torn Eye colours', 'On Torn’s pages', 'Report a problem', 'Download report (.zip)', 'Developer', 'Export as .zip', 'Your data', 'Diagnostics', 'of 85'],
+    eye: ['Targets', 'War', 'Watched', 'Ready now', 'Order: respect › HP kept › win', 'How sure', 'FFScouter', 'Gear seen', 'Your side'],
+    settings: ['Torn API key', 'How this key is used', 'Full key (Auto mode)', 'Keep for war days', 'Discord pings', 'Log in with Discord', 'FFScouter', 'data policy', 'TornStats', 'On Torn’s pages', 'Report a problem', 'Download report (.zip)', 'Developer', 'Export as .zip', 'Your data', 'Diagnostics', 'of 85'],
 };
 
 const { page, errors, tornHits } = await openApp('');
@@ -298,10 +298,14 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     const m = await checkTab(o.page, 'eye', o.errors, ['Targets', 'Stomp', 'Attack', 'win and HP kept from your stats']);
     const rows = await o.page.evaluate(() => document.getElementById('pi-app').shadowRoot.querySelectorAll('.tbl tbody tr').length);
     ok(rows >= 5, 'eye: targets load by themselves the first time (' + rows + ')');
-    ok(/\d+ can.t-win players? dropped/.test(m.text), "eye: can't-win targets dropped before they're stored");
-    ok(!/Hide can.t win/.test(m.text), "eye: no 'Hide can't win' tick on Targets");
-    const bands = await o.page.evaluate(() => [...document.getElementById('pi-app').shadowRoot.querySelectorAll('.tbl tbody tr')].map((tr) => tr.cells[0].textContent.trim()));
-    ok(bands.every((b) => b === 'Stomp' || b === 'Good' || b === 'Tough'), 'eye: every target is one you beat (' + bands.join(',') + ')');
+    ok(/\d+ players? you’d keep under 50% HP against dropped/.test(m.text), 'eye: targets under 50% HP kept dropped before they’re stored');
+    ok(!/Hide can.t win|Most respect|Refresh|Stomp only|Keep over 50% HP/.test(m.text), 'eye: no Sort, Level, Refresh or Show ticks on Targets (round 7)');
+    ok(rows <= 20, 'eye: 20 rows a page at most, only those drawn (' + rows + ')');
+    const bands = await o.page.evaluate(() => [...document.getElementById('pi-app').shadowRoot.querySelectorAll('.tbl tbody tr.click')].map((tr) => tr.cells[0].textContent.trim()));
+    ok(bands.every((b) => b === 'Stomp' || b === 'Good' || b === 'Fair'), 'eye: every target is Stomp, Good or Fair (' + bands.join(',') + ')');
+    const order = await o.page.evaluate(() => [...document.getElementById('pi-app').shadowRoot.querySelectorAll('.tbl tbody tr.click')].map((tr) => Number(tr.cells[3].textContent)));
+    ok(order.every((r, i) => i === 0 || r <= order[i - 1]), 'eye: most respect first (' + order.slice(0, 5).join(',') + ')');
+    ok(/Statuses: \d+ of \d+ checked · this page first|Statuses: all \d+ checked/.test(m.text), 'eye: the statuses progress line');
     // A row opens its details (both fair fights, the estimate's age and source), and closes again.
     await o.page.locator('#pi-app .tbl tbody tr.click').first().click();
     await o.page.waitForTimeout(300);
@@ -312,12 +316,15 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     // ☆ on the first row: it shows on Watched (checked below).
     await o.page.locator('#pi-app .tbl tbody button[data-act="star"]').first().click();
     await o.page.waitForTimeout(300);
-    // Chain: only Stomp and Good, most respect first.
-    await o.page.locator('#pi-app .modes button', { hasText: 'Chain' }).click();
+    // Round 7: no Chain view; the Stomp chip shows only Stomp, in the same order.
+    ok((await o.page.locator('#pi-app .modes button', { hasText: 'Chain' }).count()) === 0, 'eye: Chain is gone (it was the same list as Targets)');
+    await o.page.locator('#pi-app .eye-chip', { hasText: 'Stomp' }).click();
     await o.page.waitForTimeout(400);
-    const chain = await o.page.evaluate(() => [...document.getElementById('pi-app').shadowRoot.querySelectorAll('.tbl tbody tr')].map((tr) => ({ band: tr.cells[0].textContent.trim(), resp: Number(tr.cells[3].textContent) })));
-    ok(chain.length > 0 && chain.every((r) => r.band === 'Stomp' || r.band === 'Good'), 'eye chain: only Stomp and Good (' + chain.map((r) => r.band).join(',') + ')');
-    ok(chain.every((r, i) => i === 0 || r.resp <= chain[i - 1].resp), 'eye chain: most respect first');
+    const stomp = await o.page.evaluate(() => [...document.getElementById('pi-app').shadowRoot.querySelectorAll('.tbl tbody tr.click')].map((tr) => ({ band: tr.cells[0].textContent.trim(), resp: Number(tr.cells[3].textContent) })));
+    ok(stomp.every((r) => r.band === 'Stomp'), 'eye: the Stomp chip (' + stomp.map((r) => r.band).join(',') + ')');
+    ok(stomp.every((r, i) => i === 0 || r.resp <= stomp[i - 1].resp), 'eye: most respect first inside a band');
+    await o.page.locator('#pi-app .eye-chip', { hasText: 'All' }).click();
+    await o.page.waitForTimeout(300);
     // War: watch a faction; everyone listed, attackable first.
     await o.page.locator('#pi-app .modes button', { hasText: 'War' }).click();
     await o.page.waitForTimeout(300);

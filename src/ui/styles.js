@@ -434,4 +434,31 @@ svg.ch .grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
 }
 .warnb.paused { border-radius: 0; margin: 0; padding: 12px 24px; }
 .dev-scatter { max-width: 520px; }
+/* ---- Round 7: Torn Eye list ---- */
+.eye-chips { display: inline-flex; gap: 8px; flex-wrap: wrap; }
+.eye-chip { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line2); background: transparent; color: var(--text); font: bold 12px Arial; cursor: pointer; }
+.eye-chip i { width: 9px; height: 9px; border-radius: 50%; }
+.eye-chip span { color: var(--muted); font-weight: normal; }
+.eye-chip[aria-pressed="true"] { border-color: var(--chalk); background: #2a2c2e; }
+.eye-chip:focus-visible { outline: 2px solid var(--chalk); outline-offset: 2px; }
+.eye-rule { margin-left: auto; color: var(--muted); font-size: 12px; }
+.eye-rule b { color: var(--text); }
+.tbl.eyelist th.key { color: var(--white); }
+.tbl.eyelist td.resp b { font-size: 14px; }
+.tbl.eyelist td.st-ok { color: var(--good); }
+.tbl.eyelist td.st-wait { color: var(--warn); }
+.tbl.eyelist .checking { color: var(--dim); }
+.tbl.eyelist .checking::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--dim); border-top-color: transparent; margin-right: 6px; vertical-align: -1px; animation: pi-eye-spin 1s linear infinite; }
+.still .tbl.eyelist .checking::before { animation: none; }
+@media (prefers-reduced-motion: reduce) { .tbl.eyelist .checking::before { animation: none; } }
+@keyframes pi-eye-spin { to { transform: rotate(360deg); } }
+.eye-pager { display: flex; align-items: center; gap: 6px; margin-top: 14px; color: var(--muted); font-size: 12px; flex-wrap: wrap; }
+.eye-pager button { min-width: 30px; height: 28px; padding: 0 9px; border-radius: 6px; border: 1px solid var(--line2); background: transparent; color: var(--text); font: bold 12px Arial; cursor: pointer; }
+.eye-pager button.on { background: var(--chalk); color: var(--on-chalk); border-color: var(--chalk); }
+.eye-pager button:disabled { opacity: .35; cursor: default; }
+.eye-pager button:focus-visible { outline: 2px solid var(--chalk); outline-offset: 2px; }
+.eye-pager .sp { margin-left: auto; }
+.eye-bg { display: flex; align-items: center; gap: 10px; margin-top: 12px; color: var(--muted); font-size: 12px; }
+.eye-bg .track { flex: 0 0 180px; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.eye-bg .fill { height: 100%; background: var(--chalk); }
 `;

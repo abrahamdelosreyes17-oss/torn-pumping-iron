@@ -127,7 +127,7 @@ test('targets sync through PUT /plan (kept small); /targets lists them with Atta
     assert.equal(t.list.length, 3);
     assert.equal(t.list[2].band, 'none');
     assert.ok(!('junk' in t.list[0]));
-    assert.deepEqual(t.bands, { 1234567: 'stomp', 999: 'tough' });
+    assert.deepEqual(t.bands, { 1234567: 'stomp', 999: 'low' }, 'an older userscript’s Tough reads as under 50%');
     assert.equal(user().faction_id, 777);
     assert.equal(user().player_id, 3000001);
     const r = await body(handleInteraction(command('targets'), env, world(), ctx(), t.at + 720));

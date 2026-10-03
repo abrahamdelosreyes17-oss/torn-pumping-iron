@@ -1,7 +1,7 @@
 /*
  * Settings (mockups/round3/X-settings.html): keys and data, ordered by use,
  * each key with Torn's ToS table where it is entered. Discord folds to one
- * line once it works; Torn Eye's colour bands live here; Developer (export
+ * line once it works (Torn Eye's bands are fixed, round 7: no setting); Developer (export
  * learning data for everyone, the developer key unlocks the rest);
  * Diagnostics against Torn Trading's limits (the two take turns).
  */
@@ -15,7 +15,6 @@ import { W3B_SITE_URL, W3B_TERMS_URL } from '../../api/w3b.js';
 import { workerBase } from '../../api/worker.js';
 import { apiKeyPageUrl } from '../../sources/route.js';
 import { sectionHead, headsList } from './common.js';
-import { BAND_WORDS, BAND_COLORS, DEFAULT_BAND_LIMITS } from '../../core/eye/bands.js';
 import { developerSection, renderDeveloper } from './developer.js';
 import { reportSection } from './report.js';
 
@@ -99,27 +98,6 @@ function keyRow({ label, placeholder, saveText, onSave, onReveal, primary = true
 
 function stateTag(tone, text) {
     return h('span', { class: 'state ' + tone }, [h('i'), text]);
-}
-
-/**
- * Keep the colour bands in order after an edit: Stomp ≥ Good ≥ Tough (win),
- * Stomp ≥ Good (HP kept). The band just edited wins; its neighbours move.
- */
-export function orderedBands(l, edited = null) {
-    const b = { stomp: { ...l.stomp }, good: { ...l.good }, tough: { ...l.tough } };
-    if (edited === 'stomp') {
-        b.good.win = Math.min(b.good.win, b.stomp.win);
-        b.good.keep = Math.min(b.good.keep, b.stomp.keep);
-        b.tough.win = Math.min(b.tough.win, b.good.win);
-    } else if (edited === 'tough') {
-        b.good.win = Math.max(b.good.win, b.tough.win);
-        b.stomp.win = Math.max(b.stomp.win, b.good.win);
-    } else {
-        b.stomp.win = Math.max(b.stomp.win, b.good.win);
-        b.stomp.keep = Math.max(b.stomp.keep, b.good.keep);
-        b.tough.win = Math.min(b.tough.win, b.good.win);
-    }
-    return { ...l, ...b };
 }
 
 /** A button that deletes asks once more ("Sure? Forget keys") for 5 seconds; a second click does it. */
@@ -377,22 +355,6 @@ export function renderSettings(m, ctx) {
         h('details', { class: 'dis', open: !fk.has }, [h('summary', { text: 'How this key is used' }), tosTable(TOS_FULL)]),
     ]);
 
-    // Torn Eye's colour bands (moved here from the Torn Eye pane).
-    const limits = { ...DEFAULT_BAND_LIMITS, ...(s.bands || {}) };
-    const bandCell = (band) => h('span', { class: 'band2' }, [h('i', { style: 'background:' + BAND_COLORS[band] }), BAND_WORDS[band]]);
-    const bandInput = (band, key) => h('input', { class: 'inp num', style: 'width:52px', inputmode: 'numeric', value: String(limits[band][key]), 'aria-label': BAND_WORDS[band] + ' ' + key, onchange: (ev) => { const v = Math.max(0, Math.min(100, Number(ev.target.value) || 0)); ctx.setSettings({ bands: orderedBands({ ...limits, [band]: { ...limits[band], [key]: v } }, band) }); } });
-    const bandsSec = settingsSection('Torn Eye colours', h('span', { class: 'state off', text: 'your limits' }), [
-        h('table', { class: 'tbl num', style: 'max-width:520px' }, [
-            h('thead', {}, [h('tr', {}, [h('th', { text: 'Band' }), h('th', { text: 'Win at least' }), h('th', { text: 'Keep HP at least' })])]),
-            h('tbody', {}, [
-                h('tr', {}, [h('td', {}, [bandCell('stomp')]), h('td', {}, [bandInput('stomp', 'win'), ' %']), h('td', {}, [bandInput('stomp', 'keep'), ' %'])]),
-                h('tr', {}, [h('td', {}, [bandCell('good')]), h('td', {}, [bandInput('good', 'win'), ' %']), h('td', {}, [bandInput('good', 'keep'), ' %'])]),
-                h('tr', {}, [h('td', {}, [bandCell('tough')]), h('td', {}, [bandInput('tough', 'win'), ' %']), h('td', { class: 'muted', text: '—' })]),
-                h('tr', {}, [h('td', {}, [bandCell('cant')]), h('td', { class: 'muted', colspan: '2', text: 'below that' })]),
-            ]),
-        ]),
-    ]);
-
     const overlaySec = settingsSection('On Torn’s pages', null, [
         h('div', { class: 'opts' }, [settingsCheck('Panel on every page', s.pill, (v) => ctx.setSettings({ pill: v })), settingsCheck('Marks on the gym page', s.gymMarks, (v) => ctx.setSettings({ gymMarks: v })), settingsCheck('Marks on items and markets', s.marketMarks, (v) => ctx.setSettings({ marketMarks: v })), settingsCheck('Torn Eye chips', s.eyeChips, (v) => ctx.setSettings({ eyeChips: v }))]),
         h('p', { class: 'num' }, ['Expand or collapse the panel: ', h('b', { class: 'white', text: 'Alt+`' }), ' · drag it by its bar; it stays in the empty margin beside Torn’s page, left of it first, so NPC Arbitrage keeps the right.']),
@@ -424,6 +386,6 @@ export function renderSettings(m, ctx) {
         h('div', {}, [sectionHead('What it never does', null, null, 'h3'), headsList([{ tone: 'plain', text: 'Train, buy, use or attack', sub: 'Fill only types a number' }, { tone: 'plain', text: 'Load a Torn page by itself' }, { tone: 'plain', text: 'Ping from a Torn tab', sub: 'only your Discord service does' }])]),
     ];
     // One card per section, ordered by use.
-    return { main: [tornSec, fullSec, discordSec, ffsSec, tsSec, bandsSec, overlaySec, displaySec, reportSec, devSec].filter(Boolean), pane };
+    return { main: [tornSec, fullSec, discordSec, ffsSec, tsSec, overlaySec, displaySec, reportSec, devSec].filter(Boolean), pane };
 }
 

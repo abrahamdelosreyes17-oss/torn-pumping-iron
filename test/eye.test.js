@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 
 import { hitChance, mitigation, baseDamage, withAccuracy, forecast, statsFromBss, bssOf, respectFor, fairFight, simulateFights, DEFAULT_GEAR, MAX_TURNS, LIKELY_BUILDS } from '../src/core/eye/fight.js';
 import { estimatePlayer, bssFromFairFight, fairFightInformative, rankNumber, rankBucket, totalFromBss, bssFromTotal, STAT_BUCKETS } from '../src/core/eye/estimate.js';
-import { bandOf, chipFigures, BAND_WORDS, DEFAULT_BAND_LIMITS } from '../src/core/eye/bands.js';
+import { bandOf, chipFigures, BAND_WORDS, BAND_COLORS, normBand, isListedBand } from '../src/core/eye/bands.js';
 import { parseAttackData, gearSummary, myGear } from '../src/core/eye/gear.js';
 import { sortWar, warSummary, outEarly, memberState } from '../src/core/eye/war.js';
 import { installAttackHook, isAttackDataUrl, HOOK_FLAG } from '../src/platform/page-hook.js';
@@ -31,7 +31,7 @@ test('a balanced 1.0B player: stats from BSS round-trip', () => {
     near(bssOf(s), 50000, 1e-6);
 });
 
-test('round-2 H band ordering: Pallas stomp, Dune_Ferro good, Old_Tom tough, Vorhees can\'t win', () => {
+test('round-2 H band ordering, round 7 bands (HP kept over the fights won): Pallas Stomp, Dune_Ferro Good, Old_Tom Fair, Vorhees under 50%', () => {
     const t = (total, life, id) => ({ id, bss: bssFromTotal(total), life });
     const bands = [
         bandOf(forecast({ me: ME, target: { ...t(150e6, 6250, 1), stats: statsFromBss(LIKELY_BUILDS.balanced, bssFromTotal(150e6)) } })),
@@ -39,7 +39,7 @@ test('round-2 H band ordering: Pallas stomp, Dune_Ferro good, Old_Tom tough, Vor
         bandOf(forecast({ me: ME, target: t(780e6, 8200, 80) })),
         bandOf(forecast({ me: ME, target: t(2600e6, 7700, 72) })),
     ];
-    assert.deepEqual(bands, ['stomp', 'good', 'tough', 'cant']);
+    assert.deepEqual(bands, ['stomp', 'good', 'fair', 'low']);
 });
 
 test('the forecast is steady for the same player (seeded) and HP kept falls as they get stronger', () => {
@@ -122,14 +122,25 @@ test('estimate: public stats use TornTools\' rank buckets (rough)', () => {
     assert.equal(estimatePlayer({ me: ME, now: 0 }), null);
 });
 
-test('bands from win and HP kept, with the user\'s limits; chip figures', () => {
-    assert.equal(bandOf({ pWin: 0.995, keep: 0.8 }), 'stomp');
-    assert.equal(bandOf({ pWin: 0.995, keep: 0.6 }), 'good');
-    assert.equal(bandOf({ pWin: 0.95, keep: 0.3 }), 'tough');
-    assert.equal(bandOf({ pWin: 0.3, keep: 0.1 }), 'cant');
+test('round 7 bands: by the HP kept over the fights you win only (Stomp 99%+, Good 70–99%, Fair 50–69%, under 50% never listed); chip figures', () => {
+    assert.equal(bandOf({ pWin: 1, keep: 1 }), 'stomp');
+    assert.equal(bandOf({ pWin: 0.9, keep: 0.99 }), 'stomp', 'the win chance is not part of the band');
+    assert.equal(bandOf({ pWin: 1, keep: 0.986 }), 'stomp', 'by the whole percent the row shows: 99%');
+    assert.equal(bandOf({ pWin: 1, keep: 0.984 }), 'good', '98%');
+    assert.equal(bandOf({ pWin: 0.995, keep: 0.7 }), 'good');
+    assert.equal(bandOf({ pWin: 0.995, keep: 0.694 }), 'fair', '69%');
+    assert.equal(bandOf({ pWin: 0.95, keep: 0.5 }), 'fair');
+    assert.equal(bandOf({ pWin: 0.95, keep: 0.494 }), 'low', '49%: never listed');
+    assert.equal(bandOf({ pWin: 0.3, keep: 0.1 }), 'low');
+    assert.equal(bandOf({ pWin: 0, keep: null }), 'low', 'never a win: nothing kept');
+    assert.equal(bandOf({ pWin: 0.4, keep: null }), 'low');
     assert.equal(bandOf(null), 'none');
-    assert.equal(bandOf({ pWin: 0.95, keep: 0.5 }, { ...DEFAULT_BAND_LIMITS, good: { win: 97, keep: 40 } }), 'tough');
-    assert.equal(BAND_WORDS.cant, "Can't win");
+    assert.equal(bandOf({ pWin: NaN, keep: 1 }), 'none');
+    assert.deepEqual(['stomp', 'good', 'fair', 'low', 'none'].map(isListedBand), [true, true, true, false, false]);
+    assert.deepEqual([BAND_WORDS.fair, BAND_COLORS.stomp, BAND_COLORS.good, BAND_COLORS.fair], ['Fair', '#3fbf5a', '#a6e08a', '#f0c02f']);
+    assert.ok(!('tough' in BAND_WORDS) && !('cant' in BAND_WORDS), 'Tough and Can’t win are gone');
+    // What an older version stored reads as under 50% (never pinged) until it is judged again.
+    assert.deepEqual(['tough', 'cant', 'good', 'whatever', undefined].map(normBand), ['low', 'low', 'good', 'none', 'none']);
     assert.equal(chipFigures({ pWin: 0.96, keep: 0.62 }, { confidence: 'good' }, 2.8), 'win 96% · keep ~62% · 2.80 respect');
     assert.equal(chipFigures({ pWin: 1, keep: 0.9 }, { confidence: 'exact' }, 2.56), 'win 100% · keep 90% · 2.56 respect');
     assert.equal(chipFigures({ pWin: 0, keep: null }, { confidence: 'rough' }, 4.08), 'win 0% · rough estimate');
@@ -166,8 +177,12 @@ test('war list: out early first, then Okay by band and respect, Hospital by time
     const cur = [m(1, 'Okay'), m(2, 'Okay'), m(3, 'Okay'), m(4, 'Hospital', now + 48), m(5, 'Hospital', now + 252), m(6, 'Traveling'), m(7, 'Okay')];
     const early = outEarly(prev, cur, now);
     assert.deepEqual([...early], [1]);
-    const rows = sortWar(cur, { bands: { 1: 'stomp', 2: 'good', 3: 'stomp', 7: 'cant', 4: 'good', 5: 'stomp' }, respect: { 2: 8.1, 3: 7.4, 7: 9 }, early, nowS: now });
+    const rows = sortWar(cur, { bands: { 1: 'stomp', 2: 'good', 3: 'stomp', 7: 'low', 4: 'good', 5: 'stomp' }, respect: { 2: 8.1, 3: 7.4, 7: 9 }, early, nowS: now });
     assert.deepEqual(rows.map((r) => r.id), [1, 3, 2, 7, 4, 5, 6]);
+    // Within a band the one order: respect, then HP kept, then win.
+    const two = [m(11, 'Okay'), m(12, 'Okay'), m(13, 'Okay')];
+    const tied = sortWar(two, { bands: { 11: 'good', 12: 'good', 13: 'good' }, respect: { 11: 3, 12: 3, 13: 3 }, keep: { 11: 0.8, 12: 0.9, 13: 0.9 }, win: { 11: 1, 12: 0.95, 13: 0.99 }, nowS: now });
+    assert.deepEqual(tied.map((r) => r.id), [13, 12, 11]);
     assert.deepEqual(warSummary(rows, now), { attackable: 4, nextOutS: 48, traveling: 1, early: 1 });
     assert.equal(memberState({ status: { description: 'In federal jail' } }), 'jail');
 });

@@ -5,7 +5,7 @@
  * then Traveling, then Abroad; a summary line on top.
  */
 
-import { BAND_ORDER } from './bands.js';
+import { BAND_ORDER, normBand } from './bands.js';
 
 export function memberState(m) {
     const st = (m && m.status) || {};
@@ -39,14 +39,15 @@ const STATE_RANK = { early: 0, okay: 1, hospital: 2, traveling: 3, abroad: 4, ja
 
 /**
  * @param {object[]} members - /faction/{id}/members rows
- * @param {object} o - {bands: {id: band}, respect: {id: number}, early: Set, nowS}
+ * Within a band the one order of round 7 (the owner): most respect, then most HP kept, then the highest win.
+ * @param {object} o - {bands: {id: band}, respect: {id: number}, keep: {id: 0..1}, win: {id: 0..1}, early: Set, nowS}
  * @returns {object[]} rows {m, id, state, band, respect, until}
  */
-export function sortWar(members, { bands = {}, respect = {}, early = new Set(), nowS = 0 } = {}) {
+export function sortWar(members, { bands = {}, respect = {}, keep = {}, win = {}, early = new Set(), nowS = 0 } = {}) {
     const rows = (members || []).map((m) => {
         const id = Number(m.id);
         const state = early.has(id) ? 'early' : memberState(m);
-        return { m, id, state, band: bands[id] || 'none', respect: respect[id] || 0, until: Number(m.status && m.status.until) || 0 };
+        return { m, id, state, band: bands[id] || 'none', respect: respect[id] || 0, keep: keep[id] || 0, win: win[id] || 0, until: Number(m.status && m.status.until) || 0 };
     });
     rows.sort((a, b) => {
         const s = STATE_RANK[a.state] - STATE_RANK[b.state];
@@ -54,7 +55,7 @@ export function sortWar(members, { bands = {}, respect = {}, early = new Set(), 
         if (a.state === 'okay' || a.state === 'early') {
             const bd = BAND_ORDER.indexOf(a.band) - BAND_ORDER.indexOf(b.band);
             if (bd) return bd;
-            return b.respect - a.respect;
+            return b.respect - a.respect || b.keep - a.keep || b.win - a.win;
         }
         if (a.state === 'hospital' || a.state === 'traveling') return (a.until || Infinity) - (b.until || Infinity);
         return a.id - b.id;
@@ -266,9 +267,10 @@ export function warBandTable(rows, { fid = null, now = Date.now() } = {}) {
     const p = {};
     let n = 0;
     for (const r of rows || []) {
-        if (!r || !(Number(r.id) > 0) || !r.band || r.band === 'none' || !BAND_ORDER.includes(r.band)) continue;
+        const band = r && BAND_ORDER.includes(r.band) ? r.band : null;
+        if (!r || !(Number(r.id) > 0) || !band || band === 'none') continue;
         if (n++ >= WAR_BANDS_MAX) break;
-        p[Number(r.id)] = [r.band, Number.isFinite(r.win) ? Math.round(r.win) : null, Number.isFinite(r.keep) ? Math.round(r.keep) : null];
+        p[Number(r.id)] = [band, Number.isFinite(r.win) ? Math.round(r.win) : null, Number.isFinite(r.keep) ? Math.round(r.keep) : null];
     }
     return { at: now, fid: Number(fid) || null, p };
 }
@@ -277,8 +279,10 @@ export function warBandTable(rows, { fid = null, now = Date.now() } = {}) {
 export function warBandOf(table, id, now = Date.now()) {
     if (!table || !table.p || !(now - (Number(table.at) || 0) < WAR_BANDS_KEEP_MS)) return null;
     const e = table.p[Number(id)];
-    if (!Array.isArray(e) || !BAND_ORDER.includes(e[0]) || e[0] === 'none') return null;
-    return { band: e[0], win: Number.isFinite(e[1]) ? e[1] : null, keep: Number.isFinite(e[2]) ? e[2] : null, at: Number(table.at) };
+    // A table written by an older version (Tough, Can't win) reads as under 50% until war mode writes it again.
+    const band = Array.isArray(e) ? normBand(e[0]) : 'none';
+    if (band === 'none') return null;
+    return { band, win: Number.isFinite(e[1]) ? e[1] : null, keep: Number.isFinite(e[2]) ? e[2] : null, at: Number(table.at) };
 }
 
 /** The status cell as one line: "Hospital · out 14:32 TCT (3:10)", "→ Mexico, lands ~15:05 (est.)". */

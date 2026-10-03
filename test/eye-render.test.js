@@ -49,17 +49,22 @@ const text = (out) => [...out.ctl.flat(), ...out.main, ...out.pane].filter(Boole
 
 function ctxFor(mode, extra = {}) {
     const now = Date.now();
-    const view = (id) => ({ id, band: id % 3 === 0 ? 'cant' : id % 3 === 1 ? 'stomp' : 'good', forecast: { pWin: 0.97, keep: 0.8 }, respect: 3.1, ours: 2.4, est: { source: 'ffscouter', sourceText: 'FFScouter 3 d', ageDays: 3, confidence: 'good' } });
-    const stored = { at: now - 60000, params: { v: 2 }, list: [{ playerId: 1, name: 'A', level: 60, fairFight: 2.5 }, { playerId: 2, name: 'B', level: 70, fairFight: 2.2 }], dropped: { cant: 7, none: 0, range: 3 }, ffIgnored: false };
+    const view = (id) => ({ id, band: id % 3 === 0 ? 'low' : id % 3 === 1 ? 'stomp' : 'good', forecast: { pWin: 0.97, keep: id % 3 === 1 ? 1 : 0.8 }, respect: id > 2 ? 4 - id / 100 : 3.1, ours: 2.4, est: { source: 'ffscouter', sourceText: 'FFScouter 3 d', ageDays: 3, confidence: 'good' } });
+    const n = extra.n || 2;
+    const list = Array.from({ length: n }, (_, i) => ({ playerId: i + 1, name: i < 2 ? 'AB'[i] : 'P' + (i + 1), level: 60 + (i % 40), fairFight: 2.5 }));
+    const stored = { at: now - 60000, params: { v: 3 }, list, dropped: { low: 7, none: 0, range: 3 }, ffIgnored: false };
+    const shown = [];
     return {
-        ui: { eyeMode: mode, eyeOpen: 1 },
+        shown,
+        ui: { eyeMode: mode, eyeOpen: 1, ...(extra.ui || {}) },
         settings: { timeFormat: 'torn' },
         paused: false,
         flags: { hasFfs: true, hasTs: false },
         rerender: () => {},
         go: () => {},
         eye: {
-            rows: () => stored.list.map((x) => ({ ...view(x.playerId), name: x.name, level: x.level, stored: x })),
+            rows: () => stored.list.map((x) => ({ ...view(x.playerId), name: x.name, level: x.level, stored: x, ...(extra.row ? extra.row(x.playerId) : {}) })),
+            statuses: { show: (o) => shown.push(o), attack() {}, active: () => true },
             stored: () => stored,
             load: () => {},
             loading: () => false,
@@ -83,16 +88,70 @@ function ctxFor(mode, extra = {}) {
 
 const model = { ready: true, pc: { stats: { str: 1e8, spd: 1e8, def: 1e8, dex: 1e8 } }, state: { statMods: {}, life: { maximum: 7500 } } };
 
-test('Targets: only beatable rows, the dropped count, details open; Chain: Stomp and Good only', () => {
+test('Targets: only listed bands, the dropped count, details open; no Sort, Level, Refresh or Show ticks; Chain is gone', () => {
     const t = text(renderEye(model, ctxFor('targets')));
-    assert.match(t, /7 can’t-win players dropped \(never kept\)/);
+    assert.match(t, /7 players you’d keep under 50% HP against dropped \(never kept\)/);
     assert.match(t, /About 52% as strong as you \(our estimate\) · 56% by FFScouter’s list · estimate 3 days old · from FFScouter 3 d/);
-    assert.doesNotMatch(t, /Hide can.t win/);
-    assert.match(t, /Most respect/);
+    assert.doesNotMatch(t, /Hide can.t win|Most respect|Easiest|Refresh|Stomp only|Keep over 50% HP|Not attacked by me today|Torn Eye colours/);
+    assert.match(t, /Order: respect › HP kept › win/);
+    assert.match(t, /All 2.*Stomp 1.*Good 1.*Fair 0.*Ready now/);
     const c = text(renderEye(model, ctxFor('chain')));
-    assert.match(c, /only Stomp and Good/);
+    assert.match(c, /Targets/, 'an old "chain" view opens Targets');
+    assert.doesNotMatch(c, /only Stomp and Good/);
     const err = text(renderEye(model, ctxFor('targets', { error: { message: 'HTTP 500' } })));
     assert.match(err, /Couldn’t load targets: HTTP 500 · showing the list from \d\d:\d\d/, 'a failed load still shows above the old list');
+});
+
+/** The rows a draw built (FakeNode tree): each target row's player name. */
+function drawnNames(out) {
+    const names = [];
+    for (const n of out.main) if (n && n.find) for (const tr of n.find((x) => x.tagName === 'TR' && /click/.test(x.attrs.class || ''))) names.push(tr.children[1].textContent);
+    return names;
+}
+
+test('Targets: 20 a page, only those drawn, the pager, and the statuses told which rows are on screen', () => {
+    // 60 stored: every third is under 50% (never listed), so 40 are listed: two pages.
+    const ctx = ctxFor('targets', { n: 60 });
+    const out = renderEye(model, ctx);
+    const t = text(out);
+    assert.equal(drawnNames(out).length, 20, 'only the page on screen is built');
+    assert.match(t, /40 players you beat · 1–20 shown/);
+    assert.match(t, /‹ Prev.*1.*2.*Next ›/);
+    assert.match(t, /20 a page · page 1 of 2/);
+    assert.match(t, /Statuses: 0 of 40 checked · this page first · the rest in about 2 min/);
+    assert.match(t, /checking/);
+    // The one order: respect first (P4 has the most), then HP kept.
+    assert.equal(drawnNames(out)[0], 'P4');
+    const s = ctx.shown.at(-1);
+    assert.equal(s.page.length, 20);
+    assert.equal(s.all.length, 40, 'every listed row, whatever the chips');
+    assert.deepEqual(s.page, s.all.slice(0, 20), 'this page first');
+    // Page 2.
+    const ctx2 = ctxFor('targets', { n: 60, ui: { eyePage: 1 } });
+    const out2 = renderEye(model, ctx2);
+    assert.match(text(out2), /21–40 shown/);
+    assert.deepEqual(ctx2.shown.at(-1).page, ctx2.shown.at(-1).all.slice(20, 40));
+    // A page past the end is brought back.
+    const ctx3 = ctxFor('targets', { n: 60, ui: { eyePage: 9 } });
+    renderEye(model, ctx3);
+    assert.equal(ctx3.ui.eyePage, 1);
+});
+
+test('Targets: "Ready now" hides hospital, away and jail and says how many; a band chip; old kept filters are ignored', () => {
+    const now = Date.now();
+    const row = (id) => (id % 4 === 1 ? { status: { state: 'Hospital', description: 'In hospital', until: Math.floor(now / 1000) + 600 } } : id % 4 === 2 ? { status: { state: 'Okay', description: 'Okay' } } : {});
+    const on = text(renderEye(model, ctxFor('targets', { n: 60, row })));
+    assert.match(on, /Ready now · \d+ hidden/);
+    assert.doesNotMatch(on, /Hospital · /, 'nobody in hospital shows');
+    const off = text(renderEye(model, ctxFor('targets', { n: 60, row, ui: { eyeFilters: { ready: false } } })));
+    assert.match(off, /Hospital · \d+:\d\d/, 'with it off, they show (greyed)');
+    assert.doesNotMatch(off, /hidden/);
+    const stompOnly = text(renderEye(model, ctxFor('targets', { n: 60, ui: { eyeFilters: { band: 'stomp', ready: false } } })));
+    assert.match(stompOnly, /20 players you beat/);
+    // An old kept filter (1.3.0: sort, level range, ticks) breaks nothing.
+    const old = text(renderEye(model, ctxFor('targets', { n: 6, ui: { eyeFilters: { minLevel: 40, maxLevel: 9, sort: 'level', stompOnly: true, keep50: true, hideHosp: true, band: 'tough', ready: 'yes' } } })));
+    assert.match(old, /4 players you beat/);
+    assert.match(old, /Statuses: 0 of 4 checked/);
 });
 
 test('War: found by itself, everyone with status, out-times, landings and the fallen', async () => {

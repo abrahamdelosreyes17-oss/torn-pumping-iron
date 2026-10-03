@@ -6,11 +6,11 @@
  * min in memory and 1 h stored, as its guidance asks).
  */
 
-import { K, get, set, getKey, getSettings, getShared } from './platform/store.js';
+import { K, get, set, getKey, getShared } from './platform/store.js';
 import { pageGet, pageSet } from './platform/archive.js';
 import { learnedModel } from './core/learndata.js';
 import { applyFightModel } from './core/learn.js';
-import { idbGet, idbSet } from './platform/idb.js';
+import { idbGet, idbSet, idbUpdate } from './platform/idb.js';
 import { pi, tornClient, isVisible } from './runtime.js';
 import { isPaused } from './turns.js';
 import { fetchProfile, fetchPersonalStats, fetchAttacks, fetchEquipment, fetchFactionMembers } from './api/torn.js';
@@ -20,7 +20,7 @@ import { estimatePlayer } from './core/eye/estimate.js';
 import { forecast, respectFor, fairFight, bssOf, DEFAULT_GEAR } from './core/eye/fight.js';
 import { bandOf, chipFigures } from './core/eye/bands.js';
 import { gearSummary, myGear } from './core/eye/gear.js';
-import { lifeFromLevel, targetParams, targetQueries, listIgnoresFf, mergeTargetLists, inFfRange, selectTargets, listRowAsFfs, TARGETS_PER_MINUTE } from './core/eye/targets.js';
+import { lifeFromLevel, targetParams, targetQueries, listIgnoresFf, mergeTargetLists, inFfRange, selectTargets, listRowAsFfs, TARGETS_PER_MINUTE, statusesToAsk, mergeStatuses, STATUS_RETRY_MS } from './core/eye/targets.js';
 import { trackFlights, warBandOf } from './core/eye/war.js';
 import { makePause } from './core/slices.js';
 import { watchOf, addWatch, removeWatch, tagWatch, dismissOffer, isWatched, dueForRead, readEvents, watchOffers, EVENT_KEEP_MS } from './core/eye/watch.js';
@@ -144,6 +144,8 @@ export async function clearEye() {
     for (const k of [WATCH_KEY, 'eyeWarAuto', WAR_BANDS_KEY]) set(k, null);
     pageSet(WATCH_STATE_KEY, null);
     pageSet(FLIGHTS_KEY, null);
+    statusRun.map = {};
+    await idbSet(STATUS_KEY, {}).catch(() => {});
     notify();
 }
 
@@ -338,7 +340,6 @@ function yourSide(m) {
         // Your stats in ~1% steps (round 6): every train moved them, and every chip's Monte Carlo ran again (~50 ms for 100).
         meKey: Object.values(meStats).map((v) => Math.round(Math.log1p(v) * 100)),
         fm: learnedModel(getShared(K.learned, null)).fight,
-        bands: getSettings().bands,
         attacksBy,
     };
     Promise.resolve().then(() => {
@@ -363,7 +364,7 @@ export function eyeView(id, extra = {}, { war = false, later = false } = {}) {
     const prof = r.profile || {};
     const level = prof.level || extra.level || null;
     const life = prof.life || extra.life || lifeFromLevel(level);
-    const { meStats, statics, gMe, myLife, meKey, fm, bands, attacksBy } = yourSide(m);
+    const { meStats, statics, gMe, myLife, meKey, fm, attacksBy } = yourSide(m);
     const fights = attacksBy.get(Number(id)) || [];
     const pub = r.pub && (prof.rank || extra.rank) ? { rank: prof.rank || extra.rank, level, crimes: r.pub.crimes, networth: r.pub.networth } : null;
     const est = estimatePlayer({ me: meStats, spy: r.spy || null, fights, ffs: r.ffs || null, pub, now: Date.now() });
@@ -397,7 +398,7 @@ export function eyeView(id, extra = {}, { war = false, later = false } = {}) {
     let main = fGear || f;
     // What the fight learner kept from your own fights (only when it predicted your newest fights better).
     if (main && fm) main = { ...main, ...applyFightModel(fm, { pWin: main.pWin, keep: main.keep }), learned: true };
-    const band = bandOf(main, bands);
+    const band = bandOf(main);
     const ff = est ? fairFight(est.bss, bssOf(meStats)) : null;
     const respect = est && level ? respectFor(level, ff, { war }) : null;
     return {
@@ -762,5 +763,109 @@ export async function pollWatch({ members = null } = {}) {
     if (read.length) wantPlayers(read.map((r) => r.id));
     notify();
     return read.length > 0;
+}
+
+/* ------------------------------------------------ round 7: target statuses, the Torn Trading way */
+
+/**
+ * Where each target is (hospital, abroad, jail, okay), one public profile at a time, the way Torn Trading checks its
+ * traders (`updateSellPresence`): the page on screen first, then every other row quietly; at most 3 at once and 30 a
+ * minute, in Torn Eye's API lane; each player again after 10 minutes (the one opened to attack after 90 s); only from
+ * a visible tab, never while Torn Trading runs. What is read is kept across reloads and tabs in this site's
+ * IndexedDB (`eyeStatus`, {id: [status, at]}, merged with what other tabs wrote).
+ */
+export const STATUS_KEY = 'eyeStatus';
+
+const statusRun = { map: null, loading: null, loadedAt: 0, pending: new Set(), retryAt: new Map(), asked: [], saveTimer: null, listeners: [] };
+
+/** The kept statuses, read from IndexedDB (again every minute, for what other tabs read). */
+export function loadStatuses(now = Date.now()) {
+    if (statusRun.loading) return statusRun.loading;
+    statusRun.loadedAt = now;
+    statusRun.loading = idbGet(STATUS_KEY)
+        .then((v) => (statusRun.map = mergeStatuses(v, statusRun.map, Date.now())))
+        .catch(() => (statusRun.map = statusRun.map || {}))
+        .finally(() => (statusRun.loading = null));
+    return statusRun.loading;
+}
+
+/** The last status read for this player by this scheduler (any tab): {status, at} or null. */
+export function statusRead(id) {
+    const v = statusRun.map && statusRun.map[Number(id)];
+    return v ? { status: v[0], at: v[1] } : null;
+}
+
+/** Told the id of each player whose read ended (answered or not). */
+export function onStatus(fn) {
+    statusRun.listeners.push(fn);
+}
+
+function saveStatusesSoon() {
+    if (statusRun.saveTimer) return;
+    statusRun.saveTimer = setTimeout(() => {
+        statusRun.saveTimer = null;
+        const mine = statusRun.map || {};
+        idbUpdate(STATUS_KEY, (prev) => mergeStatuses(prev, mine)).catch(() => {});
+    }, 3000);
+}
+
+function statusDone(id) {
+    for (const fn of statusRun.listeners) {
+        try {
+            fn(id);
+        } catch {
+            // a listener's problem stays there
+        }
+    }
+}
+
+/**
+ * Ask Torn about the players due now (statusesToAsk), without waiting for the answers. Safe to call often.
+ * @param {object} o - {order: id[] (opened, page, rest), open: Set, readAt: id => ms (the newest read from anywhere)}
+ * @returns {number[]} the ids asked now
+ */
+export function pumpStatuses({ order = [], open = new Set(), readAt = () => 0, now = Date.now() } = {}) {
+    if (!isVisible() || isPaused() || !getKey(K.apiKey) || get(K.apiKeyDead, false)) return [];
+    if (!statusRun.map || now - statusRun.loadedAt > 60000) {
+        loadStatuses(now);
+        if (!statusRun.map) return [];
+    }
+    const mine = (id) => {
+        const r = statusRead(id);
+        return Math.max(r ? r.at : 0, readAt(id) || 0);
+    };
+    const { ask, asked } = statusesToAsk({ order, open, readAt: mine, pending: statusRun.pending, retryAt: statusRun.retryAt, asked: statusRun.asked, now });
+    statusRun.asked = asked;
+    for (const id of ask) {
+        statusRun.pending.add(id);
+        fetchProfile(tornClient(), id)
+            .then((p) => {
+                const t = Date.now();
+                if (!p || !p.status) {
+                    statusRun.retryAt.set(id, t + STATUS_RETRY_MS);
+                    return;
+                }
+                statusRun.retryAt.delete(id);
+                statusRun.map = { ...(statusRun.map || {}), [id]: [{ state: p.status.state || null, description: p.status.description || null, until: p.status.until || null }, t] };
+                saveStatusesSoon();
+                // Level and life for the fight model too (this site's cache), as a profile read always did.
+                const c = eye.cache;
+                if (c) {
+                    const r = (c.players[id] = c.players[id] || {});
+                    r.profile = { ...(r.profile || {}), level: p.level || null, rank: p.rank || null, life: (p.life && p.life.maximum) || null, status: p.status, name: p.name || null, faction: p.faction_id || null };
+                    r.profileAt = t;
+                    saveSoon();
+                }
+            })
+            .catch((error) => {
+                // Taking turns with Torn Trading: asked again when it's over, not held back.
+                if (!(error && error.takingTurns)) statusRun.retryAt.set(id, Date.now() + STATUS_RETRY_MS);
+            })
+            .finally(() => {
+                statusRun.pending.delete(id);
+                statusDone(id);
+            });
+    }
+    return ask;
 }
 

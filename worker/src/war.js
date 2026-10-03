@@ -45,10 +45,21 @@ export const CHAIN_MIN_HITS = 10;
 export const CHAIN_WARN_S = 60;
 export const CHAIN_MESSAGE_S = 10 * 60;
 
-const BAND_ORDER = ['stomp', 'good', 'tough', 'cant', 'none'];
-export const BAND_WORDS = { stomp: 'Stomp', good: 'Good', tough: 'Tough', cant: 'Can’t win', none: 'No data' };
-/** "Beatable" everywhere: never Can't win, never no data. */
-export const BEATABLE = new Set(['stomp', 'good', 'tough']);
+/*
+ * Torn Eye's bands (round 7, copied from the userscript's src/core/eye/bands.js): by the HP kept over the fights won.
+ * Stomp 99%+, Good 70–99%, Fair 50–69%; under 50% ('low') is never listed and never pinged.
+ */
+export const BAND_ORDER = ['stomp', 'good', 'fair', 'low', 'none'];
+export const BAND_WORDS = { stomp: 'Stomp', good: 'Good', fair: 'Fair', low: 'Under 50%', none: 'No data' };
+/** "Beatable" everywhere: half your HP kept or more; never under 50%, never no data. */
+export const BEATABLE = new Set(['stomp', 'good', 'fair']);
+
+/** A band as synced, older userscripts included (1.3.x sent Tough and Can't win: both read as under 50%). */
+export function normBand(band) {
+    if (BAND_ORDER.includes(band)) return band;
+    if (band === 'tough' || band === 'cant') return 'low';
+    return 'none';
+}
 
 /**
  * Standard-class flight times in minutes (copied from the userscript's
@@ -233,8 +244,8 @@ export function estimator(warList, enemyId, bands) {
     return (id) => {
         const m = byId.get(Number(id)) || null;
         if (m && BEATABLE.has(m.band)) return m;
-        if (m && m.band === 'cant') return m;
-        const b = bands && bands[id];
+        if (m && m.band === 'low') return m;
+        const b = bands && normBand(bands[id]);
         if (b && b !== 'none') return { ...(m || {}), band: b, win: m ? m.win : null };
         return m || { band: 'none', win: null, keep: null };
     };
@@ -480,8 +491,9 @@ export async function eyeTick({ f, key, nowS, list, state, bands, leadS }) {
     for (const x of list) {
         const cur = snap[x.id];
         if (!cur) continue;
-        const band = x.band && x.band !== 'none' ? x.band : (bands && bands[x.id]) || 'none';
-        if (band === 'cant') continue;
+        const band = normBand(x.band && x.band !== 'none' ? x.band : bands && bands[x.id]);
+        // Under 50% HP kept: never pinged (the owner, round 7).
+        if (band === 'low') continue;
         const est = { band, win: band === x.band ? x.win : null };
         const p = { id: x.id, name: x.name || cur.n || String(x.id), level: x.level || 0 };
         const evs = playerEvents(Object.prototype.hasOwnProperty.call(changed, x.id) ? changed[x.id] : null, cur, nowS, leadS, { early: false });

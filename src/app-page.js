@@ -12,12 +12,13 @@ import { archived, pageGet, loadArchives, drainArchives, clearArchived, archives
 import { PiApp } from './ui/app/app.js';
 import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, fetchFactionMembers, fetchFactionWars, keyIsEnough } from './api/torn.js';
 import { outEarly, enemiesFromWars, warBandTable } from './core/eye/war.js';
-import { isBeatable, knownStatus, ownHits } from './core/eye/targets.js';
+import { isBeatable, knownStatus, ownHits, statusOrder, byOrder, STATUS_REFRESH_MS, ATTACK_OPENED_MS } from './core/eye/targets.js';
+import { normBand } from './core/eye/bands.js';
 import { isWatched } from './core/eye/watch.js';
 import { W3bClient, fetchW3bListings } from './api/w3b.js';
 import { checkFfsKey } from './api/ffscouter.js';
 import { renderEye } from './ui/app/eye-tab.js';
-import { wantPlayers, eyeView, warmFights, fightsPending, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient, importTargets, TARGETS_KEY, WAR_BANDS_KEY, rememberFlights, flightsSeen, getWatch, watchStates, toggleWatch, setWatchTag, dismissWatchOffer, watchOffersNow, pollWatch } from './eye-service.js';
+import { wantPlayers, eyeView, warmFights, fightsPending, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient, importTargets, TARGETS_KEY, WAR_BANDS_KEY, rememberFlights, flightsSeen, getWatch, watchStates, toggleWatch, setWatchTag, dismissWatchOffer, watchOffersNow, pollWatch, pumpStatuses, statusRead, onStatus, loadStatuses } from './eye-service.js';
 import { discordState, discordRaw, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId, linkDiscord, setTargetsForSync, setEyeForSync, loginDiscord, cancelLogin, resumeLogin } from './discord.js';
 import { saveFullKey, forgetFullKey, refreshMoneyLog } from './income.js';
 import { WORKER_SETUP_URL } from './api/worker.js';
@@ -358,13 +359,42 @@ function eyeRows() {
         // A fight not worked out yet isn't simulated inside the draw: the row shows what the list stored until it is.
         const live = eyeView(x.playerId, { level: x.level, name: x.name }, { later: true });
         const v = live && !live.pending ? live : null;
-        const base = v || { id: x.playerId, band: x.band || 'none', forecast: Number.isFinite(x.win) ? { pWin: x.win / 100, keep: Number.isFinite(x.keep) ? x.keep / 100 : null } : null, respect: x.respect || null };
+        const base = v || { id: x.playerId, band: normBand(x.band), forecast: Number.isFinite(x.win) ? { pWin: x.win / 100, keep: Number.isFinite(x.keep) ? x.keep / 100 : null } : null, respect: x.respect || null };
         const ws = watched[x.playerId];
         const wm = warBy.get(Number(x.playerId));
-        const known = knownStatus([ws ? { status: ws.status, at: ws.readAt } : null, wm ? { status: wm.status, at: war.readAt } : null, live && live.statusAt ? { status: live.status, at: live.statusAt } : null], { flight: flights[x.playerId] || null, now });
-        return { ...base, name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId, stored: x, status: known ? known.status : null, hit: hits.get(Number(x.playerId)) || null };
+        // The free reads first (the watch list, the war list, a flight first seen), then the statuses read one by one.
+        const sr = statusRead(x.playerId);
+        const reads = [ws ? { status: ws.status, at: ws.readAt } : null, wm ? { status: wm.status, at: war.readAt } : null, live && live.statusAt ? { status: live.status, at: live.statusAt } : null, sr];
+        const known = knownStatus(reads, { flight: flights[x.playerId] || null, now });
+        const hit = hits.get(Number(x.playerId)) || null;
+        // When it is worth asking again: after the newest read, or a little before a known hospital stay ends.
+        const until = known && known.state === 'hospital' && Number(known.status.until) > 0 ? Number(known.status.until) * 1000 : 0;
+        const statusAt = Math.max(0, ...reads.filter((r) => r && r.status && r.at > 0).map((r) => r.at), until ? until - STATUS_REFRESH_MS : 0);
+        return { ...base, name: x.name, level: x.level, hospitalUntil: x.hospitalUntil, lastAction: x.lastAction, id: x.playerId, stored: x, status: known ? known.status : null, statusAt, hit };
     });
     return rows.filter((r) => isBeatable(r.band));
+}
+
+/*
+ * Target statuses (round 7, the Torn Trading way): the Torn Eye tab says which rows are on screen at each draw; the
+ * players opened to attack go first, then that page, then every other listed row in the list's order.
+ */
+const statusPlan = { order: [], page: new Set(), open: new Set(), readAt: new Map(), clicked: new Map() };
+
+function showStatuses({ page = [], all = [], opened = [], readAt = new Map() } = {}) {
+    const now = Date.now();
+    for (const [id, at] of statusPlan.clicked) if (!(now - at < ATTACK_OPENED_MS)) statusPlan.clicked.delete(id);
+    const open = [...statusPlan.clicked.keys(), ...opened];
+    statusPlan.order = statusOrder({ open, page, all });
+    statusPlan.page = new Set(page.map(Number));
+    statusPlan.open = new Set(open.map(Number));
+    statusPlan.readAt = readAt;
+    pumpTargetStatuses();
+}
+
+function pumpTargetStatuses() {
+    if (!page.app || page.app.tab !== 'eye' || !statusPlan.order.length) return;
+    pumpStatuses({ order: statusPlan.order, open: statusPlan.open, readAt: (id) => statusPlan.readAt.get(id) || 0 });
 }
 
 /* The bot's /targets, /war and watch pings read Torn Eye (ids, names, levels, bands, win, HP kept; disclosed in Settings), only if you set up Discord. */
@@ -378,7 +408,8 @@ function syncEye(force = false) {
     if (fightsPending()) return;
     eyeSyncAt = Date.now();
     const row = (id, name, level, v, extra = {}) => ({ id, name: name || (v && v.name) || null, level: level || (v && v.level) || null, band: v ? v.band : 'none', win: v && v.forecast ? Math.round(v.forecast.pWin * 100) : null, keep: v && v.forecast && v.forecast.keep !== null && v.forecast.keep !== undefined ? Math.round(v.forecast.keep * 100) : null, ...extra });
-    const rows = eyeRows();
+    // The bot's /targets: the first 50 in the one order (respect, HP kept, win).
+    const rows = eyeRows().sort(byOrder);
     const bands = {};
     for (const r of rows) if (r.band) bands[r.id] = r.band;
     const fid = warFid();
@@ -625,6 +656,19 @@ function getCtx() {
             sources: () => ({ fights: ((get('myAttacks', null) || {}).list || []).length, ffsFree: page.ffs ? page.ffs.stats().remaining : 60, gear: page.eye.gear }),
             view: (id, extra, o) => eyeView(id, extra, o),
             attacks: () => (get('myAttacks', null) || {}).list || [],
+            statuses: {
+                /** The rows on screen and every listed row, in order (each draw of Targets). */
+                show: showStatuses,
+                /** An Attack button pressed on the list: that player is asked first. */
+                attack: (id) => {
+                    statusPlan.clicked.set(Number(id), Date.now());
+                    statusPlan.order = statusOrder({ open: [id], all: statusPlan.order });
+                    statusPlan.open.add(Number(id));
+                    pumpTargetStatuses();
+                },
+                /** Whether statuses are being read now (a key, not paused): else a row with none says "—", not "checking". */
+                active: () => Boolean(getKey(K.apiKey)) && !get(K.apiKeyDead, false) && !isPaused(),
+            },
             updatedAt: () => (pageGet(TARGETS_KEY, null) || {}).at || null,
             params: () => (pageGet(TARGETS_KEY, null) || {}).params || null,
             war: {
@@ -681,6 +725,25 @@ export function bootAppPage({ renderers = {} } = {}) {
         page.app.render(true);
     });
     gearCount().then((n) => (page.eye.gear = n));
+    // A status answered: a row on screen redraws at once; one on another page at most every 5 s (its counts and the
+    // progress line), so a background pass never redraws what you're not looking at more than that.
+    let statusDrawAt = 0;
+    let statusDrawTimer = null;
+    onStatus((id) => {
+        if (page.app.tab !== 'eye') return;
+        if (statusPlan.page.has(Number(id))) {
+            statusDrawAt = Date.now();
+            page.app.render(true);
+            return;
+        }
+        if (statusDrawTimer) return;
+        statusDrawTimer = setTimeout(() => {
+            statusDrawTimer = null;
+            statusDrawAt = Date.now();
+            if (page.app.tab === 'eye') page.app.render(true);
+        }, Math.max(0, 5000 - (Date.now() - statusDrawAt)));
+    });
+    loadStatuses().catch(() => {});
     page.app.mount();
     // Torn Eye works only while its tab is open (owner, round 6): the targets' estimates are asked for when it opens.
     let eyeOpen = false;
@@ -742,6 +805,7 @@ export function bootAppPage({ renderers = {} } = {}) {
         if (page.app.ui.eyeMode === 'watched') pollWatch({ members: war.members }).catch(() => {});
         syncEye();
         shareWarBands();
+        pumpTargetStatuses();
     }, 2000);
     // A Log in with Discord that was under way when the page reloaded: keep waiting for it.
     setTimeout(() => {
