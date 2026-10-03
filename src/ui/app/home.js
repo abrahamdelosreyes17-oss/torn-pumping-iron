@@ -305,7 +305,7 @@ function planLine(m, ctx) {
 
 /** "since 14:02", or "since Tue 14:02" when it began before today's Torn day. */
 function sinceWords(since, now, settings) {
-    return (tornDayStart(since) < tornDayStart(now) ? DAY_NAMES[new Date(since).getUTCDay()] + ' ' : '') + clock(since, settings);
+    return (tornDayStart(since) < tornDayStart(now) ? DAY_NAMES[settings && settings.timeFormat === 'local' ? new Date(since).getDay() : new Date(since).getUTCDay()] + ' ' : '') + clock(since, settings);
 }
 
 /** Heads-up lines that ask you to train or to use energy (a strict step coming, the refill, boosters): held back while stacking. */

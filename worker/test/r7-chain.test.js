@@ -11,7 +11,8 @@ import { runCron, handle } from '../src/index.js';
 import { handleInteraction } from '../src/interactions.js';
 import { linkedEnv, world, tornState, T0, PLAN, press, ctx, req, body } from './helpers.js';
 
-const CHAIN = { type: 'chain', steps: [], chain: { since: T0 - 3600 } };
+// What the userscript sends (type 'jump' + noRefill so a Worker from before round 7 also keeps quiet).
+const CHAIN = { type: 'jump', noRefill: true, steps: [], chain: { since: T0 - 3600 } };
 const kinds = (a) => a.map((x) => x.kind).sort();
 const LATE = Math.floor(T0 / 86400) * 86400 + 86400 - 3600; // 23:00 TCT: the refill nudge's window
 
@@ -86,4 +87,10 @@ test('the Worker: an energy ping snoozed before "I\'m stacking" doesn\'t come ba
     await runCron(le.env, T0 + 700, f);
     assert.equal(f.calls.filter((c) => c.url.includes('/messages') || c.url.includes('/api/webhooks/')).length, 0, 'no reminder');
     assert.equal(le.env.DB.sent.get(key).state, 'snoozed', 'it waits for Resume');
+});
+
+test('a Worker that ignores chain: the payload alone holds back the energy-full and refill pings', () => {
+    const old = { type: 'jump', noRefill: true, steps: [] };
+    assert.ok(!kinds(dueAlerts(tornState({ drug: 3600, energy: 150 }), old, T0)).includes('energy'));
+    assert.ok(!kinds(dueAlerts(tornState({ drug: 3600 }), old, LATE)).includes('refill'));
 });

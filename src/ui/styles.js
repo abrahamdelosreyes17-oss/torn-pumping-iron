@@ -388,7 +388,7 @@ svg.ch .grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
 .plancard .pc-top { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
 .plancard .pc-what { flex: 1 1 360px; min-width: 0; }
 .plancard .pc-title { font: 600 28px/1.2 var(--serif); color: var(--white); }
-.plancard .pc-sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+.plancard .pc-sub, .pc-sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
 .plancard .acts { display: flex; gap: 8px; }
 .dayline { height: 4px; background: var(--line); border-radius: 2px; margin-top: 16px; position: relative; overflow: hidden; }
 .dayline i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--chalk); border-radius: 2px; }

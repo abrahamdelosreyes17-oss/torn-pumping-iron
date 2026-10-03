@@ -198,9 +198,9 @@ test('Resume clears the flag and re-plans at once (the Re-plan run); with no pla
 
 test('the bot\'s plan: chain {since} in seconds and no steps while stacking; the training plan as before after', () => {
     const on = planPayload(model({ since: T0 }));
-    assert.deepEqual(on, { type: 'chain', steps: [], chain: { since: T0 / 1000 } });
+    assert.deepEqual(on, { type: 'jump', noRefill: true, steps: [], chain: { since: T0 / 1000 } });
     const off = planPayload(model(null));
-    assert.notEqual(off.type, 'chain');
+    assert.equal(off.chain, undefined);
     assert.equal(off.chain, undefined);
     assert.ok(off.steps.length > 0);
 });

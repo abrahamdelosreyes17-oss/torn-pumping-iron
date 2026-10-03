@@ -308,7 +308,8 @@ function watchBars() {
 
 function drawItems(m) {
     clearMarks(document.querySelector('.content-wrapper') || document);
-    if (!m || !m.ready || !getSettings().marketMarks) return;
+    // Stacking for a chain: no step to buy for until Resume (the panel says so).
+    if (!m || !m.ready || m.stacking || !getSettings().marketMarks) return;
     const idx = m.steps.findIndex((s) => (s.items || []).some((it) => it.id !== POINTS));
     if (idx < 0) return;
     const step = m.steps[idx];

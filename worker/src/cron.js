@@ -216,8 +216,10 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
         const b = bodyOf(r);
         if (NO_SNOOZE.has(b.kind)) continue;
         const now = alerts.find((a) => a.id === r.alert);
+        // A refill ping is for its own Torn day: snoozed past midnight (a long chain stack, say), it is over.
+        const pastDay = b.kind === 'refill' && String(r.alert) !== 'refill:' + Math.floor(nowS / DAY_S);
         if (now) fresh.push(now);
-        else if (!resolvedBy(b.kind, state, nowS, b)) fresh.push({ id: r.alert, kind: b.kind, link: b.link, step: b.step, title: 'Reminder (snoozed at ' + clock(Number(r.until) - 600) + ')', text: b.title + (b.text ? ' · ' + b.text : '') });
+        else if (!pastDay && !resolvedBy(b.kind, state, nowS, b)) fresh.push({ id: r.alert, kind: b.kind, link: b.link, step: b.step, title: 'Reminder (snoozed at ' + clock(Number(r.until) - 600) + ')', text: b.title + (b.text ? ' · ' + b.text : '') });
         else await db.prepare(Q.sentState).bind('resolved', null, row.id, r.alert).run();
     }
     // Done on a drug ping also stops the "drug ready, unused" nudge.

@@ -119,7 +119,8 @@ export function discordState() {
  */
 export function planPayload(m) {
     if (!m || !m.ready) return null;
-    if (m.stacking) return { type: 'chain', steps: [], chain: { since: Math.floor(m.stacking.since / 1000) } };
+    // type 'jump' + noRefill: a Worker from before round 7 ignores chain but still holds back the energy-full and refill pings.
+    if (m.stacking) return { type: 'jump', noRefill: true, steps: [], chain: { since: Math.floor(m.stacking.since / 1000) } };
     return { type: m.steps.some((s) => s.kind === 'stack' || s.kind === 'jump') ? 'jump' : 'steady', steps: stepsForWorker(m.upcoming || m.steps), ...(m.noRefill ? { noRefill: true } : {}) };
 }
 
@@ -339,7 +340,7 @@ export function maybeSyncPlan(m, now = Date.now()) {
     if (!w || !isVisible() || isPaused()) return false;
     const plan = planPayload(m);
     if (!plan) return false;
-    // "I'm stacking" and Resume change it too: the bot hears either within a minute.
+    // "I'm stacking" and Resume change it too.
     const sig = JSON.stringify([plan.chain ? plan.chain.since : 0, plan.steps.map((s) => [s.kind, s.label, Math.round(s.at / 300)])]);
     const pendingAcks = w.pendingAcks || [];
     const targetsDue = sync.targets && sync.targetsSig !== w.targetsSig && now - (w.targetsAt || 0) >= TARGETS_EVERY_MS;
@@ -351,7 +352,9 @@ export function maybeSyncPlan(m, now = Date.now()) {
     const eye = eyeSyncPayload();
     const eyeDue = Boolean(eye.sig) && eye.sig !== w.eyeSig;
     const due = sig !== w.lastSig || now - (w.lastSync || 0) >= SYNC_EVERY_MS || pendingAcks.length > 0 || targetsDue || keyDue || eyeDue;
-    if (!due || now - (w.lastSync || 0) < SYNC_MIN_MS) return false;
+    // "I'm stacking" and Resume go at once, not behind the one-a-minute gate (a ping could slip out in that minute).
+    const chainFlip = (plan.chain ? plan.chain.since : 0) !== (w.lastChain || 0);
+    if (!due || (!chainFlip && now - (w.lastSync || 0) < SYNC_MIN_MS)) return false;
     const statics = get(K.userStatic, {}) || {};
     const ki = statics.keyInfo || {};
     const body = { base: w.base, secret: w.secret, plan, ackIds: pendingAcks };
@@ -363,7 +366,7 @@ export function maybeSyncPlan(m, now = Date.now()) {
         body.war = eye.war;
         body.watch = eye.watch;
     }
-    set(K.worker, { ...w, lastSync: now, lastSig: sig, pendingAcks: [], ...(targetsDue ? { targetsSig: sync.targetsSig, targetsAt: now } : {}), ...(keyDue ? { keyTag: tag } : {}), ...(eyeDue ? { eyeSig: eye.sig } : {}) });
+    set(K.worker, { ...w, lastSync: now, lastSig: sig, lastChain: plan.chain ? plan.chain.since : 0, pendingAcks: [], ...(targetsDue ? { targetsSig: sync.targetsSig, targetsAt: now } : {}), ...(keyDue ? { keyTag: tag } : {}), ...(eyeDue ? { eyeSig: eye.sig } : {}) });
     workerSync(body)
         .then((r) => {
             const acked = applyAcks(r.acks, Date.now());
