@@ -434,4 +434,16 @@ svg.ch .grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
 }
 .warnb.paused { border-radius: 0; margin: 0; padding: 12px 24px; }
 .dev-scatter { max-width: 520px; }
+/* ---- Round 7: stacking card ---- */
+.pane > div.chain { flex-grow: 0; }
+.chain .chain-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.chain .chain-state { font-weight: bold; color: var(--white); }
+.chain p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.pane > div.chain.on { border-color: color-mix(in srgb, var(--warn) 55%, transparent); }
+.chain.on .chain-state { color: var(--warn); }
+.stackbox { padding: 24px; border-radius: 10px; background: var(--card2); }
+.stackbox .big { font: 600 22px/1.2 var(--display); color: var(--white); }
+.stackbox ul { margin: 12px 0 16px; padding: 0; list-style: none; color: var(--muted); }
+.stackbox li { padding: 4px 0; }
+.stackbox li b { color: var(--text); }
 `;

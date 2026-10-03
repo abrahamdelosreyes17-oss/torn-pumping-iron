@@ -60,6 +60,9 @@ export const K = {
     problemBuf: 'problemBuf',
     // The last plan runs with their time (Settings › Report a problem).
     planRuns: 'planRuns',
+    // Stacking energy for a chain (round 7, Home's "I'm stacking"): {since: ms} while on, absent while training.
+    // GM, so every tab (the webpage, Torn's pages) and the bot's sync see it at once.
+    stacking: 'stackingChain',
 };
 
 /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */
@@ -124,6 +127,23 @@ export function getPlan() {
 export function setPlan(plan) {
     gmSet(K.plan, plan);
     return plan;
+}
+
+/** Stacking energy for a chain: {since: ms} while on, null while training. */
+export function getStacking() {
+    const v = gmGet(K.stacking, null);
+    return v && Number(v.since) > 0 ? { since: Number(v.since) } : null;
+}
+
+/** "I'm stacking" (on: kept from the first press) and Resume (off: the key goes). */
+export function setStacking(on, now = Date.now()) {
+    if (!on) {
+        gmDel(K.stacking);
+        return null;
+    }
+    const v = getStacking() || { since: now };
+    gmSet(K.stacking, v);
+    return v;
 }
 
 export function getKey(name) {
@@ -249,7 +269,7 @@ export function dropOldKeys() {
 /** What "Your data" in Settings can clear, by group. */
 export const DATA_GROUPS = {
     keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker, K.fullKey, K.fullKeyState, K.moneyLog],
-    plan: [K.plan, K.recheck, K.gymSession, K.planNow, 'savedPlanFull'],
+    plan: [K.plan, K.recheck, K.gymSession, K.planNow, 'savedPlanFull', K.stacking],
     progress: [K.statsHistory, K.dayLog, K.dayTotals, K.planLine, K.receipts, K.gymLog],
     learning: ['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions],
     prices: [K.priceHistory, K.prices],

@@ -93,8 +93,21 @@ function nextStep(plan, nowS, test) {
 }
 
 /**
+ * Stacking energy for a chain (round 7: the userscript's "I'm stacking", synced as `plan.chain: {since}`): the owner
+ * asked for "no Discord bot alerts regarding energy and training" until Resume. These kinds never go out then; the
+ * cooldown and travel pings stay (drug, drugready, booster, landed, stale), told without a training step. Not the
+ * jump plan's stack (`plan.type === 'jump'`, which only holds back the energy-full ping inside a training plan).
+ */
+export const CHAIN_SKIPPED = ['energy', 'refill', 'jump', 'step'];
+
+/** Is the player stacking for a chain (the synced plan says so)? */
+export function stackingChain(plan) {
+    return Boolean(plan && plan.chain && typeof plan.chain === 'object');
+}
+
+/**
  * @param {object} state - Torn's answer to /v2/user?selections=bars,cooldowns,refills,travel
- * @param {object} plan - {type, steps:[{at (s), kind, label, train, strict, tick (s)}]}
+ * @param {object} plan - {type, steps:[{at (s), kind, label, train, strict, tick (s)}], noRefill?, chain?: {since (s)}}
  * @param {number} nowS - unix seconds
  * @param {object} [rules] - {drug, drugready, booster, energy, refill, jump, landed, stale} booleans (default all on)
  * @param {object} [ctx] - {prev: nextPrev() of the last read (+ staleFor), planStale: bool, planAge: s, planAt: s}
@@ -103,6 +116,9 @@ function nextStep(plan, nowS, test) {
 export function dueAlerts(state, plan, nowS, rules = {}, ctx = {}) {
     const on = { drug: true, drugready: true, booster: true, energy: true, refill: true, jump: true, landed: true, stale: true, ...rules };
     const prev = ctx.prev || null;
+    // Stacking for a chain: no training steps to name (an older sync's steps included) and no energy or training kinds.
+    const chain = stackingChain(plan);
+    if (chain) plan = { type: 'chain', chain: plan.chain, steps: [] };
     // A plan not synced for 12 h: pings from Torn's own state, strict jump steps still ahead
     // (a 1.0.1 client syncs only when its steps change), and one "out of date" per synced plan.
     if (ctx.planStale) plan = plan && Array.isArray(plan.steps) ? { type: plan.type, steps: plan.steps.filter((s) => s && s.strict && s.tick && Number(s.at) > nowS) } : null;
@@ -186,7 +202,7 @@ export function dueAlerts(state, plan, nowS, rules = {}, ctx = {}) {
     // Once per spell: prev.drugNudged remembers it (its sent row is cleaned up after 2 days; the spell can last longer).
     if (on.drugready && drug === 0 && prev && prev.drugZeroAt && nowS - Number(prev.drugZeroAt) >= DRUG_IDLE_S && Number(prev.drugNudged) !== Number(prev.drugZeroAt)) {
         const step = dueStep(plan, nowS, 60, DRUG_STEP);
-        if (step || !planInUse) out.push({ id: 'drugready:' + prev.drugZeroAt, kind: 'drugready', link: LINKS.items, title: 'Drug ready for ' + Math.round((nowS - Number(prev.drugZeroAt)) / 60) + ' min, unused', text: step ? withTrain(step) : 'Your next Xanax, if you train today (open Pumping Iron for the plan)', step: step || null });
+        if (step || !planInUse) out.push({ id: 'drugready:' + prev.drugZeroAt, kind: 'drugready', link: LINKS.items, title: 'Drug ready for ' + Math.round((nowS - Number(prev.drugZeroAt)) / 60) + ' min, unused', text: step ? withTrain(step) : chain ? 'Stacking for a chain: your next Xanax, if you want more energy' : 'Your next Xanax, if you train today (open Pumping Iron for the plan)', step: step || null });
     }
 
     // Back from travel with a step waiting.
@@ -200,7 +216,7 @@ export function dueAlerts(state, plan, nowS, rules = {}, ctx = {}) {
     }
 
     if (traveling) for (const a of out) a.text += ' (you’re flying)';
-    return out;
+    return chain ? out.filter((a) => !CHAIN_SKIPPED.includes(a.kind)) : out;
 }
 
 /**

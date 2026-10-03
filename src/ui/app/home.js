@@ -15,7 +15,7 @@ import { itemContext } from '../../core/model.js';
 import { tornDayStart, DAY } from '../../core/bars.js';
 import { itemsUrl, gymUrl, pointsUrl, itemMarketUrl, pointsMarketUrl } from '../../sources/route.js';
 import { stackBars } from '../charts.js';
-import { clock, cd, sectionHead, meta, trainsText, headsList, gainsCard, STAT_COLOR, DAY_NAMES, MONTH_NAMES } from './common.js';
+import { clock, cd, sectionHead, meta, trainsText, headsList, gainsCard, planRunWords, STAT_COLOR, DAY_NAMES, MONTH_NAMES } from './common.js';
 import { partsText, trainInText, whyMix, whyOneStat } from '../../core/gympage.js';
 import { spentOverDays } from '../../core/receipts.js';
 import { hm } from '../../core/drugcd.js';
@@ -173,10 +173,10 @@ export function nextDays(m, settings) {
     ]);
 }
 
-/** Share bar against the target, "24.9% → 27.8%", what's left, and today's trains. */
+/** Share bar against the target, "24.9% → 27.8%", what's left, and today's trains (none while stacking for a chain). */
 function youVsBuild(m, ctx = null) {
     const tot = {};
-    for (const st of m.steps) for (const [k, n] of Object.entries(st.trains || {})) tot[k] = (tot[k] || 0) + n;
+    for (const st of m.stacking ? [] : m.steps) for (const [k, n] of Object.entries(st.trains || {})) tot[k] = (tot[k] || 0) + n;
     const only = Object.keys(tot).length === 1 ? Object.keys(tot)[0] : null;
     const rows = m.statRows.map((r) => {
         const k = r.stat;
@@ -296,9 +296,75 @@ function planLine(m, ctx) {
     ]);
 }
 
+/*
+ * Stacking for a chain (round 7, the owner's pick in mockups/round7/home.html): a small card on top of the pane turns
+ * it on; Today then shows that training waits instead of the steps, and Resume re-plans at once (Re-plan's run, its
+ * light sweep included). The flag is stored for every tab (platform/store.js K.stacking); the model carries it as
+ * `m.stacking = {since}`.
+ */
+
+/** "since 14:02", or "since Tue 14:02" when it began before today's Torn day. */
+function sinceWords(since, now, settings) {
+    return (tornDayStart(since) < tornDayStart(now) ? DAY_NAMES[new Date(since).getUTCDay()] + ' ' : '') + clock(since, settings);
+}
+
+/** Heads-up lines that ask you to train or to use energy (a strict step coming, the refill, boosters): held back while stacking. */
+export function trainingHead(x) {
+    const text = String((x && x.text) || '');
+    return /^In \d+ min: /.test(text) || text === 'Refill unused' || /^No candy today/.test(text) || /^No boosters before /.test(text);
+}
+
+/** The pane's first card: "Training · Stacking energy for a chain? [I'm stacking]", or since when and Resume. */
+export function chainCard(m, ctx) {
+    const st = m.stacking;
+    const busy = Boolean(m.planBusy);
+    return h('div', { class: 'chain' + (st ? ' on' : ''), 'data-chain': st ? 'on' : 'off' }, [
+        h('div', { class: 'chain-row' }, [
+            h('div', {}, [
+                h('div', { class: 'chain-state', text: st ? 'Stacking since ' + sinceWords(st.since, m.now, ctx.settings) : 'Training' }),
+                h('p', { text: st ? 'Resume re-plans from your bars right away.' : 'Stacking energy for a chain?' }),
+            ]),
+            st
+                ? h('button', { class: 'btn primary', type: 'button', disabled: busy, title: 'Training steps come back and the plan is re-planned now, from your bars', onclick: () => ctx.resumeStacking && ctx.resumeStacking(), text: 'Resume' })
+                : h('button', { class: 'btn', type: 'button', disabled: busy, title: 'No training steps and no Discord pings about energy or training until you resume', onclick: () => ctx.startStacking && ctx.startStacking(), text: 'I’m stacking' }),
+        ]),
+    ]);
+}
+
+/** Today while stacking: no steps, what waits, the energy kept, and Resume. */
+function stackingBox(m, ctx) {
+    const e = m.strip.energy;
+    return h('div', { class: 'stackbox num', role: 'status' }, [
+        h('div', { class: 'big', text: 'Stacking for a chain' }),
+        h('ul', {}, [
+            h('li', {}, [h('b', { text: 'No training steps' }), ' until you resume']),
+            h('li', {}, [h('b', { text: 'No Discord pings' }), ' about energy or training']),
+            h('li', {}, ['Energy now ', h('b', { text: fmtInt(e.current) + ' / ' + fmtInt(e.max) }), ', kept for the chain']),
+        ]),
+        h('button', { class: 'btn primary', type: 'button', disabled: Boolean(m.planBusy), onclick: () => ctx.resumeStacking && ctx.resumeStacking(), text: 'Resume and re-plan' }),
+    ]);
+}
+
+/**
+ * Re-plan running (Resume starts it from here): the Plan card's bar with the owner's light sweep (2A; still with
+ * Settings › Animations off or the PC's reduce-motion). app.js planProgress moves it without a redraw.
+ */
+function homeRun(m, ctx) {
+    const busy = m.planBusy;
+    if (!busy) {
+        const err = ctx.ui && ctx.ui.homeReplan && ctx.ui.planError;
+        return err ? h('p', { class: 'c-bad', style: 'margin:8px 0 0', text: err }) : null;
+    }
+    return h('div', { class: 'planrun', role: 'status', 'aria-live': 'polite' }, [
+        h('div', { class: 'dayline', role: 'progressbar', 'aria-label': busy.recalibrate ? 'Re-planning' : 'Working out your plan' }, [h('i', { 'data-plan-bar': '1', style: 'width:' + Math.round(100 * Math.max(0.02, busy.done || 0)) + '%' })]),
+        h('div', { class: 'row', style: 'justify-content:space-between;margin-top:6px' }, [h('span', { class: 'pc-sub num', 'data-plan-words': '1', text: planRunWords(busy) }), h('span', { class: 'muted', style: 'font-size:12px', text: 'Today’s steps follow your bars meanwhile' })]),
+    ]);
+}
+
 export function renderHome(m, ctx) {
     const s = ctx.settings;
     const now = m.now;
+    if (m.stacking) return renderStacking(m, ctx);
     const next = m.next;
     const late = next && next.kind === 'xanax' && m.strip.drug.left === 0;
     // "On plan" only while no step is waiting on you (the plan re-times, so a due step is the one sign of being behind).
@@ -351,11 +417,27 @@ export function renderHome(m, ctx) {
         : null;
     const foot = h('div', { class: 'row muted num', style: 'justify-content:space-between;margin-top:6px;font-size:12px;gap:12px;flex-wrap:wrap' }, [h('span', {}, ['So far ', h('b', { class: 'white', text: fmtSigned(m.gainedToday) }), ' of ' + fmtInt(plannedToday) + ' today']), h('span', { text: dayResetWords(m) + ' · ' + xanaxCdWords(m.xanaxCd) })]);
 
-    const lead = h('div', { class: 'lead' }, [head, nowBand, steps, foot]);
+    const lead = h('div', { class: 'lead' }, [head, homeRun(m, ctx), nowBand, steps, foot]);
     const week = weekChart(m, ctx);
     return {
         strip: true,
         main: [lead, nextDays(m, s), youVsBuild(m, ctx), week].filter(Boolean),
-        pane: [gainsCard(m), buyCard(m, ctx), h('div', {}, [sectionHead('Heads-up', null, null, 'h3'), headsList(m.heads.length ? m.heads : [{ tone: 'good', text: 'Nothing needs you' }], (tab) => ctx.go(tab))]), planLine(m, ctx), weekCard(m, ctx)],
+        pane: [chainCard(m, ctx), gainsCard(m), buyCard(m, ctx), headsCard(m, ctx), planLine(m, ctx), weekCard(m, ctx)],
+    };
+}
+
+function headsCard(m, ctx) {
+    const heads = m.stacking ? m.heads.filter((x) => !trainingHead(x)) : m.heads;
+    return h('div', {}, [sectionHead('Heads-up', null, null, 'h3'), headsList(heads.length ? heads : [{ tone: 'good', text: 'Nothing needs you' }], (tab) => ctx.go(tab))]);
+}
+
+/** Home while stacking for a chain: Today says training waits; no steps, no 48 h look-ahead, no training heads-up. */
+function renderStacking(m, ctx) {
+    const head = sectionHead('Today', meta([dateLine(m.now) + ' · ', h('b', { style: 'color:var(--warn)', text: 'training paused' })]));
+    const lead = h('div', { class: 'lead' }, [head, stackingBox(m, ctx)]);
+    return {
+        strip: true,
+        main: [lead, youVsBuild(m, ctx), weekChart(m, ctx)].filter(Boolean),
+        pane: [chainCard(m, ctx), gainsCard(m), buyCard(m, ctx), headsCard(m, ctx), planLine(m, ctx), weekCard(m, ctx)],
     };
 }
