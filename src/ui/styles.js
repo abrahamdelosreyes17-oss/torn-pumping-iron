@@ -204,7 +204,7 @@ ol.steps-list { margin: 0; padding-left: 20px; display: flex; flex-direction: co
 /* A plan being worked out (the Plan card): the card's own day line, filling */
 .planrun { margin-top: 16px; }
 .planrun .dayline i { transition: none; opacity: .72; }
-/* Re-plan running (the owner's pick, 2A in mockups/round7/animation-options.html): a light crosses the whole bar, so it
+/* Recalibrate running (the owner's pick, 2A in mockups/round7/animation-options.html): a light crosses the whole bar, so it
    shows even at 2%. Transform only. Still under the PC's "reduce motion" and with Settings › Animations off. */
 .planrun .dayline::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, rgba(255,255,255,0) 38%, rgba(255,255,255,.7) 50%, rgba(255,255,255,0) 62%); transform: translateX(-100%); animation: pi-sweep 1.8s linear infinite; }
 @keyframes pi-sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
@@ -359,6 +359,40 @@ details.dis[open] > summary::before { content: "▾ "; }
 .tbl tr.ih td { height: var(--row); background: #191c1f; }
 .tbl tr.ih b { font-size: 14px; color: var(--white); }
 .tbl tr.sub td:first-child { padding-left: 24px; }
+/* The Ledger tab (round 8, option A adjusted): the statement's totals, the warning for lines not sorted, the chips. */
+.tbl tr.sum td { border-top: 1px solid var(--line2); }
+.tbl tr.sum.key td { background: #1b1e21; }
+.tbl tr.sum.key b.w { color: var(--chalk); }
+.tbl .c-cost { color: var(--text); }
+.ledger-st td small, .ledger-st th small { margin-left: 4px; }
+.main > div.ledger-warn { border-color: var(--warn); }
+.ledger-unsorted { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+.ledger-chips { flex-wrap: wrap; margin-bottom: 16px; }
+.ledger-chips .btn.on { background: var(--chalk); color: var(--on-chalk); border-color: var(--chalk); }
+.ledger-tick { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; cursor: pointer; white-space: nowrap; }
+.ledger-one { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.ledger-one b { white-space: nowrap; }
+.ledger-idea { display: grid; gap: 4px; padding: 10px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.ledger-idea > div:first-child { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* Plan's money block (the owner's pick P1): six figures in a row; the budget choice where a plan is made. */
+.figs6 { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 14px; }
+.figs6 .figc { padding: 16px 18px; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.figs6 .figc:first-child { border-left: 0; }
+.figs6 .figc .lab { white-space: normal; }
+.figs6 .figc b { font: 600 20px var(--sans); color: var(--white); }
+.figs6 .figc small { color: var(--muted); font-size: 13px; }
+.figs6 .figc.ok b { color: var(--chalk); }
+.figs6 .figc.ok small { color: var(--good); }
+.figs6 .figc.warn b, .figs6 .figc.warn small { color: var(--warn); }
+@media (max-width: 1280px) { .figs6 { grid-template-columns: repeat(3, minmax(0, 1fr)); } .figs6 .figc:nth-child(4) { border-left: 0; } .figs6 .figc:nth-child(n+4) { border-top: 1px solid var(--line); } }
+.budgets { display: grid; gap: 8px; margin-top: 16px; max-width: 760px; }
+.budgets .bud { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 10px 14px; border: 1px solid var(--line2); border-radius: 10px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.budgets .bud.on { border-color: var(--chalk); background: #202428; }
+.budgets .bud:focus-visible { outline: 2px solid var(--chalk); outline-offset: 2px; }
+.budgets .bud b { color: var(--white); font-weight: 600; }
+.budgets .bud .tag { margin-left: 8px; }
+.budgets .bud small { display: block; color: var(--muted); font-size: 13px; }
+.budgets .bud .r { text-align: right; white-space: nowrap; }
 .verdict { font-size: 13px; }
 svg.ch { width: 100%; display: block; overflow: visible; }
 svg.ch text { font: 11px var(--sans); fill: var(--muted); }
@@ -400,6 +434,14 @@ svg.ch .grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
 .months .mo em { display: block; font-style: normal; color: var(--chalk); font-size: 12px; font-weight: 500; margin-top: 2px; }
 .months .mo.past { opacity: .55; }
 .months .mo.now { border-color: var(--chalk); }
+/* round 8: each month names the plans it follows */
+.months .mo .mh { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+.months .mo .mh b { display: inline; margin-top: 0; color: var(--white); }
+.months .mo .mp { display: block; color: var(--text); margin-top: 2px; line-height: 1.35; overflow-wrap: anywhere; }
+/* round 8: the path's stretches (the line under the stretch you are in) */
+.tbl tr.what td { height: auto; border-top: 0; padding-top: 0; padding-bottom: 10px; }
+.tbl td.nw { white-space: nowrap; }
+.tbl td > .second { color: var(--muted); font-size: 13px; }
 /* Breathing room and cards (owner, round 3; round 7 type pass): one level of cards; the page's primary block has a soft chalk edge. */
 .app { --row: 44px; --pad: 16px; --gap: 24px; --sec: 24px; }
 .top { padding: 0 var(--edge); }
@@ -488,4 +530,88 @@ svg.ch .grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
 .eye-bg { display: flex; align-items: center; gap: 8px; margin-top: 16px; color: var(--muted); font-size: 13px; }
 .eye-bg .track { flex: 0 0 180px; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .eye-bg .fill { height: 100%; background: var(--chalk); }
+/* ---- Round 8: today's steps as one rail (the owner's pick B in mockups/round8/steps-panel.html) ----
+   The plate with the one ring that leaves it (his pick 1D in mockups/round7/animation-options.html) marks the action
+   of the moment: one ring on the page, never two. Opacity and transform only. Under the PC's "reduce motion" and with
+   Settings › Animations off nothing moves: the ring stays drawn around the plate. */
+.pl { position: relative; display: inline-block; width: 14px; height: 14px; border-radius: 50%; background: var(--chalk); box-shadow: inset 0 0 0 3px var(--chalk), inset 0 0 0 4px #2a2d31; flex: none; }
+.pl::before { content: ""; position: absolute; left: 50%; top: 50%; width: 4px; height: 4px; margin: -2px 0 0 -2px; border-radius: 50%; background: var(--on-chalk); }
+.pl.ring::after { content: ""; position: absolute; inset: 0; border-radius: 50%; border: 1.5px solid var(--chalk); opacity: 0; animation: pi-ring 2s ease-out infinite; }
+@keyframes pi-ring { 0% { transform: scale(1); opacity: .75; } 70%, 100% { transform: scale(2.4); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .pl.ring::after { animation: none; opacity: .55; transform: scale(1.7); } }
+.pi-root.still .pl.ring::after { animation: none; opacity: .55; transform: scale(1.7); }
+svg.tick { display: block; width: 14px; height: 14px; }
+.rail { list-style: none; margin: 0; padding: 0; }
+.rail > li { position: relative; display: grid; grid-template-columns: 20px 52px minmax(0, 1fr) auto; gap: 0 12px; align-items: center; min-height: 44px; padding: 4px 0; }
+.rail > li::before { content: ""; position: absolute; left: 9px; top: 0; bottom: 0; width: 2px; background: var(--line2); }
+.rail > li:first-child::before { top: 22px; }
+.rail > li:last-child::before { bottom: calc(100% - 22px); }
+.rail > li:only-child::before { display: none; }
+.rail > li.now:first-child::before { top: 40px; }
+.rail > li.now:last-child::before { bottom: calc(100% - 40px); }
+.rail .node { position: relative; z-index: 1; width: 20px; height: 20px; display: grid; place-items: center; background: var(--card); border-radius: 50%; }
+.rail .dot { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--dim); background: var(--card); }
+.rail .dot.on { border-color: var(--chalk); background: var(--chalk); }
+.rail .dot.open { border-color: var(--chalk); }
+.rail .t { color: var(--muted); white-space: nowrap; }
+.rail .t small { display: block; font-size: 12px; line-height: 1.2; }
+.rail .s { color: var(--muted); font-size: 13px; }
+.rail .in { color: var(--muted); font-size: 13px; text-align: right; white-space: nowrap; }
+.rail > li.done, .rail > li.done .t, .rail > li.done .s { color: var(--dim); }
+.rail > li.done .in { color: var(--good); }
+.rail > li.now { align-items: start; padding: 10px 0; }
+.rail > li.now > .node { margin-top: 20px; }
+.rail > li.now > .t { margin-top: 20px; color: var(--chalk); font-weight: 500; }
+.nb { grid-column: 3 / -1; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px 24px; align-items: center; padding: 20px 24px; border-radius: 12px; background: var(--card2); min-width: 0; }
+.nb.solo { grid-template-columns: minmax(0, 1fr); }
+.nb .big1 { display: block; font-size: 17px; font-weight: 600; line-height: 1.35; color: var(--white); }
+.nb .side { display: flex; flex-direction: column; align-items: flex-end; gap: 12px; }
+.nb .side small { color: var(--muted); font-size: 13px; }
+.nb .k { font: 600 12px var(--sans); color: var(--on-chalk); background: var(--chalk); border-radius: 6px; padding: 4px 8px; }
+.nb .cd { font: 600 40px/1 var(--serif); color: var(--chalk); white-space: nowrap; }
+.nb .acts { flex-direction: column; align-items: stretch; }
+.nb .btn:not(.primary) { background: transparent; }
+.nb .stackbox { padding: 0; background: none; }
+.nb .stackbox .big { display: flex; align-items: center; gap: 12px; }
+.nb .stackbox .cd { font-size: 28px; margin-left: auto; }
+.subr { list-style: none; margin: 0; padding: 0; }
+.subr li { position: relative; display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 12px; align-items: start; padding: 5px 0; font-size: 13px; color: var(--muted); }
+.subr li::before { content: ""; position: absolute; left: 9px; top: 0; bottom: 0; width: 2px; background: var(--line2); }
+.subr li:first-child::before { top: 14px; }
+.subr li:last-child::before { bottom: calc(100% - 14px); }
+.subr li:only-child::before { display: none; }
+.subr .node, .subr .dot { background: var(--card2); }
+.subr .a { font-weight: 500; color: var(--text); }
+.subr li.now { padding: 10px 0; }
+.subr li.now .a { display: block; font-size: 17px; font-weight: 600; line-height: 1.2; color: var(--white); }
+.subr li.done .a, .subr li.done .s { color: var(--dim); }
+/* ---- Round 8: Torn Eye (mockups/round8/torn-eye.html): sort by a column, the war question, the chain counter ---- */
+.sortb { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font: 500 13px var(--sans); }
+.sortb:hover { color: var(--text); }
+.sortb .arr { width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid currentColor; opacity: .35; }
+.sortb.on { color: var(--white); }
+.sortb.on .arr { opacity: 1; }
+.sortb.up .arr { transform: rotate(180deg); }
+.sortb:focus-visible { outline: 2px solid var(--chalk); outline-offset: 3px; border-radius: 4px; }
+.btn.line { background: transparent; border-color: var(--chalk); color: var(--chalk); }
+.eye-rule.sorted { display: inline-flex; align-items: center; gap: 12px; }
+.ask { display: flex; align-items: center; gap: 24px; padding: 16px 20px; margin-bottom: 16px; border-radius: 12px; background: var(--card2); border: 1px solid color-mix(in srgb, var(--chalk) 40%, transparent); }
+.ask b { display: block; color: var(--white); font: 600 17px/1.35 var(--sans); }
+.ask span { color: var(--muted); font-size: 13px; }
+.ask .acts { margin-left: auto; flex: none; }
+.answ { display: flex; align-items: center; gap: 10px; margin: -4px 0 16px; color: var(--text); font-size: 13px; }
+.answ i { width: 8px; height: 8px; border-radius: 50%; background: var(--chalk); flex: none; }
+.lnk { background: none; border: 0; padding: 0; color: var(--link); font: 500 13px var(--sans); cursor: pointer; }
+.lnk:hover { text-decoration: underline; }
+.lnk:focus-visible { outline: 2px solid var(--chalk); outline-offset: 3px; border-radius: 4px; }
+.tk.set { box-shadow: 0 0 0 3px color-mix(in srgb, var(--chalk) 12%, transparent); }
+.chainc { margin: 0 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card2); }
+.chainc-side { padding: 10px 14px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: 10px; row-gap: 2px; align-items: baseline; font-variant-numeric: tabular-nums; }
+.chainc-side + .chainc-side { border-top: 1px solid var(--line); }
+.chainc .who { grid-column: 1 / 3; color: var(--muted); font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chainc .time { color: var(--white); font: 600 16px/1.2 var(--sans); }
+.chainc .time.low { color: var(--warn); }
+.chainc .n { color: var(--white); font: 600 24px/1.1 var(--sans); }
+.chainc .bonus { grid-column: 2 / 4; color: var(--muted); font-size: 13px; }
+.chainc .bonus b { color: var(--text); font-weight: 600; }
 `;

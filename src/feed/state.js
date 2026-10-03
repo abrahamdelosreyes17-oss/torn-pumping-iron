@@ -16,7 +16,7 @@ import { totalOf } from '../core/gain.js';
 import { calibrationSample, addCalibration } from '../core/calibration.js';
 import { mergeLiveGyms, GYMS } from '../core/gyms.js';
 import { parsePerks } from '../core/perks.js';
-import { fetchUserState, fetchPerks, fetchProperty, fetchGyms, fetchInventory, fetchMoney, fetchCalendar, fetchKeyInfo, fetchNetworthHistory, fetchJob, fetchJobPoints, fetchItemsInfo, fetchFactionWars, fetchPersonalStats, personalStatValues, fetchPassiveIncome } from '../api/torn.js';
+import { fetchUserState, fetchPerks, fetchProperty, fetchGyms, fetchInventory, fetchMoney, fetchCalendar, fetchKeyInfo, fetchNetworthHistory, fetchJob, fetchJobPoints, fetchItemsInfo, fetchFactionWars, fetchPersonalStats, personalStatValues, fetchPassiveIncome, fetchDrugStats } from '../api/torn.js';
 import { enemiesFromWars } from '../core/eye/war.js';
 import { NETWORTH_STATS, INCOME_DAYS } from '../core/auto.js';
 import { POINTS, CANDY_IDS, GAME_CONSOLE, ITEMS } from '../core/items.js';
@@ -62,6 +62,8 @@ export const STATIC_EVERY = {
     cityShop: 10 * 60 * 1000,
     // The income that is certain (bank investment, dividends, rent: 4 calls), for Create plan and Recalibrate.
     passive: 6 * 60 * 60 * 1000,
+    // Lifetime rehabs (what a rehab session removes): one call, for the plans' rehab cost (core/rehab.js).
+    drugs: 6 * 60 * 60 * 1000,
 };
 
 /** The personal stat that counts items bought from city shops (docs/research-sallys-xanax.md). */
@@ -296,6 +298,7 @@ export class StateFeed {
             ['jobPoints', () => fetchJobPoints(this.client)],
             ['items', () => fetchItemsInfo(this.client, ITEMS_INFO_IDS)],
             ['passive', () => fetchPassiveIncome(this.client)],
+            ['drugs', () => fetchDrugStats(this.client)],
             [
                 'factionWars',
                 async () => {

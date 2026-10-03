@@ -35,12 +35,12 @@ function recorder(handler) {
 const tornClient = (f) => new TornApiClient({ getKey: () => TORN_KEY, fetchImpl: f, maxRetries: 0, dedupTtlMs: 0 });
 const noSleep = async () => {};
 
-test('the Home call: one request for bars, cooldowns, refills, battle stats and gym', async () => {
+test('the Home call: one request for bars, cooldowns, refills, battle stats, gym and travel', async () => {
     const f = recorder(() => res({ bars: {} }));
     await torn.fetchUserState(tornClient(f));
     const u = new URL(f.calls[0].url);
     assert.equal(u.origin + u.pathname, 'https://api.torn.com/v2/user');
-    assert.equal(u.searchParams.get('selections'), 'bars,cooldowns,refills,battlestats,gym');
+    assert.equal(u.searchParams.get('selections'), 'bars,cooldowns,refills,battlestats,gym,travel');
     assert.equal(u.searchParams.get('key'), TORN_KEY);
     assert.equal(u.searchParams.get('comment'), 'PumpingIron');
 });

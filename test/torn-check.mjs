@@ -1,10 +1,13 @@
 /*
  * Marks and overlay on saved Torn pages (test/fixtures), in a real browser,
  * with the built script and canned API answers (harness-live.html):
- *   - the gym page shows the strip, the outline, the panel and Fill N;
- *     Fill types N into Torn's box, makes no request, never clicks TRAIN;
+ *   - Torn's layout is untouched: each page with the script lays out exactly
+ *     as without it (noscript=1), nothing of ours inside Torn's containers;
+ *   - the gym page: rings and pills on our own layer over Torn's boxes, the
+ *     strip's words and Fill N in the panel; Fill types N into Torn's box,
+ *     makes no request, never clicks TRAIN;
  *   - the specialist stop ("Stop at 18 trains … Balboas") caps Fill;
- *   - items, bazaar, Item Market and points market outline the chosen thing;
+ *   - items, bazaar, Item Market and points market ring the chosen thing;
  *   - the panel shows its step in the bar, opens the webpage, Alt+` collapses
  *     and expands it, a drag stays on screen and is remembered;
  *   - a hidden tab asks nothing; nothing loads from torn.com.
@@ -64,32 +67,125 @@ async function open(query, { wait = 4500, seed = null, width = 1280 } = {}) {
 }
 
 const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s)].map((e) => e.textContent.replace(/\s+/g, ' ').trim()), sel);
+// The panel's text (its shadow root).
+const panelText = (page) => page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.querySelector('.wrap').textContent.replace(/\s+/g, ' '));
+
+/* Torn's gym page, roughly (the fixtures carry no Torn CSS): the four stat boxes in a row, the gym tiles in a grid. */
+const GYM_CSS = 'body{background:#191919;color:#ddd;font:12px Arial,sans-serif} #out{display:none} #sidebarroot{width:976px;margin:0 auto} .content-wrapper{width:784px;margin:0 auto} [class*="notification___"]{background:#2a2a2a;padding:6px 10px;margin:8px 0;border-radius:5px} ul[class*="properties___"]{display:flex;gap:10px;list-style:none;padding:0;margin:12px 0} ul[class*="properties___"]>li{flex:1;background:#333;border-radius:5px;padding:14px 10px 10px;min-height:150px} [class*="propertyTitle___"] h3{margin:0 0 4px;font-size:14px} [class*="propertyValue___"]{font-size:16px;color:#fff} [class*="inputWrapper___"] input{width:60px} [class*="gymList___"]>div{display:flex;flex-wrap:wrap;gap:6px} [class*="gymButton___"]{width:44px;height:44px;background:#444;border:1px solid #555;border-radius:4px;position:relative;padding:0} [class*="gymButton___"][class*="selected___"]{background:#5a5a5a}';
+async function gymLayout(page) {
+    await page.evaluate((css) => {
+        const st = document.createElement('style');
+        st.id = 'torn-gym-layout';
+        st.textContent = css;
+        document.head.appendChild(st);
+        dispatchEvent(new Event('resize'));
+    }, GYM_CSS);
+    await page.waitForTimeout(300);
+}
+
+/*
+ * Round 7 (the owner): our marks are an overlay. Torn's layout with the script and without it (the harness's
+ * noscript=1) must be the same: every element of Torn's page (ours left out) with the same rect within 0.5 px, the same
+ * classes and inline styles, the page no wider; and nothing of ours inside Torn's containers.
+ */
+const TORN_BOXES = ['#gymroot', '.content-wrapper', '#sidebarroot', '#faction_war_list_id', '.members-list', '#profile-mini-root', '#item-market-root'];
+const tornShape = (page) => page.evaluate((boxes) => {
+    const ours = (el) => {
+        for (let e = el; e && e.nodeType === 1; e = e.parentElement) if ((e.id && e.id.startsWith('pi-')) || [...e.classList].some((c) => c.startsWith('pi-'))) return true;
+        return false;
+    };
+    const items = [];
+    for (const el of document.body.querySelectorAll('*')) {
+        if (ours(el) || el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+        const r = el.getBoundingClientRect();
+        items.push({ tag: el.tagName, id: el.id, cls: el.getAttribute('class') || '', style: el.getAttribute('style') || '', data: [...el.attributes].filter((a) => a.name.startsWith('data-pi')).map((a) => a.name).join(), r: [r.left, r.top, r.width, r.height] });
+    }
+    let inside = 0;
+    for (const sel of boxes) for (const c of document.querySelectorAll(sel)) for (const el of c.querySelectorAll('*')) if (ours(el) || [...el.attributes].some((a) => a.name.startsWith('data-pi'))) inside++;
+    return { items, inside, scrollW: document.documentElement.scrollWidth, clientW: document.documentElement.clientWidth };
+}, TORN_BOXES);
+function shapeDiff(a, b) {
+    if (a.items.length !== b.items.length) return 'element count ' + a.items.length + ' vs ' + b.items.length + ' without the script';
+    for (let i = 0; i < a.items.length; i++) {
+        const x = a.items[i];
+        const y = b.items[i];
+        const what = x.tag + (x.id ? '#' + x.id : '') + (x.cls ? '.' + x.cls.split(' ')[0] : '');
+        if (x.tag !== y.tag || x.cls !== y.cls) return what + ': class "' + x.cls + '" vs "' + y.cls + '"';
+        if (x.style !== y.style) return what + ': style "' + x.style + '" vs "' + y.style + '"';
+        if (x.data) return what + ': our attribute ' + x.data;
+        const d = x.r.map((v, k) => Math.abs(v - y.r[k]));
+        if (d.some((v) => v > 0.5)) return what + ': rect ' + x.r.map((v) => v.toFixed(1)) + ' vs ' + y.r.map((v) => v.toFixed(1));
+    }
+    if (a.scrollW !== b.scrollW || a.clientW !== b.clientW) return 'page width ' + a.scrollW + '/' + a.clientW + ' vs ' + b.scrollW + '/' + b.clientW;
+    return null;
+}
+/** Compare this page with the same page and query without our script; `prep` lays both out the same way. */
+async function layoutUntouched(name, page, query, { width = 1280, prep = null, seed = null } = {}) {
+    const mine = await tornShape(page);
+    const bare = await open(query + '&noscript=1', { width, wait: 800, seed });
+    if (prep) await prep(bare.page);
+    const theirs = await tornShape(bare.page);
+    await bare.page.close();
+    const diff = shapeDiff(mine, theirs);
+    ok(diff === null && mine.items.length > 20, name + ': Torn’s layout untouched (' + mine.items.length + ' elements within 0.5 px, same classes and styles' + (diff ? '; ' + diff : '') + ')');
+    ok(mine.inside === 0, name + ': nothing of ours inside Torn’s containers (' + mine.inside + ')');
+}
+/** Our marks' rings and pills, with the rect of each. */
+const layerMarks = (page) => page.evaluate(() => [...document.querySelectorAll('#pi-marks-layer > *')].map((e) => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e); return { cls: e.className, text: e.textContent.replace(/\s+/g, ' ').trim(), title: e.title, stat: e.getAttribute('data-pi-stat'), gym: e.getAttribute('data-pi-gym'), gymId: e.getAttribute('data-pi-gym-id'), kind: e.getAttribute('data-pi-kind'), shown: s.display !== 'none', pe: s.pointerEvents, color: s.borderTopColor, style: s.borderTopStyle, tt: s.textTransform, bg: s.backgroundColor, font: s.fontFamily, r: { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height } }; }));
+const statRect = (page, stat) => page.evaluate((k) => { const li = document.querySelector('li[class*="' + k + '___"]'); const r = li.getBoundingClientRect(); return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height }; }, stat);
+const near = (a, b, d = 1) => Math.abs(a - b) <= d;
+/** Pills whose words don't fit (cut with "…"). */
+const clippedPills = (page) => page.evaluate(() => [...document.querySelectorAll('#pi-marks-layer .pi-pill > span')].filter((e) => e.scrollWidth > e.clientWidth + 1).map((e) => e.textContent));
 
 /* Gym page: the friend right after Xanax #2 (275 energy) at Gun Shop. */
 {
     const { page, errors, tornHits } = await open('page=gym&fixture=gym-friend&energy=275&build=balanced');
-    const strip = (await text(page, '.pi-strip'))[0] || '';
-    ok(strip.includes('Train DEX × 27 here') && strip.includes('Gun Shop · Balanced'), 'gym: strip says what to train here, the gym and the build (' + strip + ')');
-    const stripState = await page.evaluate(() => { const s = document.querySelector('.pi-strip'); return s.getAttribute('data-pi-state') + ':' + s.classList.contains('pi-c-green'); });
-    ok(stripState === 'right:true', 'gym: state A, the right gym: a green strip (' + stripState + ')');
-    ok(/Force Training in [\d,]+ E/.test(strip), 'gym: next gym from the page\'s 80% (' + strip + ')');
-    const on = await page.evaluate(() => [...document.querySelectorAll('li.pi-on')].map((li) => li.className.match(/(strength|speed|defense|dexterity)/)[1]));
-    ok(on.length === 1 && on[0] === 'dexterity', 'gym: DEX outlined, and only DEX (' + on + ')');
-    const mark = await page.evaluate(() => { const m = document.querySelector('li.pi-on .pi-statmark'); const t = document.querySelector('li.pi-on .pi-panel .pi-tab'); return m ? { cls: m.className, tab: t && t.textContent, color: getComputedStyle(m).borderTopColor, tabAbove: t ? t.getBoundingClientRect().top < m.getBoundingClientRect().top : null } : null; });
-    ok(mark && /pi-c-green/.test(mark.cls) && /pi-glow/.test(mark.cls) && mark.color === 'rgb(63, 191, 90)', 'gym: the stat to train is outlined green with a glow (' + JSON.stringify(mark) + ')');
-    ok(mark && /^Train this · 27 trains · about \+[\d,]+$/.test(mark.tab) && mark.tabAbove === false, 'gym: its tab "TRAIN THIS · 27 trains · about +…", inside the box, over nothing of Torn\'s (' + JSON.stringify(mark) + ')');
-    const panel = (await text(page, 'li.pi-on .pi-panel'))[0] || '';
-    ok(/27 trains/.test(panel) && /all your energy/.test(panel) && /Fill 27/.test(panel), 'gym: panel "27 trains · all your energy · Fill 27" (' + panel + ')');
-    const fillBg = await page.evaluate(() => getComputedStyle(document.querySelector('li.pi-on .pi-fill')).backgroundColor);
-    ok(fillBg === 'rgb(63, 191, 90)', 'gym: Fill is green (' + fillBg + ')');
-    const corners = await text(page, '.pi-corner');
-    ok(corners.includes('skip · over target') && corners.includes('tomorrow'), 'gym: the other stats get a small dark tag (' + corners.join(' | ') + ')');
-    const here = await page.evaluate(() => [...document.querySelectorAll('[data-pi-gym]')].map((b) => b.getAttribute('data-pi-gym') + ':' + b.querySelector('[class*="gymIcon___"]').className.match(/gym-(\d+)/)[1] + ':' + getComputedStyle(b).outlineColor));
-    ok(here.length === 1 && here[0] === 'right:18:rgb(63, 191, 90)', 'gym: Gun Shop, the gym you\'re in, a steady green outline (' + here + ')');
+    // Torn's own layout first: the same page without our script lays out exactly the same (nothing of ours inside it).
+    await gymLayout(page);
+    await page.waitForTimeout(200);
+    await layoutUntouched('gym (friend)', page, 'page=gym&fixture=gym-friend&energy=275&build=balanced', { prep: gymLayout });
+    // The strip's words are the panel's now (state A, the right gym: green).
+    const card = await panelText(page);
+    const tone = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.querySelector('.wrap').getAttribute('data-tone'));
+    ok(/Train DEX × 27/.test(card) && /Gun Shop/.test(card) && tone === 'green', 'gym: state A, the right gym: the panel says what to train here, green (' + tone + ': ' + card.slice(0, 160) + ')');
+    ok(/Next gym: Force Training in [\d,]+ E/.test(card), 'gym: next gym from the page\'s 80%, in the panel (' + (card.match(/Next gym: [^·]{0,40}/) || [''])[0] + ')');
+    ok(/all your energy/.test(card), 'gym: the box\'s line ("all your energy") is in the panel');
+    const marks = await layerMarks(page);
+    const rings = marks.filter((x) => /pi-ring/.test(x.cls) && x.stat);
+    const dex = await statRect(page, 'dexterity');
+    const ring = rings[0];
+    ok(rings.length === 1 && ring.stat === 'dex', 'gym: DEX ringed, and only DEX (' + rings.map((x) => x.stat) + ')');
+    ok(ring && /pi-c-green/.test(ring.cls) && /pi-glow/.test(ring.cls) && ring.color === 'rgb(63, 191, 90)', 'gym: the stat to train has a green ring with a glow (' + JSON.stringify(ring && { cls: ring.cls, color: ring.color }) + ')');
+    ok(ring && near(ring.r.left, dex.left - 3) && near(ring.r.top, dex.top - 3) && near(ring.r.width, dex.width + 6) && near(ring.r.height, dex.height + 6), 'gym: the ring is over the box, 3 px out (ring ' + JSON.stringify(ring && ring.r) + ', box ' + JSON.stringify(dex) + ')');
+    const tab = marks.find((x) => /pi-pill/.test(x.cls) && x.stat === 'dex');
+    ok(tab && tab.text === 'Train this · 27 trains' && /about \+[\d,]+/.test(tab.title) && tab.tt === 'uppercase' && tab.bg === 'rgb(63, 191, 90)', 'gym: its pill "TRAIN THIS · 27 TRAINS", green, the full words on hover (' + JSON.stringify(tab && { text: tab.text, title: tab.title, bg: tab.bg }) + ')');
+    ok(tab && near((tab.r.top + tab.r.bottom) / 2, dex.top - 3, 1.5) && tab.r.left >= dex.left && tab.r.right <= dex.right && near((tab.r.left + tab.r.right) / 2, (dex.left + dex.right) / 2, 1.5), 'gym: the pill straddles the box\'s top border, centred (' + JSON.stringify(tab && tab.r) + ')');
+    ok(marks.every((x) => x.pe === 'none'), 'gym: nothing of ours takes the pointer');
+    const hit = await page.evaluate((r) => { const e = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2); return e ? (e.closest('#pi-marks-layer') ? 'ours' : e.tagName) : null; }, tab.r);
+    ok(hit && hit !== 'ours', 'gym: a click on the pill reaches Torn\'s page under it (' + hit + ')');
+    const tags = marks.filter((x) => /pi-pill/.test(x.cls) && x.stat && x.stat !== 'dex').map((x) => x.text);
+    ok(tags.includes('skip · over target') && tags.includes('tomorrow'), 'gym: the other stats get a small dark pill on their top border (' + tags.join(' | ') + ')');
+    const here = marks.filter((x) => x.gym).map((x) => x.gym + ':' + x.gymId + ':' + x.color);
+    ok(here.length === 1 && here[0] === 'right:18:rgb(63, 191, 90)', 'gym: Gun Shop, the gym you\'re in, a steady green ring (' + here + ')');
+    const tile = await page.evaluate(() => { const r = document.querySelector('[aria-label="Gym 18"]').getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width }; });
+    const gr = marks.find((x) => x.gym);
+    ok(gr && near(gr.r.left, tile.left - 2) && near(gr.r.top, tile.top - 2) && near(gr.r.width, tile.width + 4), 'gym: its ring over the tile (' + JSON.stringify(gr && gr.r) + ', tile ' + JSON.stringify(tile) + ')');
     const glows = await page.evaluate(() => ({ glow: document.querySelectorAll('.pi-glow').length, pulse: document.querySelectorAll('.pi-pulse').length }));
     ok(glows.glow === 1 && glows.pulse === 0, 'gym: one thing glows, nothing pulses (' + JSON.stringify(glows) + ')');
-    const font = await page.evaluate(() => getComputedStyle(document.querySelector('.pi-strip b')).fontFamily);
-    ok(/Segoe UI/.test(font), 'gym: our marks in Segoe UI / system-ui (' + font + ')');
+    ok(tab && /Segoe UI/.test(tab.font), 'gym: our marks in Segoe UI / system-ui (' + (tab && tab.font) + ')');
+    const fillBtn = await page.evaluate(() => { const b = document.getElementById('pi-overlay').shadowRoot.querySelector('.cta.fill'); const w = document.getElementById('pi-overlay').shadowRoot.querySelector('.cta.web'); return b ? { text: b.textContent, disabled: b.disabled, bg: getComputedStyle(b).backgroundColor, web: w && w.textContent } : null; });
+    ok(fillBtn && fillBtn.text === 'Fill 27' && !fillBtn.disabled && fillBtn.bg === 'rgb(63, 191, 90)' && fillBtn.web === 'Pumping Iron ↗', 'gym: the panel has a green "Fill 27" beside "Pumping Iron ↗" (' + JSON.stringify(fillBtn) + ')');
+    // Torn's page moves (a longer message above the boxes): the ring follows, nothing of ours pushes anything.
+    await page.evaluate(() => {
+        const n = document.querySelector('[class*="notificationText___"]');
+        n.textContent = '';
+        for (let i = 0; i < 4; i++) { const p = document.createElement('p'); p.textContent = 'You used 10 energy training your dexterity.'; n.appendChild(p); }
+    });
+    await page.waitForTimeout(400);
+    const dex2 = await statRect(page, 'dexterity');
+    const ring2 = (await layerMarks(page)).find((x) => /pi-ring/.test(x.cls) && x.stat === 'dex');
+    ok(dex2.top > dex.top + 20 && ring2 && near(ring2.r.top, dex2.top - 3), 'gym: Torn\'s page moved down ' + Math.round(dex2.top - dex.top) + ' px: the ring followed (' + Math.round(ring2 && ring2.r.top) + ' vs ' + Math.round(dex2.top - 3) + ')');
+    await page.screenshot({ path: resolve(shots, 'torn-gym-friend-layer.png') });
     await page.evaluate(() => {
         window.__trainClicks = 0;
         for (const b of document.querySelectorAll('button[aria-label^="Train "]')) b.addEventListener('click', () => window.__trainClicks++);
@@ -97,7 +193,14 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
         window.__inputEvents = 0;
         document.querySelector('li[class*="dexterity___"] input').addEventListener('input', () => window.__inputEvents++);
     });
-    await page.locator('li.pi-on .pi-fill').click();
+    // At 1280 px the free space beside Torn's page holds only the one-tag panel: a click on it opens it for a look.
+    const folded = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.querySelector('.wrap').classList.contains('collapsed'));
+    if (folded) {
+        await page.locator('#pi-overlay .head').click();
+        await page.waitForTimeout(200);
+    }
+    ok(await page.locator('#pi-overlay .cta.fill').isVisible(), 'gym: Fill 27 is one click away in the panel (' + (folded ? 'the folded tag opened for a look' : 'open') + ')');
+    await page.locator('#pi-overlay .cta.fill').click();
     await page.waitForTimeout(300);
     const after = await page.evaluate(() => ({ v: document.querySelector('li[class*="dexterity___"] input').value, train: window.__trainClicks, calls: window.__calls.length - window.__callsBefore, events: window.__inputEvents }));
     ok(after.v === '27', 'gym: Fill typed 27 into Torn\'s box (' + after.v + ')');
@@ -115,13 +218,83 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
         document.querySelector('#barEnergy [class*="bar-value___"]').textContent = '175/150';
     });
     await page.waitForTimeout(500);
-    const moved = (await text(page, 'li.pi-on .pi-panel'))[0] || '';
-    ok(/17 trains left/.test(moved) && /Fill 17/.test(moved), 'gym: after 10 trains the panel says 17 left, Fill 17 (' + moved + ')');
+    const moved = ((await layerMarks(page)).find((x) => /pi-pill/.test(x.cls) && x.stat === 'dex') || {}).text || '';
+    const movedFill = await page.evaluate(() => (document.getElementById('pi-overlay').shadowRoot.querySelector('.cta.fill') || {}).textContent);
+    ok(moved === 'Train this · 17 left' && movedFill === 'Fill 17', 'gym: after 10 trains the pill says 17 left, the panel Fill 17 (' + moved + ' · ' + movedFill + ')');
+    // Never clipped: the pill's words fit the box (the owner: "TAKE THE XANAX FIRST · TH…").
+    ok((await clippedPills(page)).length === 0, 'gym: no pill is cut short (' + (await clippedPills(page)).join(' | ') + ')');
     const sess = await page.evaluate(() => JSON.parse(_store['pumpingIron.v1.gymSession'] || 'null'));
     ok(sess && sess.parts && sess.parts.length === 1 && sess.spent.dex === 100, 'gym: the session snapshot counts the 100 energy spent on DEX (' + JSON.stringify(sess && sess.spent) + ')');
     ok(errors.length === 0, 'gym: no page errors ' + JSON.stringify(errors));
     ok(tornHits() === 0, 'gym: nothing loaded from torn.com');
     await page.screenshot({ path: resolve(shots, 'torn-gym-friend.png'), fullPage: true });
+    await page.close();
+}
+
+/* The owner's 1.4.1 report (2026-10-03): no energy for one train, the Xanax is next. It drew a dark block inside
+   Torn's stat box ("TAKE THE XANAX FIRST · TH…", clipped) with a green outline. Now: a dashed grey ring and a dark
+   pill on our layer, Fill waiting in the panel, Torn's box as it is without the script. */
+{
+    const q = 'page=gym&fixture=gym-friend&energy=5&drug=0&build=balanced';
+    const { page, errors } = await open(q);
+    await gymLayout(page);
+    await page.waitForTimeout(200);
+    await layoutUntouched('gym (no energy)', page, q, { prep: gymLayout });
+    const marks = await layerMarks(page);
+    const ring = marks.find((x) => /pi-ring/.test(x.cls) && x.stat);
+    ok(ring && ring.kind === 'noenergy' && /pi-c-grey/.test(ring.cls) && ring.style === 'dashed' && !/pi-glow|pi-c-green/.test(ring.cls), 'gym (no energy): the stat to train has a dashed grey ring, not green (' + JSON.stringify(ring && { stat: ring.stat, kind: ring.kind, cls: ring.cls, style: ring.style }) + ')');
+    const tab = marks.find((x) => /pi-pill/.test(x.cls) && x.stat === (ring && ring.stat));
+    const box = ring ? await statRect(page, { str: 'strength', def: 'defense', spd: 'speed', dex: 'dexterity' }[ring.stat]) : null;
+    ok((await clippedPills(page)).length === 0, 'gym (no energy): no pill is cut short (' + (await clippedPills(page)).join(' | ') + ')');
+    ok(tab && tab.text === 'Take the Xanax first' && /then DEX × 25/.test(tab.title) && /pi-dark/.test(tab.cls) && box && tab.r.left >= box.left && tab.r.right <= box.right, 'gym (no energy): its pill says "Take the Xanax first", dark, inside the box\'s width (' + JSON.stringify(tab && { text: tab.text, cls: tab.cls, r: tab.r }) + ')');
+    const glows = await page.evaluate(() => document.querySelectorAll('.pi-glow, .pi-c-green.pi-ring[data-pi-stat]').length);
+    ok(glows === 0, 'gym (no energy): no stat glows green (' + glows + ')');
+    const fillBtn = await page.evaluate(() => { const b = document.getElementById('pi-overlay').shadowRoot.querySelector('.cta.fill'); return b ? { text: b.textContent, disabled: b.disabled, title: b.title } : null; });
+    ok(fillBtn && fillBtn.disabled && fillBtn.title === 'Take the Xanax first', 'gym (no energy): the panel\'s Fill waits (' + JSON.stringify(fillBtn) + ')');
+    const card = await panelText(page);
+    ok(/Take the Xanax first/.test(card) && !/Train (STR|DEF|SPD|DEX) × \d+(?! after)/.test(card.split('then')[0]), 'gym (no energy): the panel says "Take the Xanax first", never "Train" with nothing left (' + card.slice(0, 160) + ')');
+    ok(errors.length === 0, 'gym (no energy): no page errors ' + JSON.stringify(errors));
+    await page.screenshot({ path: resolve(shots, 'torn-gym-no-energy.png') });
+    await page.close();
+}
+
+/* Overdosed (the owner, 2026-10-03): one stored state. The gym page: no train mark on any stat, the panel says
+   "Overdosed · fly to Switzerland" with Open Travel, nothing of ours inside Torn's page; the same key the webpage reads. */
+{
+    const q = 'page=gym&fixture=gym-friend&energy=0&happy=0&drug=86400&build=balanced';
+    const { page, errors } = await open(q);
+    await gymLayout(page);
+    await page.waitForTimeout(200);
+    await layoutUntouched('gym (overdose)', page, q, { prep: gymLayout });
+    const marks = await layerMarks(page);
+    ok(marks.filter((x) => x.stat).length === 0, 'gym (overdose): no train mark on any stat (' + marks.filter((x) => x.stat).map((x) => x.stat + ':' + x.text) + ')');
+    const card = await panelText(page);
+    const tone = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.querySelector('.wrap').getAttribute('data-tone'));
+    ok(/Overdosed · fly to Switzerland/.test(card) && /Fly to Switzerland/.test(card) && /Open Travel/.test(card) && tone === 'amber', 'gym (overdose): the panel says "Overdosed · fly to Switzerland", amber, with Open Travel (' + tone + ': ' + card.slice(0, 140) + ')');
+    ok(!/Train (STR|DEF|SPD|DEX) ×|Fill \d/.test(card), 'gym (overdose): no "Train" and no Fill in the panel');
+    const stored = await page.evaluate(() => JSON.parse(_store['pumpingIron.v1.overdose'] || 'null'));
+    ok(stored && stored.until - stored.at > 20 * 3600e3, 'gym (overdose): stored under the one key the webpage reads (' + JSON.stringify(stored) + ')');
+    ok(errors.length === 0, 'gym (overdose): no page errors ' + JSON.stringify(errors));
+    await page.screenshot({ path: resolve(shots, 'torn-gym-overdose.png') });
+    await page.close();
+}
+
+/* Flying (the owner's live page, 2026-10-03): Torn's travel answer says 43 minutes of flight left. No train mark on
+   any stat, the panel says when he is back and never "Train", nothing of ours inside Torn's page. */
+{
+    const q = 'page=gym&fixture=gym-friend&energy=60&fly=43&build=balanced';
+    const { page, errors } = await open(q);
+    await gymLayout(page);
+    await page.waitForTimeout(200);
+    await layoutUntouched('gym (flying)', page, q, { prep: gymLayout });
+    const marks = await layerMarks(page);
+    ok(marks.filter((x) => x.stat).length === 0, 'gym (flying): no train mark on any stat (' + marks.filter((x) => x.stat).map((x) => x.stat + ':' + x.text) + ')');
+    const card = await panelText(page);
+    const tone = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.querySelector('.wrap').getAttribute('data-tone'));
+    ok(/Flying · back in Torn at \d\d:\d\d/.test(card) && /The gym is closed while you travel/.test(card) && tone === 'amber', 'gym (flying): the panel says "Flying · back in Torn at HH:MM", amber (' + tone + ': ' + card.slice(0, 140) + ')');
+    ok(!/Train (STR|DEF|SPD|DEX) ×|Fill \d/.test(card), 'gym (flying): no "Train" and no Fill in the panel');
+    ok(errors.length === 0, 'gym (flying): no page errors ' + JSON.stringify(errors));
+    await page.screenshot({ path: resolve(shots, 'torn-gym-flying.png') });
     await page.close();
 }
 
@@ -150,7 +323,7 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     const head = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.querySelector('.head').textContent);
     ok(!/Train DEX × 27/.test(head) && !/Session done/.test(head) && /\d:\d\d/.test(head), 'roll-over: the panel bar shows the next step and its countdown, not "Session done" (' + head.replace(/\s+/g, ' ').trim() + ')');
     const card = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.textContent.replace(/\s+/g, ' '));
-    ok(/Session done\. Next: /.test(card), 'roll-over: the panel says the session is done and what is next (' + (card.match(/Session done\. Next: [^·]{0,60}/) || [''])[0] + ')');
+    ok(/Session done/.test(card) && /Next at \d\d:\d\d: /.test(card), 'roll-over: the panel says the session is done and what is next (' + (card.match(/Session done.{0,70}/) || [''])[0] + ')');
     // A regeneration tick (energy +5, happy +5) is not an action: no read is asked for.
     const r1 = await reads();
     await page.evaluate(() => {
@@ -183,22 +356,30 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
 /* Gym page: the owner on Hank's, 1,000 energy at Gym 3000; the session's part is SPD at The Edge (SPD is the stat under its share). */
 {
     const { page, errors } = await open('page=gym&fixture=gym-owner&who=owner&build=hank');
-    const next = await page.evaluate(() => {
-        const b = document.querySelector('[data-pi-gym="go"]');
-        const ring = b && b.querySelector('.pi-ring.pi-pulse');
-        return b ? { icon: b.querySelector('[class*="gymIcon___"]').className, label: ring && ring.title, outline: getComputedStyle(b).outlineColor, anim: ring && getComputedStyle(ring, '::after').animationName } : null;
-    });
-    ok(next && /gym-23/.test(next.icon) && /^Next: The Edge · SPD × \d+$/.test(next.label) && next.outline === 'rgb(63, 191, 90)', 'gym (Hank\'s): state B, The Edge\'s button is green and pulses (' + JSON.stringify(next) + ')');
+    await gymLayout(page);
+    await page.waitForTimeout(200);
+    await layoutUntouched('gym (Hank\'s)', page, 'page=gym&fixture=gym-owner&who=owner&build=hank', { prep: gymLayout });
+    const gymRing = (k) => page.evaluate((kind) => {
+        const r = document.querySelector('#pi-marks-layer [data-pi-gym="' + kind + '"]');
+        if (!r) return null;
+        const tile = document.querySelector('[class*="gymIcon___"][class*="gym-' + r.getAttribute('data-pi-gym-id') + '"]').closest('[class*="gymButton___"]').getBoundingClientRect();
+        const rr = r.getBoundingClientRect();
+        return { id: r.getAttribute('data-pi-gym-id'), label: r.title, color: getComputedStyle(r).borderTopColor, pulse: r.classList.contains('pi-pulse'), anim: getComputedStyle(r, '::after').animationName, over: Math.abs(rr.left - (tile.left - 2)) <= 1 && Math.abs(rr.top - (tile.top - 2)) <= 1 && Math.abs(rr.width - (tile.width + 4)) <= 1 };
+    }, k);
+    const next = await gymRing('go');
+    ok(next && next.id === '23' && /^Next: The Edge · SPD × \d+$/.test(next.label) && next.color === 'rgb(63, 191, 90)' && next.pulse && next.over, 'gym (Hank\'s): state B, a green pulsing ring over The Edge\'s tile (' + JSON.stringify(next) + ')');
     ok(next && next.anim === 'pi-pulse', 'gym (Hank\'s): the pulse runs (Animations on) (' + (next && next.anim) + ')');
-    const wrong = await page.evaluate(() => { const b = document.querySelector('[data-pi-gym="wrong"]'); return b ? b.querySelector('[class*="gymIcon___"]').className.match(/gym-(\d+)/)[1] + ':' + getComputedStyle(b).outlineColor + ':' + b.querySelectorAll('.pi-pulse').length : null; });
-    ok(wrong === '27:rgb(255, 107, 94):0', 'gym (Hank\'s): Gym 3000, where you are, a steady red outline (' + wrong + ')');
+    const wrong = await gymRing('wrong');
+    ok(wrong && wrong.id === '27' && wrong.color === 'rgb(255, 107, 94)' && !wrong.pulse && wrong.over, 'gym (Hank\'s): Gym 3000, where you are, a steady red ring over its tile (' + JSON.stringify(wrong) + ')');
+    const boxRings = await page.evaluate(() => [...document.querySelectorAll('#pi-marks-layer .pi-ring[data-pi-stat]')].map((r) => r.getAttribute('data-pi-stat') + ':' + r.getAttribute('data-pi-kind')));
+    ok(boxRings.every((x) => !/:train$/.test(x)), 'gym (Hank\'s): no green "train" ring on a box in the wrong gym (' + boxRings + ')');
     const dim = await page.evaluate(() => document.querySelectorAll('li.pi-dim, .pi-dim').length);
     ok(dim === 0, 'gym (Hank\'s): Torn\'s stat boxes are never greyed (round 6) (' + dim + ')');
-    const hint = (await text(page, '.pi-strip'))[0] || '';
-    ok(/Wrong gym/.test(hint) && /you’re in Gym 3000 \(no SPD\) · switch to The Edge \(SPD [\d.]+\)/.test(hint), 'gym (Hank\'s): the strip says "Wrong gym · you\'re in Gym 3000 · switch to The Edge" (' + hint + ')');
+    const card = await panelText(page);
+    ok(/Wrong gym/.test(card) && /Switch to The Edge/.test(card) && /You’re in Gym 3000 \(no SPD\) · switch to The Edge \(SPD [\d.]+\)/.test(card), 'gym (Hank\'s): the panel says "Wrong gym · Switch to The Edge · You\'re in Gym 3000 (no SPD) · switch to The Edge" (' + card.slice(0, 220) + ')');
     // Another script changing the gym page (not Torn's values): no redraw.
     const same = await page.evaluate(async () => {
-        const strip = document.querySelector('.pi-strip');
+        const ring = document.querySelector('#pi-marks-layer [data-pi-gym="go"]');
         const root = document.getElementById('gymroot');
         for (let i = 0; i < 5; i++) {
             const x = document.createElement('div');
@@ -207,15 +388,13 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
             await new Promise((r) => setTimeout(r, 60));
         }
         await new Promise((r) => setTimeout(r, 400));
-        return document.querySelector('.pi-strip') === strip;
+        return document.querySelector('#pi-marks-layer [data-pi-gym="go"]') === ring;
     });
     ok(same, 'gym (Hank\'s): changes that are not Torn\'s values (another script) redraw nothing');
-    const fills = await page.evaluate(() => document.querySelectorAll('.pi-fill:not(:disabled)').length);
+    const fills = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.querySelectorAll('.cta.fill:not(:disabled)').length + document.querySelectorAll('.pi-fill').length);
     ok(fills === 0, 'gym (Hank\'s): no Fill to press in a gym the part isn\'t in');
     const clicks = await page.evaluate(() => document.querySelectorAll('.gymButton___3OFdI.selected___2PmTc').length && document.querySelector('.gymButton___3OFdI.selected___2PmTc [class*="gym-27"]') !== null);
     ok(clicks, 'gym (Hank\'s): we never switched gyms (Gym 3000 is still the one selected)');
-    const card = await page.evaluate(() => document.getElementById('pi-overlay').shadowRoot.textContent.replace(/\s+/g, ' '));
-    ok(/Wrong gym/.test(card) && /Switch to The Edge/.test(card), 'gym (Hank\'s): the panel says "Switch to The Edge" (' + card.slice(0, 120) + ')');
     ok(errors.length === 0, 'gym (Hank\'s): no page errors ' + JSON.stringify(errors));
     await page.screenshot({ path: resolve(shots, 'torn-gym-owner.png'), fullPage: true });
     // Settings › Animations off: the pulse is held still.
@@ -225,17 +404,25 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
         window.__pi.refresh();
     });
     await page.waitForTimeout(1500);
-    const still = await page.evaluate(() => { const r = document.querySelector('[data-pi-gym="go"] .pi-ring'); return r ? r.classList.contains('pi-still') + ':' + getComputedStyle(r, '::after').animationName + ':' + getComputedStyle(r, '::after').opacity : null; });
+    const still = await page.evaluate(() => { const r = document.querySelector('#pi-marks-layer [data-pi-gym="go"]'); return r ? r.classList.contains('pi-still') + ':' + getComputedStyle(r, '::after').animationName + ':' + getComputedStyle(r, '::after').opacity : null; });
     ok(still === 'true:none:0.7', 'gym (Hank\'s): Animations off, the pulse held still (' + still + ')');
     await page.close();
 }
 
+/* Our listing marks: the pill texts, the shown ones only. */
+const listingPills = (page) => page.evaluate(() => [...document.querySelectorAll('#pi-marks-layer .pi-pill[data-pi-listing]')].filter((p) => getComputedStyle(p).display !== 'none').map((p) => p.textContent.replace(/\s+/g, ' ').trim()));
+
 /* Items page: the Xanax the next step uses. */
 {
     const { page, errors } = await open('page=items&fixture=items');
-    const labels = await text(page, '.pi-outlined .pi-label');
-    ok(labels.length >= 1 && /Step 1 of today · Xanax #1/.test(labels[0]), 'items: Xanax outlined with its step (' + labels.join(' | ') + ')');
-    const onlyVisible = await page.evaluate(() => [...document.querySelectorAll('.pi-outlined')].every((el) => el.closest('ul').getAttribute('aria-expanded') === 'true'));
+    await layoutUntouched('items', page, 'page=items&fixture=items');
+    const labels = await listingPills(page);
+    ok(labels.length >= 1 && /Step 1 of today · Xanax #1/.test(labels[0]), 'items: Xanax ringed with its step (' + labels.join(' | ') + ')');
+    const onlyVisible = await page.evaluate(() => {
+        const shown = [...document.querySelectorAll('#pi-marks-layer > *')].filter((p) => getComputedStyle(p).display !== 'none');
+        const ul = [...document.querySelectorAll('ul.items-cont')].find((u) => u.getAttribute('aria-expanded') === 'true').getBoundingClientRect();
+        return shown.length > 0 && shown.every((p) => { const r = p.getBoundingClientRect(); return r.top >= ul.top - 14 && r.bottom <= ul.bottom + 4; });
+    });
     ok(onlyVisible, 'items: only the list that shows is marked');
     ok(errors.length === 0, 'items: no page errors');
     await page.close();
@@ -244,25 +431,32 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
 /* Bazaar, Item Market, points market: the chosen listings. */
 {
     const { page, errors } = await open('page=bazaar&userId=1234567&fixture=bazaar', { wait: 6000 });
-    const labels = await text(page, '.pi-outlined .pi-label');
-    ok(labels.some((l) => l === 'Take 3 · $2,479,500'), 'bazaar: Iron_Monk\'s Xanax outlined "Take 3 · $2,479,500" (' + labels.join(' | ') + ')');
-    const pe = await page.evaluate(() => getComputedStyle(document.querySelector('.pi-label')).pointerEvents);
-    ok(pe === 'none', 'bazaar: the label never takes the pointer');
-    const tab = await page.evaluate(() => { const l = document.querySelector('.pi-label'); const s = getComputedStyle(l); return { tt: s.textTransform, bg: s.backgroundColor, glows: document.querySelectorAll('.pi-glow').length }; });
-    ok(tab.tt === 'uppercase' && tab.bg === 'rgb(239, 235, 226)' && tab.glows === 1, 'bazaar: a chalk tab "TAKE 3 · $2,479,500", one thing glows (' + JSON.stringify(tab) + ')');
+    await layoutUntouched('bazaar', page, 'page=bazaar&userId=1234567&fixture=bazaar');
+    const labels = await listingPills(page);
+    ok(labels.some((l) => l === 'Take 3 · $2,479,500'), 'bazaar: Iron_Monk\'s Xanax ringed "Take 3 · $2,479,500" (' + labels.join(' | ') + ')');
+    const tab = await page.evaluate(() => {
+        const l = document.querySelector('#pi-marks-layer .pi-pill[data-pi-listing]');
+        const ring = document.querySelector('#pi-marks-layer .pi-ring.pi-c-chalk');
+        const s = getComputedStyle(l);
+        const lr = l.getBoundingClientRect();
+        const rr = ring.getBoundingClientRect();
+        return { tt: s.textTransform, bg: s.backgroundColor, pe: s.pointerEvents, ringPe: getComputedStyle(ring).pointerEvents, ring: getComputedStyle(ring).borderTopColor, glows: document.querySelectorAll('.pi-glow').length, straddle: Math.abs((lr.top + lr.bottom) / 2 - rr.top) <= 1.5 };
+    });
+    ok(tab.pe === 'none' && tab.ringPe === 'none', 'bazaar: the ring and its pill never take the pointer');
+    ok(tab.tt === 'uppercase' && tab.bg === 'rgb(239, 235, 226)' && tab.ring === 'rgb(239, 235, 226)' && tab.glows === 1 && tab.straddle, 'bazaar: a chalk ring and the pill "TAKE 3 · $2,479,500" on its top edge, one thing glows (' + JSON.stringify(tab) + ')');
     await page.screenshot({ path: resolve(shots, 'torn-bazaar.png') });
     ok(errors.length === 0, 'bazaar: no page errors');
     await page.close();
 }
 {
     const { page } = await open('page=itemmarket&win=week&fixture=itemmarket#/market/view=search&itemID=206', { wait: 6000 });
-    const labels = await text(page, '.pi-outlined .pi-label');
-    ok(labels.some((l) => /^Take 3 · \$2,488,500$/.test(l)), 'item market: the $829,500 row outlined (' + labels.join(' | ') + ')');
+    const labels = await listingPills(page);
+    ok(labels.some((l) => /^Take 3 · \$2,488,500$/.test(l)), 'item market: the $829,500 row ringed (' + labels.join(' | ') + ')');
     await page.close();
 }
 {
     const { page } = await open('page=points&fixture=pmarket', { wait: 6000 });
-    const labels = await text(page, '.pi-outlined .pi-label');
+    const labels = await listingPills(page);
     // Steady: a refill (30 points) a day for the 3-day window = 90, less the 45 held = 45 to buy.
     ok(labels.includes('Take 25 · $1,128,000') && labels.some((l) => /^Take 20 · /.test(l)), 'points: 25 + 20 from the two lots, the 45 held taken off (' + labels.join(' | ') + ')');
     await page.close();
@@ -273,18 +467,21 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     // 1600 wide: the free space beside Torn's page holds the full panel.
     const { page, errors } = await open('page=other', { width: 1600 });
     const q = (sel) => `document.getElementById('pi-overlay').shadowRoot.querySelector('${sel}')`;
+    // Round 8 (the owner's pick B): the Xanax is 3:50 away, so nothing is due. The bar counts down and says so, the
+    // card says what is next in words, nothing rings, and the one button is the webpage's.
     const bar = await page.evaluate(`${q('.head')}.textContent`);
-    ok(/3:[45]\d\s*Xanax #1/.test(bar.replace(/\s+/g, ' ')), 'panel: countdown and step in the bar (' + bar + ')');
+    ok(/3:[45]\d\s*Nothing due/.test(bar.replace(/\s+/g, ' ')), 'panel: the countdown and "Nothing due" in the bar (' + bar + ')');
     const box = await page.evaluate(`(() => { const r = ${q('.head')}.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })()`);
     ok(Math.abs(box.h - 36) <= 1, 'panel: bar 36 px tall (' + box.h + ')');
-    const body = await page.evaluate(`({ shown: getComputedStyle(${q('.body')}).display !== 'none', text: ${q('.body')}.textContent, go: ${q('.cta.go')} && ${q('.cta.go')}.getAttribute('href'), goText: ${q('.cta')}.textContent, ctas: ${q('.body')}.querySelectorAll('.cta').length, web: ${q('.body')}.querySelectorAll('.cta.web').length, mid: (() => { const c = ${q('.cta.go')}; const r = c.getBoundingClientRect(); const t = document.createRange(); t.selectNodeContents(c); const tr = t.getBoundingClientRect(); return Math.round(Math.abs((tr.top + tr.bottom) / 2 - (r.top + r.bottom) / 2)); })() })`);
-    ok(body.shown && /Take Xanax #1, then train (STR|SPD|DEF|DEX)/.test(body.text), 'panel: expanded by default with the step');
-    ok(body.ctas === 2 && body.web === 1 && body.goText === 'Open Items' && body.go === 'https://www.torn.com/item.php', 'panel: the action button, "Open Items" for the Xanax, and the webpage beside it (' + JSON.stringify(body) + ')');
-    ok(body.mid <= 1, 'panel: the button text is centred (' + body.mid + ' px off)');
-    const look = await page.evaluate(`(() => { const w = ${q('.wrap')}; const s = getComputedStyle(w); return { bg: s.backgroundColor, tone: w.getAttribute('data-tone'), font: s.fontFamily }; })()`);
+    const body = await page.evaluate(`({ shown: getComputedStyle(${q('.body')}).display !== 'none', text: ${q('.body')}.textContent, lbl: ${q('.lbl')}.textContent, step: ${q('.step')}.textContent, sub: ${q('.sub')}.textContent, go: ${q('.cta.go')} && ${q('.cta.go')}.getAttribute('href'), goText: ${q('.cta')}.textContent, ctas: ${q('.body')}.querySelectorAll('.cta').length, rail: ${q('.body')}.querySelectorAll('.prail').length })`);
+    ok(body.shown && body.step === 'Nothing due now' && /^Next at \d\d:\d\d$/.test(body.lbl) && /^Next at \d\d:\d\d: take Xanax #1, then train (STR|SPD|DEF|DEX) × \d+ · about \+[\d,]+ · \d+ energy$/.test(body.sub), 'panel: expanded by default; nothing due is said in words, with what is next (' + JSON.stringify([body.lbl, body.step, body.sub]) + ')');
+    ok(body.ctas === 1 && body.goText === 'Open Pumping Iron' && body.go === null && body.rail === 0, 'panel: with nothing due the one button is the webpage, and no list of actions (' + JSON.stringify(body) + ')');
+    const look = await page.evaluate(`(() => { const w = ${q('.wrap')}; const s = getComputedStyle(w); return { bg: s.backgroundColor, tone: w.getAttribute('data-tone'), font: s.fontFamily, ring: w.getAttribute('data-ring'), plate: ${q('.plate')}.className, anim: getComputedStyle(${q('.plate')}, '::after').animationName, after: getComputedStyle(${q('.plate')}, '::after').content }; })()`);
     ok(look.bg === 'rgb(16, 18, 20)' && /Segoe UI/.test(look.font), 'panel: near-black, Segoe UI (' + JSON.stringify(look) + ')');
     ok(look.tone === '', 'panel: no chalk edge while the step is still ahead (' + look.tone + ')');
-    await page.locator('#pi-overlay .open').click();
+    ok(look.ring === '' && look.plate === 'plate' && look.after === 'none', 'panel: a countdown never rings (the plate alone) (' + JSON.stringify(look) + ')');
+    // The body's "Pumping Iron ↗" (the bar has a small ↗ too).
+    await page.locator('#pi-overlay .cta.open').click();
     const opened = await page.evaluate(() => window.__opened || []);
     ok(opened[0] === 'https://abrahamdelosreyes17-oss.github.io/torn-pumping-iron/app.html', 'panel: Open Pumping Iron opens the webpage in a new tab');
     await page.keyboard.press('Alt+Backquote');
@@ -308,15 +505,120 @@ const text = (page, sel) => page.evaluate((s) => [...document.querySelectorAll(s
     ok(after.x >= 1288 || after.r <= 312, 'drag: still beside Torn\'s page, never over it (' + JSON.stringify(after) + ')');
     ok(errors.length === 0, 'panel: no page errors');
     // Narrower windows: it sizes itself to the free space beside Torn's page instead of going over it (the owner).
-    for (const [w, tier] of [[1440, 'narrow'], [1280, 'compact'], [1100, 'mini']]) {
+    // Round 8: at 1,200 px the margin (88 px free) holds the smallest tag: it stays beside Torn's page, under its header
+    // (it went to the window's corner, over the header, although it fits). At 1,100 px no margin holds a tag: the corner.
+    for (const [w, tier, where] of [[1440, 'narrow', 'margin'], [1280, 'compact', 'margin'], [1200, 'mini', 'margin'], [1100, 'mini', 'corner']]) {
         await page.setViewportSize({ width: w, height: 900 });
         await page.waitForTimeout(400);
         const fit = await page.evaluate(`(() => { const w = ${q('.wrap')}; const r = w.getBoundingClientRect(); return { fit: w.getAttribute('data-fit'), folded: w.classList.contains('collapsed'), l: Math.round(r.left), r: Math.round(r.right), t: Math.round(r.top), font: getComputedStyle(w).fontSize }; })()`);
         const pageL = (w - 976) / 2;
-        const clear = fit.r <= pageL || fit.l >= pageL + 976 || (tier === 'mini' && fit.t <= 4 + 1);
-        ok(fit.fit === tier && clear && (tier === 'narrow' ? !fit.folded && fit.font === '12px' : fit.folded), 'fit at ' + w + ' px: ' + tier + ', never over Torn\'s page (' + JSON.stringify(fit) + ')');
+        const beside = fit.r <= pageL || fit.l >= pageL + 976;
+        const clear = where === 'margin' ? beside && fit.t > 40 : fit.t <= 4 + 1;
+        ok(fit.fit === tier && clear && (tier === 'narrow' ? !fit.folded && fit.font === '12px' : fit.folded), 'fit at ' + w + ' px: ' + tier + (where === 'margin' ? ', beside Torn\'s page and under its header' : ', the window\'s corner (no margin holds a tag)') + ', never over Torn\'s page (' + JSON.stringify(fit) + ')');
         await page.screenshot({ path: resolve(shots, 'torn-panel-' + w + '.png') });
     }
+    await page.close();
+}
+
+/* Round 8, the owner's pick B (mockups/round8/steps-panel.html): a step due now is its actions in order, the one of the
+   moment in the bar and in big type, and the header's plate rings (one ring, so it shows when the panel is folded too).
+   The ring moves with opacity and transform only; it is drawn still with Settings › Animations off and under the PC's
+   "reduce motion". */
+{
+    // The Xanax cooldown is over: Xanax #1 is due.
+    const { page, errors } = await open('page=other&drug=0', { width: 1600 });
+    const panel = () => page.evaluate(() => {
+        const sr = document.getElementById('pi-overlay').shadowRoot;
+        const w = sr.querySelector('.wrap');
+        const plate = sr.querySelector('.plate');
+        const after = getComputedStyle(plate, '::after');
+        const go = sr.querySelector('.cta.go');
+        const mid = (() => { if (!go) return null; const r = go.getBoundingClientRect(); const t = document.createRange(); t.selectNodeContents(go); const tr = t.getBoundingClientRect(); return Math.round(Math.abs((tr.top + tr.bottom) / 2 - (r.top + r.bottom) / 2)); })();
+        const pr = plate.getBoundingClientRect();
+        const wr = w.getBoundingClientRect();
+        return {
+            head: sr.querySelector('.head').textContent.replace(/\s+/g, ' ').trim(), tone: w.getAttribute('data-tone'), ring: w.getAttribute('data-ring'), plates: sr.querySelectorAll('.plate').length, rings: sr.querySelectorAll('.ring').length,
+            anim: after.animationName, opacity: after.opacity, transform: after.transform, still: w.classList.contains('still'), folded: w.classList.contains('collapsed'),
+            lbl: (sr.querySelector('.lbl') || {}).textContent, step: (sr.querySelector('.step') || {}).textContent, sub: (sr.querySelector('.sub') || {}).textContent,
+            rail: [...sr.querySelectorAll('.prail .pr1')].map((r) => (r.classList.contains('done') ? '✓ ' : r.classList.contains('now') ? '● ' : '○ ') + r.textContent.trim()), ticks: sr.querySelectorAll('.prail .pr1.done svg.tick').length,
+            ctas: [...sr.querySelectorAll('.body .cta')].map((c) => c.textContent), go: go && go.getAttribute('href'), mid,
+            // The ring at its largest (1.45 ×) stays inside the panel's own box (it is never drawn over Torn's page).
+            inside: pr.left - 0.225 * pr.width >= wr.left && pr.top - 0.225 * pr.height >= wr.top,
+        };
+    });
+    const due = await panel();
+    ok(/^Now\s?Take Xanax #1/.test(due.head), 'panel, a step due: "Now" and the action of the moment in the bar (' + due.head + ')');
+    ok(due.lbl === 'Now' && due.step === 'Take Xanax #1' && /^then train (STR|SPD|DEF|DEX) × \d+ · about \+[\d,]+ · \d+ energy$/.test(due.sub) && due.tone === 'chalk', 'panel, a step due: the action of the moment in big type, what follows on one line, a chalk edge (' + JSON.stringify([due.lbl, due.step, due.sub, due.tone]) + ')');
+    ok(due.rail.length === 2 && due.rail[0] === '● Take Xanax #1' && /^○ Train (STR|SPD|DEF|DEX) × \d+$/.test(due.rail[1]), 'panel, a step due: its actions in order, the one to do now marked (' + due.rail.join(' | ') + ')');
+    ok(due.ring === '1' && due.plates === 1 && due.rings === 1 && due.anim === 'pi-ring-in' && due.inside, 'panel, a step due: the header\'s plate rings, the panel\'s one ring, inside the panel (' + JSON.stringify({ ring: due.ring, rings: due.rings, anim: due.anim, inside: due.inside }) + ')');
+    ok(due.ctas.join('|') === 'Open Items|Pumping Iron ↗' && due.go === 'https://www.torn.com/item.php', 'panel, a step due: the button follows the action of the moment ("Open Items" for the Xanax), the webpage beside it (' + due.ctas.join('|') + ')');
+    ok(due.mid !== null && due.mid <= 1, 'panel: the button text is centred (' + due.mid + ' px off)');
+    await page.screenshot({ path: resolve(shots, 'torn-panel-due.png') });
+    // Folded to one tag: the ring is still there.
+    await page.keyboard.press('Alt+Backquote');
+    await page.waitForTimeout(150);
+    const folded = await panel();
+    ok(folded.folded && folded.rings === 1 && folded.anim === 'pi-ring-in', 'panel, folded: the plate still rings (' + JSON.stringify({ folded: folded.folded, rings: folded.rings, anim: folded.anim }) + ')');
+    await page.screenshot({ path: resolve(shots, 'torn-panel-due-folded.png') });
+    await page.keyboard.press('Alt+Backquote');
+    // The PC's "reduce motion": nothing moves, the ring stays drawn around the plate.
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.waitForTimeout(150);
+    const reduced = await panel();
+    ok(reduced.anim === 'none' && reduced.opacity === '0.55' && /matrix\(1\.3, 0, 0, 1\.3/.test(reduced.transform), 'panel, reduce motion: the ring is drawn still (' + JSON.stringify([reduced.anim, reduced.opacity, reduced.transform]) + ')');
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    // Settings › Animations off: the same.
+    await page.evaluate(() => {
+        window.GM_setValue('pumpingIron.v1.settings', JSON.stringify({ motion: false }));
+        window.__pi.refresh();
+    });
+    await page.waitForTimeout(1500);
+    const off = await panel();
+    ok(off.still && off.rings === 1 && off.anim === 'none' && off.opacity === '0.55', 'panel, Animations off: the ring is drawn still (' + JSON.stringify([off.still, off.rings, off.anim, off.opacity]) + ')');
+    await page.screenshot({ path: resolve(shots, 'torn-panel-due-still.png') });
+    ok(errors.length === 0, 'panel, a step due: no page errors ' + JSON.stringify(errors.slice(0, 2)));
+    await page.close();
+}
+{
+    // A jump mid-way: the 5 EDVD are in (happy 17,525 of 5,025 on Torn's bar), the Ecstasy is the action of the moment.
+    const { page, errors } = await open('page=other&fixture=gym&energy=1000&happy=17525&drug=0', { width: 1600 });
+    await page.evaluate(() => window.__pi.followStrategy('edvdJump'));
+    // Torn's page centred (the fixture carries no Torn CSS), so the margin holds the full panel.
+    await gymLayout(page);
+    await page.waitForTimeout(1500);
+    const v = await page.evaluate(() => {
+        const sr = document.getElementById('pi-overlay').shadowRoot;
+        const w = sr.querySelector('.wrap');
+        return {
+            head: sr.querySelector('.head').textContent.replace(/\s+/g, ' ').trim(), cd: (sr.querySelector('.head .cd') || {}).textContent, tone: w.getAttribute('data-tone'), rings: sr.querySelectorAll('.ring').length,
+            lbl: (sr.querySelector('.lbl') || {}).textContent, step: (sr.querySelector('.step') || {}).textContent, sub: (sr.querySelector('.sub') || {}).textContent, warn: (sr.querySelector('.warn') || {}).textContent,
+            rail: [...sr.querySelectorAll('.prail .pr1')].map((r) => (r.classList.contains('done') ? '✓ ' : r.classList.contains('now') ? '● ' : '○ ') + r.textContent.trim()), ticks: sr.querySelectorAll('.prail .pr1.done svg.tick').length,
+            ctas: [...sr.querySelectorAll('.body .cta')].map((c) => c.textContent),
+        };
+    });
+    ok(/^\d+:\d\d$/.test(v.cd || '') && /Take the Ecstasy/.test(v.head) && !/^Now/.test(v.head), 'panel, a jump mid-way: the bar counts down to the tick and says "Take the Ecstasy" (' + v.head + ')');
+    ok(/^Jump · finish before \d\d:\d\d$/.test(v.lbl || '') && v.step === 'Take the Ecstasy' && /^then train it all · about \+[\d,]+ · 1,000 energy$/.test(v.sub || '') && v.tone === 'red', 'panel, a jump mid-way: the Ecstasy in big type, "then train it all", red until it is in (' + JSON.stringify([v.lbl, v.step, v.sub, v.tone]) + ')');
+    ok(v.rail[0] === '✓ EDVD × 5' && v.rail[1] === '● Take the Ecstasy' && /^○ Train it all/.test(v.rail[2] || '') && v.ticks === 1, 'panel, a jump mid-way: the eaten EDVD keep their name and are ticked, the Ecstasy is marked (' + v.rail.join(' | ') + ')');
+    ok(v.rings === 1 && v.ctas[0] === 'Open Items', 'panel, a jump mid-way: one ring, and "Open Items" first (' + v.rings + ', ' + v.ctas.join('|') + ')');
+    ok(/^Strict: /.test(v.warn || ''), 'panel, a jump mid-way: the strict warning (' + v.warn + ')');
+    await page.screenshot({ path: resolve(shots, 'torn-panel-jump.png') });
+    ok(errors.length === 0, 'panel, a jump mid-way: no page errors ' + JSON.stringify(errors.slice(0, 2)));
+    await page.close();
+}
+
+// Session 9 (the owner's screenshot): he trained, the bar showed 0 / 150 and the card still said "Train DEX × 6 ·
+// 150 energy" until the next read. `bar=0` is Torn's sidebar after the train, `energy=150` the read from before it.
+{
+    const before = await open('page=other&fixture=gym&energy=150', { width: 1600 });
+    const had = await panelText(before.page);
+    ok(/Train (STR|SPD|DEF|DEX)/.test(had) && /150 energy/.test(had), 'panel, energy at hand: the train is the step now (' + had.slice(0, 90) + ')');
+    await before.page.close();
+    const { page, errors } = await open('page=other&fixture=gym&energy=150&bar=0', { width: 1600 });
+    const said = await panelText(page);
+    ok(!/· 150 energy/.test(said) && /Session done/.test(said) && /Next at \d\d:\d\d: /.test(said), 'panel, the bar at 0 after a train: the card moves to the next step, never the train just done (' + said.slice(0, 120) + ')');
+    ok(/0 \/ 150/.test(said), 'panel: the energy shown is the bar’s');
+    await page.screenshot({ path: resolve(shots, 'torn-panel-after-train.png') });
+    ok(errors.length === 0, 'panel after a train: no page errors ' + JSON.stringify(errors.slice(0, 2)));
     await page.close();
 }
 
@@ -396,15 +698,33 @@ const panelClear = (pr, torn) => Boolean(pr) && (pr.right <= torn.left + 1 || pr
         await page.screenshot({ path: resolve(shots, 'torn-eye-profile-' + w + '-' + mode + '-' + side + '.png') });
     }
     ok((await glows(page)) <= 1, 'eye profile: at most one thing glows (' + (await glows(page)) + ')');
+    // Torn's profile and its mini-profile popup lay out as they do without our script (the last window: 1440, off centre).
+    await layoutUntouched('profile + mini-profile', page, 'page=profile&XID=605123&fixture=profile&ffs=1&who=owner', { width: 1440, prep: (p) => tornLayout(p, 120) });
     // Round 6 (owner): Torn's pages ask only about the player viewed or attacked; a mini-profile shows what is known.
+    // Round 7 (owner): its tag is on our layer just under the popup, as wide as it, never inside or over it. Torn's popup
+    // floats over the page (here: 320 px wide at 400, 300; Torn moves it by its style, which our tag follows).
+    const popAt = (top) => page.evaluate((t) => { document.querySelector('#profile-mini-root .mini-profile-wrapper').setAttribute('style', 'position:absolute;left:400px;top:' + t + 'px;width:320px;background:#242424'); }, top);
+    await popAt(300);
+    await page.waitForTimeout(300);
     const mini = await page.evaluate(() => {
-        const m = document.querySelector('#profile-mini-root .pi-mini-line');
+        const m = document.querySelector('#pi-eye-layer [data-pi-part="mini"] .pi-mini-line');
         if (!m) return null;
         const r = m.getBoundingClientRect();
         const p = document.querySelector('#profile-mini-root .mini-profile-wrapper').getBoundingClientRect();
-        return { text: m.textContent.replace(/\s+/g, ' ').trim(), inside: r.left >= p.left - 0.5 && r.right <= p.right + 0.5, last: m.parentNode.lastElementChild === m };
+        return { text: m.textContent.replace(/\s+/g, ' ').trim(), width: Math.abs(r.left - p.left) <= 1 && Math.abs(r.right - p.right) <= 1, under: r.top >= p.bottom - 0.5 && r.top - p.bottom <= 8, notInside: !document.querySelector('#profile-mini-root .pi-mark, #profile-mini-root [class*="pi-"]') };
     });
-    ok(mini && mini.text.length > 0 && mini.inside && mini.last, 'eye: the mini-profile gets one tag as its last line, inside its width (' + JSON.stringify(mini) + ')');
+    ok(mini && mini.text.length > 0 && mini.width && mini.under && mini.notInside, 'eye: the mini-profile gets one tag on our layer just under the popup, as wide as it, nothing inside it (' + JSON.stringify(mini) + ')');
+    // The popup low in the window: the tag goes above it, still inside the window and never over it.
+    const vh = await page.evaluate(() => innerHeight + scrollY);
+    await popAt(vh - 200);
+    await page.waitForTimeout(300);
+    const above = await page.evaluate(() => {
+        const r = document.querySelector('#pi-eye-layer [data-pi-part="mini"] .pi-mini-line').getBoundingClientRect();
+        const p = document.querySelector('#profile-mini-root .mini-profile-wrapper').getBoundingClientRect();
+        return { bottom: Math.round(r.bottom), popTop: Math.round(p.top), top: Math.round(r.top), popBottom: Math.round(p.bottom), vh: innerHeight };
+    });
+    ok((above.bottom <= above.popTop || above.top >= above.popBottom) && above.top >= 0 && above.bottom <= above.vh, 'eye: a popup low in the window: the tag stays in the window, never over the popup (' + JSON.stringify(above) + ')');
+    await page.screenshot({ path: resolve(shots, 'torn-eye-mini.png') });
     const asked = await page.evaluate(() => window.__calls.filter((c) => /\/user\/\d+\/profile/.test(c)).map((c) => c.match(/\/user\/(\d+)\//)[1]));
     ok(asked.every((id) => id === '605123'), 'eye: the only player asked about is the one viewed (' + [...new Set(asked)] + ')');
     ok(errors.length === 0, 'eye: no page errors ' + JSON.stringify(errors));
@@ -421,11 +741,14 @@ const panelClear = (pr, torn) => Boolean(pr) && (pr.right <= torn.left + 1 || pr
     await page.goto('http://127.0.0.1:' + PORT + '/test/harness-live.html?key=1&at=2026-09-29T10:48:00Z&wait=100000&plan=1&follow=steady&page=faction&ID=7777&fixture=faction&ffs=1&who=owner');
     await page.waitForTimeout(6500);
     await tornLayout(page);
-    // Shown order (CSS order on Torn's rows; the DOM itself is untouched).
+    await layoutUntouched('faction + war list', page, 'page=faction&ID=7777&fixture=faction&ffs=1&who=owner', { width: 1600, prep: (p) => tornLayout(p) });
+    // Round 7 (owner): Torn's war list keeps its own order and look (no CSS order, no flex of ours): shown as in the DOM.
     const order = await page.evaluate(() => [...document.querySelectorAll('#faction_war_list_id li.enemy')].sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top).map((li) => li.querySelector('.member a[href*="XID"]').getAttribute('aria-label').replace('View profile of ', '')));
     const domOrder = await page.evaluate(() => [...document.querySelectorAll('#faction_war_list_id li.enemy .member a[href*="XID"]')].map((a) => a.getAttribute('aria-label').replace('View profile of ', '')));
     ok(JSON.stringify(domOrder) === JSON.stringify(['Flyer', 'Mira_Vex', 'Rival', 'Brix']), "war: Torn's rows are not moved in the page");
-    ok(order[0] === 'Rival' && order[3] === 'Flyer', 'war: Okay first, Traveling last, from what the page shows (' + order + ')');
+    ok(JSON.stringify(order) === JSON.stringify(domOrder), 'war: Torn’s rows shown in Torn’s own order, never reordered by us (' + order + ')');
+    const styled = await page.evaluate(() => [...document.querySelectorAll('#faction_war_list_id li, #faction_war_list_id ul')].filter((e) => e.style.order || /\bpi-/.test(e.className)).length);
+    ok(styled === 0, 'war: no CSS order or class of ours on Torn’s list (' + styled + ')');
     const inside = await page.evaluate(() => document.querySelectorAll('#faction_war_list_id .pi-mark, .members-list .pi-mark').length + [...document.querySelectorAll('#faction_war_list_id li, .members-list li')].filter((li) => /\bpi-/.test(li.className)).length);
     ok(inside === 0, "war: Torn's rows untouched: nothing of ours inside them or on them (" + inside + ')');
     const tags = () => page.evaluate(() => {
@@ -437,7 +760,7 @@ const panelClear = (pr, torn) => Boolean(pr) && (pr.right <= torn.left + 1 || pr
             const t = document.querySelector('#pi-eye-layer [data-pi-part="war"] .pi-rowtag[data-pi-player="' + id + '"]');
             const r = li.getBoundingClientRect();
             const tr = t ? t.getBoundingClientRect() : null;
-            out[name] = t ? { text: t.textContent.replace(/\s+/g, ' ').trim(), dim: t.classList.contains('pi-dimmed'), level: tr.top >= r.top - 1 && tr.bottom <= r.bottom + 1, glow: t.classList.contains('pi-glow'), left: tr.left } : null;
+            out[name] = t ? { text: t.textContent.replace(/\s+/g, ' ').trim(), dim: t.classList.contains('pi-out'), level: tr.top >= r.top - 1 && tr.bottom <= r.bottom + 1, glow: t.classList.contains('pi-glow'), left: tr.left } : null;
         }
         return out;
     });
@@ -446,7 +769,9 @@ const panelClear = (pr, torn) => Boolean(pr) && (pr.right <= torn.left + 1 || pr
     ok(t1.Rival && /^(Stomp|Good|Fair)/.test(t1.Rival.text) && t1.Rival.level && t1.Rival.left >= torn.right, 'war: the estimate stored by an earlier page shows as a tag in the free space, level with its row (' + JSON.stringify(t1.Rival) + ')');
     ok(t1.Flyer === null, 'war: a fight you lose (under half your HP kept) is never shown (' + JSON.stringify(t1.Flyer) + ')');
     ok(t1.Mira_Vex === null, 'war: no tag where nothing is known, never "No data"');
-    ok(t1.Brix && t1.Brix.dim && /^Good\s?in hospital$/.test(t1.Brix.text), "war: a hospital row's tag is dimmed (" + JSON.stringify(t1.Brix) + ')');
+    // Round 8 (his pick B): the war row's tag is the band, HP kept, then where they are.
+    ok(t1.Rival && /^(Stomp|Good|Fair)\s?\d+% HP\s?Okay$/.test(t1.Rival.text), 'war: a ready row says the band, HP kept, Okay (' + JSON.stringify(t1.Rival) + ')');
+    ok(t1.Brix && t1.Brix.dim && /^Good\s?81% HP\s?Hospital$/.test(t1.Brix.text), "war: a hospital row's tag fades its band and number, and says Hospital (" + JSON.stringify(t1.Brix) + ')');
     ok(t1.Rival && t1.Rival.glow && t1.Brix && !t1.Brix.glow, 'war: the best ready row is the one that glows');
     // Torn's status cell shows the clock: "out in 1:17".
     await page.evaluate(() => {
@@ -455,10 +780,10 @@ const panelClear = (pr, torn) => Boolean(pr) && (pr.right <= torn.left + 1 || pr
     });
     await page.waitForTimeout(1600);
     const t2 = await tags();
-    ok(t2.Brix && /^Good\s?out in 1:1[67]$/.test(t2.Brix.text), 'war: "out in 1:17" from Torn\'s clock (' + JSON.stringify(t2.Brix) + ')');
+    ok(t2.Brix && /^Good\s?81% HP\s?Hospital 1h 1[67]m$/.test(t2.Brix.text), 'war: "Hospital 1h 17m" from Torn\'s clock (' + JSON.stringify(t2.Brix) + ')');
     const sum = await page.evaluate(() => { const s = document.querySelector('#pi-eye-layer [data-pi-part="war"] .pi-sum'); return s ? { text: s.textContent.replace(/\s+/g, ' ').trim(), title: s.title, bottom: s.getBoundingClientRect().bottom } : null; });
     const firstRow = await page.evaluate(() => Math.min(...[...document.querySelectorAll('#faction_war_list_id li.enemy')].map((li) => li.getBoundingClientRect().top)));
-    ok(sum && /^1 ready · 1 out in 1:1[67] · 1 traveling/.test(sum.text) && /live war mode on Pumping Iron’s Torn Eye tab/.test(sum.title) && sum.bottom <= firstRow, 'war: the summary tag on top (' + JSON.stringify(sum) + ')');
+    ok(sum && /^1 ready · next out in 1h 1[67]m · 1 away/.test(sum.text) && /live war mode on Pumping Iron’s Torn Eye tab/.test(sum.title) && sum.bottom <= firstRow, 'war: the summary tag on top (' + JSON.stringify(sum) + ')');
     const edge = await page.evaluate(() => [...document.querySelectorAll('#pi-eye-layer [data-pi-part="war"] .pi-edgebar')].map((e) => Math.round(e.getBoundingClientRect().width)));
     ok(edge.length === 2 && edge.every((w) => w === 4), 'war: a 4 px band edge on our own layer for each tagged row (' + edge + ')');
     const rivalTag = page.locator('#pi-eye-layer .pi-rowtag[data-pi-player="424242"]');
@@ -525,12 +850,104 @@ const panelClear = (pr, torn) => Boolean(pr) && (pr.right <= torn.left + 1 || pr
     await page.waitForTimeout(3200);
     const e2 = (await tags()).Brix;
     const sum2 = await page.evaluate(() => { const s = document.querySelector('#pi-eye-layer [data-pi-part="war"] .pi-sum'); return s ? s.textContent.replace(/\s+/g, ' ').trim() : ''; });
-    ok(e1 && /out early/.test(e1.text) && e2 && /out early/.test(e2.text) && !e2.dim && /\(1 out early\)/.test(sum2), 'war: "out early" stays until the hospital end it left (' + JSON.stringify([e1 && e1.text, e2 && e2.text, sum2]) + ')');
+    ok(e1 && /Out early/.test(e1.text) && e2 && /Out early/.test(e2.text) && !e2.dim && /\(1 out early\)/.test(sum2), 'war: "out early" stays until the hospital end it left (' + JSON.stringify([e1 && e1.text, e2 && e2.text, sum2]) + ')');
     // Round 6 (owner): no Torn Eye reads for faction or war lists on Torn's pages (the Torn Eye tab does war mode).
     const calls = await page.evaluate(() => window.__calls.filter((c) => /faction|\/profile|get-stats/.test(c)).length);
     ok(calls === 0, 'war: nothing asked on a faction page (' + calls + ')');
     ok(errors.length === 0, 'war: no page errors ' + JSON.stringify(errors));
     await page.close();
+}
+/* Round 8 (his pick B): the chain counter. On Torn's war page it is its own card above the training panel, in the
+   free space: both chains with the count, the time left of 5:00 (amber under a minute) and the hits to the next bonus.
+   Yours is Torn's own sidebar bar; the enemy's is what the Torn Eye tab's read left in shared storage. A narrow margin:
+   two thin lines. Chain mode: the counter shows on the other Torn pages too, and over the attack page's fight card. */
+const chainCard = (page) => page.evaluate(() => {
+    const c = document.getElementById('pi-chaincard');
+    if (!c) return null;
+    const r = c.getBoundingClientRect();
+    return { form: c.getAttribute('data-pi-form'), text: c.textContent.replace(/\s+/g, ' ').trim(), lines: [...c.querySelectorAll('.pi-cline')].map((l) => l.textContent.replace(/\s+/g, ' ').trim()), low: [...c.querySelectorAll('.pi-ctime, .pi-cline b[data-pi-chain-until]')].map((e) => e.classList.contains('pi-low')), left: r.left, right: r.right, top: r.top, bottom: r.bottom, font: getComputedStyle(c).fontFamily, inTorn: Boolean(c.closest('.content-wrapper, #sidebarroot')), fixed: getComputedStyle(c).position };
+});
+{
+    const T0 = Date.parse('2026-09-29T10:48:00Z');
+    const seed = {
+        'pumpingIron.v1.eyeWarBands': JSON.stringify({ at: T0 - 480000, fid: 7777, p: { 424242: ['good', 95, 81], 777001: ['good', 92, 81], 777002: ['stomp', 100, 100] } }),
+        // The enemy's chain as the Torn Eye tab read it a second ago: 96, 45 s left on its timer.
+        'pumpingIron.v1.eyeChain': JSON.stringify({ at: T0 + 1000, fid: 7777, name: 'Rival Syndicate', current: 96, max: 100, until: T0 + 46000, cooldownUntil: 0 }),
+    };
+    const { page, errors } = await open('page=faction&ID=7777&fixture=faction&ffs=1&who=owner&chain=247/250/222', { wait: 6500, width: 1600, seed });
+    await tornLayout(page);
+    await page.waitForTimeout(1500);
+    const c = await chainCard(page);
+    const torn = await tornRect(page);
+    const pr = await panelRect(page);
+    ok(c && c.form === 'card' && /^Chains\s?time left of 5:00\s?Your faction\s?3:[23]\d\s?247\s?3 hits to the 250 bonus\s?Rival Syndicate\s?0:[0-4]\d\s?96\s?4 hits to the 100 bonus$/.test(c.text), 'chain counter: both chains on the war page, the count, the time left and the hits to the next bonus (' + (c && c.text) + ')');
+    ok(c && JSON.stringify(c.low) === '[false,true]', 'chain counter: the timer under 1:00 is amber (' + (c && c.low) + ')');
+    ok(c && pr && pr.top >= c.bottom && pr.top - c.bottom <= 12 && Math.abs(pr.left - c.left) <= 1 && Math.abs(pr.right - c.right) <= 1, 'chain counter: its own card above the training panel, the panel right under it (card ' + JSON.stringify(c && { l: c.left, r: c.right, t: c.top, b: c.bottom }) + ', panel ' + JSON.stringify(pr) + ')');
+    ok(c && (c.left >= torn.right || c.right <= torn.left) && !c.inTorn && c.fixed === 'fixed' && /Segoe UI|system-ui/.test(c.font.split(',')[0]), 'chain counter: in the free space on our own layer, never on or in Torn’s page (' + Math.round(c && c.left) + '–' + Math.round(c && c.right) + ', Torn ' + Math.round(torn.left) + '–' + Math.round(torn.right) + ')');
+    const tagRects = await page.evaluate(() => [...document.querySelectorAll('#pi-eye-layer .pi-rowtag, #pi-eye-layer .pi-sum')].filter((t) => t.style.display !== 'none').map((t) => { const r = t.getBoundingClientRect(); return { left: r.left, right: r.right, text: t.textContent.replace(/\s+/g, ' ').trim() }; }));
+    ok(tagRects.length >= 3 && c && tagRects.every((t) => t.right <= c.left || t.left >= c.right), 'chain counter: the row tags keep to the other margin (' + JSON.stringify(tagRects.slice(0, 2)) + ')');
+    ok(tagRects.some((t) => /^Good\s?81% HP\s?Okay$/.test(t.text)) && tagRects.some((t) => /^\d ready · /.test(t.text) && / away/.test(t.text)), 'war rows with it: band, HP kept, where they are; the summary on top (' + tagRects.map((t) => t.text).join(' | ') + ')');
+    ok((await glows(page)) <= 1, 'chain counter: it never glows; at most the best ready row does (' + (await glows(page)) + ')');
+    await page.screenshot({ path: resolve(shots, 'torn-eye-chain-war.png') });
+    // A hit: Torn's bar moves, the counter follows within a second or two.
+    await page.evaluate(() => { window.__chainHold = true; document.querySelector('#barChain [class*="bar-value___"]').textContent = '248/250'; document.querySelector('#barChain [class*="bar-timeleft___"]').textContent = '05:00'; });
+    await page.waitForTimeout(1600);
+    const hit = await chainCard(page);
+    ok(hit && /Your faction\s?(5:00|4:5\d)\s?248\s?2 hits to the 250 bonus/.test(hit.text), 'chain counter: a hit moves it (Torn’s own bar, read each second) (' + (hit && hit.text.slice(0, 80)) + ')');
+    // Far down a long list it is still on screen (the pick's point).
+    await page.evaluate(() => { document.body.style.minHeight = '3000px'; scrollTo(0, 900); });
+    await page.waitForTimeout(400);
+    const down = await chainCard(page);
+    ok(down && Math.abs(down.top - c.top) <= 1 && down.bottom <= 900, 'chain counter: always on screen, even far down the list (' + JSON.stringify(down && { t: down.top, b: down.bottom }) + ')');
+    await page.evaluate(() => scrollTo(0, 0));
+    // A narrow window: two thin lines, still above the panel and off Torn's page.
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(2400);
+    const n = await chainCard(page);
+    const pr2 = await panelRect(page);
+    const torn2 = await tornRect(page);
+    ok(n && n.form === 'lines' && n.lines.length === 2 && /^You 248 · \d:\d\d · 2 to 250$/.test(n.lines[0]) && /^Them 96 · (\d:\d\d · 4 to 100|no chain)$|^Them 0 · no chain$/.test(n.lines[1]), 'chain counter 1280 px: two thin lines, one a chain (' + JSON.stringify(n && n.lines) + ')');
+    ok(n && (n.left >= torn2.right - 1 || n.right <= torn2.left + 1) && pr2 && pr2.top >= n.bottom - 1 && panelClear(pr2, torn2), 'chain counter 1280 px: beside Torn’s page, the panel under it (lines ' + JSON.stringify(n && { l: n.left, r: n.right, b: n.bottom }) + ', panel ' + JSON.stringify(pr2) + ')');
+    await page.screenshot({ path: resolve(shots, 'torn-eye-chain-war-1280.png') });
+    const calls = await page.evaluate(() => window.__calls.filter((x) => /faction/.test(x)).length);
+    ok(calls === 0, 'chain counter: Torn’s war page asks nothing for it (' + calls + ')');
+    ok(errors.length === 0, 'chain counter: no page errors ' + JSON.stringify(errors));
+    await page.close();
+}
+{
+    // Chain mode (the Torn Eye tab's card, the same state as "I'm stacking"): the counter shows on Torn's other pages too.
+    const T0 = Date.parse('2026-09-29T10:48:00Z');
+    const stacking = { 'pumpingIron.v1.stackingChain': JSON.stringify({ since: T0 - 600000 }) };
+    const g = await open('page=gym&fixture=gym&chain=12/25/200', { wait: 5500, width: 1600, seed: stacking });
+    await tornLayout(g.page);
+    await g.page.waitForTimeout(1500);
+    const c = await chainCard(g.page);
+    const pr = await panelRect(g.page);
+    const body = await panelText(g.page);
+    ok(c && c.form === 'card' && /^Chain\s?time left of 5:00\s?Your faction\s?3:[01]\d\s?12\s?13 hits to the 25 bonus$/.test(c.text), 'chain mode: the chain counter shows on the gym page, your chain alone (' + (c && c.text) + ')');
+    ok(c && pr && pr.top >= c.bottom && Math.abs(pr.left - c.left) <= 1 && /Stacking for a chain/.test(body), 'chain mode: the counter above the panel, the panel says Stacking (' + JSON.stringify(pr) + ')');
+    ok(g.errors.length === 0, 'chain mode: no page errors ' + JSON.stringify(g.errors));
+    await g.page.screenshot({ path: resolve(shots, 'torn-eye-chain-mode-gym.png') });
+    await g.page.close();
+    // Chain mode off: no counter away from the war page.
+    const off = await open('page=gym&fixture=gym&chain=12/25/200', { wait: 5500, width: 1600 });
+    await tornLayout(off.page);
+    await off.page.waitForTimeout(1300);
+    ok((await chainCard(off.page)) === null, 'chain mode off: no chain counter on the gym page');
+    await off.page.close();
+    // The attack page in chain mode: the counter's line over the fight card, the card under it, the panel under the card.
+    const a = await open('page=attack&user2ID=424242&fixture=attack&ffs=1&who=owner&chain=12/25/200', { wait: 6000, width: 1600, seed: stacking });
+    await tornLayout(a.page);
+    await a.page.waitForTimeout(2400);
+    const ac = await chainCard(a.page);
+    const fight = await rectOf(a.page, '#pi-eyecard');
+    const apr = await panelRect(a.page);
+    const at = await tornRect(a.page);
+    ok(ac && ac.form === 'lines' && /^You 12 · \d:\d\d · 13 to 25$/.test(ac.lines[0]) && ac.left >= at.right, 'chain mode, attack page: the counter as a thin line beside the fight (' + JSON.stringify(ac && ac.lines) + ')');
+    ok(ac && fight && fight.top >= ac.bottom && fight.top - ac.bottom <= 12 && Math.abs(fight.left - ac.left) <= 1 && apr && apr.top >= fight.bottom - 1 && !overlaps(fight, apr), 'chain mode, attack page: the fight card under the counter, the panel under the card (counter b ' + Math.round(ac && ac.bottom) + ', card ' + JSON.stringify(fight && { t: fight.top, b: fight.bottom }) + ', panel ' + JSON.stringify(apr) + ')');
+    ok(a.errors.length === 0, 'chain mode, attack page: no page errors ' + JSON.stringify(a.errors));
+    await a.page.screenshot({ path: resolve(shots, 'torn-eye-chain-mode-attack.png') });
+    await a.page.close();
 }
 {
     const { page, errors } = await open('page=attack&user2ID=424242&fixture=attack&ffs=1&who=owner', { wait: 6000 });
@@ -539,7 +956,7 @@ const panelClear = (pr, torn) => Boolean(pr) && (pr.right <= torn.left + 1 || pr
     const card = () => page.evaluate(() => { const c = document.getElementById('pi-eyecard'); if (!c) return null; const r = c.getBoundingClientRect(); return { text: c.textContent.replace(/\s+/g, ' ').trim(), mode: c.getAttribute('data-pi-mode'), left: r.left, right: r.right, top: r.top, bottom: r.bottom }; });
     const before = await card();
     const torn = await tornRect(page);
-    ok(before && /^(Stomp|Good|Fair)/.test(before.text) && /gear shows once the fight starts/.test(before.text), 'attack: the fight card before Start Fight (' + (before && before.text.slice(0, 140)) + ')');
+    ok(before && /^(Stomp|Good|Fair)/.test(before.text) && /What they were wearing\s?Not seen yet · attack once to read it/.test(before.text), 'attack: the fight card before Start Fight, their gear "Not seen yet" (' + (before && before.text.slice(0, 200)) + ')');
     const i = before ? [before.text.indexOf('Respect'), before.text.indexOf('HP kept'), before.text.indexOf('Win')] : [];
     ok(before && i[0] >= 0 && i[0] < i[1] && i[1] < i[2], 'attack: respect, HP kept, win in that order');
     ok(before && before.left >= torn.right, 'attack: beside the fight, never on Torn’s page');
@@ -564,21 +981,121 @@ const panelClear = (pr, torn) => Boolean(pr) && (pr.right <= torn.left + 1 || pr
     await page.setViewportSize({ width: 1600, height: 900 });
     await page.waitForTimeout(300);
     await page.evaluate(() => fetch('fixtures/attackData.json?sid=attackData').then((r) => r.json()));
-    await page.waitForTimeout(2200); // the cache is written 1.5 s after the last change
-    const after = await card();
-    ok(after && /saved for next time/.test(after.text) && /AK-47/.test(after.text), 'attack: gear read from attackData and saved (' + (after && after.text.slice(0, 200)) + ')');
+    // Round 8 (B.6): their gear is written at once (it waited 1.5 s after the last answer, and leaving the page lost it).
+    await page.waitForTimeout(500);
     const stored = await page.evaluate(() => new Promise((res) => { const r = indexedDB.open('pumpingIron', 1); r.onsuccess = () => { const tx = r.result.transaction('kv', 'readonly'); const g = tx.objectStore('kv').get('eye'); g.onsuccess = () => res(g.result && g.result.gear && Object.keys(g.result.gear)); }; r.onerror = () => res(null); }));
-    ok(Array.isArray(stored) && stored.includes('424242'), 'attack: gear kept in IndexedDB for next time');
+    ok(Array.isArray(stored) && stored.includes('424242'), 'attack: their gear is in IndexedDB half a second after Torn’s answer (' + JSON.stringify(stored) + ')');
+    await page.waitForTimeout(700);
+    // Round 8 (his pick B): every piece with its own numbers, what the fight counts, and the fight again with their gear.
+    const after = await card();
+    ok(after && /What they were wearing\s?seen just now\s?Weapons\s?Dmg\s?Acc\s?AK-47\s?Primary · Powerful 23%, Deadeye 41%\s?57\.3\s?49\.1/.test(after.text) && /Tear Gas\s?Temporary/.test(after.text) && /Riot Body\s?Impregnable 12%\s?41\.2/.test(after.text), 'attack: what they were wearing, piece by piece (' + (after && after.text.slice(0, 260)) + ')');
+    ok(after && /The fight counts their best weapon \(57\.3 damage, 49\.1 accuracy, \+23%\) and their armour on average/.test(after.text) && /With their gear: win \d+% · HP kept ~\d+%/.test(after.text), 'attack: what the fight counts of it, and the amber line with their gear');
+    const gearBox = await page.evaluate(() => { const g = document.querySelector('#pi-eyecard .pi-gear'); const c = document.getElementById('pi-eyecard').getBoundingClientRect(); const r = g.getBoundingClientRect(); const cells = [...g.querySelectorAll('.pi-gt > span')].map((s) => s.getBoundingClientRect()); return { inside: r.left >= c.left && r.right <= c.right + 0.5, cellsInside: cells.every((x) => x.right <= c.right + 0.5), cardBottom: c.bottom, vh: innerHeight }; });
+    ok(gearBox.inside && gearBox.cellsInside && gearBox.cardBottom <= gearBox.vh, 'attack: the loadout fits the card, the card fits the window (' + JSON.stringify(gearBox) + ')');
     ok((await glows(page)) <= 1, 'attack: at most one thing of Torn Eye glows (' + (await glows(page)) + ')');
-    ok(errors.length === 0, 'attack: no page errors ' + JSON.stringify(errors));
     await page.screenshot({ path: resolve(shots, 'torn-eye-attack.png') });
+    // The next visit to their attack page (a load of its own): the gear is there before the fight starts.
+    await page.reload();
+    await page.waitForTimeout(6000 * (Number(process.env.SLOW) || 1));
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await tornLayout(page);
+    const again = await card();
+    ok(again && /What they were wearing\s?seen (just now|\d+ min ago)\s?Weapons/.test(again.text) && /AK-47/.test(again.text), 'attack: on the next visit their gear shows before the fight starts (' + (again && again.text.slice(0, 200)) + ')');
+    ok(errors.length === 0, 'attack: no page errors ' + JSON.stringify(errors));
+    await page.screenshot({ path: resolve(shots, 'torn-eye-attack-seen.png') });
+    // No list handed over by the Torn Eye tab yet: the Next row says so, with a plain button to the list.
+    const nolist = await page.evaluate(() => { const b = document.querySelector('#pi-eyecard .pi-nextbox'); const a = b && b.querySelector('a'); return b ? { text: b.textContent.replace(/\s+/g, ' ').trim(), alt: a.classList.contains('pi-alt'), href: a.getAttribute('href') } : null; });
+    ok(nolist && /^Open the Torn Eye list\s?Your Torn Eye list is not here yet: open it once\.$/.test(nolist.text) && nolist.alt && /app\.html#eye$/.test(nolist.href), 'next: no list handed over yet, said plainly, with a button to the list (' + JSON.stringify(nolist) + ')');
     await page.close();
+}
+
+/* Round 8 (his pick A): the Next button, the first row of the fight card. It opens the attack page of the next player
+   in your Torn Eye list (handed over by the Torn Eye tab), skipping who is not ready; key N; the panel's line under the
+   card says "Training", so "Next" means one thing; once the fight is over the button is the one thing that glows. */
+{
+    const T0 = Date.parse('2026-09-29T10:48:00Z');
+    const table = { at: T0, mode: 'targets', rows: [[605123, 'Pallas', 70, 'stomp', 2.8, 99, 'hosp', T0 + 3600000], [777001, 'Rust_Kestrel26', 87, 'good', 4.23, 72, 'ok', 0], [424242, 'Rival', 64, 'good', 3.9, 81, 'ok', 0]] };
+    const { page, errors } = await open('page=attack&user2ID=424242&fixture=attack&ffs=1&who=owner', { wait: 6000, width: 1600, seed: { 'pumpingIron.v1.eyeNext': JSON.stringify(table) } });
+    await tornLayout(page);
+    await page.waitForTimeout(1300);
+    const nb = () => page.evaluate(() => {
+        const c = document.getElementById('pi-eyecard');
+        const b = c && c.querySelector('.pi-nextbox');
+        if (!b) return null;
+        const a = b.querySelector('a.pi-nextb');
+        const r = a.getBoundingClientRect();
+        const cr = c.getBoundingClientRect();
+        return { text: b.textContent.replace(/\s+/g, ' ').trim(), href: a.getAttribute('href'), target: a.getAttribute('target'), alt: a.classList.contains('pi-alt'), glow: a.classList.contains('pi-glow'), cardGlow: c.classList.contains('pi-glow'), first: c.querySelector('.pi-bd').firstElementChild === b, inside: r.left >= cr.left && r.right <= cr.right + 0.5, height: Math.round(r.height), bg: getComputedStyle(a).backgroundColor, left: cr.left };
+    });
+    const n1 = await nb();
+    const torn = await tornRect(page);
+    ok(n1 && /^Next target\s?N\s?Rust_Kestrel26 \[87\] · Good · 4\.23 · 72% HP\s?skips 1 not ready: 1 in hospital$/.test(n1.text), 'next: "Next target N", who it is and what it skipped (' + (n1 && n1.text) + ')');
+    ok(n1 && n1.first && n1.inside && n1.height === 34 && n1.bg === 'rgb(239, 235, 226)' && n1.left >= torn.right, 'next: the first row of the fight card, a chalk button, beside Torn’s page (' + JSON.stringify(n1) + ')');
+    ok(n1 && /page\.php\?sid=attack&user2ID=777001$/.test(n1.href) && !n1.target && !n1.alt, 'next: it only opens their attack page, in this tab (' + (n1 && n1.href) + ')');
+    ok(n1 && n1.cardGlow && !n1.glow && (await glows(page)) === 1, 'next: before the fight ends the card glows, not the button');
+    const line = await panelText(page);
+    ok(/Training: /.test(line) && !/Next/.test(line), 'next: the panel’s line under the card says Training, never Next (' + line.slice(0, 80) + ')');
+    await page.screenshot({ path: resolve(shots, 'torn-eye-attack-next.png') });
+    // The fight is over (their life at 0 in Torn's answer): the button is the one thing that glows.
+    const over = JSON.parse(await readFile(resolve(root, 'test/fixtures/attackData.json'), 'utf8'));
+    over.DB.usersLife.defender.currentLife = 0;
+    await page.route(/fight-over\.json/, (r) => r.fulfill({ contentType: 'application/json', body: JSON.stringify(over) }));
+    await page.evaluate(() => fetch('fixtures/fight-over.json?sid=attackData').then((r) => r.json()));
+    await page.waitForTimeout(900);
+    const n2 = await nb();
+    ok(n2 && n2.glow && !n2.cardGlow && (await glows(page)) === 1, 'next: the fight over, the Next button is the one thing that glows (' + JSON.stringify(n2 && { glow: n2.glow, card: n2.cardGlow }) + ')');
+    // The tallest card (Next, their gear piece by piece, the builds) in a 900 px window: the panel's line still fits under it.
+    await page.waitForTimeout(1400);
+    const tall = await rectOf(page, '#pi-eyecard');
+    const under = await panelRect(page);
+    ok(tall && under && under.top >= tall.bottom - 1 && under.bottom <= 900, 'next: the tallest card leaves the panel’s line on screen under it (card bottom ' + Math.round(tall && tall.bottom) + ', panel ' + JSON.stringify(under) + ')');
+    await page.screenshot({ path: resolve(shots, 'torn-eye-attack-next-over.png') });
+    // Key N: never while typing; else it opens the same page as the button. Torn's Start fight is never pressed by us.
+    const asked = [];
+    page.on('request', (r) => { if (/sid=attack&user2ID=/.test(r.url())) asked.push(r.url()); });
+    await page.evaluate(() => { const i = document.createElement('input'); i.id = 'chatbox'; document.body.appendChild(i); i.focus(); });
+    await page.keyboard.press('n');
+    await page.waitForTimeout(500);
+    ok(asked.length === 0, 'next: N typed into a box does nothing (' + asked.length + ')');
+    await page.evaluate(() => { window.__startClicks = 0; document.querySelector('.dialogButtons___nX4Bz button').addEventListener('click', () => window.__startClicks++); document.getElementById('chatbox').blur(); });
+    // The page it asks for answers "no content" here, so this page stays to be looked at.
+    await page.route(/user2ID=777001/, (r) => r.fulfill({ status: 204, body: '' }));
+    await page.keyboard.press('n');
+    await page.waitForTimeout(900);
+    ok(asked.length === 1 && /user2ID=777001$/.test(asked[0]), 'next: key N opens the next player’s attack page (' + asked.join() + ')');
+    const startClicks = await page.evaluate(() => window.__startClicks).catch(() => 0);
+    ok(startClicks === 0, 'next: Torn’s Start fight is never pressed by us (' + startClicks + ')');
+    ok(errors.length === 0, 'next: no page errors ' + JSON.stringify(errors));
+    await page.close();
+    // Everyone else is in hospital or away: a plain button to the list.
+    const none = { at: T0, mode: 'war', rows: [[605123, 'Pallas', 70, 'stomp', 2.8, 99, 'hosp', T0 + 3600000], [515151, 'Flyer', 40, 'fair', 3.1, 55, 'away', 0], [424242, 'Rival', 64, 'good', 3.9, 81, 'ok', 0]] };
+    const b = await open('page=attack&user2ID=424242&fixture=attack&ffs=1&who=owner', { wait: 6000, width: 1600, seed: { 'pumpingIron.v1.eyeNext': JSON.stringify(none) } });
+    await tornLayout(b.page);
+    const n3 = await b.page.evaluate(() => { const x = document.querySelector('#pi-eyecard .pi-nextbox'); const a = x && x.querySelector('a'); return x ? { text: x.textContent.replace(/\s+/g, ' ').trim(), alt: a.classList.contains('pi-alt'), href: a.getAttribute('href') } : null; });
+    ok(n3 && /^Open the Torn Eye list\s?No one else on your list is ready right now\.$/.test(n3.text) && n3.alt && /app\.html#eye$/.test(n3.href), 'next: nobody left ready, a plain button to the Torn Eye list (' + JSON.stringify(n3) + ')');
+    // War mode's list with someone ready: "Next enemy".
+    ok(b.errors.length === 0, 'next (nobody ready): no page errors ' + JSON.stringify(b.errors));
+    await b.page.close();
+    const warList = { at: T0, mode: 'war', rows: [[777001, 'Brix', 67, 'good', 7.8, 73, 'ok', 0], [424242, 'Rival', 64, 'good', 7.8, 81, 'ok', 0]] };
+    const w = await open('page=attack&user2ID=424242&fixture=attack&ffs=1&who=owner', { wait: 6000, width: 1280, seed: { 'pumpingIron.v1.eyeNext': JSON.stringify(warList) } });
+    await tornLayout(w.page);
+    await w.page.setViewportSize({ width: 1600, height: 900 });
+    await w.page.waitForTimeout(600);
+    const n4 = (await text(w.page, '#pi-eyecard .pi-nextbox'))[0] || '';
+    ok(/^Next enemy\s?N\s?Brix \[67\] · Good · 7\.80 · 73% HP$/.test(n4), 'next: in war mode the same button walks the war list, "Next enemy" (' + n4 + ')');
+    // The smallest card (1280 px): the button alone, still inside the card and beside Torn's page.
+    await w.page.setViewportSize({ width: 1280, height: 900 });
+    await w.page.waitForTimeout(600);
+    const sm = await w.page.evaluate(() => { const c = document.getElementById('pi-eyecard'); const a = c && c.querySelector('a.pi-nextb'); if (!a) return null; const r = a.getBoundingClientRect(); const cr = c.getBoundingClientRect(); return { mode: c.getAttribute('data-pi-mode'), text: a.textContent.replace(/\s+/g, ' ').trim(), inside: r.left >= cr.left && r.right <= cr.right + 0.5, left: cr.left }; });
+    ok(sm && sm.mode === 'small' && /^Next\s?N$/.test(sm.text) && sm.inside && sm.left >= (await tornRect(w.page)).right, 'next 1280 px: the smallest card keeps the button (' + JSON.stringify(sm) + ')');
+    ok(w.errors.length === 0, 'next (war): no page errors ' + JSON.stringify(w.errors));
+    await w.page.close();
 }
 
 /* Taking turns: Torn Trading's panel shows up → paused (no calls, no marks, a warning panel); gone a minute → back. */
 {
     const { page, errors } = await open('page=gym&fixture=gym-friend&energy=275&build=balanced');
-    const marksBefore = await page.evaluate(() => document.querySelectorAll('li.pi-on').length);
+    const marksBefore = await page.evaluate(() => document.querySelectorAll('#pi-marks-layer .pi-ring[data-pi-stat]').length);
     ok(marksBefore === 1, 'turns: marks drawn before Torn Trading shows up (' + marksBefore + ')');
     // Torn Trading's panel mounts after ours (a stand-in #ttv2-host).
     await page.evaluate(() => {
@@ -590,7 +1107,7 @@ const panelClear = (pr, torn) => Boolean(pr) && (pr.right <= torn.left + 1 || pr
     const n1 = await page.evaluate(() => window.__calls.length);
     const state = await page.evaluate(() => {
         const sh = document.getElementById('pi-overlay').shadowRoot;
-        return { paused: sh.querySelector('.wrap').classList.contains('paused'), head: sh.querySelector('.head').textContent, body: sh.querySelector('.body').textContent, marks: document.querySelectorAll('li.pi-on, .pi-strip, .pi-panel').length };
+        return { paused: sh.querySelector('.wrap').classList.contains('paused'), head: sh.querySelector('.head').textContent, body: sh.querySelector('.body').textContent, marks: document.querySelectorAll('#pi-marks-layer > *, .content-wrapper .pi-mark').length };
     });
     ok(state.paused && /Paused · Torn Trading is on/.test(state.head), 'turns: the panel shows the warning sign (' + state.head + ')');
     ok(/Still seen in 1 tab: Gym\./.test(state.body) && /Reload or close it\. Pumping Iron starts again 2 min after the last one\./.test(state.body) && /Last seen\d+ s ago/.test(state.body), 'turns: the amber card says where Torn Trading is still seen, and when (' + state.body + ')');
@@ -613,7 +1130,7 @@ const panelClear = (pr, torn) => Boolean(pr) && (pr.right <= torn.left + 1 || pr
     // Last seen over two minutes ago (the grace outlasts a hidden tab's once-a-minute timers).
     await page.evaluate(() => window.GM_setValue('pumpingIron.v1.tradingSeenAt', JSON.stringify(Date.now() - 121000)));
     await page.waitForTimeout(6000);
-    const back = await page.evaluate(() => ({ paused: document.getElementById('pi-overlay').shadowRoot.querySelector('.wrap').classList.contains('paused'), marks: document.querySelectorAll('li.pi-on').length }));
+    const back = await page.evaluate(() => ({ paused: document.getElementById('pi-overlay').shadowRoot.querySelector('.wrap').classList.contains('paused'), marks: document.querySelectorAll('#pi-marks-layer .pi-ring[data-pi-stat]').length }));
     ok(!back.paused && back.marks === 1, 'turns: back by itself, marks drawn again (' + JSON.stringify(back) + ')');
     ok(errors.length === 0, 'turns: no page errors ' + JSON.stringify(errors));
     await page.close();

@@ -15,8 +15,13 @@ export const TORN_ERROR_WRONG_FIELDS = 4;
 export const TORN_ERROR_ACCESS_LEVEL = 16;
 export const TORN_ERROR_INCORRECT_CATEGORY = 21;
 
-/** The one call Home and the overlay live on, every 30 s while visible (Limited key). */
-export const USER_STATE_SELECTIONS = 'bars,cooldowns,refills,battlestats,gym';
+/**
+ * The one call Home and the overlay live on, every 30 s while visible (Limited key). `travel` rides along (the
+ * owner's gym page said "Train DEX × 6" while he was flying: Torn was never asked): a custom key without it is
+ * asked for the rest, and the app goes on without knowing where you are.
+ */
+export const USER_STATE_REQUIRED = 'bars,cooldowns,refills,battlestats,gym';
+export const USER_STATE_SELECTIONS = USER_STATE_REQUIRED + ',travel';
 
 /** Inventory categories a gym plan cares about (always sent: no-cat answers 21). Special: the Game Console. */
 export const INVENTORY_CATS = ['Drug', 'Booster', 'Candy', 'Energy Drink', 'Special'];
@@ -30,8 +35,19 @@ export const ACCESS_FULL = 4;
 
 const ids = (list) => [...new Set((Array.isArray(list) ? list : [list]).map((x) => String(x).replace(/\D/g, '')).filter(Boolean))];
 
+/** Clients whose key answered "access level" to the call with travel: asked without it from then on. */
+const stateWithoutTravel = new WeakSet();
+
 export async function fetchUserState(client) {
-    return client.get('v2/user', { selections: USER_STATE_SELECTIONS });
+    if (!stateWithoutTravel.has(client)) {
+        try {
+            return await client.get('v2/user', { selections: USER_STATE_SELECTIONS });
+        } catch (error) {
+            if (!(error instanceof TornApiError && error.code === TORN_ERROR_ACCESS_LEVEL)) throw error;
+            stateWithoutTravel.add(client);
+        }
+    }
+    return client.get('v2/user', { selections: USER_STATE_REQUIRED });
 }
 
 export async function fetchPerks(client) {
@@ -118,18 +134,34 @@ export async function fetchPassiveIncome(client) {
     const money = await part(async () => ((await client.get('v2/user/money')) || {}).money || null);
     const cb = money && money.city_bank;
     const userStocks = await part(async () => ((await client.get('v2/user/stocks')) || {}).stocks || []);
-    const tornStocks = userStocks && userStocks.length ? await part(async () => ((await client.get('v2/torn/stocks')) || {}).stocks || []) : [];
+    // Round 8: read whatever you hold, for the investment ideas (the stocks whose benefit pays money, with today's price).
+    const tornStocks = await part(async () => ((await client.get('v2/torn/stocks')) || {}).stocks || []);
     const properties = await part(async () => ((await client.get('v2/user/properties', { filters: 'ownedByUser', limit: 100 })) || {}).properties || []);
     // Every part refused: not "nothing certain", a failed read.
     if (failed >= 3) throw new Error('The income reads all failed.');
-    const slimStocks = (tornStocks || []).filter((s) => (userStocks || []).some((u) => Number(u.id) === Number(s.id))).map((s) => ({ id: s.id, name: s.name, acronym: s.acronym, bonus: s.bonus }));
+    const slimStocks = (tornStocks || []).filter((s) => (userStocks || []).some((u) => Number(u.id) === Number(s.id))).map((s) => ({ id: s.id, name: s.name, acronym: s.acronym, bonus: s.bonus, price: s.market && Number.isFinite(Number(s.market.price)) ? Number(s.market.price) : null }));
     return {
         cityBank: cb ? { amount: cb.amount, profit: cb.profit, duration: cb.duration, until: cb.until, rate: cb.interest_rate } : null,
         userStocks: (userStocks || []).map((u) => ({ id: u.id, shares: u.shares, bonus: u.bonus })),
         tornStocks: slimStocks,
+        moneyStocks: (tornStocks || []).filter((s) => s && s.bonus && /^\s*\$\s?[\d,]+/.test(String(s.bonus.description || ''))).map((s) => ({ id: s.id, name: s.name, acronym: s.acronym, price: s.market && Number.isFinite(Number(s.market.price)) ? Number(s.market.price) : null, bonus: { frequency: s.bonus.frequency, requirement: s.bonus.requirement, description: s.bonus.description } })),
         // Only what the rent needs (the full answer carries every modification and staff).
         properties: (properties || []).filter((p) => p && p.status === 'rented').map((p) => ({ status: p.status, owner: p.owner ? { id: p.owner.id } : null, property: p.property ? { name: p.property.name } : null, cost_per_day: p.cost_per_day, rental_period_remaining: p.rental_period_remaining })),
     };
+}
+
+/**
+ * Your drug figures (round 8, docs/REHAB-PLAN.md §4): /v2/user/personalstats?cat=drugs, the main key. What a rehab
+ * session removes depends on the rehabs done in your life; the rest is kept for the learner. Null when Torn's answer
+ * holds no drugs part.
+ */
+export async function fetchDrugStats(client) {
+    const r = await client.get('v2/user/personalstats', { cat: 'drugs' });
+    const d = r && r.personalstats && r.personalstats.drugs;
+    if (!d || typeof d !== 'object') return null;
+    const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+    const rh = d.rehabilitations && typeof d.rehabilitations === 'object' ? d.rehabilitations : {};
+    return { rehabs: n(rh.amount), rehabFees: n(rh.fees), xanax: n(d.xanax), ecstasy: n(d.ecstasy), overdoses: n(d.overdoses) };
 }
 
 /** Torn's codes for a key that no longer works (the caller stops on these). */
@@ -264,9 +296,9 @@ export async function fetchKeyInfo(client) {
 export function missingSelections(info) {
     if (!info || info.level === null || info.level === undefined) return null;
     if (info.level >= ACCESS_LIMITED) return [];
-    if (info.level !== ACCESS_CUSTOM) return USER_STATE_SELECTIONS.split(',');
+    if (info.level !== ACCESS_CUSTOM) return USER_STATE_REQUIRED.split(',');
     const u = (info.selections && info.selections.user) || [];
-    return USER_STATE_SELECTIONS.split(',').filter((s) => !u.includes(s));
+    return USER_STATE_REQUIRED.split(',').filter((s) => !u.includes(s));
 }
 
 /** Is this key enough for the app (Limited or Full, or a custom key with the user state selections)? */
@@ -303,26 +335,49 @@ export async function fetchLogCategories(client) {
 }
 
 /**
- * Your money log since a time (Full key only): the categories whose titles
- * are about money, newest first, as {at, title, category, money} where money
- * is the entry's main amount (0 when it has none).
+ * Your money log since a time (Full key only; round 7, R7.5): every line of
+ * the given categories once (by its log id: "Money incoming" and "Money
+ * outgoing" overlap with other categories), newest first, as
+ * {id, type (Torn's log type id), title, at (ms), data (as Torn gave it)}.
+ * A full page means more are older: each category is walked back with `to`
+ * until it reaches `from`, at most `pages` calls. `coveredFrom` is the
+ * moment from which every category is complete; `fields` the field names
+ * per type (never a value).
  */
-export async function fetchMoneyLog(client, { from, categories, perCategory = 100 }) {
+export async function fetchMoneyLog(client, { from, categories, perCategory = 100, pages = 6 }) {
     const out = [];
-    // Round 7 (C.0): the log by type, with the names of each type's data fields (never a value).
+    const seen = new Set();
     const fields = logFieldsOf([]);
-    // A category that filled its page covers less than the whole span: only the newest `perCategory` lines came back.
     let coveredFrom = from * 1000;
+    let calls = 0;
     for (const c of categories) {
-        const d = await client.get('v2/user/log', { cat: c.id, from, limit: perCategory });
-        const rows = (d && d.log) || [];
-        logFieldsOf(rows, fields);
-        for (const e of rows) out.push({ at: Number(e.timestamp) * 1000, title: String((e.details && e.details.title) || ''), category: c.title, money: moneyOf(e.data) });
-        if (rows.length >= perCategory) coveredFrom = Math.max(coveredFrom, Math.min(...rows.map((e) => Number(e.timestamp) * 1000)));
+        let to = null;
+        for (let i = 0; i < pages; i++) {
+            const d = await client.get('v2/user/log', { cat: c.id, from, limit: perCategory, ...(to ? { to } : {}) });
+            calls++;
+            const rows = (d && d.log) || [];
+            logFieldsOf(rows, fields);
+            for (const e of rows) {
+                const id = e && e.id !== undefined && e.id !== null ? String(e.id) : null;
+                if (!id || seen.has(id)) continue;
+                seen.add(id);
+                out.push({ id, type: Number(e.details && e.details.id) || 0, title: String((e.details && e.details.title) || ''), at: Number(e.timestamp) * 1000, data: e.data && typeof e.data === 'object' ? e.data : {} });
+            }
+            const oldest = rows.length ? Math.min(...rows.map((e) => Number(e.timestamp) || Infinity)) : Infinity;
+            // The page was not full, or it reached back far enough: this category is complete.
+            if (rows.length < perCategory || !Number.isFinite(oldest) || oldest <= from) break;
+            // A whole page in one second, or the last page allowed: complete only from the oldest line read.
+            if (oldest === to || i === pages - 1) {
+                coveredFrom = Math.max(coveredFrom, oldest * 1000);
+                break;
+            }
+            to = oldest;
+        }
     }
     out.sort((a, b) => b.at - a.at);
     out.coveredFrom = coveredFrom;
     out.fields = logFieldsList(fields);
+    out.calls = calls;
     return out;
 }
 
@@ -358,16 +413,6 @@ export async function fetchGymLog(client, { from, to = null, pages = 3, limit = 
     return out;
 }
 
-/** The amount a log entry is about: the first money-like field it carries. */
-export function moneyOf(data) {
-    if (!data || typeof data !== 'object') return 0;
-    for (const k of ['money', 'total_value', 'value', 'cost', 'total_cost', 'price', 'amount', 'worth']) {
-        const n = Number(data[k]);
-        if (Number.isFinite(n) && n > 0) return n;
-    }
-    return 0;
-}
-
 /**
  * A faction's current wars (Public): {pacts, wars: {ranked, raids, territory}}.
  * Without an id, your own faction's.
@@ -375,6 +420,15 @@ export function moneyOf(data) {
 export async function fetchFactionWars(client, factionId = null) {
     const d = await client.get(factionId ? 'v2/faction/' + ids(factionId)[0] + '/wars' : 'v2/faction/wars');
     return { pacts: (d && d.pacts) || [], wars: (d && d.wars) || {} };
+}
+
+/**
+ * A faction's chain as it is now (Public): {id, current, max, timeout (seconds until it breaks), modifier,
+ * cooldown (when a cooldown ends), start, end}, or null. The chain counter reads the enemy's (round 8).
+ */
+export async function fetchFactionChain(client, factionId) {
+    const d = await client.get('v2/faction/' + ids(factionId)[0] + '/chain');
+    return d && d.chain && typeof d.chain === 'object' ? d.chain : null;
 }
 
 /**

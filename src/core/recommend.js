@@ -25,7 +25,7 @@ const STEADY_LIKE = new Set(['steady', 'steadyLite', 'steadyBoost', 'steadyMax',
 
 /** The Plan dropdown: what "best" means. */
 export const PICK_BY = {
-    auto: { id: 'auto', name: 'Auto (from your income)', what: 'Picks the plan and items your income affords, and plans around events. Needs a Full key. Default.' },
+    auto: { id: 'auto', name: 'Auto (from your books)', what: 'Picks the plan and items your books afford (what the gym costs you now, what comes in, what your cash covers) and plans around events. Needs a Full key. Default.' },
     most: { id: 'most', name: 'Most stats in my budget', what: 'The most stats the budget you set allows.' },
     value: { id: 'value', name: 'Best value for money', what: 'The most stats for each $1M: cheaper plans can win.' },
     max: { id: 'max', name: 'Max gains, no budget', what: 'Adds FHC and cans on top whenever they add stats; says what it costs a day.' },

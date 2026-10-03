@@ -97,13 +97,17 @@ test('the ladder: free first, then cheapest per stat; FHC and cans on the booste
 });
 
 test('boosterChoice: FHC or cans, whichever buys more energy a day in the budget and the cooldown', () => {
-    assert.equal(boosterChoice({ perDay: 5e6, maxE: 150, prices: PRICES }).id, MUNSTER, '$5M a day: 2 cans, no FHC');
+    // Round 8, all nine cans: $5M a day buys 12 of the small can (60 energy, the whole cooldown), more than 2 Munster (40).
+    const small = boosterChoice({ perDay: 5e6, maxE: 150, prices: PRICES });
+    assert.deepEqual([small.id, small.perDay, small.energy], [985, 12, 60], '$5M a day: the most energy a day, no FHC');
+    assert.equal(boosterChoice({ perDay: 2e6, maxE: 150, prices: PRICES }).energy, 20, '$2M a day: 4 small cans or 2 of the next size or 1 Munster, 20 energy each way');
+    assert.equal(boosterChoice({ perDay: 1.5e6, maxE: 150, prices: PRICES }), null, 'under 20 energy a day (3 small cans: 15): not worth a line of steps');
     const big = boosterChoice({ perDay: 60e6, maxE: 150, prices: PRICES });
     assert.equal(big.id, FHC);
     assert.equal(big.perDay, 4, 'the booster cap is 24 h');
     assert.equal(boosterChoice({ perDay: 0, maxE: 150, prices: PRICES }), null);
-    assert.equal(bestCan(PRICES, { canMult: 1.5 }).energy, 30, 'faction Voracity +50%');
-    assert.equal(bestCan(PRICES, { eventMult: 2 }).energy, 40, 'CaffeineCon doubles cans');
+    assert.equal(bestCan(PRICES, { canMult: 1.5 }).energy, 8, 'the cheapest energy is the 5-energy can; faction Voracity +50%');
+    assert.equal(bestCan(PRICES, { eventMult: 2 }).energy, 10, 'CaffeineCon doubles cans');
 });
 
 test('Max gains, no budget: FHC every time the cooldown allows beats steady, at a price a day', () => {
@@ -121,9 +125,9 @@ test('a budget with room buys a middle rung: Steady + energy boosters', () => {
     const { state, pc, shares } = setup('owner');
     const c = compareStrategies({ state, pc, shares, settings: { horizonDays: 30, budget: 900e6 }, prices: PRICES });
     assert.ok(c.steadyBoost, 'steadyBoost simulated');
-    // $25.8M a day left: 12 Munster (240 E, what the 24 h cooldown sustains) beat one FHC (150 E).
-    assert.equal(c.steadyBoost.booster.id, MUNSTER);
-    assert.equal(c.steadyBoost.booster.perDay, 12);
+    // $25.8M a day left: 10 Red Cow (250 E) beat 12 Munster (240 E, the whole 24 h cooldown) and one FHC (150 E).
+    assert.equal(c.steadyBoost.booster.id, 532);
+    assert.equal(c.steadyBoost.booster.perDay, 10);
     assert.ok(c.steadyBoost.cost <= 900e6);
     assert.ok(c.steadyBoost.gained > c.steady.gained);
     assert.equal(recommend(c, { budget: 900e6 }).recommended, 'steadyBoost');

@@ -1,7 +1,7 @@
 /*
  * Breaks for the page while a plan is worked out (round 7, R7.3b).
  *
- * What was wrong: Create plan and Re-plan waited on a 0 ms timer between
+ * What was wrong: Create plan and Recalibrate waited on a 0 ms timer between
  * slices, 170 times for 12 months. A browser runs a hidden tab's timers
  * once a second at best, so a player who clicked and went back to Torn
  * waited minutes (280 s in Edge, over 400 s in Chrome) for 3 seconds of

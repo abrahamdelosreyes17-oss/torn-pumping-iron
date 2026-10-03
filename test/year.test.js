@@ -30,7 +30,7 @@ test('events for a year: the API\'s this year, the date rules for next (Easter b
     assert.ok(holdBoosterFor([e], T, 'chocoJump', 48));
 });
 
-test('segments: every 30 days, an event from 2 days before to its end', () => {
+test('segments: every 10 days, an event from 2 days before to its end', () => {
     const ev = [{ id: 'diabetes', start: T + 44 * DAY + 12 * 3600e3, end: T + 46 * DAY + 12 * 3600e3 }];
     const segs = segmentsOf(T, T + 91 * DAY, ev);
     assert.equal(segs.reduce((a, s) => a + s.days, 0), 91);
@@ -38,6 +38,9 @@ test('segments: every 30 days, an event from 2 days before to its end', () => {
     assert.equal(e.from, T + 42 * DAY);
     assert.equal(e.to, T + 47 * DAY);
     assert.ok(segs.every((s) => s.days <= REPICK_DAYS + 3), 'a sliver under 3 days joins its neighbour');
+    assert.ok(segs.every((s) => s.event || s.days >= 3), 'no plain stretch too short for a jump’s stack: ' + segs.map((s) => s.days).join(','));
+    // The plain time is cut from where it begins: 10 days at a time from the plan's start, and again from the event's end.
+    assert.deepEqual(segs.map((s) => s.days), [10, 10, 10, 12, 5, 10, 10, 10, 10, 4]);
 });
 
 test('gyms: the ladder climbs with energy trained; specialists after their ladder gym', () => {

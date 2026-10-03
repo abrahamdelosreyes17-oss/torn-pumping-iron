@@ -1,7 +1,7 @@
 /*
  * Round 6 (owner, 2026-09-30: "all of Torn is laggy"; "no more automatic"): the plan is made on a click and saved.
  * Nothing works a comparison out by itself any more: no Auto re-pick, no hourly or per-change run, no event switch.
- * Create plan (1/3/6/12 months) and Recalibrate (keeps the end date, re-plans the days left) are the only runs;
+ * Create plan (1/3/6/12 months) and Recalibrate (keeps the end date, recalibrates the days left) are the only runs;
  * Torn's pages follow the saved plan's small part and re-time today's steps. Also the engine's happy-terms cache.
  */
 import test from 'node:test';
@@ -77,7 +77,11 @@ test('Create plan (12 months): every plan over the year, saved with what it saw;
     assert.ok(saved.year.segments.length >= 12, 'a segment a month at least');
     assert.equal(saved.year.path.daily.length, saved.days, 'the path is day by day');
     assert.ok(saved.year.band.low < saved.year.path.gained && saved.year.path.gained < saved.year.band.high, 'the year is a range');
-    assert.equal(pn.schedule.length, saved.year.segments.length);
+    // The schedule Torn's pages follow: stretches in a row on the same plan are one entry (a stretch a week, round 8).
+    assert.ok(pn.schedule.length >= 1 && pn.schedule.length <= saved.year.segments.length);
+    assert.equal(pn.schedule[0].from, saved.year.segments[0].from);
+    assert.equal(pn.schedule[pn.schedule.length - 1].to, saved.year.segments[saved.year.segments.length - 1].to);
+    for (let i = 1; i < pn.schedule.length; i++) assert.equal(pn.schedule[i].from, pn.schedule[i - 1].to, 'no day without a plan');
     assert.ok(saved.year.unlocks.length >= 1, 'the friend opens gyms over a year (Gun Shop → George\'s)');
     assert.ok(!('daily' in pn.slim.steady), 'Torn pages never get the day-by-day lines');
     assert.ok(JSON.stringify(pn).length < 6000, 'planNow stays small: ' + JSON.stringify(pn).length);
@@ -102,7 +106,7 @@ test('Torn pages follow the saved plan (light): no ladder, no 30-day projection,
     set(K.userState, { api: { ...API, battlestats: { ...API.battlestats, strength: { value: 200000 } } }, at: Date.now() });
     set(K.prices, { 206: { at: Date.now(), listings: [{ source: 'itemmarket', price: 900000, qty: 50 }] } });
     for (let i = 0; i < 3; i++) refresh();
-    assert.equal(planNowStored().rev, saved.rev, 'nothing re-planned by itself');
+    assert.equal(planNowStored().rev, saved.rev, 'nothing recalibrated by itself');
     assert.equal(pi.planBusy, null);
     setWhere('app');
 });
@@ -122,7 +126,7 @@ test('Auto never rewrites the plan by itself any more (the old background re-pic
     assert.ok(picks.length >= 2, 'the line before the pick stays (round 7)');
 });
 
-test('Recalibrate keeps the end date and re-plans the days left from what is true now (2 months into a year)', async () => {
+test('Recalibrate keeps the end date and recalibrates the days left from what is true now (2 months into a year)', async () => {
     setup('steady');
     const t0 = Date.now();
     const first = await createPlan({ months: 12, pause: nowPause });
@@ -154,7 +158,7 @@ test('Recalibrate works any time: a day later, and twice the same day (owner: "s
     const again = await at(t0 + DAY + 3600e3, () => recalibratePlan({ pause: nowPause }));
     assert.equal(again.end, first.end);
     assert.equal(again.history.length, 2, 'each recalibration is kept');
-    // The last day of the plan still re-plans that one day.
+    // The last day of the plan still recalibrates that one day.
     const last = await at(first.end - 3600e3, () => recalibratePlan({ pause: nowPause }));
     assert.equal(last.days, 1);
 });
@@ -241,7 +245,7 @@ test('Torn pages rebuild the model only when due: 30 s old, a step\'s time come,
     assert.equal(modelDue(null, at, at), true);
 });
 
-test('R6.5: the model follows the saved path\'s plan for the day (a planned switch, not re-planning); your own pick wins', async () => {
+test('R6.5: the model follows the saved path\'s plan for the day (a planned switch, not recalibrating); your own pick wins', async () => {
     setup('steady');
     const saved = await createPlan({ months: 3, pause: nowPause });
     const segs = saved.year.segments;

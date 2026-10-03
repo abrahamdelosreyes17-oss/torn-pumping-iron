@@ -19,7 +19,7 @@ import { makeTsClient, fetchSpyUser } from './api/tornstats.js';
 import { estimatePlayer } from './core/eye/estimate.js';
 import { forecast, respectFor, fairFight, bssOf, DEFAULT_GEAR } from './core/eye/fight.js';
 import { bandOf, chipFigures } from './core/eye/bands.js';
-import { gearSummary, myGear } from './core/eye/gear.js';
+import { gearSummary, myGear, mergeGear, sameGear } from './core/eye/gear.js';
 import { lifeFromLevel, targetParams, needsRefetch, inFfRange, selectTargets, listRowAsFfs, TARGETS_PER_MINUTE, statusesToAsk, mergeStatuses, STATUS_RETRY_MS, OWN_HIT_MS, findEdges, fallbackEdges, askPlan, pickZone, nextAsk, noteAnswer, cutTargets, goneNow, dropHits, ownHits, ACTIVE_MAX, LIST_MAX, ASK_LIMIT, TARGET_ASKS_MAX } from './core/eye/targets.js';
 import { trackFlights, warBandOf } from './core/eye/war.js';
 import { makePause } from './core/slices.js';
@@ -39,6 +39,12 @@ export const WATCH_STATE_KEY = 'eyeWatchState';
 export const FLIGHTS_KEY = 'eyeFlights';
 /** GM storage: the bands the Torn Eye tab's war mode worked out (warBandTable in core/eye/war.js), for Torn's war page. */
 export const WAR_BANDS_KEY = 'eyeWarBands';
+/** GM storage: the war that turned war mode on by itself and the answer to "Termed war / med-out deal?" (core/eye/war.js warAskNext). */
+export const WAR_ASK_KEY = 'eyeWarAsk';
+/** GM storage: the enemy's chain as the Torn Eye tab last read it ({at, fid, name, current, max, until, cooldownUntil}), for the chain counter on Torn's pages. */
+export const EYE_CHAIN_KEY = 'eyeChain';
+/** GM storage: the list the Torn Eye tab shows, in its order (core/eye/targets.js nextTable), for the attack page's Next button. */
+export const EYE_NEXT_KEY = 'eyeNext';
 
 const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(), timer: null, listeners: [], mem: new Map(), fc: new Map(), flushing: null, again: false, todo: new Map(), working: false, idling: false, side: null };
 
@@ -93,7 +99,13 @@ function writeEye() {
         for (const id of ids.slice(0, ids.length - 3000)) delete c.players[id];
     }
     c.savedAt = Date.now();
-    idbSet('eye', c).catch(() => {});
+    // Read, merge, write in one transaction (round 8, B.6): each Torn tab holds its own copy, and a plain put of this
+    // one wiped the gear another tab's fight had saved since it loaded. The gear seen last per player is kept.
+    const clearedAt = Number(get('eyeClearAt', 0)) || 0;
+    idbUpdate('eye', (prev) => {
+        c.gear = mergeGear(prev && !((prev.savedAt || 0) < clearedAt) ? prev.gear : null, c.gear, clearedAt);
+        return c;
+    }).catch(() => {});
 }
 
 function saveSoon() {
@@ -154,14 +166,33 @@ function notify() {
     }
 }
 
-/** Remember a player's gear from the attack page. */
+/** The same gear answered again (Torn answers after every hit) is kept as it is for this long. */
+export const GEAR_RESAVE_MS = 60 * 1000;
+
+/**
+ * Remember a player's gear from the attack page. Round 8 (B.6, "why theirs isn't stored"): it waited 1.5 s after the
+ * last answer for the whole cache's write, the wait started again with every hit, and leaving the page inside it (the
+ * next target) dropped it. It is now written at once and by itself, onto what is stored (never this tab's old copy).
+ * @returns {Promise<boolean>} whether it was new (or seen again after GEAR_RESAVE_MS)
+ */
 export async function saveGear(playerId, items) {
     const c = await cache();
-    c.gear[playerId] = { items, seenAt: Date.now() };
+    const now = Date.now();
+    const had = c.gear[playerId];
+    if (had && now - had.seenAt < GEAR_RESAVE_MS && sameGear(had.items, items)) return false;
+    const rec = { items, seenAt: now };
+    c.gear[playerId] = rec;
+    const clearedAt = Number(get('eyeClearAt', 0)) || 0;
+    idbUpdate('eye', (prev) => {
+        const kept = prev && prev.players && !((prev.savedAt || 0) < clearedAt) ? prev : { players: {}, gear: {} };
+        kept.gear = mergeGear(kept.gear, { [playerId]: rec }, clearedAt);
+        kept.savedAt = now;
+        return kept;
+    }).catch(() => {});
     // The count is shared (GM storage) so the webpage can show it; the gear itself stays with Torn's pages.
     set('eyeGearCount', Object.keys(c.gear).length);
-    saveSoon();
     notify();
+    return true;
 }
 
 export async function gearCount() {
@@ -177,7 +208,7 @@ export async function clearEye() {
     await idbSet('eye', eye.cache).catch(() => {});
     set('myAttacks', null);
     pageSet(TARGETS_KEY, null);
-    for (const k of [WATCH_KEY, 'eyeWarAuto', WAR_BANDS_KEY]) set(k, null);
+    for (const k of [WATCH_KEY, 'eyeWarAuto', WAR_BANDS_KEY, WAR_ASK_KEY, EYE_CHAIN_KEY, EYE_NEXT_KEY]) set(k, null);
     pageSet(WATCH_STATE_KEY, null);
     pageSet(FLIGHTS_KEY, null);
     statusRun.map = {};
@@ -498,7 +529,8 @@ export function eyeView(id, extra = {}, { war = false, later = false } = {}) {
         forecast: main,
         plain: f,
         withGear: fGear,
-        gear: gearRec ? { text: gThem ? gThem.text : '', seenAt: gearRec.seenAt } : null,
+        // `items`: each piece as the attack page gave it (the fight card lists them, round 8).
+        gear: gearRec ? { text: gThem ? gThem.text : '', seenAt: gearRec.seenAt, items: gearRec.items || [] } : null,
         band,
         respect,
         ours: ff,

@@ -107,14 +107,14 @@ test('the numbers of a day: gained from the stats history, planned from the line
     assert.deepEqual(dayNumbers({ lines: [], history: {}, totals: {}, day: day0, today: day0, gainedToday: 3, plannedToday: 4 }), { gained: 3, planned: 4 });
 });
 
-test('the months row counts in the months of the plan after a Re-plan, and each stat follows its own line', () => {
+test('the months row counts in the months of the plan after a Recalibrate, and each stat follows its own line', () => {
     const start = Date.UTC(2026, 9, 1);
     const days = 61;
     const r = { daily: Array.from({ length: days }, (_, i) => (i + 1) * 100), gained: 6100, cost: 61e6, perStat: { str: 6100, spd: 0, def: 0, dex: 0 }, used: {}, statLine: { step: 1, days, str: Array.from({ length: days }, (_, i) => (i + 1) * 100), spd: Array(days).fill(0), def: Array(days).fill(0), dex: Array(days).fill(0) } };
     const whole = monthlyOf(r, { start, days, stats: STATS0 });
     assert.deepEqual(whole.map((m) => new Date(m.to).toISOString().slice(0, 10)), ['2026-11-01', '2026-12-01']);
     assert.equal(whole[0].stats.str, 100 + 3100);
-    // Re-planned on 20 Oct: the first cell ends on 1 Nov (the month of the plan), not on 20 Nov.
+    // Recalibrated on 20 Oct: the first cell ends on 1 Nov (the month of the plan), not on 20 Nov.
     const from = Date.UTC(2026, 9, 20);
     const left = monthlyOf({ ...r, daily: r.daily.slice(0, 42), gained: 4200 }, { start: from, days: 42, stats: STATS0, anchor: start });
     assert.deepEqual(left.map((m) => new Date(m.to).toISOString().slice(0, 10)), ['2026-11-01', '2026-12-01']);

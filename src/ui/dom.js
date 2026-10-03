@@ -41,6 +41,11 @@ export function fill(el, children) {
     return el;
 }
 
+/** A small tick for a step that is done (the rail on Home, the panel's list on Torn's pages). */
+export function tickMark(color = '#9bdc8a') {
+    return h('svg', { class: 'tick', viewBox: '0 0 12 12', 'aria-hidden': 'true' }, [h('polyline', { points: '2,6.5 5,9.5 10,3', fill: 'none', stroke: color, 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })]);
+}
+
 /** A polyline sparkline in a w×h box from values (nulls skipped). */
 export function sparkline(values, { w = 76, h: ht = 18, color = '#efebe2', cls = 'spark', pad = 2 } = {}) {
     const v = (values || []).map((x) => (Number.isFinite(x) ? x : null));

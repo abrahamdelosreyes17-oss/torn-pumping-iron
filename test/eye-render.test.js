@@ -22,7 +22,9 @@ class FakeNode {
     getAttribute(k) {
         return this.attrs[k] ?? null;
     }
-    addEventListener() {}
+    addEventListener(ev, fn) {
+        (this.listeners = this.listeners || {})[ev] = fn;
+    }
     appendChild(c) {
         this.children.push(c);
         return c;
@@ -42,7 +44,8 @@ class FakeNode {
 }
 globalThis.document = { createElement: (t) => new FakeNode(t), createElementNS: (_, t) => new FakeNode(t), createTextNode: (t) => new FakeNode(null, t), visibilityState: 'visible' };
 
-const { renderEye } = await import('../src/ui/app/eye-tab.js');
+const eyeTab = await import('../src/ui/app/eye-tab.js');
+const { renderEye } = eyeTab;
 
 const fixture = async (name) => JSON.parse(await readFile(new URL('./fixtures/' + name, import.meta.url), 'utf8'));
 const text = (out) => [...out.ctl.flat(), ...out.main, ...out.pane].filter(Boolean).map((n) => (typeof n === 'string' ? n : n.textContent)).join(' | ');
@@ -226,4 +229,34 @@ test('Watched: rows with reasons, the "Watch?" offer and the heads-up', () => {
     assert.match(t, /Brix is out of hospital in 1:4\d/);
     assert.match(t, /Remove/);
     assert.match(t, /2 of 50 players/);
+});
+
+test('Chain mode: a card over "How sure" on every view; on, your energy is stacked (Home’s one state), and ending it recalibrates', () => {
+    const { chainModeCard } = eyeTab;
+    for (const mode of ['targets', 'war', 'watched']) {
+        const out = renderEye(model, ctxFor(mode));
+        const pane = out.pane.filter(Boolean).map((n) => n.textContent);
+        const at = pane.findIndex((x) => /^Chain mode/.test(x));
+        assert.ok(at >= 0 && /^How sure/.test(pane[at + 1]), mode + ': the card sits right over How sure (' + pane.map((x) => x.slice(0, 12)).join(' | ') + ')');
+    }
+    const calls = [];
+    const ctx = { ...ctxFor('targets'), startStacking: () => calls.push('start'), resumeStacking: () => calls.push('resume') };
+    const button = (card) => card.find((n) => n.tagName === 'BUTTON')[0];
+    const press = (card) => {
+        button(card).listeners.click();
+        return button(card).textContent;
+    };
+    const off = chainModeCard(model, ctx);
+    assert.equal(off.attrs['data-chain-mode'], 'off');
+    assert.match(off.textContent, /^Chain modeoffChaining\? Chain mode stacks your energy/);
+    assert.equal(press(off), 'Chain mode');
+    const since = Date.parse('2026-10-03T14:02:00Z');
+    const on = chainModeCard({ ...model, stacking: { since } }, ctx);
+    assert.equal(on.attrs['data-chain-mode'], 'on');
+    // Round 8: while it is on it carries the chain counter (here nothing was read: it says so).
+    assert.match(on.textContent, /^Chain modeon since 14:02.* · stackingYour faction——Not read yetYour energy is kept for the chain/);
+    assert.equal(press(on), 'End chain mode · recalibrate');
+    assert.deepEqual(calls, ['start', 'resume']);
+    // A plan being worked out: the button waits.
+    assert.ok(button(chainModeCard({ ...model, stacking: { since }, planBusy: { recalibrate: true } }, ctx)).attrs.disabled !== undefined);
 });

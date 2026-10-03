@@ -2,12 +2,12 @@
  * Auto mode (the Plan dropdown's default): the plan picks itself from what
  * you can afford. Pure. ROUND4-PLAN §E.
  *
- * Income comes from your money log (the Full key, owner's rule): money in
- * less money out a day, plus what the gym plan spent (its purchases are in
- * the "out" lines). Networth growth from Torn's own history (personal stats
- * at past dates, plus the gym spend) is the cross-check, and the fallback
- * while the log has nothing readable. The plan may spend up to that a day:
- * "you can afford this with your income".
+ * The money comes from your books (round 7, R7.5; the Full key): your money
+ * log sorted into accounts (core/ledger.js) and the budget offer read off it
+ * (core/cashflow.js): what the gym costs you now, what comes in, what your
+ * cash covers. Networth growth from Torn's own history (personal stats at
+ * past dates, plus the gym spend) is the cross-check, and the fallback until
+ * the log is read.
  *
  * Events: when an event multiplies what a plan uses (World Diabetes Day's
  * candy ×3, CaffeineCon's cans ×2), Auto compares the event plans over the
@@ -63,11 +63,10 @@ export function incomeFrom(snaps, { spentPerDay = 0 } = {}) {
  * @param {object} o.settings
  * @param {boolean} o.hasFullKey
  * @param {object|null} o.income - incomeFrom() (networth)
- * @param {object|null} [o.log] - incomeBreakdown() of the money log
- * @param {number} [o.spentPerDay] - what the gym plan spends a day (added back to the log's net)
- * @returns {{on:boolean, ready:boolean, needsKey:boolean, waiting:boolean, perDay:number|null, budgetPerDay:number|null, budget:number|null, source:'log'|'networth'|null, networthPerDay:number|null}}
+ * @param {object|null} [o.books] - budgetOffer() of your ledger, with its `flow` (cashflowOf)
+ * @returns {{on:boolean, ready:boolean, needsKey:boolean, waiting:boolean, perDay:number|null, budgetPerDay:number|null, budget:number|null, source:'books'|'networth'|'floor'|null, networthPerDay:number|null}}
  */
-export function autoState({ plan, settings, hasFullKey, income, log = null, spentPerDay = 0, floor = null }) {
+export function autoState({ plan, settings, hasFullKey, income, books = null, floor = null }) {
     const on = Boolean(plan && plan.pickBy === 'auto');
     const horizon = (settings && settings.horizonDays) || 30;
     const certain = floor && floor.perDay > 0 ? floor.perDay : 0;
@@ -78,15 +77,18 @@ export function autoState({ plan, settings, hasFullKey, income, log = null, spen
         return { on, ready: true, needsKey: false, waiting: false, perDay: certain, budgetPerDay: certain, budget: certain * horizon, days: null, source: 'floor', networthPerDay: null, floor };
     }
     const nw = income && Number.isFinite(income.perDay) ? income.perDay : null;
-    // The log's other income leaves out the bank and dividend lines (the floor counts those): certain + the rest.
-    const fromLog = log && log.lines && log.lines.some((l) => l.dir === 'in') ? certain + Math.max(0, log.inPerDay - log.outPerDay + Math.max(0, spentPerDay || 0)) : null;
-    // Networth growth already holds the certain part: whichever is higher, never both.
-    const measured = fromLog !== null ? fromLog : nw !== null ? Math.max(certain, nw) : null;
+    // Your books: what comes in is what the log's lines add up to (the bank's profit counts on the day it is paid,
+    // a one-off gift or a stock sale never), and the budget is the offer's pick.
+    if (books && Number.isFinite(books.perDay)) {
+        return { on, ready: true, needsKey: false, waiting: false, perDay: books.earnsPerDay, budgetPerDay: books.perDay, budget: books.perDay * horizon, days: books.flow ? books.flow.days : null, source: 'books', networthPerDay: nw, floor: null, books };
+    }
+    // Until the log is read: networth growth already holds the certain part: whichever is higher, never both.
+    const measured = nw !== null ? Math.max(certain, nw) : null;
     const perDay = measured !== null ? measured : certain || null;
     if (perDay === null) return { on, ready: false, needsKey: false, waiting: true, perDay: null, budgetPerDay: null, budget: null, source: null, networthPerDay: null };
     const budgetPerDay = Math.max(0, perDay);
-    const source = fromLog !== null ? 'log' : nw !== null ? (certain > nw ? 'floor' : 'networth') : 'floor';
-    return { on, ready: true, needsKey: false, waiting: false, perDay, budgetPerDay, budget: budgetPerDay * horizon, days: fromLog !== null ? log.days : income ? income.days : null, source, networthPerDay: nw, floor };
+    const source = nw !== null ? (certain > nw ? 'floor' : 'networth') : 'floor';
+    return { on, ready: true, needsKey: false, waiting: false, perDay, budgetPerDay, budget: budgetPerDay * horizon, days: income ? income.days : null, source, networthPerDay: nw, floor };
 }
 
 /**
@@ -111,9 +113,15 @@ export function effectivePickBy(pickBy, auto) {
     return pickBy;
 }
 
-/** "You can afford this with your income: about $4.2M a day comes in, this plan costs $3.1M a day." */
-export function affordLine(auto, planPerDay) {
+/**
+ * "You can afford this with your income: about $4.2M a day comes in, this plan costs $3.1M a day."
+ * @param {object|null} [cash] - the plan's own cash check (cashflow.js planCash): a plan that buys in lumps can run
+ *   out on a day although its cost a day is covered
+ */
+export function affordLine(auto, planPerDay, cash = null) {
     if (!auto || !auto.ready) return null;
+    // From your books: the offer's own reason, then what this plan costs.
+    if (auto.source === 'books' && auto.books) return auto.books.why + (planPerDay > 0 ? ' This plan costs ' + fmtMoney(Math.round(planPerDay)) + ' a day' + (cash && cash.fits === false ? ', but it buys in lumps: your cash runs out on day ' + cash.runsOutDay + '.' : '.') : ' This plan costs nothing.');
     const inText = fmtMoney(Math.round(auto.perDay));
     if (!(auto.perDay > 0)) return 'Your networth hasn’t grown over the last ' + Math.round(auto.days) + ' days, so Auto picks a plan that costs nothing.';
     if (!(planPerDay > 0)) return 'About ' + inText + ' a day comes in; this plan costs nothing.';
@@ -203,48 +211,6 @@ export function autoWaitLine(auto) {
     if (auto.needsKey) return 'Auto mode needs a Full key (Settings › Full key). Until then the plan uses your budget.';
     if (auto.waiting) return 'Reading your income from Torn… until then the plan uses your budget.';
     return null;
-}
-
-/** [calibrate] Money-log categories read for the breakdown (by title; Torn's list comes from /torn/logcategories). */
-export const MONEY_LOG_CATEGORY = /(money|bank|bazaar|market|trad|compan|job|stock|points|auction|loan|mug|casino)/i;
-
-/** [calibrate] Log lines that bring money in, and ones that send it out, by title words. */
-const IN_WORDS = /(sell|sold|receive|dividend|payout|pay ?day|wage|salary|won|win|refund|collect|mugged|reward|profit|matur)/i;
-const OUT_WORDS = /(buy|bought|purchase|send|sent|paid|fee|lose|lost|bet|donat|deposit|upkeep)/i;
-
-/**
- * Where your money comes from, from the money log: amounts in and out by
- * log line, over the days read (biggest first). Titles that say neither are
- * left out rather than guessed.
- * @param {{at, title, money}[]} log
- * @param {number} now
- * @param {number} [windowDays] - how far back the log was read
- * @returns {{days:number, inPerDay:number, outPerDay:number, lines:{title:string, perDay:number, n:number, dir:'in'|'out'}[]}|null}
- */
-export function incomeBreakdown(log, now, windowDays = null, floor = null) {
-    const rows = (log || []).filter((e) => e && e.money > 0 && Number.isFinite(e.at));
-    if (!rows.length) return null;
-    // Spread over the whole span that was read (one sale 2 days ago in a 30-day read is 1/30 a day, not 1/2).
-    const oldest = Math.min(...rows.map((e) => e.at));
-    const days = Math.max(1, windowDays || 0, (now - oldest) / DAY);
-    const by = new Map();
-    for (const e of rows) {
-        // Bank investment and dividend lines are the certain income (core/income-floor.js), counted there, not here
-        // (a maturity line carries the principal too: never income). Only the kinds the floor counted are left out.
-        if (/matur/i.test(e.title)) continue;
-        if (floor && floor.bank > 0 && /(invest|city bank|bank interest)/i.test(e.title)) continue;
-        if (floor && floor.dividends > 0 && /dividend/i.test(e.title)) continue;
-        const dir = IN_WORDS.test(e.title) ? 'in' : OUT_WORDS.test(e.title) ? 'out' : null;
-        if (!dir) continue;
-        const k = dir + '|' + e.title;
-        const r = by.get(k) || { title: e.title, dir, total: 0, n: 0 };
-        r.total += e.money;
-        r.n++;
-        by.set(k, r);
-    }
-    const lines = [...by.values()].map((r) => ({ title: r.title, dir: r.dir, n: r.n, perDay: r.total / days })).sort((a, b) => b.perDay - a.perDay);
-    const sum = (d) => lines.filter((l) => l.dir === d).reduce((a, l) => a + l.perDay, 0);
-    return { days, inPerDay: sum('in'), outPerDay: sum('out'), lines };
 }
 
 /**

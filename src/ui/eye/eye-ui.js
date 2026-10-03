@@ -16,6 +16,9 @@
 import { h, fill } from '../dom.js';
 import { BAND_WORDS, BAND_COLORS } from '../../core/eye/bands.js';
 import { BUILD_WORDS } from '../../core/eye/fight.js';
+import { gearRows, gearCountedText } from '../../core/eye/gear.js';
+import { chainClock, chainBonusText, CHAIN_TIMER_S, CHAIN_LOW_S } from '../../core/eye/chain.js';
+import { skippedText } from '../../core/eye/targets.js';
 import { FFS_SITE_URL } from '../../api/ffscouter.js';
 
 const EYE_FONT = "'Segoe UI', system-ui, -apple-system, sans-serif";
@@ -48,8 +51,8 @@ export const EYE_CSS = `
 .pi-eye.pi-sum .pi-edge { align-self: stretch; margin: -4px 0; }
 .pi-eye.pi-sum b { color: #fff; font-weight: 700; }
 .pi-eye.pi-edgebar { width: 4px; border-radius: 2px; background: var(--b); pointer-events: none; }
-.pi-eye.pi-mini-line { display: block; width: 100%; max-width: 100%; margin: 8px 0 0; clear: both; }
-.pi-eye.pi-mini-line .pi-tag { width: 100%; }
+.pi-eye.pi-mini-line { display: block; margin: 0; }
+#pi-eye-layer .pi-mini-line .pi-tag { width: 100%; }
 .pi-eye.pi-card { background: #101214; border: 1px solid color-mix(in srgb, var(--b) 45%, #3a4046); border-radius: 10px; box-shadow: 0 8px 26px rgba(0,0,0,.6); overflow: hidden; }
 .pi-eye.pi-card.pi-glow { box-shadow: 0 0 0 3px color-mix(in srgb, var(--b) 14%, transparent), 0 0 18px color-mix(in srgb, var(--b) 22%, transparent), 0 8px 26px rgba(0,0,0,.6); }
 .pi-card .pi-ribbon { height: 4px; background: var(--b); }
@@ -79,7 +82,54 @@ export const EYE_CSS = `
 .pi-card.pi-small .pi-stack b { font-size: 15px; }
 .pi-card.pi-small .pi-stack { column-gap: 6px; }
 .pi-eye.pi-card.pi-fixed { position: fixed; z-index: 9991; overflow: hidden auto; }
-.pi-warlist { display: flex !important; flex-direction: column; }
+.pi-eye .pi-st { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.pi-eye .pi-st.pi-ok { color: #9bdc8a; }
+.pi-eye .pi-st.pi-wait { color: #e8a33d; }
+.pi-eye .pi-st.pi-away { color: #9aa1a8; }
+.pi-eye.pi-tag.pi-out .pi-band, .pi-eye.pi-tag.pi-out .pi-fig { opacity: .55; }
+.pi-eye.pi-short .pi-st { font-size: 11px; }
+.pi-chain .pi-top .pi-lbl { font-size: 11px; font-weight: 700; letter-spacing: .06em; color: #9aa1a8; text-transform: uppercase; }
+.pi-chain .pi-top .pi-src { margin-left: auto; white-space: nowrap; }
+.pi-chain .pi-cside { padding: 8px 14px 10px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: 10px; row-gap: 2px; align-items: baseline; }
+.pi-chain .pi-cside + .pi-cside { border-top: 1px solid #262a2e; }
+.pi-chain .pi-cwho { grid-column: 1 / 3; color: #9aa1a8; font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pi-chain .pi-ctime { font-size: 16px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
+.pi-chain .pi-low { color: #e8a33d; }
+.pi-chain .pi-cn { font-size: 24px; font-weight: 700; color: #fff; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.pi-chain .pi-cbonus { grid-column: 2 / 4; color: #c9cdd2; font-size: 12px; }
+.pi-chain .pi-cbonus b { color: #fff; font-weight: 700; }
+.pi-chain .pi-ctm { grid-column: 1 / -1; height: 4px; border-radius: 2px; background: #2a2e33; margin-top: 6px; overflow: hidden; }
+.pi-chain .pi-ctm i { display: block; height: 100%; background: #efebe2; }
+.pi-chain .pi-cside[data-pi-chain="on"] .pi-low ~ .pi-ctm i { background: #e8a33d; }
+.pi-eye.pi-chainlines { position: fixed; z-index: 9991; display: flex; flex-direction: column; gap: 4px; }
+.pi-chainlines .pi-tag { width: 100%; min-width: 0; }
+.pi-chainlines .pi-fig { white-space: normal; padding: 3px 0; min-width: 0; }
+.pi-chainlines .pi-fig b.pi-low { color: #e8a33d; }
+.pi-card .pi-nextbox { display: flex; flex-direction: column; gap: 5px; padding-bottom: 10px; border-bottom: 1px solid #262a2e; }
+.pi-card a.pi-nextb { display: flex; align-items: center; justify-content: center; gap: 8px; height: 34px; border-radius: 6px; background: #efebe2; color: #15171a; font-size: 13px; font-weight: 700; text-decoration: none; cursor: pointer; --b: #efebe2; }
+.pi-card a.pi-nextb:hover { text-decoration: none; filter: brightness(1.06); }
+.pi-card a.pi-nextb:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.pi-card a.pi-nextb.pi-alt { background: #1c1f22; color: #fff; border: 1px solid #3a4046; }
+.pi-card a.pi-nextb.pi-glow { box-shadow: 0 0 0 3px color-mix(in srgb, #efebe2 14%, transparent), 0 0 16px color-mix(in srgb, #efebe2 24%, transparent); }
+.pi-card .pi-kbd { display: inline-block; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 4px; border: 1px solid currentColor; font-size: 11px; font-weight: 700; line-height: 16px; text-align: center; opacity: .75; }
+.pi-card .pi-nextwho { font-size: 12px; color: #c9cdd2; }
+.pi-card .pi-nextwho b { color: #fff; font-weight: 700; }
+.pi-card.pi-small .pi-nextbox { padding-bottom: 6px; }
+.pi-card.pi-small a.pi-nextb { height: 26px; font-size: 12px; gap: 5px; }
+.pi-card .pi-gear { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid #262a2e; }
+.pi-card .pi-gh { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.pi-card .pi-gh b { color: #fff; font-size: 13px; font-weight: 700; }
+.pi-card .pi-gh span { color: #9aa1a8; font-size: 11px; white-space: nowrap; }
+.pi-card .pi-gt { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; }
+.pi-card .pi-gt > span { padding: 4px 0 4px 8px; border-top: 1px solid #1f2327; text-align: right; font-size: 13px; color: #fff; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pi-card .pi-gt > .pi-gn { text-align: left; padding-left: 0; white-space: normal; }
+.pi-card .pi-gt > .pi-gth { color: #9aa1a8; font-size: 11px; font-weight: 400; padding-top: 0; padding-bottom: 2px; border-top: 0; }
+.pi-card .pi-gt > .pi-gth:first-child { text-align: left; padding-left: 0; }
+.pi-card .pi-gt small { display: block; color: #9aa1a8; font-size: 11px; font-weight: 400; }
+.pi-card .pi-nogear { color: #c9cdd2; font-size: 13px; }
+.pi-card .pi-nogear b { color: #fff; font-weight: 700; }
+.pi-card.pi-mid .pi-nogear, .pi-card.pi-mid .pi-gh b { font-size: 11px; }
+
 .pi-eye .pi-watch { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
 .pi-eye .pi-watch button, .pi-eye .pi-watch select, .pi-eye .pi-watch input { height: 24px; border-radius: 5px; border: 1px solid color-mix(in srgb, #efebe2 45%, transparent); background: #1c1f22; color: #fff; font: 700 11px ${EYE_FONT}; padding: 0 9px; cursor: pointer; margin: 0; }
 .pi-eye .pi-watch input { cursor: text; width: 120px; font-weight: 400; }
@@ -255,16 +305,47 @@ function eyeFigSpans(v, mode) {
     return [h('span', { class: 'pi-fig' }, [h('b', { text: fs[0].text })]), h('span', { class: 'pi-fig' }, [h('b', { text: fs[1].text }), ' HP']), h('span', { class: 'pi-fig' }, [h('b', { text: fs[2].text })])];
 }
 
+/** How long until they are out, on a war row's tag: "12m", "1h 17m". */
+export function eyeHm(s) {
+    const m = Math.max(0, Math.ceil(Number(s) / 60));
+    return m >= 60 ? Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm' : m + 'm';
+}
+
+/**
+ * Where a war row is, in a word: Okay, Out early, Hospital 12m, Abroad, Traveling, Jail (green, amber, grey).
+ * `short`: the narrower tag's words; `bare`: the narrowest tag (a hospital row is its clock alone).
+ */
+function eyeWhere(state, { outInS = null, outAt = null, short = false, bare = false } = {}) {
+    if (state === 'okay') return h('span', { class: 'pi-st pi-ok', text: 'Okay' });
+    if (state === 'early') return h('span', { class: 'pi-st pi-ok', text: short ? 'Early' : 'Out early' });
+    if (state === 'hospital') {
+        const clock = Number.isFinite(outInS) ? h('span', { 'data-pi-out-at': Number.isFinite(outAt) ? String(outAt) : null, 'data-pi-out-fmt': 'hm', text: eyeHm(outInS) }) : null;
+        return h('span', { class: 'pi-st pi-wait' }, clock && bare ? [clock] : [short ? 'Hosp' : 'Hospital', clock ? ' ' : null, clock]);
+    }
+    return h('span', { class: 'pi-st pi-away', text: state === 'traveling' ? (short ? 'Flying' : 'Traveling') : state === 'abroad' ? 'Abroad' : state === 'jail' ? 'Jail' : String(state) });
+}
+
 /**
  * A list row's tag. `state` is the row's: ready rows show the numbers; a row in hospital (dimmed) when it is out.
+ * `where` (a war row, round 8): the band, HP kept, then where they are; the other numbers are in its hover card.
  * @param {object} v - eyeView()
  * @param {object} o - {mode, state: 'okay'|'early'|'hospital'|'traveling'|'abroad'|'jail', outInS, outAt, landText, glow}
  *   outAt: when they are out (epoch seconds): the "out in" clock is then moved on by eyeTickOut, not by a redraw
  */
-export function eyeRowTag(v, { mode = 'full', state = 'okay', outInS = null, outAt = null, landText = null, glow = false } = {}) {
+export function eyeRowTag(v, { mode = 'full', state = 'okay', outInS = null, outAt = null, landText = null, glow = false, where = false } = {}) {
     const ready = state === 'okay' || state === 'early';
     const kids = [h('span', { class: 'pi-edge' })];
     if (mode === 'full') kids.push(h('span', { class: 'pi-band', text: eyeBandWord(v.band) }));
+    if (where) {
+        // A war row (round 8, the owner's pick B): the band, HP kept, then where they are. Narrower: the edge carries
+        // the band; the narrowest says HP kept for a ready row and where the others are.
+        const keep = eyeFigures(v)[1].text;
+        const st = eyeWhere(state, { outInS, outAt, short: mode !== 'full', bare: mode === 'tiny' });
+        if (mode !== 'tiny' || ready) kids.push(h('span', { class: 'pi-fig' }, [h('b', { text: keep }), mode === 'short' ? null : ' HP']));
+        if (mode !== 'tiny' || !ready) kids.push(st);
+        const cls = 'pi-mark pi-eye pi-tag pi-rowtag' + (mode !== 'full' ? ' pi-short' : '') + (ready ? '' : ' pi-out') + (glow && ready ? ' pi-glow' : '');
+        return h('div', { class: cls, style: '--b:' + eyeBandColor(v.band), 'data-pi-player': String(v.id || ''), 'data-pi-hover': '1', title: eyeSourceTitle(v), tabindex: '0', role: 'button', 'aria-label': eyeBandWord(v.band) + ' · HP kept ' + keep + ' · ' + st.textContent + ' · ' + eyeFigures(v).filter((x) => x.k !== 'keep').map((x) => x.label + ' ' + x.text).join(' · ') }, kids);
+    }
     if (ready) {
         kids.push(...eyeFigSpans(v, mode));
         if (state === 'early' && mode !== 'tiny') kids.push(h('span', { class: 'pi-src', text: 'out early' }));
@@ -293,7 +374,18 @@ export function eyeSummary(rows, nowS) {
     const hosp = rows.filter((r) => r.state === 'hospital');
     const outs = hosp.filter((r) => r.until > nowS).map((r) => r.until - nowS);
     const nextOutS = outs.length ? Math.min(...outs) : null;
-    return { ready, early: rows.filter((r) => r.state === 'early').length, hospital: hosp.length, nextOutS, nextOutAt: nextOutS === null ? null : nowS + nextOutS, traveling: rows.filter((r) => r.state === 'traveling').length };
+    const traveling = rows.filter((r) => r.state === 'traveling').length;
+    // away: flying or standing abroad (the war summary's "2 away").
+    return { ready, early: rows.filter((r) => r.state === 'early').length, hospital: hosp.length, nextOutS, nextOutAt: nextOutS === null ? null : nowS + nextOutS, traveling, away: traveling + rows.filter((r) => r.state === 'abroad').length };
+}
+
+/** The war list's summary in words (round 8, his pick B): "4 ready · next out in 12m · 2 away". */
+export function eyeWarSummaryText(s) {
+    const parts = [s.ready + ' ready' + (s.early ? ' (' + s.early + ' out early)' : '')];
+    if (s.nextOutS !== null && s.nextOutS !== undefined) parts.push('next out in ' + eyeHm(s.nextOutS));
+    else if (s.hospital) parts.push(s.hospital + ' in hospital');
+    parts.push((s.away || 0) + ' away');
+    return parts.join(' · ');
 }
 
 /** "2 ready · 1 out in 1:17 · 0 traveling". */
@@ -306,10 +398,15 @@ export function eyeSummaryText(s) {
 }
 
 /** The summary tag on top of a list. `note` (where the numbers come from) goes in its title. */
-export function eyeSummaryTag(s, { note = '', fromFfs = false, short = false } = {}) {
+export function eyeSummaryTag(s, { note = '', fromFfs = false, short = false, war = false } = {}) {
     const words = [];
-    eyeSummaryText(s).split(' · ').forEach((p, i) => {
+    (war ? eyeWarSummaryText(s) : eyeSummaryText(s)).split(' · ').forEach((p, i) => {
         if (i) words.push(' · ');
+        // The war list's "next out in 12m": its clock moves on by eyeTickOut too.
+        if (war && /^next out in /.test(p)) {
+            words.push(h('span', {}, ['next out in ', h('b', { 'data-pi-out-at': Number.isFinite(s.nextOutAt) ? String(s.nextOutAt) : null, 'data-pi-out-fmt': 'hm', text: p.replace(/^next out in /, '') })]));
+            return;
+        }
         const m = p.match(/^(\d+)(.*)$/);
         // "1 out in 1:17": its clock moves on by eyeTickOut (no redraw every second).
         const out = m && Number.isFinite(s.nextOutAt) && /^ out in /.test(m[2]);
@@ -324,7 +421,8 @@ export function eyeTickOut(root, nowS) {
     if (!root || !root.querySelectorAll) return 0;
     let n = 0;
     for (const el of root.querySelectorAll('[data-pi-out-at]')) {
-        const text = eyeHmm(Math.max(0, Number(el.getAttribute('data-pi-out-at')) - nowS));
+        const left = Math.max(0, Number(el.getAttribute('data-pi-out-at')) - nowS);
+        const text = el.getAttribute('data-pi-out-fmt') === 'hm' ? eyeHm(left) : eyeHmm(left);
         if (el.textContent !== text) {
             el.textContent = text;
             n++;
@@ -480,17 +578,88 @@ export function eyeProfileCard(v, mode, { id = null, watch = null, glow = true }
     return el;
 }
 
+/** "seen just now", "seen 40 min ago", "seen 5 h ago", "seen 12 d ago". */
+export function eyeSeenText(seenAt, now = Date.now()) {
+    const s = Math.max(0, now - (Number(seenAt) || 0));
+    if (s < 2 * 60000) return 'seen just now';
+    if (s < 3600000) return 'seen ' + Math.round(s / 60000) + ' min ago';
+    if (s < 86400000) return 'seen ' + Math.round(s / 3600000) + ' h ago';
+    return 'seen ' + Math.round(s / 86400000) + ' d ago';
+}
+
 /**
- * The attack page's fight card: band, the three numbers, turns and the gear note, HP kept per likely build. The
- * training panel docks under it (#pi-eyecard), so its foot is left free.
+ * "What they were wearing" on the fight card (round 8, mockups/round8/torn-eye.html §5, the owner's pick B): every
+ * piece with its own numbers, weapons then armour, and what the fight counts of it; before their gear was ever read,
+ * "Not seen yet · attack once to read it". The narrower card says it in one line.
+ * @param {object} v - eyeView() (gear: {items, text, seenAt}|null)
+ * @param {object} o - {shown: Torn shows their gear in this fight}
+ */
+export function eyeGearBlock(v, mode = 'full', { shown = false, now = Date.now() } = {}) {
+    const g = v && v.gear && (v.gear.items || []).length ? v.gear : null;
+    const head = (meta) => h('div', { class: 'pi-gh' }, [h('b', { text: 'What they were wearing' }), meta ? h('span', { text: meta }) : null]);
+    if (!g) {
+        // Torn shows their side and nothing is on it: said as it is, not as "not seen".
+        const none = shown ? [h('div', { class: 'pi-nogear', text: 'Nothing equipped in this fight.' })] : [h('div', { class: 'pi-nogear' }, [h('b', { text: 'Not seen yet' }), ' · attack once to read it']), h('div', { class: 'pi-src', text: 'Torn shows it when the fight starts. It is saved for next time.' })];
+        return h('div', { class: 'pi-gear', 'data-pi-gear': 'none' }, [head(null), ...none]);
+    }
+    const seen = eyeSeenText(g.seenAt, now);
+    if (mode !== 'full') return h('div', { class: 'pi-gear', 'data-pi-gear': 'seen' }, [head(seen), h('div', { class: 'pi-nogear', text: g.text || 'gear' })]);
+    const rows = gearRows(g.items);
+    const one = (n) => (n === null ? '' : (Math.round(n * 10) / 10).toFixed(1));
+    const name = (r) => h('span', { class: 'pi-gn' }, [r.name || 'Item', r.sub ? h('small', { text: r.sub }) : null]);
+    const kids = [head(seen)];
+    if (rows.weapons.length) {
+        kids.push(h('div', { class: 'pi-gt', 'data-pi-gt': 'weapons' }, [h('span', { class: 'pi-gth', text: 'Weapons' }), h('span', { class: 'pi-gth', text: 'Dmg' }), h('span', { class: 'pi-gth', text: 'Acc' }), ...rows.weapons.flatMap((r) => [name(r), h('span', { text: one(r.dmg) }), h('span', { text: one(r.acc) })])]));
+    }
+    if (rows.armour.length) {
+        kids.push(h('div', { class: 'pi-gt', 'data-pi-gt': 'armour' }, [h('span', { class: 'pi-gth', text: 'Armour' }), h('span', { class: 'pi-gth' }), h('span', { class: 'pi-gth', text: 'Armour' }), ...rows.armour.flatMap((r) => [name(r), h('span'), h('span', { text: one(r.armour) })])]));
+    }
+    const counted = gearCountedText(g.items);
+    if (counted) kids.push(h('div', { class: 'pi-src', text: counted }));
+    return h('div', { class: 'pi-gear', 'data-pi-gear': 'seen' }, kids);
+}
+
+/**
+ * The Next button (round 8, mockups/round8/torn-eye.html §4, the owner's pick A): the first row of the fight card. It
+ * opens the attack page of the next player in your Torn Eye list, in the list's own order, skipping who is not ready
+ * (key N); you still press Torn's Start fight. In war mode it walks the war list ("Next enemy"). Nobody left ready, or
+ * no list handed over yet: a plain button to the Torn Eye list. Once the fight is over it is the one thing that glows.
+ * @param {object} n - {list, mode, next: {id, name, level, band, respect, keep}|null, skipped, href, listHref, over}
+ *   (core/eye/targets.js nextTarget(), with the links)
+ */
+export function eyeNextBox(n, mode = 'full') {
+    const kbd = () => h('span', { class: 'pi-kbd', 'aria-hidden': 'true', text: 'N' });
+    if (!n.next) {
+        const words = n.list ? 'No one else on your list is ready right now.' : 'Your Torn Eye list is not here yet: open it once.';
+        return h('div', { class: 'pi-nextbox', 'data-pi-next': n.list ? 'none' : 'nolist' }, [h('a', { class: 'pi-nextb pi-alt', href: n.listHref, target: '_blank', rel: 'noopener', text: mode === 'small' ? 'Torn Eye' : 'Open the Torn Eye list' }), mode === 'small' ? null : h('span', { class: 'pi-nextwho', text: words })]);
+    }
+    const x = n.next;
+    const label = mode === 'small' ? 'Next' : n.mode === 'war' ? 'Next enemy' : 'Next target';
+    const who = [h('b', { text: x.name || String(x.id) }), x.level ? ' [' + x.level + ']' : '', ' · ', h('span', { style: 'color:' + eyeBandColor(x.band), text: eyeBandWord(x.band) })];
+    if (x.respect) who.push(' · ' + Number(x.respect).toFixed(2));
+    if (x.keep !== null && x.keep !== undefined) who.push(' · ' + x.keep + '% HP');
+    const skips = skippedText(n.skipped);
+    return h('div', { class: 'pi-nextbox', 'data-pi-next': String(x.id) }, [
+        h('a', { class: 'pi-nextb' + (n.over ? ' pi-glow' : ''), href: n.href, title: 'Opens their attack page (key N). You still press Start fight.', 'aria-label': label + ': ' + (x.name || x.id) + ' (key N)' }, [label + ' ', kbd()]),
+        mode === 'small' ? null : h('span', { class: 'pi-nextwho' }, who),
+        mode === 'small' || !skips ? null : h('span', { class: 'pi-src', text: skips }),
+    ]);
+}
+
+/**
+ * The attack page's fight card: the Next button, band, the three numbers, turns, what they were wearing, HP kept per
+ * likely build. The training panel docks under it (#pi-eyecard), so its foot is left free.
  * @param {object|null} v - eyeView()
  * @param {'full'|'mid'|'small'} mode
- * @param {object} s - {gearVisible, gearSaved, watch: {watching, tag, full, toggle}}
+ * @param {object} s - {gearVisible, gearSaved, watch: {watching, tag, full, toggle}, next: eyeNextBox()'s n}
  */
 export function eyeFightCard(v, mode, s = {}) {
     const { el, bd } = eyeCardShell(v, mode, { who: eyeWhoText(v, mode), hover: mode === 'small' });
     el.id = 'pi-eyecard';
-    el.classList.add('pi-glow', 'pi-fixed');
+    // At most one thing glows: the card, until the fight is over; then the Next button.
+    el.classList.add('pi-fixed');
+    if (!(s.next && s.next.over && s.next.next)) el.classList.add('pi-glow');
+    if (s.next) bd.appendChild(eyeNextBox(s.next, mode));
     const watchBtn = () => (s.watch ? watchControl({ watching: s.watch.watching, tag: null, full: s.watch.full }, { toggle: s.watch.toggle }) : null);
     if (!v) {
         if (mode !== 'small') {
@@ -503,11 +672,8 @@ export function eyeFightCard(v, mode, s = {}) {
     bd.appendChild(eyeNumbers(v, mode));
     if (mode === 'small') return el;
     const f = v.forecast;
-    const gear = s.gearSaved ? 'their gear is saved for next time' : s.gearVisible ? '' : 'their gear shows once the fight starts';
-    const turns = f && f.turns ? 'About ' + f.turns + ' turns' : '';
-    const line = [turns, turns ? gear : gear.charAt(0).toUpperCase() + gear.slice(1)].filter(Boolean).join(' · ');
-    if (line) bd.appendChild(h('div', { class: s.gearSaved ? 'pi-good' : 'pi-muted', text: line }));
-    if (v.gear) bd.appendChild(h('div', { class: 'pi-muted', text: 'Last seen: ' + (v.gear.text || 'gear') + ' · ' + Math.max(0, Math.round((Date.now() - v.gear.seenAt) / 86400000)) + ' d ago' }));
+    if (f && f.turns) bd.appendChild(h('div', { class: 'pi-muted', text: 'About ' + f.turns + ' turns' }));
+    bd.appendChild(eyeGearBlock(v, mode, { shown: Boolean(s.gearVisible) }));
     if (v.withGear && mode === 'full') bd.appendChild(h('div', { class: 'pi-warnline', text: 'With their gear: win ' + Math.round(v.withGear.pWin * 100) + '% · HP kept ~' + Math.round((v.withGear.keep || 0) * 100) + '%' }));
     const p = v.plain || f;
     if (mode === 'full' && p && p.perBuild && !p.exact) {
@@ -524,7 +690,93 @@ export function eyeFightCard(v, mode, s = {}) {
     return el;
 }
 
-/** The mini-profile's last line: one tag inside the popup's width. */
+/* ------------------------------------------------------------ the chain counter */
+
+/** Under this width the counter is two thin lines (the panel's own narrow size). */
+export const EYE_CHAIN_LINES_W = 180;
+
+function eyeChainSide({ who, side, hint = '' }) {
+    const timed = side.state === 'on' || side.state === 'cooldown';
+    const bonus = side.state === 'on' && side.next ? [h('b', { text: String(side.next.hits) }), chainBonusText(side).replace(/^\d+/, '')] : [chainBonusText(side) + (side.state === 'unknown' && hint ? ' · ' + hint : '')];
+    return h('div', { class: 'pi-cside', 'data-pi-chain': side.state }, [
+        h('span', { class: 'pi-cwho', text: who }),
+        h('span', { class: 'pi-ctime' + (side.low ? ' pi-low' : ''), 'data-pi-chain-until': timed ? String(side.until) : null, text: timed ? chainClock(side.leftS) : '—' }),
+        h('span', { class: 'pi-cn', text: side.count === null ? '—' : side.count.toLocaleString('en-US') }),
+        h('span', { class: 'pi-cbonus' }, bonus),
+        h('div', { class: 'pi-ctm' }, [h('i', { style: 'width:' + side.pct + '%' })]),
+    ]);
+}
+
+function eyeChainLine({ short, side }, first) {
+    const kids = [short + ' '];
+    if (side.state === 'unknown') kids.push('· not read');
+    else {
+        kids.push(h('b', { text: side.count.toLocaleString('en-US') }));
+        if (side.state === 'off') kids.push(' · no chain');
+        else {
+            kids.push(side.state === 'cooldown' ? ' · cooldown ' : ' · ', h('b', { class: side.low ? 'pi-low' : null, 'data-pi-chain-until': String(side.until), text: chainClock(side.leftS) }));
+            if (side.next) kids.push(h('span', { class: 'pi-cto', text: ' · ' + side.next.hits + ' to ' + side.next.at.toLocaleString('en-US') }));
+        }
+    }
+    return h('div', { class: 'pi-eye pi-tag pi-cline', style: '--b:' + (side.low ? '#e8a33d' : '#efebe2'), 'data-pi-chain': side.state }, [h('span', { class: 'pi-edge' }), first ? eyeMk() : null, h('span', { class: 'pi-fig' }, kids)]);
+}
+
+/**
+ * The chain counter (round 8, mockups/round8/torn-eye.html §1, the owner's pick B): its own card above the training
+ * panel. Per chain: whose it is, the time left on the 5:00 timer (amber under a minute), the count and the hits to the
+ * next bonus. `lines` (a narrow margin, the attack page): one thin line a chain. A chain nothing was read about says
+ * so; the clocks move on by eyeChainTick.
+ * @param {{who: string, short: string, side: object, hint?: string}[]} sides - core/eye/chain.js chainSide(), yours first
+ */
+export function eyeChainCard(sides, { lines = false } = {}) {
+    if (lines) return h('div', { id: 'pi-chaincard', class: 'pi-mark pi-eye pi-chain pi-chainlines', 'data-pi-form': 'lines' }, sides.map((x, i) => eyeChainLine(x, i === 0)));
+    const top = h('div', { class: 'pi-top' }, [eyeMk(), h('span', { class: 'pi-lbl', text: sides.length > 1 ? 'Chains' : 'Chain' }), h('span', { class: 'pi-src', text: 'time left of ' + chainClock(CHAIN_TIMER_S) })]);
+    return h('div', { id: 'pi-chaincard', class: 'pi-mark pi-eye pi-card pi-chain pi-fixed', style: '--b:#efebe2', 'data-pi-form': 'card' }, [h('div', { class: 'pi-ribbon' }), top, ...sides.map(eyeChainSide)]);
+}
+
+/**
+ * Move the counter's clocks and timer bars on (once a second). Returns how many chains ran out since the last draw:
+ * the caller draws the counter again then (a chain that broke, a cooldown that ended).
+ */
+export function eyeChainTick(root, now = Date.now()) {
+    if (!root || !root.querySelectorAll) return 0;
+    let over = 0;
+    for (const el of root.querySelectorAll('[data-pi-chain-until]')) {
+        const left = Math.ceil((Number(el.getAttribute('data-pi-chain-until')) - now) / 1000);
+        if (left <= 0) over++;
+        const text = chainClock(left);
+        if (el.textContent !== text) el.textContent = text;
+        const box = el.closest ? el.closest('[data-pi-chain]') : null;
+        if (!box || box.getAttribute('data-pi-chain') !== 'on') continue;
+        const low = left < CHAIN_LOW_S;
+        el.classList.toggle('pi-low', low);
+        const bar = box.querySelector('.pi-ctm i');
+        if (bar) bar.style.width = Math.max(0, Math.min(100, Math.round((100 * left) / CHAIN_TIMER_S))) + '%';
+        if (box.classList.contains('pi-cline')) box.style.setProperty('--b', low ? '#e8a33d' : '#efebe2');
+    }
+    return over;
+}
+
+/** Space between Torn's mini-profile popup and our tag under it. */
+export const MINI_GAP = 4;
+
+/**
+ * Where the mini-profile's tag goes (screen coordinates): just under Torn's popup, as wide as it, inside the window;
+ * above the popup when the window has no room below it. Never over the popup itself.
+ * @param {{left, top, right, bottom, width, height}} p - the popup's rect
+ * @param {number} ht - the tag's height
+ * @returns {{x:number, y:number, width:number, side:'below'|'above'}}
+ */
+export function eyeMiniSpot(p, ht, viewW, viewH, gap = MINI_GAP) {
+    const width = Math.round(Math.max(0, Math.min(p.width, viewW - 4)));
+    const x = Math.round(Math.min(Math.max(2, p.left), viewW - 2 - width));
+    const below = p.bottom + gap;
+    const above = p.top - gap - ht;
+    if (below + ht > viewH - 2 && above >= 2) return { x, y: Math.round(above), width, side: 'above' };
+    return { x, y: Math.round(below), width, side: 'below' };
+}
+
+/** The mini-profile's tag (placed on our layer under the popup: eyeMiniSpot). */
 export function eyeMiniLine(v, { id = null, glow = false } = {}) {
     const band = v ? v.band : 'none';
     const kids = [h('span', { class: 'pi-edge' }), eyeMk(), h('span', { class: 'pi-band', text: eyeBandWord(band) })];

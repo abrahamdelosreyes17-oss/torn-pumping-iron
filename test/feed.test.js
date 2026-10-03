@@ -113,7 +113,7 @@ test('state changes become done steps in the day log', async () => {
     assert.equal(Object.values(hist)[0].dex, 84100);
 });
 
-test('a key without access (Torn error 16) is asked once, then waits for a new key', async () => {
+test('a key without access (Torn error 16) is asked once (with travel, then without), then waits for a new key', async () => {
     let t = 1_790_000_000_000;
     const store = memStore();
     const f = fakeTorn(() => ({ error: { code: 16, error: 'Access level of this key is not high enough' } }));
@@ -121,7 +121,8 @@ test('a key without access (Torn error 16) is asked once, then waits for a new k
     const feed = new StateFeed({ client, store, tabId: 'A', now: () => t });
     await feed.tick();
     await feed.tick();
-    assert.equal(f.calls.length, 1);
+    // The state call carries `travel` since round 7: refused for its access level, it is asked once more without it.
+    assert.equal(f.calls.length, 2);
     assert.equal(store.get('stateError').code, 16);
     assert.equal(store.get('apiKeyDead', false), false, 'not a dead key: it still works for what it can read');
     // 1.0.0 asked again every 3 s heartbeat; now nothing until the key changes.
@@ -131,11 +132,11 @@ test('a key without access (Torn error 16) is asked once, then waits for a new k
     }
     t += STATE_RETRY_MS * 10;
     await feed.tick();
-    assert.equal(f.calls.length, 1, 'nothing more is sent');
+    assert.equal(f.calls.length, 2, 'nothing more is sent');
     // A new key clears the mark (store.setKey does this); the next tick asks again.
     store.del('stateError');
     await feed.tick();
-    assert.equal(f.calls.length, 2);
+    assert.equal(f.calls.length, 3);
 });
 
 test('any other failed state call waits 30 s, and a good answer clears the warning', async () => {

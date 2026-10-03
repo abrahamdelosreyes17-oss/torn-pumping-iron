@@ -9,6 +9,7 @@ import { reply, interactionUser, linkButton, row as actionRow } from './discord.
 import { clock, rel, dur, dayStart, DAY_S, PAGES } from './format.js';
 import { settingsOf, kindsOn, planAge, planStale, muted, parseQuiet } from './settings.js';
 import { KINDS } from './commands.js';
+import { stackingChain, overdosed } from './alerts.js';
 
 export const NOT_LINKED = 'You’re not linked yet. In Pumping Iron: Settings → Discord → **Get a link code**, then type `/link CODE` here.';
 
@@ -96,7 +97,19 @@ function staleNote(user, nowS) {
     return null;
 }
 
+/**
+ * No training steps to tell: stacking for a chain, or overdosed (the synced plan says which). The words Home uses.
+ */
+export function pausedWords(user, nowS) {
+    const plan = parse(user.plan, null);
+    if (overdosed(plan, nowS)) return '**Overdosed · fly to Switzerland.** No training steps until rehab is done; then press Rehab done on Pumping Iron’s Home to recalibrate.';
+    if (stackingChain(plan)) return '**Stacking for a chain:** training is paused, so there are no steps. Press Resume on Pumping Iron’s Home to get them back.';
+    return null;
+}
+
 export async function planCmd(user, i, env, fetchImpl, ctx, nowS) {
+    const paused = pausedWords(user, nowS);
+    if (paused) return reply(paused);
     const all = steps(user).filter((s) => s.at >= nowS - 3600);
     const end = dayStart(nowS) + DAY_S;
     const today = all.filter((s) => s.at < end);
@@ -107,6 +120,8 @@ export async function planCmd(user, i, env, fetchImpl, ctx, nowS) {
 }
 
 export async function nextCmd(user, i, env, fetchImpl, ctx, nowS) {
+    const paused = pausedWords(user, nowS);
+    if (paused) return reply(paused);
     const s = steps(user).find((x) => x.at >= nowS - 60);
     const note = staleNote(user, nowS);
     if (!s) return reply(['No next step in your synced plan.', ...(note ? [note] : [])].join('\n'));

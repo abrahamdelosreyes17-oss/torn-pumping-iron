@@ -35,7 +35,7 @@ export function planColor(ratio) {
  * plan's lines read by time (core/planline.js). Round 7: "you" on a past day
  * is that day's last read, so the plan is read at the same moment (the day's
  * end; today: now); history from before the plan stays on the chart; a pick
- * or a Re-plan starts a new line and the old one stays.
+ * or a Recalibrate starts a new line and the old one stays.
  */
 function seriesFor(m, ctx, range) {
     const hist = ctx.history || {};
@@ -220,7 +220,7 @@ function budgetFacts(m, ctx, s) {
     const perDay = line ? line.cost / days : m.spend ? m.spend.perDay : 0;
     const spent = perDay * dayN;
     return h('div', {}, [
-        sectionHead('Budget', meta([fmtMoney(budget) + ' for ' + days + ' days' + (auto ? ' · Auto, from your income' : '')]), null, 'h3'),
+        sectionHead('Budget', meta([fmtMoney(budget) + ' for ' + days + ' days' + (auto ? ' · Auto, from your books' : '')]), null, 'h3'),
         h('dl', { class: 'facts num' }, [
             h('dt', { text: 'At the plan’s pace' }),
             h('dd', {}, ['about ' + fmtMoney(spent) + ' · day ' + dayN + ' of ' + days, h('div', { class: 'mini' }, [h('i', { style: 'width:' + (budget ? Math.min(100, (100 * spent) / budget) : 0).toFixed(0) + '%;background:var(--muted)' })])]),

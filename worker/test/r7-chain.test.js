@@ -94,3 +94,38 @@ test('a Worker that ignores chain: the payload alone holds back the energy-full 
     assert.ok(!kinds(dueAlerts(tornState({ drug: 3600, energy: 150 }), old, T0)).includes('energy'));
     assert.ok(!kinds(dueAlerts(tornState({ drug: 3600 }), old, LATE)).includes('refill'));
 });
+
+/*
+ * Overdosed (the owner, 2026-10-03): the userscript's one overdose state, synced as plan.overdose {at, until} with no
+ * steps. "Overdosed · fly to Switzerland" once, and no energy or training pings until it is over.
+ */
+test('overdosed: one "Overdosed · fly to Switzerland" ping, no energy, refill, jump or step pings', async () => {
+    const { overdosed, LINKS } = await import('../src/alerts.js');
+    const OD = { type: 'jump', noRefill: true, steps: [], overdose: { at: T0 - 600, until: T0 + 23 * 3600 } };
+    assert.ok(overdosed(OD, T0));
+    assert.ok(!overdosed(OD, T0 + 24 * 3600), 'over with the cooldown it started');
+    assert.ok(!overdosed(PLAN, T0));
+    // A full bar, late in the Torn day with the refill unused: only the overdose is told.
+    const a = dueAlerts(tornState({ drug: 23 * 3600, energy: 150 }), OD, LATE);
+    assert.deepEqual(kinds(a), ['overdose']);
+    assert.equal(a[0].id, 'overdose:' + (T0 - 600), 'once per overdose');
+    assert.equal(a[0].title, 'Overdosed · fly to Switzerland');
+    assert.match(a[0].text, /No training steps until rehab is done/);
+    assert.equal(a[0].link, LINKS.travel);
+    // Steps synced with the flag are ignored too.
+    assert.deepEqual(kinds(dueAlerts(tornState({ drug: 23 * 3600 }), { ...JUMPS, overdose: OD.overdose }, T0)), ['overdose']);
+    // Drug pings switched off: nothing.
+    assert.deepEqual(dueAlerts(tornState({ drug: 23 * 3600 }), OD, T0, { drug: false }), []);
+    // Its cooldown over: the plan is a plain one again.
+    assert.deepEqual(kinds(dueAlerts(tornState({ drug: 3600, energy: 150 }), { ...PLAN, overdose: { at: T0 - 25 * 3600, until: T0 - 3600 } }, T0)), ['energy']);
+});
+
+test('/next and /plan say why there are no steps: stacking for a chain, or overdosed', async () => {
+    const { pausedWords } = await import('../src/cmd-core.js');
+    const nowS = 1790000000;
+    assert.match(pausedWords({ plan: JSON.stringify({ type: 'jump', noRefill: true, steps: [], chain: { since: nowS - 600 } }) }, nowS), /^\*\*Stacking for a chain:\*\* training is paused/);
+    assert.match(pausedWords({ plan: JSON.stringify({ type: 'jump', noRefill: true, steps: [], overdose: { at: nowS - 600, until: nowS + 80000 } }) }, nowS), /^\*\*Overdosed · fly to Switzerland\.\*\*/);
+    assert.equal(pausedWords({ plan: JSON.stringify({ type: 'jump', steps: [], overdose: { at: nowS - 90000, until: nowS - 10 } }) }, nowS), null, 'an overdose whose cooldown has run out');
+    assert.equal(pausedWords({ plan: JSON.stringify({ type: 'steady', steps: [{ at: nowS + 60, kind: 'xanax', label: 'Take Xanax #1' }] }) }, nowS), null);
+    assert.equal(pausedWords({ plan: null }, nowS), null);
+});

@@ -63,6 +63,12 @@ export const K = {
     // Stacking energy for a chain (round 7, Home's "I'm stacking"): {since: ms} while on, absent while training.
     // GM, so every tab (the webpage, Torn's pages) and the bot's sync see it at once.
     stacking: 'stackingChain',
+    // An overdose seen on your bars (core/gympage.js nextOverdose): {at, until, ended?}. GM, so the webpage, Torn's
+    // pages and the bot's sync all say the same thing (it was Torn's pages only, and Home went on with "Train DEX × 6").
+    overdose: 'overdose',
+    // The plan's own recalibration, once a Torn day (round 8): the last try {day, at, ok (null while it runs), error}.
+    // GM, so two open tabs of the webpage do not both run it.
+    autoRecal: 'autoRecal',
 };
 
 /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */
@@ -78,7 +84,7 @@ export const DEFAULT_SETTINGS = {
     gymMarks: true,
     marketMarks: true,
     eyeChips: true,
-    // Animations (round 7: the Re-plan bar's light, the action of the moment); off = the still version.
+    // Animations (round 7: the Recalibrate bar's light, the action of the moment); off = the still version.
     motion: true,
     budget: 150000000,
     horizonDays: 30,
@@ -129,10 +135,16 @@ export function setPlan(plan) {
     return plan;
 }
 
-/** Stacking energy for a chain: {since: ms} while on, null while training. */
-export function getStacking() {
+/**
+ * Chain mode ends by itself after this long (round 8; it had no end: a forgotten "I'm stacking" kept the steps, the
+ * bot's pings and the daily recalibration off for good). Three days is longer than a chain.
+ */
+export const STACKING_MAX_MS = 3 * 24 * 60 * 60 * 1000;
+
+/** Stacking energy for a chain: {since: ms} while on, null while training (or once it is older than STACKING_MAX_MS). */
+export function getStacking(now = Date.now()) {
     const v = gmGet(K.stacking, null);
-    return v && Number(v.since) > 0 ? { since: Number(v.since) } : null;
+    return v && Number(v.since) > 0 && now - Number(v.since) < STACKING_MAX_MS ? { since: Number(v.since) } : null;
 }
 
 /** "I'm stacking" (on: kept from the first press) and Resume (off: the key goes). */
@@ -141,7 +153,7 @@ export function setStacking(on, now = Date.now()) {
         gmDel(K.stacking);
         return null;
     }
-    const v = getStacking() || { since: now };
+    const v = getStacking(now) || { since: now };
     gmSet(K.stacking, v);
     return v;
 }
@@ -269,7 +281,7 @@ export function dropOldKeys() {
 /** What "Your data" in Settings can clear, by group. */
 export const DATA_GROUPS = {
     keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker, K.fullKey, K.fullKeyState, K.moneyLog],
-    plan: [K.plan, K.recheck, K.gymSession, K.planNow, 'savedPlanFull', K.stacking],
+    plan: [K.plan, K.recheck, K.gymSession, K.planNow, 'savedPlanFull', K.stacking, K.overdose],
     progress: [K.statsHistory, K.dayLog, K.dayTotals, K.planLine, K.receipts, K.gymLog],
     learning: ['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions],
     prices: [K.priceHistory, K.prices],

@@ -5,9 +5,9 @@
  *   - Create plan: 1, 3, 6 or 12 months from today, worked out from scratch
  *     from your stats, income, prices and gyms now;
  *   - Recalibrate (only on a click): re-reads everything as it is now and
- *     re-plans the time left, keeping the end date (2 months into a year,
+ *     recalibrates the time left, keeping the end date (2 months into a year,
  *     still 10 months left).
- * Nothing re-plans by itself. Everything else (today's steps and their
+ * Nothing recalibrates by itself. Everything else (today's steps and their
  * timing, the booster cooldown, links, gym marks, Buy, Progress, the Discord
  * pings) follows the saved plan with the same logic as before.
  *
@@ -22,6 +22,7 @@
 import { DAY, tornDayStart } from './bars.js';
 import { STATS } from './gain.js';
 import { statCurveAt, dayEndMs } from './planline.js';
+import { fmtMoney, fmtShort } from './format.js';
 
 /** The lengths Create plan offers, in months (owner: 1 / 3 / 6 / 12). */
 export const PLAN_MONTHS = [1, 3, 6, 12];
@@ -67,7 +68,7 @@ export function planProgress(saved, now) {
 export function slimResult(r) {
     if (!r) return null;
     const out = { id: r.id, gained: r.gained, cost: r.cost, used: r.used || {}, perStat: r.perStat || {}, energyTrained: r.energyTrained || 0 };
-    for (const k of ['candy', 'refill', 'refillGain', 'refillCost', 'specialHelps', 'specialGain', 'booster', 'blocked', 'xanaxPerDay']) if (r[k] !== undefined) out[k] = r[k];
+    for (const k of ['candy', 'refill', 'refillGain', 'refillCost', 'specialHelps', 'specialGain', 'booster', 'blocked', 'xanaxPerDay', 'cash', 'costParts', 'overdoseLost']) if (r[k] !== undefined) out[k] = r[k];
     return out;
 }
 
@@ -88,7 +89,7 @@ export function monthlyOf(r, { start, days, stats, anchor = start }) {
     let from = start;
     let d0 = 0;
     for (let i = 1; d0 < days; i++) {
-        // Month ends count from the plan's first day (`anchor`), so a re-plan mid-month keeps the plan's own months.
+        // Month ends count from the plan's first day (`anchor`), so a recalibrate mid-month keeps the plan's own months.
         if (addMonths(anchor, i) <= start) continue;
         const to = Math.min(addMonths(anchor, i), start + days * DAY);
         const d1 = Math.min(days, Math.round((to - start) / DAY));
@@ -145,9 +146,9 @@ export function snapshotOf({ state, pc, statics = {}, plan = {}, prices = {}, in
  * @param {object[]} [o.jobWhatIf] - company what-ifs
  * @param {object|null} [o.prev] - the plan this one recalibrates (its start, end, history are kept)
  * @param {object|null} [o.year] - core/year.js yearSteps' value: the path followed (a plan per segment, re-picked
- *   every 30 days and for each event), gyms opening, the events, the band
+ *   every 10 days and for each event), gyms opening, the events, the band
  */
-export function makeSavedPlan({ compare, rec, snapshot, start, end, months, days, budget, whatIf = null, jobWhatIf = [], prev = null, year = null, gymWorth = [], extras = 'done', now }) {
+export function makeSavedPlan({ compare, rec, snapshot, start, end, months, days, budget, whatIf = null, jobWhatIf = [], prev = null, year = null, gymWorth = [], extras = 'done', auto = false, now }) {
     const from = prev ? tornDayStart(now) : start;
     const best = compare && rec && rec.recommended ? compare[rec.recommended] : null;
     const history = prev ? (prev.history || []).slice(-(HISTORY_KEEP - 1)) : [];
@@ -165,6 +166,8 @@ export function makeSavedPlan({ compare, rec, snapshot, start, end, months, days
         rev: now,
         createdAt: prev ? prev.createdAt : now,
         recalibratedAt: prev ? now : null,
+        // Who asked for the last recalibration: you (the button), or the plan itself (once a day, round 8).
+        recalibratedBy: prev ? (auto ? 'auto' : 'you') : null,
         start: prev ? prev.start : start,
         end: prev ? prev.end : end,
         months: prev ? prev.months : months,
@@ -209,6 +212,7 @@ export function planNowOf(saved, warn = {}) {
         rev: saved.rev,
         createdAt: saved.createdAt,
         recalibratedAt: saved.recalibratedAt,
+        recalibratedBy: saved.recalibratedBy || null,
         start: saved.start,
         end: saved.end,
         months: saved.months,
@@ -219,14 +223,134 @@ export function planNowOf(saved, warn = {}) {
         pickBy: saved.rec ? saved.rec.pickBy : null,
         warn,
         slim,
-        // Which plan the path follows when (a switch on its date is following the saved plan, not re-planning).
+        // Which plan the path follows when (a switch on its date is following the saved plan, not recalibrating).
         // When the what-ifs were added to the whole plan (other tabs read it again then).
         extrasAt: saved.extrasAt || null,
-        schedule: saved.year ? saved.year.segments.map((s) => ({ from: s.from, to: s.to, strategy: s.strategy, candy: s.candy || null, ...(Number.isFinite(s.xanaxPerDay) ? { xanaxPerDay: s.xanaxPerDay } : {}) })) : null,
+        schedule: saved.year ? scheduleOf(saved.year.segments) : null,
     };
+}
+
+/**
+ * The path as Torn's pages follow it: which plan from when to when, with its candy and Xanax a day. Stretches in a
+ * row that follow the same plan the same way are one entry (round 8: a stretch a week would be 52 entries a year, and
+ * this part is handed to every Torn page).
+ */
+export function scheduleOf(segments) {
+    const out = [];
+    for (const s of segments || []) {
+        const e = { from: s.from, to: s.to, strategy: s.strategy, candy: s.candy || null, ...(Number.isFinite(s.xanaxPerDay) ? { xanaxPerDay: s.xanaxPerDay } : {}) };
+        const last = out[out.length - 1];
+        const same = last && last.to === e.from && last.strategy === e.strategy && last.xanaxPerDay === e.xanaxPerDay && JSON.stringify(last.candy) === JSON.stringify(e.candy);
+        if (same) last.to = e.to;
+        else out.push(e);
+    }
+    return out;
 }
 
 /** A stored planNow this build can follow (else: no plan yet). */
 export function usablePlanNow(p) {
     return p && p.v === SAVED_PLAN_V && p.slim && Number.isFinite(p.end) && p.recommended ? p : null;
+}
+
+/**
+ * The path's stretches as the Plan page lists them (round 8, mockup A: the path is the recommendation): stretches
+ * that follow the same plan in a row are one, their days, gain and cost added.
+ * @param {object[]} segments - the saved plan's `year.segments`
+ * @returns {Array<{from, to, days, strategy, gained, cost, candy, refill, xanax: number[], joined: number[]}>}
+ *   xanax: the Xanax a day of a small-budget stretch (each value once); joined: specialist gyms joined at its start
+ */
+export function pathStretches(segments) {
+    const out = [];
+    for (const s of segments || []) {
+        if (!s) continue;
+        const last = out[out.length - 1];
+        const xan = Number.isFinite(s.xanaxPerDay) ? s.xanaxPerDay : null;
+        if (last && last.strategy === s.strategy) {
+            last.to = s.to;
+            last.days += s.days;
+            last.gained += s.gained;
+            last.cost += s.cost;
+            if (xan !== null && !last.xanax.includes(xan)) last.xanax.push(xan);
+            last.joined.push(...(s.joined || []));
+        } else out.push({ from: s.from, to: s.to, days: s.days, strategy: s.strategy, gained: s.gained, cost: s.cost, candy: s.candy || null, refill: s.refill, xanax: xan === null ? [] : [xan], joined: [...(s.joined || [])] });
+    }
+    return out;
+}
+
+/**
+ * The plans a month follows, in order: the ones that take `minDays` or more of it (none does: the one with the
+ * most days). Empty for a month the path does not reach.
+ * @param {object[]} stretches - pathStretches()
+ */
+export function monthPlans(stretches, from, to, minDays = 5) {
+    const parts = [];
+    for (const s of stretches || []) {
+        const days = (Math.min(to, s.to) - Math.max(from, s.from)) / DAY;
+        if (days > 0) parts.push({ strategy: s.strategy, days });
+    }
+    const long = parts.filter((x) => x.days >= minDays);
+    const list = long.length ? long : parts.length ? [parts.reduce((a, b) => (b.days > a.days ? b : a))] : [];
+    return list.map((x) => x.strategy).filter((id, i, all) => i === 0 || all[i - 1] !== id);
+}
+
+/**
+ * Why the path is the recommendation, from its numbers: against the money and against the best single plan over
+ * the same days. `wins` is false when one plan the whole way gains more (the page then says so, not "wins").
+ * @param {object} o
+ * @param {{gained:number, cost:number}} o.path
+ * @param {number|null} o.budget - the money for these days (null: none)
+ * @param {string} o.pickBy - the Plan rule
+ * @param {{gained:number, cost:number}|null} o.single - the comparison's pick, one plan the whole way
+ * @param {string} o.singleName
+ * @returns {{wins:boolean, text:string}}
+ */
+export function pathWhy({ path, budget = null, pickBy = 'most', single = null, singleName = '' }) {
+    const limit = Number.isFinite(budget) && pickBy !== 'max' ? budget : null;
+    const mine = '+' + fmtShort(path.gained) + ' for ' + fmtMoney(path.cost);
+    const over = limit !== null && path.cost > limit ? ' It ends ' + fmtMoney(path.cost - limit) + ' over that: a gym’s fee near the end.' : '';
+    const head = (pickBy === 'value' ? 'the best value, stretch by stretch' : 'the most stats') + (limit !== null ? ' inside your ' + fmtMoney(limit) : '') + ': ' + mine + '.' + over;
+    if (!single) return { wins: true, text: head };
+    const theirs = '+' + fmtShort(single.gained) + ' for ' + fmtMoney(single.cost);
+    if (single.gained > path.gained && (limit === null || single.cost <= limit)) return { wins: false, text: 'The path: ' + mine + '. ' + singleName + ' the whole way gains more, ' + theirs + ': you can follow it below.' };
+    const inside = limit === null || single.cost <= limit;
+    return { wins: true, text: head + ' ' + (inside ? 'The best single plan' + (limit !== null ? ' inside it' : '') + ', ' + singleName + ', gains ' + theirs + '.' : 'No single plan fits it; the closest, ' + singleName + ', gains ' + theirs + '.') };
+}
+
+/** The daily recalibration waits this long after Torn's reset (the day's first reads and prices come in). */
+export const AUTO_RECAL_AFTER_MS = 2 * 60 * 1000;
+/** A run that failed is tried again this much later, not every minute. */
+export const AUTO_RECAL_RETRY_MS = 30 * 60 * 1000;
+/** The stats read it starts from must be this fresh. */
+export const AUTO_RECAL_STATE_MS = 10 * 60 * 1000;
+
+/**
+ * Is the plan's own recalibration due (round 8; the accountant: "recalibrate once per day, at Torn's reset; keep
+ * the button")? Once a Torn day, from two minutes after the reset, or the first moment after that the app is open.
+ * A plan made or recalibrated today (by you or by itself) is done for the day.
+ * @param {object} o
+ * @param {object|null} o.planNow - the saved plan's small part ({rev, start, end, createdAt, recalibratedAt})
+ * @param {object} o.settings - {autoRecalibrate}: off only when set to false
+ * @param {object|null} [o.last] - the last try {day, at, ok}
+ * @param {number|null} [o.stateAt] - when your stats were last read
+ * @param {boolean} [o.busy] - a plan is being worked out
+ * @param {boolean} [o.stacking] - chain mode: Resume recalibrates
+ * @param {boolean} [o.overdose] - "Rehab done" recalibrates
+ * @param {number} o.now
+ * @returns {{due:boolean, why:string}}
+ */
+export function autoRecalibrateDue({ planNow, settings, last = null, stateAt = null, busy = false, stacking = false, overdose = false, now }) {
+    const no = (why) => ({ due: false, why });
+    if (settings && settings.autoRecalibrate === false) return no('off');
+    if (!planNow || !Number.isFinite(planNow.end)) return no('no plan');
+    if (now >= planNow.end) return no('ended');
+    const today = tornDayStart(now);
+    if (Math.max(planNow.createdAt || 0, planNow.recalibratedAt || 0, planNow.rev || 0) >= today) return no('done today');
+    if (now - today < AUTO_RECAL_AFTER_MS) return no('just after the reset');
+    if (busy) return no('busy');
+    if (stacking) return no('stacking');
+    if (overdose) return no('overdose');
+    if (last && last.day === today && last.ok === false && now - last.at < AUTO_RECAL_RETRY_MS) return no('tried');
+    if (last && last.day === today && last.ok === null && now - last.at < AUTO_RECAL_RETRY_MS) return no('another tab');
+    if (!Number.isFinite(stateAt) || now - stateAt > AUTO_RECAL_STATE_MS) return no('waiting for a read');
+    return { due: true, why: 'due' };
 }

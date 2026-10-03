@@ -5,10 +5,10 @@
  * What was wrong: the line was read by Torn day against "you" at the day's
  * last read, so it was a day off (a player doing exactly what the plan said
  * read 151% of plan); a pick re-based the whole line to the plan's first
- * day; Re-plan wiped it.
+ * day; Recalibrate wiped it.
  *
  * Now a line is read by time. It starts at the moment it was made (Create
- * plan, Re-plan, a pick, back to the saved plan) from your stats at that
+ * plan, Recalibrate, a pick, back to the saved plan) from your stats at that
  * moment, and a new one never erases the ones before it: the old line ends
  * where the new one starts. The simulator's result gives the shape: `daily`
  * (the gain by the end of each of its days: Torn days, the first from its start to Torn's midnight), `quart` (when in each of
@@ -21,8 +21,13 @@ import { STATS } from './gain.js';
 
 export const PLAN_LINE_V = 2;
 
-/** Lines kept (the last few picks and re-plans). */
+/** Lines kept (the last few picks and recalibrates). */
 export const PLAN_LINES_KEPT = 12;
+/**
+ * Lines kept when the plan recalibrates by itself once a day (round 8): a line a day, each cut down to the days it
+ * was the plan, so two months of them are kept.
+ */
+export const PLAN_AUTO_LINES_KEPT = 60;
 
 /**
  * "N% of plan" is shown once the line is this old and has planned anything. In its first hours a session done a
@@ -127,7 +132,7 @@ export function statLineFrom(perDay, step = 1) {
  * @param {object} o.stats - your stats at `at`
  * @param {object} o.result - the plan's result ({daily, quart, statLine, perStat, cost})
  * @param {string} o.strategy - its id ('path' for the saved path)
- * @param {string} o.why - 'create' | 'replan' | 'pick' | 'path'
+ * @param {string} o.why - 'create' | 'replan' | 'auto' (a recalibration that ran by itself) | 'pick' | 'path'
  */
 export function makeLine({ at, t0 = at, stats, result, strategy, build = null, why = 'create' }) {
     const off = curveAt(result, at - t0);
@@ -154,6 +159,13 @@ export function makeLine({ at, t0 = at, stats, result, strategy, build = null, w
     };
 }
 
+/** A line cut to the days it was the plan: until `endAt`, and a day more. Its numbers inside those days do not change. */
+export function cutLine(line, endAt) {
+    const n = gridAt(line.dayMin, Math.max(0, endAt - line.t0)).i + 2;
+    if (!Array.isArray(line.daily) || line.daily.length <= n) return line;
+    return { ...line, daily: line.daily.slice(0, n), quart: Array.isArray(line.quart) ? line.quart.slice(0, QUART * n) : line.quart };
+}
+
 /** The stored lines (also what 1.3.0 stored: one line from a Torn day's start), oldest first. */
 export function readLines(store) {
     if (!store) return [];
@@ -167,7 +179,10 @@ export function readLines(store) {
 /** The lines with a new one added: it ends the one before it; lines that began at or after it are replaced. */
 export function addLine(store, line) {
     const lines = readLines(store).filter((l) => l.at < line.at);
-    return { v: PLAN_LINE_V, lines: [...lines, line].slice(-PLAN_LINES_KEPT) };
+    // A line that has ended keeps only the days it was the plan (a year's line would be a year of numbers, every day).
+    const ended = lines.map((l, i) => cutLine(l, i + 1 < lines.length ? lines[i + 1].at : line.at));
+    const autos = [...ended, line].filter((l) => l.why === 'auto').length;
+    return { v: PLAN_LINE_V, lines: [...ended, line].slice(-(autos ? PLAN_AUTO_LINES_KEPT : PLAN_LINES_KEPT)) };
 }
 
 /** The line that is the plan at `t` (null before the first). */
@@ -225,11 +240,17 @@ export function plannedBetween(lines, t1, t2) {
  * it began, and the share. `pct` is null until the plan has planned anything.
  */
 export function progressOf(lines, t, total) {
-    const line = lineAt(lines, t);
-    if (!line) return null;
-    const planned = planGain(line, t);
+    const cur = lineAt(lines, t);
+    if (!cur) return null;
+    // A recalibration that ran by itself (once a day) carries on from the line before it: you are measured since
+    // the plan was made, picked or recalibrated by hand, not since this morning.
+    let i = lines.indexOf(cur);
+    while (i > 0 && lines[i].why === 'auto') i--;
+    const line = lines[i];
+    const before = line === cur ? 0 : plannedBetween(lines, line.at, cur.at) || 0;
+    const planned = before + planGain(cur, t);
     const gained = total - line.base;
-    return { line, gained, planned, pct: planned >= MIN_PLANNED_FOR_PCT && t - line.at >= PCT_MIN_AGE_MS ? (100 * gained) / planned : null, whole: Math.max(0, (line.daily.length ? line.daily[line.daily.length - 1] : 0) - line.off) };
+    return { line, gained, planned, pct: planned >= MIN_PLANNED_FOR_PCT && t - line.at >= PCT_MIN_AGE_MS ? (100 * gained) / planned : null, whole: before + Math.max(0, (cur.daily.length ? cur.daily[cur.daily.length - 1] : 0) - cur.off) };
 }
 
 const sumStats = (o) => STATS.reduce((a, k) => a + (Number(o && o[k]) || 0), 0);

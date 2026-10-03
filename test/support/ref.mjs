@@ -1,6 +1,6 @@
 /*
  * Round 7's reference players and a way to drive the real runtime in node
- * (Create plan, Re-plan, the model) with a clock we set. The baseline
+ * (Create plan, Recalibrate, the model) with a clock we set. The baseline
  * (test/baseline.mjs) and the round's tests share it, so they all stand on
  * the same three players at the same moment.
  */

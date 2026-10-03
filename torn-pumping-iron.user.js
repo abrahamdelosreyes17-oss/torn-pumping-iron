@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Pumping Iron
 // @namespace    torn-pumping-iron
-// @version      1.4.1
+// @version      1.5.0
 // @description  Gym planner and fight scout for Torn: what to take, what to train, what to buy, who you can beat. Reads the API and the page you're on; never acts for you.
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
@@ -48,8 +48,8 @@
 (function () {
     'use strict';
 
-    const PI_BUILD_VERSION = '1.4.1';
-    const PI_BUILD_HASH = 'd91f97491f66';
+    const PI_BUILD_VERSION = '1.5.0';
+    const PI_BUILD_HASH = '6f65175f2c2e';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -353,6 +353,14 @@
     const MUNSTER = 530;
     const RED_COW = 532;
     const TAURINE = 533;
+    // The other six energy drinks (round 8; Torn's items list, docs/reference/torn-items-dump-2024.json): the three
+    // small ones and the three Christmas ones, which give what Munster, Red Cow and Taurine Elite give.
+    const SANTA_SHOOTERS = 553;
+    const ROCKSTAR_RUDOLPH = 554;
+    const X_MASS = 555;
+    const GOOSE_JUICE = 985;
+    const DAMP_VALLEY = 986;
+    const CROCOZADE = 987;
     const BOOK_GHOGH = 757;
     const BOOK_BLISS = 770;
 
@@ -404,6 +412,12 @@
         [MUNSTER]: { id: MUNSTER, name: 'Can of Munster', kind: 'booster', category: 'Energy Drink', energy: 20, boosterH: 2 },
         [RED_COW]: { id: RED_COW, name: 'Can of Red Cow', kind: 'booster', category: 'Energy Drink', energy: 25, boosterH: 2 },
         [TAURINE]: { id: TAURINE, name: 'Can of Taurine Elite', kind: 'booster', category: 'Energy Drink', energy: 30, boosterH: 2 },
+        [SANTA_SHOOTERS]: { id: SANTA_SHOOTERS, name: 'Can of Santa Shooters', kind: 'booster', category: 'Energy Drink', energy: 20, boosterH: 2 },
+        [ROCKSTAR_RUDOLPH]: { id: ROCKSTAR_RUDOLPH, name: 'Can of Rockstar Rudolph', kind: 'booster', category: 'Energy Drink', energy: 25, boosterH: 2 },
+        [X_MASS]: { id: X_MASS, name: 'Can of X-MASS', kind: 'booster', category: 'Energy Drink', energy: 30, boosterH: 2 },
+        [GOOSE_JUICE]: { id: GOOSE_JUICE, name: 'Can of Goose Juice', kind: 'booster', category: 'Energy Drink', energy: 5, boosterH: 2 },
+        [DAMP_VALLEY]: { id: DAMP_VALLEY, name: 'Can of Damp Valley', kind: 'booster', category: 'Energy Drink', energy: 10, boosterH: 2 },
+        [CROCOZADE]: { id: CROCOZADE, name: 'Can of Crocozade', kind: 'booster', category: 'Energy Drink', energy: 15, boosterH: 2 },
     };
 
     function candy(id, name, happy, short = null) {
@@ -1050,12 +1064,107 @@
         return a;
     }
 
+    /* ===== src/core/eye/chain.js ===== */
+    /*
+     * The chain counter (round 8, mockups/round8/torn-eye.html §1, the owner's pick B): for each faction's chain the
+     * count, the time left on the 5:00 chain timer and the hits to the next bonus. Yours comes from Torn's own bars (the
+     * sidebar on Torn's pages, the bars read on the webpage); the enemy's from one read of their chain by the Torn Eye
+     * tab. Pure: no page, no request. A side nothing was read about is 'unknown', never a made-up figure.
+     */
+
+    /** Torn's chain bonuses: the hit that carries each one. */
+    const CHAIN_BONUSES = [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000];
+
+    /** The chain timer: every hit sets it back to this (seconds). */
+    const CHAIN_TIMER_S = 300;
+
+    /** Under this much left the timer turns amber. */
+    const CHAIN_LOW_S = 60;
+
+    /** A read of the enemy's chain is believed this long (hits since are not known): then that side says "not read". */
+    const CHAIN_FRESH_MS = 2 * 60 * 1000;
+
+    /**
+     * The next bonus above a count and the hits to it; null past the last bonus. `max` is Torn's own next mark (the
+     * sidebar's "247/250"), used when it is above the count.
+     * @returns {{at: number, hits: number}|null}
+     */
+    function chainNext(count, max = null) {
+        const n = Math.max(0, Math.floor(Number(count) || 0));
+        const at = Number(max) > n ? Number(max) : CHAIN_BONUSES.find((b) => b > n);
+        return at ? { at, hits: at - n } : null;
+    }
+
+    /** "3:42", "0:48"; over an hour (a cooldown) "1:05:00". */
+    function chainClock(s) {
+        const t = Math.max(0, Math.ceil(Number(s) || 0));
+        const m = Math.floor((t % 3600) / 60);
+        const ss = String(t % 60).padStart(2, '0');
+        return t >= 3600 ? Math.floor(t / 3600) + ':' + String(m).padStart(2, '0') + ':' + ss : m + ':' + ss;
+    }
+
+    /**
+     * A chain as Torn's API gives it ({current, max, timeout: seconds until it breaks, cooldown: when a cooldown ends},
+     * from /user bars or /faction/{id}/chain), read at `at` (ms).
+     * @returns {{current, max, until, cooldownUntil, at}|null} until, cooldownUntil: ms, 0 when none
+     */
+    function chainFromApi(c, at = Date.now()) {
+        if (!c || typeof c !== 'object') return null;
+        const timeout = Math.max(0, Number(c.timeout) || 0);
+        const cool = Number(c.cooldown) || 0;
+        return { current: Math.max(0, Number(c.current) || 0), max: Number(c.max) || 0, until: timeout > 0 ? at + timeout * 1000 : 0, cooldownUntil: cool * 1000 > at ? cool * 1000 : 0, at };
+    }
+
+    /**
+     * Torn's sidebar chain bar as text ("247/250" and "03:42") [check live: the bar's markup follows the energy bar's].
+     * @returns {{current, max, until, cooldownUntil, at}|null}
+     */
+    function chainFromBar(valueText, timeText, at = Date.now()) {
+        const m = String(valueText || '').replace(/,/g, '').match(/(\d+)\s*\/\s*(\d+)/);
+        if (!m) return null;
+        const t = String(timeText || '').match(/(?:(\d+):)?(\d{1,2}):(\d{2})/);
+        const left = t ? (Number(t[1]) || 0) * 3600 + Number(t[2]) * 60 + Number(t[3]) : 0;
+        // The chain timer never shows more than 5:00: a longer clock on the bar is the cooldown after a chain.
+        const cooling = left > CHAIN_TIMER_S;
+        return { current: Number(m[1]), max: Number(m[2]), until: left > 0 && !cooling ? at + left * 1000 : 0, cooldownUntil: cooling ? at + left * 1000 : 0, at };
+    }
+
+    /**
+     * One side of the counter as it shows now.
+     * @param {object|null} raw - chainFromApi() / chainFromBar(); null: nothing read
+     * @returns {{state: 'on'|'cooldown'|'off'|'unknown', count: number|null, leftS: number, low: boolean, pct: number, next: {at, hits}|null, until: number}}
+     *   on: a chain with time left; cooldown: `leftS` is what is left of it; off: no chain running; pct: the timer's bar
+     */
+    function chainSide(raw, now = Date.now()) {
+        if (!raw) return { state: 'unknown', count: null, leftS: 0, low: false, pct: 0, next: null, until: 0 };
+        const count = Math.max(0, Number(raw.current) || 0);
+        if (Number(raw.cooldownUntil) > now) return { state: 'cooldown', count, leftS: Math.ceil((raw.cooldownUntil - now) / 1000), low: false, pct: 0, next: null, until: raw.cooldownUntil };
+        const leftS = Number(raw.until) > now ? Math.ceil((raw.until - now) / 1000) : 0;
+        if (!(count > 0) || !(leftS > 0)) return { state: 'off', count: 0, leftS: 0, low: false, pct: 0, next: null, until: 0 };
+        return { state: 'on', count, leftS, low: leftS < CHAIN_LOW_S, pct: Math.max(0, Math.min(100, Math.round((100 * leftS) / CHAIN_TIMER_S))), next: chainNext(count, raw.max), until: raw.until };
+    }
+
+    /** The line under a side's count: "3 hits to the 250 bonus", "No chain running", "On cooldown", "Not read yet". */
+    function chainBonusText(side) {
+        if (side.state === 'unknown') return 'Not read yet';
+        if (side.state === 'cooldown') return 'On cooldown';
+        if (side.state === 'off') return 'No chain running';
+        return side.next ? side.next.hits + ' hit' + (side.next.hits === 1 ? '' : 's') + ' to the ' + side.next.at.toLocaleString('en-US') + ' bonus' : 'Past the last bonus';
+    }
+
+    /** The enemy's chain as shared by the Torn Eye tab ({at, fid, name, current, max, until, cooldownUntil}): null once it is old. */
+    function sharedChain(rec, now = Date.now()) {
+        if (!rec || !(Number(rec.at) > 0) || !(now - rec.at < CHAIN_FRESH_MS)) return null;
+        return rec;
+    }
+
     /* ===== src/core/bars.js ===== */
     /*
      * Energy, happy, cooldowns, refill and Torn time. Pure: every function takes
      * the time it is asked about. Torn time is UTC; a Torn day starts at 00:00
      * UTC. See ENGINE-SPEC §3 and research-api-shapes.md §1 for the bar fields.
      */
+
 
 
 
@@ -1146,7 +1255,28 @@
             statMods,
             gymId: a.gym && a.gym.id ? Number(a.gym.id) : null,
             gymName: a.gym && a.gym.name ? String(a.gym.name) : null,
+            // Where you are: {destination, left (ms of flight), arriveAt (ms)}; null when Torn was not asked (an old read).
+            travel: travelState(a.travel, at),
+            // Your faction's chain as the bars give it (round 8, the chain counter): {current, max, until, cooldownUntil, at}; null: none read.
+            chain: chainFromApi(bars.chain, at),
         };
+    }
+
+    function travelState(t, at) {
+        if (!t || typeof t !== 'object') return null;
+        const left = Math.max(0, Number(t.time_left) || 0) * 1000;
+        return { destination: String(t.destination || 'Torn'), left, arriveAt: left > 0 ? (Number(t.arrival_at) > 0 ? Number(t.arrival_at) * 1000 : at + left) : null };
+    }
+
+    /**
+     * Away from the gym (the one shared state, like stacking and the overdose): in the air, or standing abroad.
+     * @param {object|null} travel - normalizeState().travel
+     * @returns {{flying:boolean, where:string, until:number|null}|null} null in Torn (or when Torn was not asked)
+     */
+    function awayOf(travel, now) {
+        if (!travel) return null;
+        if (travel.left > 0 && travel.arriveAt > now) return { flying: true, where: travel.destination, until: travel.arriveAt };
+        return travel.destination && travel.destination !== 'Torn' ? { flying: false, where: travel.destination, until: null } : null;
     }
 
     /** Is this a donator/subscriber's energy bar (5 per 10 min)? */
@@ -1632,6 +1762,12 @@
         // Stacking energy for a chain (round 7, Home's "I'm stacking"): {since: ms} while on, absent while training.
         // GM, so every tab (the webpage, Torn's pages) and the bot's sync see it at once.
         stacking: 'stackingChain',
+        // An overdose seen on your bars (core/gympage.js nextOverdose): {at, until, ended?}. GM, so the webpage, Torn's
+        // pages and the bot's sync all say the same thing (it was Torn's pages only, and Home went on with "Train DEX × 6").
+        overdose: 'overdose',
+        // The plan's own recalibration, once a Torn day (round 8): the last try {day, at, ok (null while it runs), error}.
+        // GM, so two open tabs of the webpage do not both run it.
+        autoRecal: 'autoRecal',
     };
 
     /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */
@@ -1647,7 +1783,7 @@
         gymMarks: true,
         marketMarks: true,
         eyeChips: true,
-        // Animations (round 7: the Re-plan bar's light, the action of the moment); off = the still version.
+        // Animations (round 7: the Recalibrate bar's light, the action of the moment); off = the still version.
         motion: true,
         budget: 150000000,
         horizonDays: 30,
@@ -1698,10 +1834,16 @@
         return plan;
     }
 
-    /** Stacking energy for a chain: {since: ms} while on, null while training. */
-    function getStacking() {
+    /**
+     * Chain mode ends by itself after this long (round 8; it had no end: a forgotten "I'm stacking" kept the steps, the
+     * bot's pings and the daily recalibration off for good). Three days is longer than a chain.
+     */
+    const STACKING_MAX_MS = 3 * 24 * 60 * 60 * 1000;
+
+    /** Stacking energy for a chain: {since: ms} while on, null while training (or once it is older than STACKING_MAX_MS). */
+    function getStacking(now = Date.now()) {
         const v = gmGet(K.stacking, null);
-        return v && Number(v.since) > 0 ? { since: Number(v.since) } : null;
+        return v && Number(v.since) > 0 && now - Number(v.since) < STACKING_MAX_MS ? { since: Number(v.since) } : null;
     }
 
     /** "I'm stacking" (on: kept from the first press) and Resume (off: the key goes). */
@@ -1710,7 +1852,7 @@
             gmDel(K.stacking);
             return null;
         }
-        const v = getStacking() || { since: now };
+        const v = getStacking(now) || { since: now };
         gmSet(K.stacking, v);
         return v;
     }
@@ -1838,7 +1980,7 @@
     /** What "Your data" in Settings can clear, by group. */
     const DATA_GROUPS = {
         keys: [K.apiKey, K.apiKeyDead, K.keyInfo, K.ffsKey, K.ffsState, K.tsKey, K.worker, K.fullKey, K.fullKeyState, K.moneyLog],
-        plan: [K.plan, K.recheck, K.gymSession, K.planNow, 'savedPlanFull', K.stacking],
+        plan: [K.plan, K.recheck, K.gymSession, K.planNow, 'savedPlanFull', K.stacking, K.overdose],
         progress: [K.statsHistory, K.dayLog, K.dayTotals, K.planLine, K.receipts, K.gymLog],
         learning: ['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions],
         prices: [K.priceHistory, K.prices],
@@ -3366,6 +3508,117 @@
         return { days: out, reachedDay, statsAfter: s, catchUp };
     }
 
+    /* ===== src/core/rehab.js ===== */
+    /*
+     * Rehab and overdoses in a plan's cost (round 8; docs/REHAB-PLAN.md §3, the
+     * owner's yes on 2026-10-03). Pure.
+     *
+     * A Xanax adds 35 addiction points and an Ecstasy 20, less the faction's
+     * Toleration cut; 20 points fade every night; what is left is paid off in
+     * Switzerland, a session at a time. An overdose is priced as what it is
+     * expected to cost: its chance per drug taken, times its 100 points of
+     * addiction and the training it stops. The rule prices the habit; it never
+     * tells the player when to rehab, and the day's steps do not change.
+     *
+     * Sources: docs/research-addiction-rehab.md and the owner's drug log (129
+     * days, 3 rehabs, 3 overdoses in 95 Xanax). [verify] marks a single source.
+     */
+
+    /** A rehab session's price before the faction's Excursion cut. */
+    const REHAB_PRICE = 250000;
+    /** Addiction points: per Xanax, per Ecstasy, per overdose [verify: one source], and what fades each night. */
+    const ADDICTION = { xanax: 35, ecstasy: 20, overdose: 100, decay: 20 };
+    /** The chance one drug taken is an overdose: Xanax 2 to 3% (his log: 3.2%), Ecstasy 4 to 6% [verify: forum only]. */
+    const OVERDOSE_CHANCE = { xanax: 0.03, ecstasy: 0.05 };
+
+    /** Points one session removes: 250,000 ÷ (2,857 + 12.85 × lifetime rehabs): 87 for a new player, fewer with every rehab. */
+    function sessionPoints(lifetimeRehabs = 0) {
+        return REHAB_PRICE / (2857 + 12.85 * Math.max(0, Number(lifetimeRehabs) || 0));
+    }
+
+    /** The first "N%" in a perk line that speaks of `word`, as a share (0 to 1); 0 when there is none. */
+    function perkCut(perks, word) {
+        let best = 0;
+        for (const list of Object.values(perks && typeof perks === 'object' ? perks : {})) {
+            for (const line of Array.isArray(list) ? list : []) {
+                if (typeof line !== 'string' || !word.test(line)) continue;
+                const m = line.match(/(\d+(?:\.\d+)?)\s*%/);
+                if (m) best = Math.max(best, Math.min(100, Number(m[1])) / 100);
+            }
+        }
+        return best;
+    }
+
+    /**
+     * What rehab costs this player, from what the app reads (never asked).
+     * @param {object} o
+     * @param {object|null} [o.perks] - /v2/user/perks: Toleration ("Reduces addiction gain by X%", "…risk of overdose
+     *   by X%"), Excursion ("Reduces rehabilitation costs by X%"), the Nightclub's cut of the overdose risk
+     * @param {object|null} [o.drugs] - /v2/user/personalstats?cat=drugs, slimmed: {rehabs}
+     * @returns {{price:number, perSession:number, perPoint:number, keep:number, xanaxChance:number, ecstasyChance:number, rehabs:number|null, rough:boolean}}
+     *   `rough`: lifetime rehabs not read yet, so a session is priced as a new player's (the least it can cost)
+     */
+    function rehabParams({ perks = null, drugs = null } = {}) {
+        const rehabs = drugs && Number.isFinite(Number(drugs.rehabs)) ? Number(drugs.rehabs) : null;
+        const keep = 1 - Math.min(0.5, perkCut(perks, /addiction/i));
+        const odCut = Math.min(0.9, perkCut(perks, /overdos/i));
+        const price = REHAB_PRICE * (1 - Math.min(0.2, perkCut(perks, /rehab/i)));
+        const perSession = sessionPoints(rehabs || 0);
+        return { price, perSession, perPoint: price / perSession, keep, xanaxChance: OVERDOSE_CHANCE.xanax * (1 - odCut), ecstasyChance: OVERDOSE_CHANCE.ecstasy * (1 - odCut), rehabs, rough: rehabs === null };
+    }
+
+    const rehabMedian = (list) => {
+        if (!list.length) return 0;
+        const s = [...list].sort((a, b) => a - b);
+        const mid = Math.floor(s.length / 2);
+        return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+    };
+
+    /**
+     * The rule on a plan's own days (bursts count: four Xanax in a day are not the month's average).
+     * @param {object} o
+     * @param {number[]} o.xanDaily - Xanax taken on each day
+     * @param {number[]} o.ecsDaily - Ecstasy taken on each day
+     * @param {number[]} o.gainDaily - stats gained on each day
+     * @param {object} p - rehabParams()
+     * @returns {{rehab:number, overdose:number, costDaily:number[], lost:number, factor:number}}
+     *   `rehab`: sessions to pay off what the nights do not fade; `overdose`: the expected addiction of overdoses, as
+     *   sessions; `lost`: stats an overdose is expected to stop (a Xanax's: a day of the plan; an Ecstasy's: the jump's
+     *   gain over a plain day); `factor`: what is left of the plan's gain, 0 to 1
+     */
+    function rehabOf({ xanDaily = [], ecsDaily = [], gainDaily = [] }, p) {
+        const n = Math.max(xanDaily.length, ecsDaily.length, gainDaily.length);
+        const total = gainDaily.reduce((a, v) => a + (v || 0), 0);
+        const avg = n ? total / n : 0;
+        // A plain day: one without Ecstasy (the jump's own gain is what is over it).
+        const plain = rehabMedian(gainDaily.filter((_, d) => !(ecsDaily[d] > 0)));
+        const costDaily = [];
+        let rehab = 0;
+        let overdose = 0;
+        let lost = 0;
+        for (let d = 0; d < n; d++) {
+            const x = xanDaily[d] || 0;
+            const e = ecsDaily[d] || 0;
+            const points = Math.max(0, (x * ADDICTION.xanax + e * ADDICTION.ecstasy) * p.keep - ADDICTION.decay);
+            const ods = x * p.xanaxChance + e * p.ecstasyChance;
+            const r = points * p.perPoint;
+            const o = ods * ADDICTION.overdose * p.keep * p.perPoint;
+            rehab += r;
+            overdose += o;
+            costDaily.push(r + o);
+            lost += x * p.xanaxChance * avg + e * p.ecstasyChance * Math.max(0, (gainDaily[d] || 0) - plain);
+        }
+        lost = Math.min(total, lost);
+        return { rehab, overdose, costDaily, lost, factor: total > 0 ? 1 - lost / total : 1 };
+    }
+
+    /** "Rehab about $185k a day · overdoses about $20k a day", or null when the plan takes no drugs. */
+    function rehabWords(parts, days, fmt) {
+        if (!parts || !(parts.rehab + parts.overdose > 0) || !(days > 0)) return null;
+        const a = parts.rough ? 'at least ' : 'about ';
+        return 'Rehab ' + a + fmt(Math.round(parts.rehab / days)) + ' a day · overdoses ' + a + fmt(Math.round(parts.overdose / days)) + ' a day';
+    }
+
     /* ===== src/core/strategies.js ===== */
     /*
      * The training strategies as event simulators over N days, in 5-minute
@@ -3376,6 +3629,7 @@
      * train in between goes through one trainer (one stat, or greedy toward a
      * build's shares), so strategies compare like for like.
      */
+
 
 
 
@@ -3546,6 +3800,7 @@
      *   those days the gain lands (three minutes a day: a quarter, half and three quarters of the day's gain reached), so a jump
      *   reads as a step and steady training as a slope; `statLine` is each stat's own line ({step (days), days, str: [],
      *   spd, def, dex}: the gain by the end of every `step` days, the last entry at `days`).
+     *   `costDaily`: what the plan pays on each of those days (not a running total; it adds up to `cost`).
      * Refills (points or special) set energy to the maximum, never above it: anything over is wasted (O2, owner).
      */
     function simulateStrategy(id, o) {
@@ -3663,6 +3918,18 @@
         }
         const consoleHappy = CONSOLE_HAPPY_EACH * (id === 'consoleJumpToy' || o.toyShop5 ? 2 : 1);
         const daily = [];
+        // What each of those days costs (the cash check, cashflow.js): a jump buys in lumps, steady training evenly.
+        const costDaily = [];
+        let costSeen = 0;
+        // The drugs taken on each of those days (rehab and overdoses are priced on the plan's own days, core/rehab.js).
+        const xanDaily = [];
+        const ecsDaily = [];
+        const closeCost = () => {
+            costDaily.push(Math.round(cost - costSeen));
+            costSeen += costDaily[costDaily.length - 1];
+            xanDaily.push((used[XANAX] || 0) - xanDaily.reduce((a, v) => a + v, 0));
+            ecsDaily.push((used[ECSTASY] || 0) - ecsDaily.reduce((a, v) => a + v, 0));
+        };
         const start = totalOf(S);
         const trace = typeof o.trace === 'function' ? o.trace : null;
         let curT = 0;
@@ -3882,6 +4149,7 @@
             if (day !== lastDay) {
                 lastDay = day;
                 daily.push(Math.round(totalOf(S) - start));
+                closeCost();
                 closeDay();
                 if (day % statStep === 0) statMark();
             }
@@ -4038,6 +4306,7 @@
             }
         }
         daily.push(Math.round(totalOf(S) - start));
+        closeCost();
         if (gainSum !== gainSeen) {
             const lastT = Math.ceil(endMin / STEP_MIN) * STEP_MIN - STEP_MIN;
             dayMarks.push(lastT - dayStartT(dayOf(lastT)), gainSum - dayBase);
@@ -4047,7 +4316,21 @@
         const perStat = {};
         for (const k of STATS) perStat[k] = Math.round(S[k] - o.stats[k]);
         // `dayMin`: the plan line (planline.js) reads `daily`, `quart` and `statLine` on this day grid.
-        const out = { id, gained: Math.round(totalOf(S) - start), perStat, cost: Math.round(cost), energyTrained: trainedE, daily, used, quart, statLine, dayMin };
+        const out = { id, gained: Math.round(totalOf(S) - start), perStat, cost: Math.round(cost), energyTrained: trainedE, daily, costDaily, used, quart, statLine, dayMin };
+        // Where the run ends (round 8): the bars and cooldowns a stretch that follows it starts from (core/year.js).
+        out.end = { energy: E, happy: H, drugCdMin: Math.max(0, drugFree - endMin), boosterCdMin: Math.max(0, boosterFree - endMin) };
+        // Engine rule (round 8, docs/REHAB-PLAN.md §3): a plan’s cost has a rehab part (the sessions that pay off what the
+        // nights do not fade) and an overdose part (its expected addiction, as sessions), on the days the drugs are
+        // taken. With `o.rehab` (core/rehab.js rehabParams) only.
+        if (o.rehab) {
+            const rh = rehabOf({ xanDaily, ecsDaily, gainDaily: daily.map((v, i) => v - (i ? daily[i - 1] : 0)) }, o.rehab);
+            out.costDaily = costDaily.map((v, i) => Math.round(v + (rh.costDaily[i] || 0)));
+            out.cost = out.costDaily.reduce((a, v) => a + v, 0);
+            out.costParts = { rehab: Math.round(rh.rehab), overdose: Math.round(rh.overdose), rough: Boolean(o.rehab.rough) };
+            // The training an overdose is expected to stop is said, never taken off the plan's line: the line is what
+            // following the plan gives, and a player who follows it must read 100% (review 4.4).
+            if (rh.lost > 0) out.overdoseLost = Math.round(rh.lost);
+        }
         if (unlocked.length) out.unlocked = unlocked;
         return out;
     }
@@ -4219,6 +4502,12 @@
     function fmtInt(n) {
         const v = Math.round(Number(n) || 0);
         return (v < 0 ? '−' : '') + Math.abs(v).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    }
+
+    /** Money to the dollar, never shortened (the books): "$2,757,839,400", "−$136,043" */
+    function fmtDollars(n) {
+        const v = Math.round(Number(n) || 0);
+        return (v < 0 ? '−$' : '$') + fmtInt(Math.abs(v));
     }
 
     /** Signed: "+1,420", "−300" */
@@ -4414,6 +4703,18 @@
      */
     const MID_BOOST_SHARE = 0.25;
     const MID_BOOST_MIN = 300;
+
+    /**
+     * How far above its maximum happy must be for the boosters to count as eaten: the share of the boost above, at
+     * least MID_BOOST_MIN, but never more than half the boost itself. A small candy boost (Candy Kisses x 4 = +200)
+     * never reached the 300 floor: the gym page stayed on "eat first" and the day plan planned the candy a second time.
+     * Half of it is still more than a Xanax's +75 for any boost over 150. One rule for the day plan and the gym page.
+     */
+    function boostEatenOver(boostHappy) {
+        const b = Math.max(0, Number(boostHappy) || 0);
+        const over = Math.max(MID_BOOST_MIN, MID_BOOST_SHARE * b);
+        return b > 0 ? Math.min(over, b / 2) : over;
+    }
 
     /**
      * A boost or jump as its actions in order (round 7, D.1), each with what proves it done from Torn's bars:
@@ -4679,10 +4980,16 @@
         const candyId = ctx.candyId && ITEMS[ctx.candyId] ? ctx.candyId : CANDY_KISSES;
         const candyQty = () => ctx.candyCount || boostersThatFit(candyId, capH, 0, cdMult);
         // A candy boost of `qty`, from what you hold first: the happy, the items, the words and the note.
-        const candyBoost = (qty) => {
+        // Fewer than planned: the note says the cooldown at that time against the cap, and what one candy adds (the owner,
+        // 2026-10-03: "Candy × 22" while his booster cooldown read 13h 05m, and the note didn't say why 22).
+        const candyBoost = (qty, at = now) => {
             const f = fillPool(qty, candyId);
             const planned = candyQty();
-            const notes = [heldWords(f), qty < planned ? 'the booster cooldown has room for ' + qty + ' of ' + planned : null, tierWords(candyId) || null].filter(Boolean);
+            // Rounded up, so the words' own arithmetic gives the same count (13h 00m 20s reads 13h 01m: 22, not 23).
+            const leftMin = Math.ceil(Math.max(0, boosterAt - at) / MIN);
+            const eachMin = Math.round(boosterHours(candyId, cdMult) * 60);
+            const room = qty < planned ? 'booster cooldown ' + Math.floor(leftMin / 60) + 'h ' + String(leftMin % 60).padStart(2, '0') + 'm of ' + capH + 'h: room for ' + qty + ' of ' + planned + ' (' + eachMin + ' min each)' : null;
+            const notes = [heldWords(f), room, tierWords(candyId) || null].filter(Boolean);
             return { f, happy: f.value * candyMult, items: f.alloc.map((a) => ({ id: a.id, qty: a.qty })), words: fillWords(f, candyId), note: notes.join(' · ') };
         };
         // Job points banked where the player works: happy specials spent in the boosted session.
@@ -4722,6 +5029,15 @@
             if (s === 'chocoJump' || s === 'dailyChoco' || s === 'candyXanax') return candy;
             return (ctx.edvdCount || 5) * ITEMS[EDVD].happy * (ctx.adultNovelties10 || s === 'edvdJumpAN' ? 2 : 1);
         };
+        // The same boosters by name, for a step found under way (round 8: once eaten they keep their name, "EDVD × 5",
+        // where the list said "Boosters"). A jump waits for room for its whole load, so the count is the plan's; a daily
+        // candy boost can be smaller (the room under the cooldown that day), so it has the name alone.
+        const boostName = () => {
+            if (isConsole) return 'Game Console + ' + itemName(candyId) + ' × ' + candyQty();
+            if (s === 'chocoJump') return itemName(candyId) + ' × ' + candyQty();
+            if (s === 'dailyChoco' || s === 'candyXanax') return itemName(candyId);
+            return 'EDVD × ' + (ctx.edvdCount || (s === 'happy99k' ? boostersThatFit(EDVD, capH) : 5));
+        };
         let midDone = false;
 
         // A new Torn day: its refill (today's, if unused, goes in before midnight), Xanax count, boost and share.
@@ -4748,7 +5064,7 @@
         // train; all before the next quarter tick, which resets the happy. Before, the plan was worked out again from the
         // bars as if nothing had started: after 5 EDVD it said the jump was in 30 hours (the booster cooldown it had just
         // filled), and after the day's candy it planned a plain Xanax and a second candy boost.
-        if (boostPlan && H >= happyMax + Math.max(MID_BOOST_MIN, MID_BOOST_SHARE * boostHappy())) {
+        if (boostPlan && H >= happyMax + boostEatenOver(boostHappy())) {
             const tick = nextQuarterTick(now);
             const keep = Math.max(0, Math.min(E, ctx.keepEnergy || 0));
             const drugName = s === 'candyXanax' ? 'Xanax' : 'Ecstasy';
@@ -4769,7 +5085,7 @@
             if (canTrain || refillLeft) {
                 const label = takes ? (s === 'candyXanax' ? 'Xanax #' + xanN++ : 'Ecstasy') + (drugSoon ? ' at ' + clockOf(at) : ' now') + ', then train it all' : 'Train it all now';
                 const note = (takes ? 'The boosters are in' : 'Your happy is boosted') + ': finish before the ' + clockOf(tick) + ' tick, when the happy resets';
-                const acts = boostActions({ eat: 'the boosters', eaten: true, drug: drugName, drugDone: !takes, refill: refillLeft });
+                const acts = boostActions({ eat: boostName(), eaten: true, drug: drugName, drugDone: !takes, refill: refillLeft });
                 if (canTrain) train(at, isJump ? 'jump' : 'boost', label, takes ? [{ id: s === 'candyXanax' ? XANAX : ECSTASY, qty: 1 }] : [], { strict: true, warnAt: now, tick, deadline: tick, mid: true, actions: acts.list, actionNow: acts.now, note });
                 if (refillLeft) {
                     refill(at + MIN, canTrain ? {} : { strict: true, warnAt: now, tick, deadline: tick, mid: true, note });
@@ -4866,7 +5182,7 @@
                     const uses = Math.min(CONSOLE_USES, Math.floor(E / CONSOLE_ENERGY_EACH));
                     const each = CONSOLE_HAPPY_EACH * (s === 'consoleJumpToy' || ctx.toyShop5 ? 2 : 1);
                     E -= uses * CONSOLE_ENERGY_EACH;
-                    const c = candyBoost(qty);
+                    const c = candyBoost(qty, at);
                     H += uses * each + c.happy;
                     items = [{ id: CONSOLE_ITEM, qty: 0, uses }, ...c.items];
                     if (!ctx.consoleOwned) items.push({ id: CONSOLE_ITEM, qty: 1 });
@@ -4874,7 +5190,7 @@
                     note += '; the Xanax cooldown must be clear for the Ecstasy' + (ctx.consoleOwned ? '' : '; buy a Game Console first');
                     if (c.note) note += '; ' + c.note;
                 } else if (s === 'chocoJump') {
-                    const c = candyBoost(qty);
+                    const c = candyBoost(qty, at);
                     H += c.happy;
                     items = c.items;
                     label = c.words + ' + Ecstasy, then train it all';
@@ -4921,7 +5237,7 @@
                 rollDay(at);
                 advance(at);
                 const qty = Math.min(candyQty(), fitsAt(candyId, at));
-                const c = qty > 0 ? candyBoost(qty) : { happy: 0, items: [], words: '', note: candyRoomWords() };
+                const c = qty > 0 ? candyBoost(qty, at) : { happy: 0, items: [], words: '', note: candyRoomWords() };
                 const jp = jobPoints();
                 H = Math.min(HAPPY_CAP, (H + c.happy + jp.happy) * ITEMS[ECSTASY].happyMult);
                 if (qty > 0) addBooster(candyId, qty, at);
@@ -4996,7 +5312,7 @@
                     E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
                     H += ITEMS[XANAX].happy;
                     const qty = Math.min(candyQty(), fits);
-                    const c = candyBoost(qty);
+                    const c = candyBoost(qty, at);
                     const jp = jobPoints();
                     H = Math.min(HAPPY_CAP, H + c.happy + jp.happy);
                     addBooster(candyId, qty, at);
@@ -5629,7 +5945,7 @@
      * The problem log (round 7; the pattern is Torn Trading's core/errlog.js).
      * Every tab adds what went wrong (a script error, a read that failed, a
      * plan that couldn't be worked out) and what you did just before (Create
-     * plan, Re-plan, a plan picked), plus how long each plan took. Kept 7 days,
+     * plan, Recalibrate, a plan picked), plus how long each plan took. Kept 7 days,
      * LOG_MAX lines at most. Settings › Report a problem puts it in the zip, so
      * a bug is found from what happened, not by guessing. No key (masked before
      * it is stored), no player id or name. Pure.
@@ -5675,6 +5991,265 @@
         return (list || []).map((e) => t(e.at) + '  ' + (e.kind === 'error' ? 'ERROR ' : e.kind === 'action' ? 'did   ' : 'note  ') + '[' + (e.where || '?') + '] ' + e.what + (e.detail ? ' - ' + e.detail : '') + (e.times > 1 ? ' (x' + e.times + ', last ' + t(e.lastAt) + ')' : '')).join('\n') + '\n';
     }
 
+    /* ===== src/core/ledger.js ===== */
+    /*
+     * The ledger (round 7, R7.5; ROUND7-PLAN §C): your money as books, not
+     * guesses. Every line of Torn's log once (by its log id), sorted into an
+     * account by Torn's log type id, never by words in its title. Pure.
+     *
+     * Cash basis: a line's amount is what it did to your wallet, signed. A type
+     * the table does not know goes to "Not sorted" and is shown, never guessed.
+     * The table was written from real log lines (the field names per type are
+     * shown in Settings › Developer and in the report zip); a type nobody has
+     * shown yet is not in it.
+     *
+     * Round 8, the accountant's answers (docs/LEDGER-ANSWERS.txt): a line is
+     * sorted by what it is, never by its size. Recurring income comes back by
+     * its nature; a gift, a trade payment, an auction or a sale of points is
+     * non-recurring whatever its size; the casino, being mugged and what others
+     * pay into your faction balance are outside your control and stand apart.
+     */
+
+
+
+    /** Property upkeep: a cost that runs every day, whenever it is paid (cashflow.js keeps cash back for the days not paid yet). */
+    const LEDGER_UPKEEP = 5920;
+
+    /**
+     * The accounts, in the statement's order. `kind`: income (recurring: what a plan may count on), spend (what you
+     * pay out), apart (shown, never in a daily figure), balance (money that only changed place), none (not sorted).
+     */
+    const LEDGER_ACCOUNTS = [
+        { id: 'recurring', name: 'Recurring income', kind: 'income', what: 'pay, stock benefits, crimes, bounties, mugs' },
+        { id: 'committed', name: 'Committed costs', kind: 'spend', what: 'property upkeep, education' },
+        { id: 'training', name: 'Gym', kind: 'spend', what: 'gym items bought, rehab' },
+        { id: 'chosen', name: 'Other spending', kind: 'spend', what: 'items bought that are not for the gym' },
+        { id: 'uncontrollable', name: 'Uncontrollable gains and losses', kind: 'apart', what: 'the casino, being mugged, what others pay into your faction balance' },
+        { id: 'nonrecurring', name: 'Non-recurring', kind: 'apart', what: 'gifts, money sent, trades, auctions, points sold, a gain or loss on stocks sold' },
+        { id: 'transfers', name: 'Transfers', kind: 'balance', what: 'the bank, stocks bought and sold, the faction vault, your vault' },
+        { id: 'unsorted', name: 'Not sorted', kind: 'none', what: 'log types the table does not know yet' },
+    ];
+
+    const ledgerNum = (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : 0;
+    };
+    /** An amount read from named fields of a line's data: `fields` says which (the report names them, never a value). */
+    const ledgerAmount = (fields, read) => Object.assign(read, { fields });
+    const ledgerField = (k) => ledgerAmount([k], (d) => ledgerNum(d[k]));
+
+    /**
+     * Torn's log type id → how it is booked.
+     *   amount(data): the money, positive (a roulette win is its payout less the stake, so it can be negative)
+     *   sign: +1 into your wallet, −1 out of it
+     *   internal: wallet ↔ vault, your liquid money is unchanged (left out of the reconciliation's flow)
+     *   items(data): the item ids a purchase is about (gym items go to Gym)
+     *   gain(data): the part of the amount that is a realised gain or loss (a stock sale's profit): booked as
+     *     non-recurring, the rest stays in the line's own account
+     */
+    const LEDGER_TYPES = {
+        6221: { title: 'Company employee pay', account: 'recurring', sign: 1, amount: ledgerField('pay') },
+        5531: { title: 'Stock special money', account: 'recurring', sign: 1, amount: ledgerField('money') },
+        9015: { title: 'Crime success money gain', account: 'recurring', sign: 1, amount: ledgerField('money_gained') },
+        8155: { title: 'Attack mug', account: 'recurring', sign: 1, amount: ledgerField('money_mugged') },
+        6710: { title: 'Bounty claim', account: 'recurring', sign: 1, amount: ledgerField('bounty_reward') },
+        5920: { title: 'Property upkeep', account: 'committed', sign: -1, amount: ledgerField('upkeep_paid') },
+        5960: { title: 'Education start', account: 'committed', sign: -1, amount: ledgerField('cost') },
+        6005: { title: 'Rehab', account: 'training', sign: -1, amount: ledgerField('cost') },
+        1112: { title: 'Item market buy', account: 'chosen', sign: -1, amount: ledgerField('cost_total'), items: (d) => (Array.isArray(d.items) ? d.items.map((x) => x && x.id) : []) },
+        1225: { title: 'Bazaar buy', account: 'chosen', sign: -1, amount: ledgerField('cost_total'), items: (d) => (Array.isArray(d.items) ? d.items.map((x) => x && x.id) : []) },
+        4201: { title: 'Item abroad buy', account: 'chosen', sign: -1, amount: ledgerField('cost_total'), items: (d) => [d.item] },
+        // One line per spin: the payout holds the winning stake, the whole bet left the wallet.
+        8305: { title: 'Casino roulette win', account: 'uncontrollable', sign: 1, amount: ledgerAmount(['won_amount', 'bet_amount'], (d) => ledgerNum(d.won_amount) - ledgerNum(d.bet_amount)) },
+        8301: { title: 'Casino slots lose', account: 'uncontrollable', sign: -1, amount: ledgerField('bet_amount') },
+        8306: { title: 'Casino roulette lose', account: 'uncontrollable', sign: -1, amount: ledgerField('bet_amount') },
+        8350: { title: 'Casino blackjack start', account: 'uncontrollable', sign: -1, amount: ledgerField('bet') },
+        8391: { title: 'Casino russian roulette join', account: 'uncontrollable', sign: -1, amount: ledgerField('bet_amount') },
+        8410: { title: 'Casino poker table join', account: 'uncontrollable', sign: -1, amount: ledgerField('value') },
+        8411: { title: 'Casino poker table leave', account: 'uncontrollable', sign: 1, amount: ledgerField('value') },
+        8156: { title: 'Attack mug receive', account: 'uncontrollable', sign: -1, amount: ledgerField('money_mugged') },
+        4810: { title: 'Money receive', account: 'nonrecurring', sign: 1, amount: ledgerField('money') },
+        4800: { title: 'Money send', account: 'nonrecurring', sign: -1, amount: ledgerField('money') },
+        4440: { title: 'Trade money outgoing', account: 'nonrecurring', sign: -1, amount: ledgerField('money') },
+        5011: { title: 'Points market sell', account: 'nonrecurring', sign: 1, amount: ledgerField('cost_total') },
+        // The whole bid leaves the wallet; what is over the winning price comes back as a cashier's check.
+        4310: { title: 'Auction house item bid', account: 'nonrecurring', sign: -1, amount: ledgerField('bid_price') },
+        5460: { title: 'Cashiers check withdraw', account: 'nonrecurring', sign: 1, amount: ledgerField('amount') },
+        5450: { title: 'Bank invest', account: 'transfers', sign: -1, amount: ledgerField('amount') },
+        5510: { title: 'Stock buy', account: 'transfers', sign: -1, amount: ledgerField('worth') },
+        // `worth` is what reached the wallet (the fee is already off it); `profit` of it is the realised gain or loss.
+        5511: { title: 'Stock sell', account: 'transfers', sign: 1, amount: ledgerField('worth'), gain: ledgerField('profit') },
+        5851: { title: 'Vault withdraw', account: 'transfers', sign: 1, amount: ledgerField('withdrawn'), internal: true },
+        6726: { title: 'Faction deposit money', account: 'transfers', sign: -1, amount: ledgerField('money_deposited') },
+    };
+
+    /** How a log type is booked, in names only: its account, its sign and the fields its amount is read from; null for a type not in the table. */
+    function ledgerBooking(type) {
+        const spec = LEDGER_TYPES[type];
+        return spec ? { account: spec.account, sign: spec.sign, fields: [...spec.amount.fields, ...(spec.gain ? spec.gain.fields : [])] } : null;
+    }
+
+    /**
+     * One raw log line (as fetchMoneyLog keeps it) into a ledger entry.
+     * @param {{id:string, type:number, title:string, at:number, data:object}} line
+     * @param {function} [isGymItem] - (item id) → is it something the gym plan uses
+     */
+    function ledgerEntry(line, isGymItem = null) {
+        const spec = LEDGER_TYPES[line.type];
+        const base = { id: String(line.id), at: line.at, type: line.type, title: (spec && spec.title) || line.title || 'Log type ' + line.type };
+        if (!spec) return { ...base, account: 'unsorted', amount: 0, gain: 0, known: false, internal: false };
+        const data = line.data && typeof line.data === 'object' ? line.data : {};
+        const ids = spec.items ? spec.items(data).filter((x) => x !== undefined && x !== null) : [];
+        const gym = Boolean(isGymItem && ids.length && ids.every((x) => isGymItem(x)));
+        return { ...base, account: gym ? 'training' : spec.account, amount: spec.sign * spec.amount(data), gain: spec.gain ? spec.gain(data) : 0, known: true, internal: Boolean(spec.internal) };
+    }
+
+    /**
+     * A line as the amounts it puts in each account: itself, except a sale with a realised gain or loss, whose gain is
+     * non-recurring and whose cost coming back stays a transfer. The parts always add up to the line's amount.
+     */
+    function ledgerParts(e) {
+        if (!e.gain || e.account === 'nonrecurring') return [{ account: e.account, amount: e.amount, gain: false }];
+        return [
+            { account: e.account, amount: e.amount - e.gain, gain: false },
+            { account: 'nonrecurring', amount: e.gain, gain: true },
+        ];
+    }
+
+    /**
+     * The books over a span of days.
+     * @param {object[]} lines - raw lines ({id, type, title, at (ms), data}); a line listed twice counts once
+     * @param {object} o
+     * @param {number} o.from - ms
+     * @param {number} o.to - ms
+     * @param {function} [o.isGymItem]
+     * @param {object} [o.overrides] - {log id: true|false}: your tick. true: this line is non-recurring, whatever its
+     *   type; false: a line non-recurring by its type counts as usual money (recurring income in, other spending out)
+     * @returns {{from, to, days, entries, accounts, types, oneOffs, unsorted}}
+     */
+    function ledgerOf(lines, { from, to, isGymItem = null, overrides = {} } = {}) {
+        const seen = new Set();
+        const entries = [];
+        for (const l of lines || []) {
+            if (!l || l.id === undefined || l.id === null || !Number.isFinite(l.at)) continue;
+            const key = String(l.id);
+            if (seen.has(key) || l.at < from || l.at > to) continue;
+            seen.add(key);
+            const e = ledgerEntry(l, isGymItem);
+            const tick = overrides ? overrides[e.id] : undefined;
+            if (e.known && (tick === true || tick === false)) {
+                e.ticked = true;
+                if (tick && e.account !== 'nonrecurring') e.account = 'nonrecurring';
+                else if (!tick && e.account === 'nonrecurring') e.account = e.amount >= 0 ? 'recurring' : 'chosen';
+            }
+            e.oneOff = e.account === 'nonrecurring';
+            entries.push(e);
+        }
+        entries.sort((a, b) => b.at - a.at || (a.id < b.id ? -1 : 1));
+        const days = Math.max(1, (to - from) / DAY);
+        const dayOf = (at) => Math.floor((at - from) / DAY);
+
+        const accounts = {};
+        for (const a of LEDGER_ACCOUNTS) accounts[a.id] = { id: a.id, name: a.name, kind: a.kind, n: 0, in: 0, out: 0, net: 0 };
+        const types = new Map();
+        for (const e of entries) {
+            accounts[e.account].n++;
+            for (const p of ledgerParts(e)) {
+                const a = accounts[p.account];
+                const k = e.type + '|' + p.account + (p.gain ? '|gain' : '');
+                const t = types.get(k) || { type: e.type, title: p.gain ? e.title + ': gain or loss' : e.title, account: p.account, gain: p.gain, internal: e.internal, n: 0, days: new Set(), in: 0, out: 0, last: 0 };
+                t.n++;
+                t.days.add(dayOf(e.at));
+                t.last = Math.max(t.last, e.at);
+                if (p.amount >= 0) {
+                    a.in += p.amount;
+                    t.in += p.amount;
+                } else {
+                    a.out -= p.amount;
+                    t.out -= p.amount;
+                }
+                types.set(k, t);
+            }
+        }
+        for (const a of Object.values(accounts)) a.net = a.in - a.out;
+        return {
+            from,
+            to,
+            days,
+            entries,
+            accounts,
+            types: [...types.values()].map((t) => ({ ...t, days: t.days.size })).sort((a, b) => b.in + b.out - (a.in + a.out)),
+            oneOffs: entries.filter((e) => e.oneOff),
+            unsorted: [...types.values()].filter((t) => t.account === 'unsorted').map((t) => ({ type: t.type, title: t.title, n: t.n })),
+        };
+    }
+
+    /**
+     * The books in names and counts, never an amount (the learning-data export and the report zip): per account how
+     * many lines, per log type how it is booked and from which fields, and the types not sorted.
+     * @param {object|null} ledger - ledgerOf()
+     */
+    function ledgerShape(ledger) {
+        if (!ledger) return null;
+        const types = (ledger.types || []).filter((t) => !t.gain).map((t) => {
+            const b = ledgerBooking(t.type);
+            return { type: t.type, title: t.title, account: t.account, sign: b ? (b.sign > 0 ? '+' : '-') : null, fields: b ? b.fields : [], lines: t.n, days: t.days };
+        });
+        types.sort((a, b) => b.lines - a.lines || a.type - b.type);
+        const accounts = LEDGER_ACCOUNTS.map((a) => {
+            const mine = types.filter((t) => t.account === a.id);
+            return { id: a.id, name: a.name, kind: a.kind, lines: mine.reduce((n, t) => n + t.lines, 0), types: mine.length };
+        });
+        return { days: Math.round(ledger.days), lines: (ledger.entries || []).length, accounts, types, unsorted: (ledger.unsorted || []).map((u) => ({ type: u.type, title: u.title, lines: u.n })) };
+    }
+
+    /** A cell for a CSV file: quoted when it holds a comma, a quote or a line break. */
+    const ledgerCsvCell = (v) => {
+        const s = String(v === null || v === undefined ? '' : v);
+        return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+
+    /**
+     * Every line of the books as a CSV file (the Ledger tab's "Download CSV"): when, Torn's log id and type, the
+     * account it was booked in, and the money in or out, to the dollar.
+     * @param {object} ledger - ledgerOf()
+     * @returns {string}
+     */
+    function ledgerCsv(ledger) {
+        const names = Object.fromEntries(LEDGER_ACCOUNTS.map((a) => [a.id, a.name]));
+        const rows = [['When (TCT)', 'Torn log id', 'Log type', 'Log line', 'Account', 'In', 'Out', 'Of it a gain or loss']];
+        for (const e of [...((ledger && ledger.entries) || [])].sort((a, b) => a.at - b.at)) {
+            rows.push([new Date(e.at).toISOString().slice(0, 19).replace('T', ' '), e.id, e.type, e.title, names[e.account] || e.account, e.amount > 0 ? Math.round(e.amount) : '', e.amount < 0 ? Math.round(-e.amount) : '', e.gain ? Math.round(e.gain) : '']);
+        }
+        return rows.map((r) => r.map(ledgerCsvCell).join(',')).join('\r\n') + '\r\n';
+    }
+
+    /**
+     * What we need to teach the table a log type it does not know (the Ledger tab's "Export log"): per log type its
+     * title, how many lines and the names of its data fields, and how the known ones are booked. Never an amount, a
+     * log id or a player.
+     * @param {object} o
+     * @param {object} o.ledger - ledgerOf()
+     * @param {object[]} [o.fields] - the money log by type with its field names (core/report.js logFieldsList)
+     * @returns {string} JSON
+     */
+    function ledgerExportOf({ ledger, fields = [], version = '', now = Date.now() }) {
+        const shape = ledgerShape(ledger);
+        const known = (type) => Boolean(LEDGER_TYPES[type]);
+        return JSON.stringify(
+            {
+                what: 'Pumping Iron ledger log: log types, field names and counts. Never an amount, a log id or a player.',
+                version,
+                at: new Date(now).toISOString(),
+                unsorted: (shape ? shape.unsorted : []).map((u) => ({ ...u, fields: ((fields || []).find((f) => Number(f.type) === Number(u.type)) || {}).fields || [] })),
+                types: (fields || []).map((f) => ({ type: f.type, title: f.title, category: f.category, lines: f.lines, days: f.days, fields: f.fields, sorted: known(f.type) })),
+                ledger: shape,
+            },
+            null,
+            2,
+        );
+    }
+
     /* ===== src/core/report.js ===== */
     /*
      * Settings › Report a problem (round 7; the pattern is Torn Trading's
@@ -5688,18 +6263,20 @@
 
 
 
+
     const REPORT_KIND = 'torn-pumping-iron-report';
 
-    /** The first money-like field of a log line's data (what moneyOf reads), or null. */
-    const MONEY_FIELDS = ['money', 'total_value', 'value', 'cost', 'total_cost', 'price', 'amount', 'worth'];
-
-    function moneyFieldOf(data) {
-        if (!data || typeof data !== 'object') return null;
-        for (const k of MONEY_FIELDS) {
-            const n = Number(data[k]);
-            if (Number.isFinite(n) && n > 0) return k;
-        }
-        return null;
+    /**
+     * The field a log line's amount is booked from, by the ledger's own table (core/ledger.js): its name (two fields
+     * as "won_amount - bet_amount"), "not sorted" for a log type the table does not know, "missing: <field>" when
+     * the line does not carry the field the table reads (Torn's field differs from what the table was written from).
+     */
+    function bookedFieldOf(type, data) {
+        const b = ledgerBooking(type);
+        if (!b) return 'not sorted';
+        const d = data && typeof data === 'object' ? data : {};
+        const missing = b.fields.filter((k) => d[k] === null || d[k] === undefined || d[k] === '' || !Number.isFinite(Number(d[k])));
+        return missing.length ? 'missing: ' + missing.join(', ') : b.fields.join(' - ');
     }
 
     /** What a value is, never the value: "number", "text", "list", or an object's own field names. */
@@ -5718,8 +6295,8 @@
     /**
      * The money log by log type: Torn's title and type id, how many lines on how
      * many days, the names of the `data` fields (never an amount, an id or a
-     * name) and which field was read as the amount (ROUND7-PLAN §3 C.0: the
-     * account table is written from this, not from guesses). A line listed under
+     * name) and which field the ledger books the amount from (`bookedFieldOf`;
+     * ROUND7-PLAN §3 C.0: the account table is written from this, not from guesses). A line listed under
      * two categories counts once.
      * @param {object[]} rows - raw v2 log lines ({id, timestamp, details: {id, title, category}, data})
      * @param {object} [acc] - what earlier pages gave: {types: {}, seen: Set}
@@ -5744,7 +6321,7 @@
                 f.lines++;
                 f.is[logShapeOf(v)] = 1;
             }
-            const m = moneyFieldOf(data) || '(none read)';
+            const m = bookedFieldOf(d.id, data);
             r.amount[m] = (r.amount[m] || 0) + 1;
         }
         return out;
@@ -5797,11 +6374,12 @@
      * @param {object|null} r.saved - the whole saved plan (summarised here)
      * @param {object[]} [r.learning] - the learning export's files (core/learndata.js exportFiles): gym samples, gym log, fights, model
      * @param {object[]|null} [r.moneyFields] - logFieldsList()
+     * @param {object|null} [r.ledger] - core/ledger.js ledgerShape(): your books in names and counts
      * @param {object} [r.statsHistory] - {day: {str, spd, def, dex, total}}
      * @param {object} [r.env] - {userAgent, screen, memoryMB, cores}
      * @returns {Array<{name: string, data: string|Uint8Array}>}
      */
-    function reportFiles({ happened = '', expected = '', shots = [], log = [], state = {}, player = null, saved = null, learning = [], moneyFields = null, statsHistory = null, env = {}, now = Date.now() }) {
+    function reportFiles({ happened = '', expected = '', shots = [], log = [], state = {}, player = null, saved = null, learning = [], moneyFields = null, ledger = null, statsHistory = null, env = {}, now = Date.now() }) {
         const errors = log.filter((e) => e.kind === 'error');
         const safe = (n) => String(n || 'screenshot').replace(/[^\w.-]+/g, '_').slice(0, 60);
         const stamp = new Date(now).toISOString();
@@ -5821,7 +6399,7 @@
             player ? '  stats ' + ['str', 'spd', 'def', 'dex'].map((k) => k.toUpperCase() + ' ' + fmt(player.stats[k] || 0)).join(' · ') + ' · total ' + fmt(reportTotal(player.stats)) : '  stats: not read yet',
             player ? '  happy maximum ' + fmt(player.happyMax || 0) + ' · energy maximum ' + (player.energyMax || '?') + ' · gym ' + (player.gymId || '?') + ' · build ' + (player.build || '?') : null,
             saved ? '  plan: ' + saved.months + (saved.months === 1 ? ' month, ' : ' months, ') + (saved.rec ? saved.rec.recommended : '?') + ' recommended' : '  plan: none saved',
-            (state.runs || []).length ? '  last plan run: ' + state.runs.slice(-1).map((x) => (x.kind === 'replan' ? 'Re-plan' : 'Create plan') + ' ' + (x.months || '?') + (x.months === 1 ? ' month, ' : ' months, ') + (x.ms / 1000).toFixed(1) + ' s' + (x.hiddenMs > 0 ? ' (' + (x.hiddenMs / 1000).toFixed(1) + ' s of it with the tab not in front)' : '') + (x.ok ? '' : ' - ' + (x.error || 'failed')))[0] : null,
+            (state.runs || []).length ? '  last plan run: ' + state.runs.slice(-1).map((x) => (x.kind === 'replan' ? 'Recalibrate' : 'Create plan') + ' ' + (x.months || '?') + (x.months === 1 ? ' month, ' : ' months, ') + (x.ms / 1000).toFixed(1) + ' s' + (x.hiddenMs > 0 ? ' (' + (x.hiddenMs / 1000).toFixed(1) + ' s of it with the tab not in front)' : '') + (x.ok ? '' : ' - ' + (x.error || 'failed')))[0] : null,
             '',
             'ATTACHED',
             shots.length ? shots.map((s, i) => '  screenshots/' + (i + 1) + '-' + safe(s.name)).join('\n') : '  no screenshots',
@@ -5832,6 +6410,7 @@
             '  stats-history.json - your stats at each day\'s last read',
             '  learning/ - your trains from Torn\'s log, the sessions the app saw, fights, what it learned',
             '  money-log-fields.json - your money log by log type: titles and the NAMES of the fields, never an amount',
+            '  ledger.json - your books: how many lines each account and log type holds and the field booked, never an amount' + (ledger ? '' : ' (not read yet)'),
             '',
             'No API key, player id or name is in these files.',
         ].filter((x) => x !== null);
@@ -5844,6 +6423,7 @@
             { name: 'state.json', data: JSON.stringify({ kind: REPORT_KIND, v: 1, exportedAt: stamp, ...state, env }, null, 1) },
             { name: 'stats-history.json', data: JSON.stringify(statsHistory || {}) },
             { name: 'money-log-fields.json', data: JSON.stringify(moneyFields || [], null, 1) },
+            { name: 'ledger.json', data: JSON.stringify(ledger, null, 1) },
         ];
         for (const f of learning || []) files.push({ name: 'learning/' + f.name, data: f.data });
         shots.forEach((s, i) => files.push({ name: 'screenshots/' + (i + 1) + '-' + safe(s.name), data: s.data }));
@@ -5851,7 +6431,7 @@
     }
 
     /** The lines Settings shows before anything is made: what the zip will hold. */
-    function reportIncludes({ shots = 0, log = [], player = null, saved = null, gymLog = 0, moneyTypes = 0 }) {
+    function reportIncludes({ shots = 0, log = [], player = null, saved = null, gymLog = 0, moneyTypes = 0, ledgerLines = 0 }) {
         const errors = log.filter((e) => e.kind === 'error').length;
         return [
             'What you wrote above',
@@ -5861,8 +6441,9 @@
             saved ? 'Your saved plan in short (every plan’s stats and cost)' : 'No saved plan yet',
             gymLog ? 'Your trains from Torn’s log (' + gymLog + ' lines) and what the app learned' : 'What the app learned from your trains',
             moneyTypes ? 'Your money log by type (' + moneyTypes + ' types): titles and field names only, never an amount' : 'Money log fields: none read (needs the Full key)',
+            ledgerLines ? 'Your books by account (' + ledgerLines + ' lines): counts and field names only, never an amount' : null,
             'Version and settings: no API key, no player id or name',
-        ];
+        ].filter(Boolean);
     }
 
     /* ===== src/api/torn.js ===== */
@@ -5883,8 +6464,13 @@
     const TORN_ERROR_ACCESS_LEVEL = 16;
     const TORN_ERROR_INCORRECT_CATEGORY = 21;
 
-    /** The one call Home and the overlay live on, every 30 s while visible (Limited key). */
-    const USER_STATE_SELECTIONS = 'bars,cooldowns,refills,battlestats,gym';
+    /**
+     * The one call Home and the overlay live on, every 30 s while visible (Limited key). `travel` rides along (the
+     * owner's gym page said "Train DEX × 6" while he was flying: Torn was never asked): a custom key without it is
+     * asked for the rest, and the app goes on without knowing where you are.
+     */
+    const USER_STATE_REQUIRED = 'bars,cooldowns,refills,battlestats,gym';
+    const USER_STATE_SELECTIONS = USER_STATE_REQUIRED + ',travel';
 
     /** Inventory categories a gym plan cares about (always sent: no-cat answers 21). Special: the Game Console. */
     const INVENTORY_CATS = ['Drug', 'Booster', 'Candy', 'Energy Drink', 'Special'];
@@ -5898,8 +6484,19 @@
 
     const ids = (list) => [...new Set((Array.isArray(list) ? list : [list]).map((x) => String(x).replace(/\D/g, '')).filter(Boolean))];
 
+    /** Clients whose key answered "access level" to the call with travel: asked without it from then on. */
+    const stateWithoutTravel = new WeakSet();
+
     async function fetchUserState(client) {
-        return client.get('v2/user', { selections: USER_STATE_SELECTIONS });
+        if (!stateWithoutTravel.has(client)) {
+            try {
+                return await client.get('v2/user', { selections: USER_STATE_SELECTIONS });
+            } catch (error) {
+                if (!(error instanceof TornApiError && error.code === TORN_ERROR_ACCESS_LEVEL)) throw error;
+                stateWithoutTravel.add(client);
+            }
+        }
+        return client.get('v2/user', { selections: USER_STATE_REQUIRED });
     }
 
     async function fetchPerks(client) {
@@ -5986,18 +6583,34 @@
         const money = await part(async () => ((await client.get('v2/user/money')) || {}).money || null);
         const cb = money && money.city_bank;
         const userStocks = await part(async () => ((await client.get('v2/user/stocks')) || {}).stocks || []);
-        const tornStocks = userStocks && userStocks.length ? await part(async () => ((await client.get('v2/torn/stocks')) || {}).stocks || []) : [];
+        // Round 8: read whatever you hold, for the investment ideas (the stocks whose benefit pays money, with today's price).
+        const tornStocks = await part(async () => ((await client.get('v2/torn/stocks')) || {}).stocks || []);
         const properties = await part(async () => ((await client.get('v2/user/properties', { filters: 'ownedByUser', limit: 100 })) || {}).properties || []);
         // Every part refused: not "nothing certain", a failed read.
         if (failed >= 3) throw new Error('The income reads all failed.');
-        const slimStocks = (tornStocks || []).filter((s) => (userStocks || []).some((u) => Number(u.id) === Number(s.id))).map((s) => ({ id: s.id, name: s.name, acronym: s.acronym, bonus: s.bonus }));
+        const slimStocks = (tornStocks || []).filter((s) => (userStocks || []).some((u) => Number(u.id) === Number(s.id))).map((s) => ({ id: s.id, name: s.name, acronym: s.acronym, bonus: s.bonus, price: s.market && Number.isFinite(Number(s.market.price)) ? Number(s.market.price) : null }));
         return {
             cityBank: cb ? { amount: cb.amount, profit: cb.profit, duration: cb.duration, until: cb.until, rate: cb.interest_rate } : null,
             userStocks: (userStocks || []).map((u) => ({ id: u.id, shares: u.shares, bonus: u.bonus })),
             tornStocks: slimStocks,
+            moneyStocks: (tornStocks || []).filter((s) => s && s.bonus && /^\s*\$\s?[\d,]+/.test(String(s.bonus.description || ''))).map((s) => ({ id: s.id, name: s.name, acronym: s.acronym, price: s.market && Number.isFinite(Number(s.market.price)) ? Number(s.market.price) : null, bonus: { frequency: s.bonus.frequency, requirement: s.bonus.requirement, description: s.bonus.description } })),
             // Only what the rent needs (the full answer carries every modification and staff).
             properties: (properties || []).filter((p) => p && p.status === 'rented').map((p) => ({ status: p.status, owner: p.owner ? { id: p.owner.id } : null, property: p.property ? { name: p.property.name } : null, cost_per_day: p.cost_per_day, rental_period_remaining: p.rental_period_remaining })),
         };
+    }
+
+    /**
+     * Your drug figures (round 8, docs/REHAB-PLAN.md §4): /v2/user/personalstats?cat=drugs, the main key. What a rehab
+     * session removes depends on the rehabs done in your life; the rest is kept for the learner. Null when Torn's answer
+     * holds no drugs part.
+     */
+    async function fetchDrugStats(client) {
+        const r = await client.get('v2/user/personalstats', { cat: 'drugs' });
+        const d = r && r.personalstats && r.personalstats.drugs;
+        if (!d || typeof d !== 'object') return null;
+        const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
+        const rh = d.rehabilitations && typeof d.rehabilitations === 'object' ? d.rehabilitations : {};
+        return { rehabs: n(rh.amount), rehabFees: n(rh.fees), xanax: n(d.xanax), ecstasy: n(d.ecstasy), overdoses: n(d.overdoses) };
     }
 
     /** Torn's codes for a key that no longer works (the caller stops on these). */
@@ -6132,9 +6745,9 @@
     function missingSelections(info) {
         if (!info || info.level === null || info.level === undefined) return null;
         if (info.level >= ACCESS_LIMITED) return [];
-        if (info.level !== ACCESS_CUSTOM) return USER_STATE_SELECTIONS.split(',');
+        if (info.level !== ACCESS_CUSTOM) return USER_STATE_REQUIRED.split(',');
         const u = (info.selections && info.selections.user) || [];
-        return USER_STATE_SELECTIONS.split(',').filter((s) => !u.includes(s));
+        return USER_STATE_REQUIRED.split(',').filter((s) => !u.includes(s));
     }
 
     /** Is this key enough for the app (Limited or Full, or a custom key with the user state selections)? */
@@ -6171,26 +6784,49 @@
     }
 
     /**
-     * Your money log since a time (Full key only): the categories whose titles
-     * are about money, newest first, as {at, title, category, money} where money
-     * is the entry's main amount (0 when it has none).
+     * Your money log since a time (Full key only; round 7, R7.5): every line of
+     * the given categories once (by its log id: "Money incoming" and "Money
+     * outgoing" overlap with other categories), newest first, as
+     * {id, type (Torn's log type id), title, at (ms), data (as Torn gave it)}.
+     * A full page means more are older: each category is walked back with `to`
+     * until it reaches `from`, at most `pages` calls. `coveredFrom` is the
+     * moment from which every category is complete; `fields` the field names
+     * per type (never a value).
      */
-    async function fetchMoneyLog(client, { from, categories, perCategory = 100 }) {
+    async function fetchMoneyLog(client, { from, categories, perCategory = 100, pages = 6 }) {
         const out = [];
-        // Round 7 (C.0): the log by type, with the names of each type's data fields (never a value).
+        const seen = new Set();
         const fields = logFieldsOf([]);
-        // A category that filled its page covers less than the whole span: only the newest `perCategory` lines came back.
         let coveredFrom = from * 1000;
+        let calls = 0;
         for (const c of categories) {
-            const d = await client.get('v2/user/log', { cat: c.id, from, limit: perCategory });
-            const rows = (d && d.log) || [];
-            logFieldsOf(rows, fields);
-            for (const e of rows) out.push({ at: Number(e.timestamp) * 1000, title: String((e.details && e.details.title) || ''), category: c.title, money: moneyOf(e.data) });
-            if (rows.length >= perCategory) coveredFrom = Math.max(coveredFrom, Math.min(...rows.map((e) => Number(e.timestamp) * 1000)));
+            let to = null;
+            for (let i = 0; i < pages; i++) {
+                const d = await client.get('v2/user/log', { cat: c.id, from, limit: perCategory, ...(to ? { to } : {}) });
+                calls++;
+                const rows = (d && d.log) || [];
+                logFieldsOf(rows, fields);
+                for (const e of rows) {
+                    const id = e && e.id !== undefined && e.id !== null ? String(e.id) : null;
+                    if (!id || seen.has(id)) continue;
+                    seen.add(id);
+                    out.push({ id, type: Number(e.details && e.details.id) || 0, title: String((e.details && e.details.title) || ''), at: Number(e.timestamp) * 1000, data: e.data && typeof e.data === 'object' ? e.data : {} });
+                }
+                const oldest = rows.length ? Math.min(...rows.map((e) => Number(e.timestamp) || Infinity)) : Infinity;
+                // The page was not full, or it reached back far enough: this category is complete.
+                if (rows.length < perCategory || !Number.isFinite(oldest) || oldest <= from) break;
+                // A whole page in one second, or the last page allowed: complete only from the oldest line read.
+                if (oldest === to || i === pages - 1) {
+                    coveredFrom = Math.max(coveredFrom, oldest * 1000);
+                    break;
+                }
+                to = oldest;
+            }
         }
         out.sort((a, b) => b.at - a.at);
         out.coveredFrom = coveredFrom;
         out.fields = logFieldsList(fields);
+        out.calls = calls;
         return out;
     }
 
@@ -6226,16 +6862,6 @@
         return out;
     }
 
-    /** The amount a log entry is about: the first money-like field it carries. */
-    function moneyOf(data) {
-        if (!data || typeof data !== 'object') return 0;
-        for (const k of ['money', 'total_value', 'value', 'cost', 'total_cost', 'price', 'amount', 'worth']) {
-            const n = Number(data[k]);
-            if (Number.isFinite(n) && n > 0) return n;
-        }
-        return 0;
-    }
-
     /**
      * A faction's current wars (Public): {pacts, wars: {ranked, raids, territory}}.
      * Without an id, your own faction's.
@@ -6243,6 +6869,15 @@
     async function fetchFactionWars(client, factionId = null) {
         const d = await client.get(factionId ? 'v2/faction/' + ids(factionId)[0] + '/wars' : 'v2/faction/wars');
         return { pacts: (d && d.pacts) || [], wars: (d && d.wars) || {} };
+    }
+
+    /**
+     * A faction's chain as it is now (Public): {id, current, max, timeout (seconds until it breaks), modifier,
+     * cooldown (when a cooldown ends), start, end}, or null. The chain counter reads the enemy's (round 8).
+     */
+    async function fetchFactionChain(client, factionId) {
+        const d = await client.get('v2/faction/' + ids(factionId)[0] + '/chain');
+        return d && d.chain && typeof d.chain === 'object' ? d.chain : null;
     }
 
     /**
@@ -6387,16 +7022,20 @@
      * @param {object} o - {bands: {id: band}, respect: {id: number}, keep: {id: 0..1}, win: {id: 0..1}, early: Set, nowS}
      * @returns {object[]} rows {m, id, state, band, respect, until}
      */
-    function sortWar(members, { bands = {}, respect = {}, keep = {}, win = {}, early = new Set(), nowS = 0 } = {}) {
+    function sortWar(members, { bands = {}, respect = {}, keep = {}, win = {}, early = new Set(), nowS = 0, termed = false } = {}) {
         const rows = (members || []).map((m) => {
             const id = Number(m.id);
             const state = early.has(id) ? 'early' : memberState(m);
             return { m, id, state, band: bands[id] || 'none', respect: respect[id] || 0, keep: keep[id] || 0, win: win[id] || 0, until: Number(m.status && m.status.until) || 0 };
         });
+        // A termed war (round 8): they med out, so a hospital row keeps its place by band and respect among the ready
+        // ones; the hospital clock does not move it.
+        const up = (r) => r.state === 'okay' || r.state === 'early' || (termed && r.state === 'hospital');
+        const rank = (r) => (termed && up(r) ? STATE_RANK.okay : STATE_RANK[r.state]);
         rows.sort((a, b) => {
-            const s = STATE_RANK[a.state] - STATE_RANK[b.state];
+            const s = rank(a) - rank(b);
             if (s) return s;
-            if (a.state === 'okay' || a.state === 'early') {
+            if (up(a)) {
                 const bd = BAND_ORDER.indexOf(a.band) - BAND_ORDER.indexOf(b.band);
                 if (bd) return bd;
                 // Compared as the row shows them (respect to 2 decimals, HP kept and win in whole percents): unrounded,
@@ -6632,6 +7271,43 @@
         return { band, win: Number.isFinite(e[1]) ? e[1] : null, keep: Number.isFinite(e[2]) ? e[2] : null, at: Number(table.at) };
     }
 
+    /* ------------------------------------------------ round 8: war mode by itself, and the termed-war question */
+
+    /** What names a war: its kind and Torn's war id (the enemy's id when Torn gives none). */
+    function warKeyOf(enemy) {
+        return enemy && Number(enemy.id) > 0 ? enemy.kind + ':' + (enemy.warId || 'f' + enemy.id) : null;
+    }
+
+    /** Has this war begun (a ranked war is listed before it starts)? No start time: it has. */
+    function warBegun(enemy, nowS = Math.floor(Date.now() / 1000)) {
+        return Boolean(enemy) && !(Number(enemy.start) > nowS);
+    }
+
+    /**
+     * War mode by itself (mockups/round8/torn-eye.html §3, the owner's pick A): what is kept per war, {key, autoAt,
+     * termed}. A war that has begun and is not the one kept is new: the Torn Eye tab opens on War once (`fresh`) and
+     * "Termed war / med-out deal?" is asked again (termed: null until answered).
+     * @param {object|null} kept - the record of the last war seen
+     * @param {object|null} enemy - enemiesFromWars()[n], the war being shown
+     * @returns {{rec: object|null, fresh: boolean}}
+     */
+    function warAskNext(kept, enemy, now = Date.now()) {
+        const key = warBegun(enemy, Math.floor(now / 1000)) ? warKeyOf(enemy) : null;
+        if (!key) return { rec: kept || null, fresh: false };
+        if (kept && kept.key === key) return { rec: kept, fresh: false };
+        return { rec: { key, autoAt: now, termed: null }, fresh: true };
+    }
+
+    /** What the answer sets on the War list's ticks: a real war hides hospital rows, a termed one keeps them. */
+    function termedFilters(termed) {
+        if (termed === true) return { warHideHosp: false, warHideTravel: true };
+        if (termed === false) return { warHideHosp: true, warHideTravel: true };
+        return null;
+    }
+
+    /** The answer in one line, under the War list's title. */
+    const TERMED_WORDS = { no: 'Real war · hospital rows hidden', yes: 'Termed war · hospital rows stay in the list' };
+
     /** The status cell as one line: "Hospital · out 14:32 TCT (3:10)", "→ Mexico, lands ~15:05 (est.)". */
     function statusText(parts, { now = Date.now(), clockFn, tct = true, countdownFn } = {}) {
         if (!parts.at) return parts.pre + parts.post;
@@ -6644,12 +7320,12 @@
      * Auto mode (the Plan dropdown's default): the plan picks itself from what
      * you can afford. Pure. ROUND4-PLAN §E.
      *
-     * Income comes from your money log (the Full key, owner's rule): money in
-     * less money out a day, plus what the gym plan spent (its purchases are in
-     * the "out" lines). Networth growth from Torn's own history (personal stats
-     * at past dates, plus the gym spend) is the cross-check, and the fallback
-     * while the log has nothing readable. The plan may spend up to that a day:
-     * "you can afford this with your income".
+     * The money comes from your books (round 7, R7.5; the Full key): your money
+     * log sorted into accounts (core/ledger.js) and the budget offer read off it
+     * (core/cashflow.js): what the gym costs you now, what comes in, what your
+     * cash covers. Networth growth from Torn's own history (personal stats at
+     * past dates, plus the gym spend) is the cross-check, and the fallback until
+     * the log is read.
      *
      * Events: when an event multiplies what a plan uses (World Diabetes Day's
      * candy ×3, CaffeineCon's cans ×2), Auto compares the event plans over the
@@ -6705,11 +7381,10 @@
      * @param {object} o.settings
      * @param {boolean} o.hasFullKey
      * @param {object|null} o.income - incomeFrom() (networth)
-     * @param {object|null} [o.log] - incomeBreakdown() of the money log
-     * @param {number} [o.spentPerDay] - what the gym plan spends a day (added back to the log's net)
-     * @returns {{on:boolean, ready:boolean, needsKey:boolean, waiting:boolean, perDay:number|null, budgetPerDay:number|null, budget:number|null, source:'log'|'networth'|null, networthPerDay:number|null}}
+     * @param {object|null} [o.books] - budgetOffer() of your ledger, with its `flow` (cashflowOf)
+     * @returns {{on:boolean, ready:boolean, needsKey:boolean, waiting:boolean, perDay:number|null, budgetPerDay:number|null, budget:number|null, source:'books'|'networth'|'floor'|null, networthPerDay:number|null}}
      */
-    function autoState({ plan, settings, hasFullKey, income, log = null, spentPerDay = 0, floor = null }) {
+    function autoState({ plan, settings, hasFullKey, income, books = null, floor = null }) {
         const on = Boolean(plan && plan.pickBy === 'auto');
         const horizon = (settings && settings.horizonDays) || 30;
         const certain = floor && floor.perDay > 0 ? floor.perDay : 0;
@@ -6720,15 +7395,18 @@
             return { on, ready: true, needsKey: false, waiting: false, perDay: certain, budgetPerDay: certain, budget: certain * horizon, days: null, source: 'floor', networthPerDay: null, floor };
         }
         const nw = income && Number.isFinite(income.perDay) ? income.perDay : null;
-        // The log's other income leaves out the bank and dividend lines (the floor counts those): certain + the rest.
-        const fromLog = log && log.lines && log.lines.some((l) => l.dir === 'in') ? certain + Math.max(0, log.inPerDay - log.outPerDay + Math.max(0, spentPerDay || 0)) : null;
-        // Networth growth already holds the certain part: whichever is higher, never both.
-        const measured = fromLog !== null ? fromLog : nw !== null ? Math.max(certain, nw) : null;
+        // Your books: what comes in is what the log's lines add up to (the bank's profit counts on the day it is paid,
+        // a one-off gift or a stock sale never), and the budget is the offer's pick.
+        if (books && Number.isFinite(books.perDay)) {
+            return { on, ready: true, needsKey: false, waiting: false, perDay: books.earnsPerDay, budgetPerDay: books.perDay, budget: books.perDay * horizon, days: books.flow ? books.flow.days : null, source: 'books', networthPerDay: nw, floor: null, books };
+        }
+        // Until the log is read: networth growth already holds the certain part: whichever is higher, never both.
+        const measured = nw !== null ? Math.max(certain, nw) : null;
         const perDay = measured !== null ? measured : certain || null;
         if (perDay === null) return { on, ready: false, needsKey: false, waiting: true, perDay: null, budgetPerDay: null, budget: null, source: null, networthPerDay: null };
         const budgetPerDay = Math.max(0, perDay);
-        const source = fromLog !== null ? 'log' : nw !== null ? (certain > nw ? 'floor' : 'networth') : 'floor';
-        return { on, ready: true, needsKey: false, waiting: false, perDay, budgetPerDay, budget: budgetPerDay * horizon, days: fromLog !== null ? log.days : income ? income.days : null, source, networthPerDay: nw, floor };
+        const source = nw !== null ? (certain > nw ? 'floor' : 'networth') : 'floor';
+        return { on, ready: true, needsKey: false, waiting: false, perDay, budgetPerDay, budget: budgetPerDay * horizon, days: income ? income.days : null, source, networthPerDay: nw, floor };
     }
 
     /**
@@ -6753,9 +7431,15 @@
         return pickBy;
     }
 
-    /** "You can afford this with your income: about $4.2M a day comes in, this plan costs $3.1M a day." */
-    function affordLine(auto, planPerDay) {
+    /**
+     * "You can afford this with your income: about $4.2M a day comes in, this plan costs $3.1M a day."
+     * @param {object|null} [cash] - the plan's own cash check (cashflow.js planCash): a plan that buys in lumps can run
+     *   out on a day although its cost a day is covered
+     */
+    function affordLine(auto, planPerDay, cash = null) {
         if (!auto || !auto.ready) return null;
+        // From your books: the offer's own reason, then what this plan costs.
+        if (auto.source === 'books' && auto.books) return auto.books.why + (planPerDay > 0 ? ' This plan costs ' + fmtMoney(Math.round(planPerDay)) + ' a day' + (cash && cash.fits === false ? ', but it buys in lumps: your cash runs out on day ' + cash.runsOutDay + '.' : '.') : ' This plan costs nothing.');
         const inText = fmtMoney(Math.round(auto.perDay));
         if (!(auto.perDay > 0)) return 'Your networth hasn’t grown over the last ' + Math.round(auto.days) + ' days, so Auto picks a plan that costs nothing.';
         if (!(planPerDay > 0)) return 'About ' + inText + ' a day comes in; this plan costs nothing.';
@@ -6845,48 +7529,6 @@
         if (auto.needsKey) return 'Auto mode needs a Full key (Settings › Full key). Until then the plan uses your budget.';
         if (auto.waiting) return 'Reading your income from Torn… until then the plan uses your budget.';
         return null;
-    }
-
-    /** [calibrate] Money-log categories read for the breakdown (by title; Torn's list comes from /torn/logcategories). */
-    const MONEY_LOG_CATEGORY = /(money|bank|bazaar|market|trad|compan|job|stock|points|auction|loan|mug|casino)/i;
-
-    /** [calibrate] Log lines that bring money in, and ones that send it out, by title words. */
-    const IN_WORDS = /(sell|sold|receive|dividend|payout|pay ?day|wage|salary|won|win|refund|collect|mugged|reward|profit|matur)/i;
-    const OUT_WORDS = /(buy|bought|purchase|send|sent|paid|fee|lose|lost|bet|donat|deposit|upkeep)/i;
-
-    /**
-     * Where your money comes from, from the money log: amounts in and out by
-     * log line, over the days read (biggest first). Titles that say neither are
-     * left out rather than guessed.
-     * @param {{at, title, money}[]} log
-     * @param {number} now
-     * @param {number} [windowDays] - how far back the log was read
-     * @returns {{days:number, inPerDay:number, outPerDay:number, lines:{title:string, perDay:number, n:number, dir:'in'|'out'}[]}|null}
-     */
-    function incomeBreakdown(log, now, windowDays = null, floor = null) {
-        const rows = (log || []).filter((e) => e && e.money > 0 && Number.isFinite(e.at));
-        if (!rows.length) return null;
-        // Spread over the whole span that was read (one sale 2 days ago in a 30-day read is 1/30 a day, not 1/2).
-        const oldest = Math.min(...rows.map((e) => e.at));
-        const days = Math.max(1, windowDays || 0, (now - oldest) / DAY);
-        const by = new Map();
-        for (const e of rows) {
-            // Bank investment and dividend lines are the certain income (core/income-floor.js), counted there, not here
-            // (a maturity line carries the principal too: never income). Only the kinds the floor counted are left out.
-            if (/matur/i.test(e.title)) continue;
-            if (floor && floor.bank > 0 && /(invest|city bank|bank interest)/i.test(e.title)) continue;
-            if (floor && floor.dividends > 0 && /dividend/i.test(e.title)) continue;
-            const dir = IN_WORDS.test(e.title) ? 'in' : OUT_WORDS.test(e.title) ? 'out' : null;
-            if (!dir) continue;
-            const k = dir + '|' + e.title;
-            const r = by.get(k) || { title: e.title, dir, total: 0, n: 0 };
-            r.total += e.money;
-            r.n++;
-            by.set(k, r);
-        }
-        const lines = [...by.values()].map((r) => ({ title: r.title, dir: r.dir, n: r.n, perDay: r.total / days })).sort((a, b) => b.perDay - a.perDay);
-        const sum = (d) => lines.filter((l) => l.dir === d).reduce((a, l) => a + l.perDay, 0);
-        return { days, inPerDay: sum('in'), outPerDay: sum('out'), lines };
     }
 
     /**
@@ -6988,7 +7630,7 @@
 
     /** The Plan dropdown: what "best" means. */
     const PICK_BY = {
-        auto: { id: 'auto', name: 'Auto (from your income)', what: 'Picks the plan and items your income affords, and plans around events. Needs a Full key. Default.' },
+        auto: { id: 'auto', name: 'Auto (from your books)', what: 'Picks the plan and items your books afford (what the gym costs you now, what comes in, what your cash covers) and plans around events. Needs a Full key. Default.' },
         most: { id: 'most', name: 'Most stats in my budget', what: 'The most stats the budget you set allows.' },
         value: { id: 'value', name: 'Best value for money', what: 'The most stats for each $1M: cheaper plans can win.' },
         max: { id: 'max', name: 'Max gains, no budget', what: 'Adds FHC and cans on top whenever they add stats; says what it costs a day.' },
@@ -7223,11 +7865,19 @@
 
 
 
-    /** The cans the ladder compares (the cheapest energy per $ wins). */
-    const CANS = [MUNSTER, RED_COW, TAURINE];
+    /** The cans the ladder compares: all nine energy drinks (round 8: there were three). */
+    const CANS = [GOOSE_JUICE, DAMP_VALLEY, CROCOZADE, MUNSTER, SANTA_SHOOTERS, RED_COW, ROCKSTAR_RUDOLPH, TAURINE, X_MASS];
+
+    /** The least energy a day cans must add to be planned: what one Can of Munster gives. */
+    const MIN_CAN_ENERGY = 20;
 
     /** Prices when nothing live is known yet (docs, 2026-09-29 TornW3B). */
     const LADDER_SAMPLE_PRICES = { [MUNSTER]: 1830000, [RED_COW]: 2410000, [TAURINE]: 3990000 };
+    /**
+     * The other six, at the same price for an energy as the can of their size above (2024's items list has them within
+     * 1% of it: Santa Shooters against Munster, and so on; the three small ones a little under Munster's price an energy).
+     */
+    const LADDER_SAMPLE_PRICES_MORE = { [SANTA_SHOOTERS]: 1840000, [ROCKSTAR_RUDOLPH]: 2415000, [X_MASS]: 3995000, [GOOSE_JUICE]: 410000, [DAMP_VALLEY]: 840000, [CROCOZADE]: 1270000 };
 
     /** The stat the next train goes to: furthest behind its share. */
     function nextStat(stats, shares, best) {
@@ -7257,7 +7907,7 @@
     /** The price to count for an item: live (10 units from the cheapest up) or the sample. */
     function priceFor(id, prices) {
         const live = prices ? livePrices(prices) : {};
-        return live[id] || SAMPLE_PRICES[id] || LADDER_SAMPLE_PRICES[id] || null;
+        return live[id] || SAMPLE_PRICES[id] || LADDER_SAMPLE_PRICES[id] || LADDER_SAMPLE_PRICES_MORE[id] || null;
     }
 
     /** The can with the cheapest energy, with faction/book perks and an event (CaffeineCon ×2). */
@@ -7287,10 +7937,16 @@
             const n = Math.min(Math.floor(capH / ITEMS[FHC].boosterH), Math.floor(perDay / fhcP));
             if (n > 0) out.push({ id: FHC, perDay: n, energy: n * maxE, cost: n * fhcP });
         }
-        const can = bestCan(prices, { canMult });
-        if (can) {
-            const n = Math.min(Math.floor(capH / ITEMS[can.id].boosterH), Math.floor(perDay / can.price));
-            if (n > 0) out.push({ id: can.id, perDay: n, energy: n * can.energy, cost: n * can.price });
+        // Every can is weighed by the energy a day it buys (round 8): each takes 2 hours of the booster cooldown, so the
+        // cheapest energy (a 5-energy can) is not the most energy; the best one before was the only one looked at.
+        for (const id of CANS) {
+            const p = priceFor(id, prices);
+            if (!p) continue;
+            const e = Math.round(ITEMS[id].energy * canMult);
+            const n = Math.min(Math.floor(capH / ITEMS[id].boosterH), Math.floor(perDay / p));
+            // A day's cans under one Munster's worth of energy are not a plan: 5 energy a day for $400k is a line of
+            // steps for a third of a percent (the baseline showed it: "Steady + boosters" with one small can a day).
+            if (n > 0 && n * e >= MIN_CAN_ENERGY) out.push({ id, perDay: n, energy: n * e, cost: n * p });
         }
         out.sort((a, b) => b.energy - a.energy || a.cost - b.cost);
         return out[0] || null;
@@ -7533,7 +8189,7 @@
     /*
      * Breaks for the page while a plan is worked out (round 7, R7.3b).
      *
-     * What was wrong: Create plan and Re-plan waited on a 0 ms timer between
+     * What was wrong: Create plan and Recalibrate waited on a 0 ms timer between
      * slices, 170 times for 12 months. A browser runs a hidden tab's timers
      * once a second at best, so a player who clicked and went back to Torn
      * waited minutes (280 s in Edge, over 400 s in Chrome) for 3 seconds of
@@ -7632,6 +8288,7 @@
      * plan, the day's log and settings. The webpage and the overlay both render
      * from this, so they can never disagree.
      */
+
 
 
 
@@ -7774,7 +8431,7 @@
     }
 
     /**
-     * The simulation inputs every strategy shares. `live` (round 7; Create plan and Re-plan): the run starts from the
+     * The simulation inputs every strategy shares. `live` (round 7; Create plan and Recalibrate): the run starts from the
      * bars as they are (energy, happy, the drug cooldown, today's refill used), like the day plan does; without it, from
      * a full bar with no cooldown (a stretch that starts later, a what-if over past days).
      */
@@ -7812,6 +8469,9 @@
             freeEdvdPerDay: ic.freeEdvdPerDay,
             // Boosters you hold go first and cost nothing new (candy and energy drinks as a pool).
             held: heldBoosters(statics.inventory),
+            // Rehab and overdoses in every plan's cost (round 8): the faction's cuts from your perks, a session's size
+            // from your lifetime rehabs (a new player's until they are read).
+            rehab: rehabParams({ perks: statics.perks, drugs: statics.drugs }),
             // Later Xanax at your own median cooldown once a few are recorded (else 7 h).
             xanaxCdMin: xanaxCdOf(statics.xanaxCds).min,
             // Today's candy pick, kept unless another is clearly cheaper.
@@ -8174,7 +8834,7 @@
      * worked out (today's steps, the 48 h look-ahead, the strip, the gym page's next two days); no ladder, no 30-day
      * projection. `saved`: where the saved plan stands (null: no plan yet).
      */
-    function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, rec: recIn = null, warn = null, lite = false, saved = null, onPath = false, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, warOn = null, stacking = null, now }) {
+    function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, rec: recIn = null, warn = null, lite = false, saved = null, onPath = false, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, warOn = null, stacking = null, overdose = null, now }) {
         if (!state) return { ready: false };
         // One player context per refresh: the comparison's, when the caller has it.
         const pc = pcIn || playerContext(state, statics, { unlockedKnown, learnedMult });
@@ -8451,7 +9111,7 @@
             // Energy the plan keeps on purpose now (null: none): what every "train now" surface leaves alone.
             energyKept,
             noRefill: Boolean(ctx.noRefill),
-            auto: auto ? { ...auto, afford: affordLine(auto, recRow ? recRow.cost / horizon : 0), wait: autoWaitLine(auto) } : null,
+            auto: auto ? { ...auto, afford: affordLine(auto, recRow ? recRow.cost / horizon : 0, recRow ? recRow.cash : null), wait: autoWaitLine(auto) } : null,
             // The saved plan: its dates and where it stands (null: no plan yet), and the days its numbers cover.
             saved,
             planDays: horizon,
@@ -8465,6 +9125,11 @@
             // Stacking energy for a chain (round 7, Home's "I'm stacking"): {since: ms}, null while training. The steps
             // above stay as they are; every surface that would ask you to train reads this and holds them back.
             stacking: stacking && Number(stacking.since) > 0 ? { since: Number(stacking.since) } : null,
+            // An overdose seen on your bars (runtime.js overdoseSeen): {at, until} while it is on, else null. Held back
+            // the same way: the steps stay, every surface says "Overdosed · fly to Switzerland" instead of them.
+            overdose: overdose && Number(overdose.until) > now && !overdose.ended ? { at: Number(overdose.at) || now, until: Number(overdose.until) } : null,
+            // Flying or abroad (Torn's travel answer): {flying, where, until}. Held back the same way: the gym is closed.
+            away: awayOf(state.travel, now),
         };
     }
 
@@ -9034,6 +9699,8 @@
         cityShop: 10 * 60 * 1000,
         // The income that is certain (bank investment, dividends, rent: 4 calls), for Create plan and Recalibrate.
         passive: 6 * 60 * 60 * 1000,
+        // Lifetime rehabs (what a rehab session removes): one call, for the plans' rehab cost (core/rehab.js).
+        drugs: 6 * 60 * 60 * 1000,
     };
 
     /** The personal stat that counts items bought from city shops (docs/research-sallys-xanax.md). */
@@ -9268,6 +9935,7 @@
                 ['jobPoints', () => fetchJobPoints(this.client)],
                 ['items', () => fetchItemsInfo(this.client, ITEMS_INFO_IDS)],
                 ['passive', () => fetchPassiveIncome(this.client)],
+                ['drugs', () => fetchDrugStats(this.client)],
                 [
                     'factionWars',
                     async () => {
@@ -9317,6 +9985,325 @@
             }
             return this.store.get(this.keys.static, {}) || st;
         }
+    }
+
+    /* ===== src/core/cashflow.js ===== */
+    /*
+     * The statements read off the ledger (round 7, R7.5; ROUND7-PLAN §C.3–C.5):
+     * what you have, what you earned and spent, whether the log explains your
+     * cash (the reconciliation), and the budget a plan may spend. Pure: sums
+     * over core/ledger.js, every number traceable to its lines.
+     *
+     * Round 8, the accountant's answers (docs/LEDGER-ANSWERS.txt): one
+     * statement in six sections by what a line is, and what you own as free
+     * cash (what the gym may use) and restricted cash (the bank, stocks held for
+     * a benefit block, what is kept back for property upkeep not paid yet).
+     * A plan counts on recurring income less committed costs; the casino, gifts
+     * and sales reach it as cash, at the next recalibration.
+     */
+
+
+
+
+
+    /** "Reconciled" only when the difference is under this share of a month's recurring income and no line is unsorted. */
+    const RECONCILE_INCOME_PCT = 1;
+
+    /** The statement's sections, in order: the accounts each one adds up, and whether it counts in a daily figure. */
+    const STATEMENT_SECTIONS = [
+        { id: 'recurring', name: 'Recurring income', what: 'what comes in by its nature, month after month', accounts: ['recurring'], daily: true },
+        { id: 'committed', name: 'Committed costs', what: 'what you must pay to keep what you have', accounts: ['committed'], daily: true },
+        { id: 'spending', name: 'What you chose to spend it on', what: 'the gym competes with these', accounts: ['training', 'chosen'], daily: true },
+        { id: 'uncontrollable', name: 'Uncontrollable gains and losses', what: 'outside your control: never counted on, a large one calls for a recalibration', accounts: ['uncontrollable'], daily: false },
+        { id: 'nonrecurring', name: 'Non-recurring', what: 'by what they are, whatever their size: never in a daily figure', accounts: ['nonrecurring'], daily: false },
+        { id: 'transfers', name: 'Transfers between your own accounts', what: 'your money changing place: never income, never spending', accounts: ['transfers'], daily: false },
+    ];
+
+    /**
+     * Shares held for benefit blocks: Torn's blocks double (the 2nd needs twice the 1st), so `increment` blocks hold
+     * requirement × (2^increment − 1) shares.
+     * @param {object[]} userStocks - /user/stocks [{id, shares, bonus: {increment}}]
+     * @param {object[]} tornStocks - /torn/stocks, slim [{id, acronym, price, bonus: {requirement}}]
+     * @returns {{amount:number, other:number, lines:{id, name, blocks, amount}[]}|null} null when no price is known
+     */
+    function stockBlocks(userStocks, tornStocks) {
+        const info = new Map((tornStocks || []).map((s) => [Number(s.id), s]));
+        const lines = [];
+        let other = 0;
+        let priced = false;
+        for (const us of userStocks || []) {
+            const s = info.get(Number(us && us.id));
+            const price = s ? Number(s.price) : NaN;
+            const shares = Number(us && us.shares) || 0;
+            if (!(price > 0) || !(shares > 0)) continue;
+            priced = true;
+            const blocks = Number(us.bonus && us.bonus.increment) || 0;
+            const need = Number(s.bonus && s.bonus.requirement) || 0;
+            const held = blocks > 0 && need > 0 ? Math.min(shares, need * (2 ** blocks - 1)) : 0;
+            if (held > 0) lines.push({ id: us.id, name: s.acronym || s.name || 'Stock ' + us.id, blocks, amount: held * price });
+            other += (shares - held) * price;
+        }
+        if (!priced) return null;
+        return { amount: lines.reduce((n, l) => n + l.amount, 0), other, lines: lines.sort((a, b) => b.amount - a.amount) };
+    }
+
+    /**
+     * The statements over the ledger's days.
+     * @param {object} o
+     * @param {object} o.ledger - ledgerOf()
+     * @param {number|null} [o.liquid] - wallet + vault now
+     * @param {object|null} [o.bank] - the city bank investment {amount, profit, until (ms)}
+     * @param {object|null} [o.blocks] - stockBlocks()
+     * @param {number|null} [o.habitPerDay] - what the gym really cost a day (receipts: what was used, priced)
+     * @param {number} [o.now] - ms (the days of upkeep not paid yet); the ledger's last moment when left out
+     * @returns {object} {days, have, sections, disposable, surplus, change, earnsPerDay, comesIn, trainingPerDay, habitPerDay, oneOffs, unsorted}
+     */
+    function cashflowOf({ ledger, liquid = null, bank = null, blocks = null, habitPerDay = null, now = null }) {
+        const a = ledger.accounts;
+        const days = ledger.days;
+        const per = (v) => v / days;
+        const sections = STATEMENT_SECTIONS.map((sec) => {
+            const lines = ledger.types
+                .filter((t) => sec.accounts.includes(t.account) && (t.in || t.out))
+                .map((t) => ({ type: t.type, title: t.title, account: t.account, n: t.n, days: t.days, internal: Boolean(t.internal), total: t.in - t.out, perDay: per(t.in - t.out) }))
+                .sort((x, y) => Math.abs(y.total) - Math.abs(x.total));
+            // A wallet ↔ vault line is listed, never added: your liquid money did not change.
+            const total = lines.reduce((n, l) => n + (l.internal ? 0 : l.total), 0);
+            return { id: sec.id, name: sec.name, what: sec.what, daily: sec.daily, lines, total, perDay: per(total) };
+        });
+        const sec = Object.fromEntries(sections.map((s) => [s.id, s]));
+        const disposable = sec.recurring.total + sec.committed.total;
+        const surplus = disposable + sec.spending.total;
+        const change = surplus + sec.uncontrollable.total + sec.nonrecurring.total + sec.transfers.total;
+        // Upkeep runs every day, whenever it is paid: the days since the last payment are cash to be spent, kept back.
+        const up = ledger.types.find((t) => t.type === LEDGER_UPKEEP && t.account === 'committed');
+        const end = Number.isFinite(now) ? now : ledger.to;
+        const upkeepPerDay = up ? per(up.out) : 0;
+        const upkeepOwed = up && up.last ? Math.max(0, Math.round(upkeepPerDay * Math.min(days, (end - up.last) / DAY))) : 0;
+        const restricted = [];
+        if (bank && bank.amount > 0) restricted.push({ id: 'bank', name: 'Bank deposit', amount: bank.amount, until: bank.until || null, profit: bank.profit || 0 });
+        if (blocks && blocks.amount > 0) restricted.push({ id: 'blocks', name: 'Stocks held for a benefit block', amount: blocks.amount, lines: blocks.lines });
+        if (upkeepOwed > 0) restricted.push({ id: 'upkeep', name: 'Kept back for property upkeep', amount: upkeepOwed, perDay: upkeepPerDay, fromCash: true });
+        const has = Number.isFinite(liquid);
+        return {
+            days,
+            have: {
+                liquid: has ? liquid : null,
+                // What the gym (or an investment) may use: the wallet and vault, less what is kept back out of them.
+                free: has ? Math.max(0, liquid - upkeepOwed) : null,
+                restricted,
+                restrictedTotal: restricted.reduce((n, r) => n + r.amount, 0),
+                otherStocks: blocks ? blocks.other : null,
+                locked: bank && bank.amount > 0 ? { amount: bank.amount, profit: bank.profit || 0, until: bank.until || null } : null,
+            },
+            sections,
+            disposable: { total: disposable, perDay: per(disposable) },
+            surplus: { total: surplus, perDay: per(surplus) },
+            change,
+            // What a plan may count on a day: recurring income less committed costs.
+            earnsPerDay: per(disposable),
+            comesIn: [...sec.recurring.lines, ...sec.committed.lines].sort((x, y) => Math.abs(y.perDay) - Math.abs(x.perDay)),
+            trainingPerDay: per(a.training.out - a.training.in),
+            habitPerDay: Number.isFinite(habitPerDay) ? habitPerDay : null,
+            oneOffs: ledger.oneOffs.map((e) => ({ id: e.id, at: e.at, title: e.title, account: e.account, amount: e.amount, ticked: Boolean(e.ticked) })),
+            unsorted: ledger.unsorted,
+        };
+    }
+
+    /**
+     * The reconciliation: opening liquid + in − out = closing liquid. Wallet ↔ vault lines are left out (liquid is
+     * both). The difference is listed to the dollar; it is "Reconciled" only when no line is unsorted and the
+     * difference is under RECONCILE_INCOME_PCT of a month's recurring income (the two balances are read hours apart
+     * from the log's first and last lines, so exactly zero is rare).
+     * @param {object} o - {ledger, opening, closing}: liquid money at the ledger's first and last moment
+     * @returns {{opening, closing, in, out, expected, gap, limit, unsorted, reconciled, rough, words}|null} null without both ends
+     */
+    function reconcile({ ledger, opening, closing }) {
+        if (!ledger || !Number.isFinite(opening) || !Number.isFinite(closing)) return null;
+        let inn = 0;
+        let out = 0;
+        for (const e of ledger.entries) {
+            if (e.internal) continue;
+            if (e.amount >= 0) inn += e.amount;
+            else out -= e.amount;
+        }
+        const expected = opening + inn - out;
+        const gap = closing - expected;
+        const limit = (RECONCILE_INCOME_PCT / 100) * (ledger.accounts.recurring.in / ledger.days) * 30;
+        const unsorted = (ledger.unsorted || []).reduce((n, u) => n + u.n, 0);
+        const off = Math.abs(Math.round(gap));
+        const reconciled = unsorted === 0 && (off === 0 || off <= limit);
+        const words = reconciled
+            ? off === 0
+                ? 'Reconciled: the log explains your cash to the dollar.'
+                : 'Reconciled: ' + fmtDollars(off) + (gap > 0 ? ' more came in' : ' more went out') + ' than the log explains, under ' + RECONCILE_INCOME_PCT + '% of a month’s recurring income.'
+            : 'Off by ' + fmtDollars(off) + ': ' + (gap > 0 ? 'more came in' : 'more went out') + ' than the log explains' + (unsorted ? ', and ' + unsorted + (unsorted === 1 ? ' line is' : ' lines are') + ' not sorted yet.' : '.');
+        return { opening, closing, in: inn, out, expected, gap, limit, unsorted, reconciled, rough: !reconciled, words };
+    }
+
+    /**
+     * The day-by-day cash check: a plan fits when free cash + what you earn + dated money − what it has cost so far
+     * never goes under the money you keep aside.
+     * @param {object} o
+     * @param {number} o.liquid - free cash at the start
+     * @param {number} o.earnsPerDay - what comes in a day before the gym (can be negative)
+     * @param {number[]} o.costDaily - the plan's cost on each day
+     * @param {{day:number, amount:number}[]} [o.dated] - money that arrives on a day (the bank's profit when it ends)
+     * @param {number} [o.keepAside]
+     * @returns {{fits:boolean, runsOutDay:number|null, lowest:number, lowestDay:number}}
+     */
+    function cashCheck({ liquid, earnsPerDay, costDaily, dated = [], keepAside = 0 }) {
+        let cash = liquid;
+        let lowest = cash;
+        let lowestDay = 0;
+        let runsOutDay = null;
+        for (let d = 0; d < costDaily.length; d++) {
+            cash += earnsPerDay - (costDaily[d] || 0);
+            for (const x of dated) if (x.day === d) cash += x.amount;
+            if (cash < lowest) {
+                lowest = cash;
+                lowestDay = d + 1;
+            }
+            if (runsOutDay === null && cash < keepAside - 0.5) runsOutDay = d + 1;
+        }
+        return { fits: runsOutDay === null, runsOutDay, lowest, lowestDay };
+    }
+
+    /**
+     * The cash check on a plan's own days: the simulator's `costDaily` (a jump buys in lumps, so an even cost a day
+     * can pass where the real days do not). Null without your books or a cash figure.
+     * @param {object|null} books - budgetOffer()
+     * @param {number[]} costDaily - what the plan pays on each day
+     * @returns {{fits:boolean, runsOutDay:number|null, lowest:number, lowestDay:number}|null}
+     */
+    function planCash(books, costDaily) {
+        if (!books || !Number.isFinite(books.liquid) || !Array.isArray(costDaily)) return null;
+        const c = cashCheck({ liquid: books.liquid, earnsPerDay: books.earnsPerDay, costDaily, dated: books.dated || [], keepAside: books.keepAside || 0 });
+        return { ...c, lowest: Math.round(c.lowest) };
+    }
+
+    /** A plan's result as it is kept: its cash check (`cash`) in place of the cost of every day. */
+    function withCash(r, books) {
+        if (!r || typeof r !== 'object') return r;
+        const { costDaily, ...rest } = r;
+        const cash = planCash(books, costDaily);
+        return cash ? { ...rest, cash } : rest;
+    }
+
+    /**
+     * The budget a plan may spend a day, offered when a plan is made (ROUND7-PLAN §C.5): your habit (what the gym
+     * really cost you), stretch (everything that comes in after committed costs), all your free cash spread over the
+     * plan's days, no limit. Only free cash is spent (restricted cash never is): each offer passes or fails the cash
+     * check over the plan's days, and one is recommended with its reason.
+     * @param {object} o
+     * @param {object} o.flow - cashflowOf()
+     * @param {number} o.days - the plan's length
+     * @param {number} [o.keepAside] - money never to go under (a setting; 0)
+     * @param {number} [o.now] - ms (the bank's end date against the plan's days)
+     * @param {string|null} [o.pick] - the budget you chose at Create plan (an option's id); the recommended one when left out
+     * @returns {{options:object[], recommended:string, picked:string|null, perDay:number, why:string, earnsPerDay:number, liquid:number|null, dated:object[]}}
+     */
+    function budgetOffer({ flow, days, keepAside = 0, now = Date.now(), pick = null }) {
+        const liquid = flow.have.free;
+        const earns = flow.earnsPerDay;
+        // The gym's own cost a day: receipts (what was used) when they cover enough days, else what the log shows bought.
+        const habit = Math.max(0, flow.habitPerDay !== null ? flow.habitPerDay : flow.trainingPerDay);
+        const locked = flow.have.locked;
+        const dated = [];
+        if (locked && locked.until && locked.profit > 0) {
+            const day = Math.floor((locked.until - now) / DAY);
+            if (day >= 0 && day < days) dated.push({ day, amount: locked.profit, what: 'the bank’s profit' });
+        }
+        const check = (perDay) => (liquid === null ? null : cashCheck({ liquid, earnsPerDay: earns, costDaily: Array.from({ length: Math.ceil(days) }, () => perDay), dated, keepAside }));
+        // What your cash covers over these days: every free dollar above the keep-aside, plus what comes in.
+        const datedSum = dated.reduce((s, x) => s + x.amount, 0);
+        const covers = liquid === null ? Math.max(0, earns) : Math.max(0, earns + (liquid - keepAside + datedSum) / Math.max(1, days));
+        const option = (id, name, perDay, what) => {
+            const c = Number.isFinite(perDay) ? check(perDay) : null;
+            return { id, name, perDay, what, fits: c ? c.fits : null, runsOutDay: c ? c.runsOutDay : null };
+        };
+        const stretch = Math.max(habit, earns);
+        const options = [
+            option('habit', 'Your habit', habit, 'what the gym cost you a day over the last ' + Math.round(flow.days) + ' days'),
+            option('stretch', 'Stretch', stretch, stretch > habit ? 'everything that comes in a day after your committed costs' : 'no more comes in than your habit spends'),
+            ...(liquid === null ? [] : [option('free', 'All your free cash', covers, 'your free cash spread over these ' + Math.round(days) + ' days, plus what comes in')]),
+            option('max', 'No limit', Infinity, 'the plan that gains most, whatever it costs'),
+        ];
+        const [h, s] = options;
+        let recommended;
+        let perDay;
+        let why;
+        if (s.perDay > h.perDay && s.fits !== false) {
+            recommended = 'stretch';
+            perDay = s.perDay;
+            why = 'About ' + fmtMoney(Math.round(earns)) + ' a day comes in after your committed costs, more than the gym costs you now (' + fmtMoney(Math.round(habit)) + ' a day): the plan may use all of it.';
+        } else if (h.perDay > 0 && h.fits !== false) {
+            recommended = 'habit';
+            perDay = h.perDay;
+            why = liquid === null
+                ? 'The gym costs you ' + fmtMoney(Math.round(habit)) + ' a day; less than that comes in, so the plan keeps to it.'
+                : 'The gym costs you ' + fmtMoney(Math.round(habit)) + ' a day and ' + fmtMoney(Math.round(Math.max(0, earns))) + ' a day comes in: your ' + fmtMoney(Math.round(liquid)) + ' of free cash covers the difference for these ' + Math.round(days) + ' days.';
+        } else if (h.perDay > 0) {
+            // Your habit does not last these days: what your cash covers, to the day.
+            recommended = 'covers';
+            perDay = Math.min(covers, h.perDay);
+            why = 'Your habit (' + fmtMoney(Math.round(habit)) + ' a day) runs out on day ' + h.runsOutDay + ': the plan keeps to ' + fmtMoney(Math.round(perDay)) + ' a day, what your free cash covers.';
+        } else {
+            // Nothing comes in after your committed costs and nothing was spent on the gym: nothing is taken from your savings unasked.
+            recommended = 'habit';
+            perDay = 0;
+            why = 'Nothing comes in after your committed costs and the gym cost you nothing in these days: the plan costs nothing unless you pick a budget.';
+        }
+        // Your own choice at Create plan wins over the recommendation; the page still says which one the books recommend.
+        const chosen = pick ? options.find((o) => o.id === pick) || null : null;
+        if (chosen) {
+            perDay = chosen.perDay;
+            why = 'Your pick: ' + chosen.name.toLowerCase() + ', ' + chosen.what + '.' + (chosen.fits === false ? ' At that pace your free cash runs out on day ' + chosen.runsOutDay + '.' : '');
+        }
+        return { options, recommended, picked: chosen ? chosen.id : null, perDay: Math.max(0, perDay), why, earnsPerDay: earns, habitPerDay: habit, covers, liquid, dated, keepAside };
+    }
+
+    const cashDay = (at) => new Date(at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+
+    /**
+     * The Plan page's money block (the owner's pick P1, mockups/round8/ledger.html): six figures in a row, each with
+     * one line under it, in the accountant's words (free cash, restricted cash, non-recurring).
+     * @param {object} o
+     * @param {object} o.offer - budgetOffer() with its `flow` (runtime booksFor)
+     * @param {number} o.perDay - what the plan you follow costs a day
+     * @param {object|null} [o.cash] - that plan's cash check (planCash)
+     * @param {number} o.days - the plan's length
+     * @returns {{id:string, label:string, value:string, sub:string, tone:string}[]}
+     */
+    function moneyFigures({ offer, perDay, cash = null, days }) {
+        const f = offer.flow;
+        const hv = f.have;
+        const kept = hv.restricted.filter((r) => r.fromCash).reduce((n, r) => n + r.amount, 0);
+        const signed = (v) => (v < 0 ? '−' : '') + fmtMoney(Math.abs(Math.round(v)));
+        const top = f.comesIn.slice(0, 2).map((l) => l.title.replace(/^Company employee pay$/, 'pay').replace(/^Property upkeep$/, 'upkeep').replace(/^Stock special money$/, 'stock benefits') + ' ' + signed(l.perDay));
+        const bank = hv.restricted.find((r) => r.id === 'bank');
+        const others = hv.restricted.filter((r) => r.id !== 'bank');
+        const oneOffSum = f.oneOffs.reduce((n, e) => n + e.amount, 0);
+        return [
+            { id: 'free', label: 'Total free cash', value: hv.free === null ? 'not read yet' : fmtMoney(Math.round(hv.free)), sub: 'wallet + vault' + (kept > 0 ? ', less ' + fmtMoney(kept) + ' kept for upkeep' : ''), tone: '' },
+            { id: 'in', label: 'Comes in a day', value: signed(f.earnsPerDay), sub: top.length ? top.join(' · ') : 'recurring income less committed costs', tone: f.earnsPerDay < 0 ? 'warn' : '' },
+            { id: 'habit', label: 'Your gym habit', value: fmtMoney(Math.round(offer.habitPerDay)) + ' a day', sub: f.habitPerDay !== null ? 'what you used, priced' : 'gym items and rehab bought', tone: '' },
+            {
+                id: 'restricted',
+                label: bank && bank.until ? 'Restricted until ' + cashDay(bank.until) : 'Restricted cash',
+                value: hv.restrictedTotal > 0 ? fmtMoney(Math.round(hv.restrictedTotal)) : 'none',
+                sub: bank && bank.profit > 0 ? 'the bank · then +' + fmtMoney(Math.round(bank.profit)) + ' profit' + (others.length ? ' · ' + others.map((r) => (r.id === 'blocks' ? 'stock blocks' : 'upkeep')).join(', ') : '') : others.length ? others.map((r) => (r.id === 'blocks' ? 'stocks held for a benefit block' : 'kept for upkeep')).join(' · ') : 'no bank deposit, no benefit block',
+                tone: '',
+            },
+            { id: 'oneoffs', label: 'Non-recurring, not counted', value: f.oneOffs.length + (f.oneOffs.length === 1 ? ' line' : ' lines'), sub: f.oneOffs.length ? signed(oneOffSum) + ' together' : 'none in these ' + Math.round(f.days) + ' days', tone: '' },
+            {
+                id: 'plan',
+                label: 'This plan a day',
+                value: perDay > 0 ? fmtMoney(Math.round(perDay)) : 'nothing',
+                sub: cash ? (cash.fits ? 'fits: lasts all ' + Math.round(days) + ' days' : 'your free cash runs out on day ' + cash.runsOutDay) : perDay > 0 ? 'not checked against your cash yet' : 'costs nothing',
+                tone: cash ? (cash.fits ? 'ok' : 'warn') : '',
+            },
+        ];
     }
 
     /* ===== src/core/income-floor.js ===== */
@@ -9383,6 +10370,76 @@
         return { perDay: bank + dividends + rent, bank, dividends, rent, lines: lines.sort((a, b) => b.perDay - a.perDay) };
     }
 
+    /* ===== src/core/invest.js ===== */
+    /*
+     * Investments that grow recurring income (round 8; the accountant, docs/
+     * LEDGER-ANSWERS.txt Q5 and Q19: "suggest which investment should we do so we
+     * can grow the recurring income to be able to afford a plan", weighing "the
+     * potential loss of the benefit block if sold"). Pure.
+     *
+     * Only what pays money on a date: a stock's benefit block with a money
+     * dividend, and the city bank at the rate it last paid you. Each idea says
+     * what it costs now, what it pays a day, its return a year and how long it
+     * takes to pay for itself. It is a list to choose from, never a step: the
+     * shares can lose value, and selling them ends the benefit.
+     */
+
+
+
+    /** Shares that `blocks` benefit blocks hold: Torn's blocks double, so requirement × (2^blocks − 1). */
+    function blockShares(requirement, blocks) {
+        return requirement * (2 ** Math.max(0, blocks) - 1);
+    }
+
+    /**
+     * @param {object} o
+     * @param {object[]} [o.moneyStocks] - every stock whose benefit pays money: [{id, acronym, name, price, bonus: {frequency (days), requirement (shares), description}}]
+     * @param {object[]} [o.userStocks] - /user/stocks, slim: [{id, shares, bonus: {increment}}]
+     * @param {object|null} [o.bank] - your city bank investment {amount, profit, duration (days)}: the rate it last paid
+     * @param {number|null} [o.freeCash] - what you could spend (cashflow.js have.free)
+     * @returns {{id, kind:'block'|'bank', name, what, cost, perDay, yearlyPct, paybackDays, fits:boolean|null, short:number}[]} best return a year first
+     */
+    function investmentIdeas({ moneyStocks = [], userStocks = [], bank = null, freeCash = null } = {}) {
+        const mine = new Map((userStocks || []).map((u) => [Number(u.id), u]));
+        const out = [];
+        for (const s of moneyStocks || []) {
+            const price = Number(s && s.price);
+            const b = s && s.bonus;
+            const amount = b ? dividendMoney(b.description) : null;
+            const freq = b ? Number(b.frequency) : 0;
+            const req = b ? Number(b.requirement) : 0;
+            if (!(price > 0) || !(amount > 0) || !(freq > 0) || !(req > 0)) continue;
+            const u = mine.get(Number(s.id));
+            const have = u ? Number(u.shares) || 0 : 0;
+            const blocks = u && u.bonus ? Number(u.bonus.increment) || 0 : 0;
+            // The next block: its own shares, less what you hold over your blocks already.
+            const need = Math.max(0, blockShares(req, blocks + 1) - Math.max(have, blockShares(req, blocks)));
+            const cost = need * price;
+            if (!(cost > 0)) continue;
+            const perDay = amount / freq;
+            out.push({
+                id: 'block:' + s.id,
+                kind: 'block',
+                name: (s.acronym || s.name || 'Stock ' + s.id) + ' benefit block' + (blocks > 0 ? ' ' + (blocks + 1) : ''),
+                what: fmtShares(need) + ' shares · pays every ' + freq + ' days',
+                cost,
+                perDay,
+                yearlyPct: (100 * perDay * 365) / cost,
+                paybackDays: cost / perDay,
+            });
+        }
+        if (bank && bank.amount > 0 && bank.profit > 0 && bank.duration > 0) {
+            const perDay = bank.profit / bank.duration;
+            out.push({ id: 'bank', kind: 'bank', name: 'The city bank, at the rate it last paid you', what: Math.round(bank.duration) + ' days · the money is locked until it ends', cost: bank.amount, perDay, yearlyPct: (100 * perDay * 365) / bank.amount, paybackDays: bank.amount / perDay });
+        }
+        const cash = Number.isFinite(freeCash) ? freeCash : null;
+        return out
+            .map((x) => ({ ...x, fits: cash === null ? null : x.kind === 'bank' ? cash > 0 : x.cost <= cash, short: cash === null || x.kind === 'bank' ? 0 : Math.max(0, x.cost - cash) }))
+            .sort((a, b) => b.yearlyPct - a.yearlyPct);
+    }
+
+    const fmtShares = (n) => Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+
     /* ===== src/core/planline.js ===== */
     /*
      * The plan's line: what the plan you follow says your stats should be at any
@@ -9391,10 +10448,10 @@
      * What was wrong: the line was read by Torn day against "you" at the day's
      * last read, so it was a day off (a player doing exactly what the plan said
      * read 151% of plan); a pick re-based the whole line to the plan's first
-     * day; Re-plan wiped it.
+     * day; Recalibrate wiped it.
      *
      * Now a line is read by time. It starts at the moment it was made (Create
-     * plan, Re-plan, a pick, back to the saved plan) from your stats at that
+     * plan, Recalibrate, a pick, back to the saved plan) from your stats at that
      * moment, and a new one never erases the ones before it: the old line ends
      * where the new one starts. The simulator's result gives the shape: `daily`
      * (the gain by the end of each of its days: Torn days, the first from its start to Torn's midnight), `quart` (when in each of
@@ -9407,8 +10464,13 @@
 
     const PLAN_LINE_V = 2;
 
-    /** Lines kept (the last few picks and re-plans). */
+    /** Lines kept (the last few picks and recalibrates). */
     const PLAN_LINES_KEPT = 12;
+    /**
+     * Lines kept when the plan recalibrates by itself once a day (round 8): a line a day, each cut down to the days it
+     * was the plan, so two months of them are kept.
+     */
+    const PLAN_AUTO_LINES_KEPT = 60;
 
     /**
      * "N% of plan" is shown once the line is this old and has planned anything. In its first hours a session done a
@@ -9513,7 +10575,7 @@
      * @param {object} o.stats - your stats at `at`
      * @param {object} o.result - the plan's result ({daily, quart, statLine, perStat, cost})
      * @param {string} o.strategy - its id ('path' for the saved path)
-     * @param {string} o.why - 'create' | 'replan' | 'pick' | 'path'
+     * @param {string} o.why - 'create' | 'replan' | 'auto' (a recalibration that ran by itself) | 'pick' | 'path'
      */
     function makeLine({ at, t0 = at, stats, result, strategy, build = null, why = 'create' }) {
         const off = curveAt(result, at - t0);
@@ -9540,6 +10602,13 @@
         };
     }
 
+    /** A line cut to the days it was the plan: until `endAt`, and a day more. Its numbers inside those days do not change. */
+    function cutLine(line, endAt) {
+        const n = gridAt(line.dayMin, Math.max(0, endAt - line.t0)).i + 2;
+        if (!Array.isArray(line.daily) || line.daily.length <= n) return line;
+        return { ...line, daily: line.daily.slice(0, n), quart: Array.isArray(line.quart) ? line.quart.slice(0, QUART * n) : line.quart };
+    }
+
     /** The stored lines (also what 1.3.0 stored: one line from a Torn day's start), oldest first. */
     function readLines(store) {
         if (!store) return [];
@@ -9553,7 +10622,10 @@
     /** The lines with a new one added: it ends the one before it; lines that began at or after it are replaced. */
     function addLine(store, line) {
         const lines = readLines(store).filter((l) => l.at < line.at);
-        return { v: PLAN_LINE_V, lines: [...lines, line].slice(-PLAN_LINES_KEPT) };
+        // A line that has ended keeps only the days it was the plan (a year's line would be a year of numbers, every day).
+        const ended = lines.map((l, i) => cutLine(l, i + 1 < lines.length ? lines[i + 1].at : line.at));
+        const autos = [...ended, line].filter((l) => l.why === 'auto').length;
+        return { v: PLAN_LINE_V, lines: [...ended, line].slice(-(autos ? PLAN_AUTO_LINES_KEPT : PLAN_LINES_KEPT)) };
     }
 
     /** The line that is the plan at `t` (null before the first). */
@@ -9611,11 +10683,17 @@
      * it began, and the share. `pct` is null until the plan has planned anything.
      */
     function progressOf(lines, t, total) {
-        const line = lineAt(lines, t);
-        if (!line) return null;
-        const planned = planGain(line, t);
+        const cur = lineAt(lines, t);
+        if (!cur) return null;
+        // A recalibration that ran by itself (once a day) carries on from the line before it: you are measured since
+        // the plan was made, picked or recalibrated by hand, not since this morning.
+        let i = lines.indexOf(cur);
+        while (i > 0 && lines[i].why === 'auto') i--;
+        const line = lines[i];
+        const before = line === cur ? 0 : plannedBetween(lines, line.at, cur.at) || 0;
+        const planned = before + planGain(cur, t);
         const gained = total - line.base;
-        return { line, gained, planned, pct: planned >= MIN_PLANNED_FOR_PCT && t - line.at >= PCT_MIN_AGE_MS ? (100 * gained) / planned : null, whole: Math.max(0, (line.daily.length ? line.daily[line.daily.length - 1] : 0) - line.off) };
+        return { line, gained, planned, pct: planned >= MIN_PLANNED_FOR_PCT && t - line.at >= PCT_MIN_AGE_MS ? (100 * gained) / planned : null, whole: before + Math.max(0, (cur.daily.length ? cur.daily[cur.daily.length - 1] : 0) - cur.off) };
     }
 
     const sumStats = (o) => STATS.reduce((a, k) => a + (Number(o && o[k]) || 0), 0);
@@ -9648,7 +10726,7 @@
      * same 5-minute simulator, in segments. At each segment's start the plans
      * are compared again from the stats projected for that day and the best one
      * is followed (stats grow, so the best plan changes):
-     *   - a segment every 30 days;
+     *   - a segment every 10 days (REPICK_DAYS);
      *   - an event gets its own segment, from 2 days before it (a jump stacks in
      *     ~29 h) to its end, with its multiplier (World Diabetes Day's candy ×3,
      *     CaffeineCon's cans ×2, the Anniversary's free energy and happy);
@@ -9670,8 +10748,26 @@
 
 
 
-    /** Plans are compared again this often (simulated days). */
-    const REPICK_DAYS = 30;
+    /**
+     * Plans are compared again this often (simulated days). Round 8: every 10 days, not every 30 (the accountant:
+     * "there are lots of points where a certain way of training becomes inefficient"). docs/sims/round8/repick-probe.mjs
+     * tried 7, 10, 14, 21 and 30 days on the three players, 3 and 12 months, two budgets: 10 days is the only one never
+     * behind 30 (0 to +14%, mostly by spending what a stretch left over sooner); 7 and 14 lose in three cases of twelve.
+     * With no budget it changes nothing, and the time to work a plan out is the same.
+     */
+    const REPICK_DAYS = 10;
+
+    /** How long the stretch that starts `elapsed` days into the plan is (a probe may set another schedule: useRepick). */
+    let repickAt = () => REPICK_DAYS;
+    function useRepick(fn) {
+        repickAt = typeof fn === 'function' ? fn : () => REPICK_DAYS;
+    }
+
+    /** A probe's own pick for a stretch: ({index, seg, cmp, rec, budget, top}) → a plan id, or null for the rule's pick. */
+    let pathPick = null;
+    function usePathPick(fn) {
+        pathPick = typeof fn === 'function' ? fn : null;
+    }
 
     /** An event segment starts this long before the event (a jump's stack: 4 Xanax ~29 h, and the booster hold). */
     const EVENT_LEAD_MS = 2 * DAY;
@@ -9680,11 +10776,12 @@
     const BAND_GAIN = 0.05;
     const BAND_HAPPY_LOSS = 0.1;
 
-    /** Segment boundaries: every REPICK_DAYS, and each event's lead-in and end (ms, from start to end). */
+    /** Segment boundaries: each event's lead-in and end, and every REPICK_DAYS in the plain time between them (ms, from start to end). */
     function segmentsOf(start, end, events = []) {
         if (!(end > start)) return [];
+        // The events' own stretches first; the plain time between them is cut every REPICK_DAYS from where it begins, so
+        // an event never leaves a sliver behind it (what is left under 3 days joins the plain stretch before it).
         const cuts = new Set([start, end]);
-        for (let t = start + REPICK_DAYS * DAY; t < end; t += REPICK_DAYS * DAY) cuts.add(t);
         for (const e of events) {
             const a = Math.max(start, Math.floor((e.start - EVENT_LEAD_MS) / DAY) * DAY);
             const b = Math.min(end, Math.ceil(e.end / DAY) * DAY);
@@ -9696,9 +10793,18 @@
         const list = [...cuts].sort((x, y) => x - y);
         const segs = [];
         for (let i = 0; i < list.length - 1; i++) {
-            const seg = { from: list[i], to: list[i + 1] };
-            seg.event = events.some((e) => e.start < seg.to && e.end > seg.from && seg.from >= Math.floor((e.start - EVENT_LEAD_MS) / DAY) * DAY - 1);
-            segs.push(seg);
+            const span = { from: list[i], to: list[i + 1] };
+            span.event = events.some((e) => e.start < span.to && e.end > span.from && span.from >= Math.floor((e.start - EVENT_LEAD_MS) / DAY) * DAY - 1);
+            if (span.event) {
+                segs.push(span);
+                continue;
+            }
+            for (let t = span.from; t < span.to; ) {
+                let next = Math.min(span.to, t + Math.max(1, repickAt(Math.round((t - start) / DAY))) * DAY);
+                if (span.to - next < 3 * DAY) next = span.to;
+                segs.push({ from: t, to: next, event: false });
+                t = next;
+            }
         }
         // A plain sliver under 3 days joins the stretch before it (the first one, the stretch after): a plan re-picked
         // over a day or two can't even finish a jump's stack.
@@ -9752,7 +10858,13 @@
      * side don't share it. The ladder gym's fee and a specialist's membership are
      * paid when they're first used.
      */
-    function unlockHook({ top, progress, gymExpMult, table, active, drugsTaken, known, paid = new Set(), stopAt = GEORGES }) {
+
+    /** The gyms open, without the specialists whose membership is not paid. */
+    function heldGyms(open, paid) {
+        return open.filter((id) => id <= GEORGES || paid.has(id));
+    }
+
+    function unlockHook({ top, progress, gymExpMult, table, active, drugsTaken, known, paid = new Set(), stopAt = GEORGES, joinNew = true }) {
         if (!(top >= 1 && top < GEORGES)) return null;
         const steps = [];
         let acc = -Math.max(0, progress || 0);
@@ -9771,10 +10883,11 @@
                 for (let j = 0; j < steps.length; j++) if (steps[j].at <= trained) i = j;
                 if (i < 0) return null;
                 const gymTop = steps[i].gymId;
-                const open = openAt(gymTop, known || []);
+                memo.paid = memo.paid || new Set(paid);
+                // `joinNew` false (a path under a budget): no membership is joined inside a stretch; its next start weighs it.
+                const open = joinNew ? openAt(gymTop, known || []) : heldGyms(openAt(gymTop, known || []), memo.paid);
                 const g = gymById(gymTop, table);
                 const { best, gyms } = gymsFor(S, open, { table, active, drugsTaken });
-                memo.paid = memo.paid || new Set(paid);
                 const joined = newMemberships(best, memo.paid, table);
                 for (const x of joined) memo.paid.add(x.id);
                 return { gymId: gymTop, cost: (g ? g.cost : 0) + joined.reduce((a, x) => a + x.cost, 0), joined: joined.map((x) => x.id), gyms, left: i + 1 < steps.length ? steps[i + 1].at - steps[i].at : Infinity };
@@ -9782,8 +10895,40 @@
         };
     }
 
+    /**
+     * The fees of the ladder gyms that training `energy` more will open (round 8): from the ladder at `top`, with
+     * `toNext` already trained toward the next one. What the path's budget keeps back for the gyms still to come.
+     */
+    function ladderFeesAhead(top, toNext, energy, gymExpMult = 1, table = null, room = Infinity) {
+        let left = (toNext || 0) + Math.max(0, energy || 0);
+        let fees = 0;
+        for (let id = top; id < GEORGES; id++) {
+            const need = unlockEnergyAfter(id, gymExpMult);
+            if (need === null || left < need) break;
+            const fee = (gymById(id + 1, table) || {}).cost || 0;
+            // `room` (the money left): a gym that cannot be paid for is not bought, and the ladder waits there.
+            if (fees + fee > room) break;
+            left -= need;
+            fees += fee;
+        }
+        return fees;
+    }
+
+    /** The highest ladder gym `room` dollars can buy from `top`, one after the other (the path under a budget, round 8). */
+    function ladderTopWithin(top, room, table = null) {
+        let t = top;
+        let fees = 0;
+        while (t < GEORGES) {
+            const fee = (gymById(t + 1, table) || {}).cost || 0;
+            if (fees + fee > room) break;
+            fees += fee;
+            t++;
+        }
+        return t;
+    }
+
     /** What's left of today's one-off resources after a stretch (held boosters, special refills), for the next one. */
-    function carryOver(args, r) {
+    function carryOver(args, r, to) {
         const usedHeld = (r.used && r.used.held) || {};
         const inv = { ...((args.statics && args.statics.inventory) || {}) };
         for (const [id, n] of Object.entries(usedHeld)) inv[id] = Math.max(0, (Number(inv[id]) || 0) - n);
@@ -9794,8 +10939,16 @@
         return {
             ...args,
             statics: { ...(args.statics || {}), inventory: inv },
-            // The live booster cooldown is today's only; later stretches start with it spent.
-            state: { ...args.state, specialRefills: args.state.specialRefills === null || args.state.specialRefills === undefined ? args.state.specialRefills : held, boosterCd: 0 },
+            // Round 8: the next stretch starts from the bars and cooldowns this one ended with, at the Torn midnight it
+            // ended on (`at`), the day's refill unused. Before, every stretch after the first started from a full bar with
+            // no cooldown: a path cut into more stretches trained energy nobody has (test/r8-stretch-carry.test.js).
+            state: {
+                ...args.state,
+                specialRefills: args.state.specialRefills === null || args.state.specialRefills === undefined ? args.state.specialRefills : held,
+                ...(r.end
+                    ? { energy: { ...args.state.energy, current: r.end.energy }, happy: { ...args.state.happy, current: r.end.happy }, drugCd: r.end.drugCdMin * 60, boosterCd: r.end.boosterCdMin * 60, refillUsed: false, at: to, carried: true }
+                    : { boosterCd: 0 }),
+            },
             special: Math.max(0, (args.special || 0) - extraUsed),
         };
     }
@@ -9832,6 +10985,9 @@
         const segs = segmentsOf(start, end, events);
         const out = [];
         const daily = [];
+        // What the path pays on each day (the cash check): each stretch's own days, a membership on the stretch's first.
+        const costDaily = [];
+        const parts = { rehab: 0, overdose: 0, rough: false, lost: 0 };
         // Round 7 (Progress): when in each day the gain lands, and each stat's own line, along the whole path.
         const quart = [];
         const statDaily = { str: [], spd: [], def: [], dex: [] };
@@ -9843,29 +10999,82 @@
         let firstDayMin = 0;
         let cur = args;
         const startTotal = totalOf(stats);
+        // The money is the whole path's (round 8): a stretch may spend its share, by its days, of what is left. A one-off
+        // fee (a membership, a ladder gym) is carried by all the days of the path, not by the stretch it falls in: the
+        // fees of the gyms still to open are kept back from what is left (at the energy a day trained so far; before any
+        // stretch, natural energy, three Xanax and the refill), and a stretch gets the ones it will pay on top of its share.
+        const totalDays = segs.reduce((a, s) => a + s.days, 0);
+        let daysDone = 0;
+        // A membership is weighed against the money only when there is a limit (never under "Max gains").
+        const weigh = Number.isFinite(budgetPerDay) && args.pickBy !== 'max';
+        const bar = args.state.energy || {};
+        const energyPerDay0 = (bar.interval > 0 ? (86400 / bar.interval) * (bar.increment || 0) : 0) + 3 * 250 + (bar.maximum || 0);
+        // A ladder gym is bought only out of money the path still has (round 8): a gym the fees kept back did not
+        // foresee (the energy a day grows as the budget frees up) is not bought with money that is not there; the ladder
+        // waits at it (`cap`), its bar full, and the next stretch keeps its fee back. Before, the friend's 12 months at
+        // $2M a day ended $93M over: George's opened in the last five days.
+        const budgetFor = (seg, fees) => {
+            if (!Number.isFinite(budgetPerDay)) return { budget: Infinity, cap: GEORGES };
+            const daysLeft = totalDays - daysDone;
+            const perDay = daysDone > 0 ? energy / daysDone : energyPerDay0;
+            const left = Math.max(0, budgetPerDay * totalDays - cost - fees);
+            const ahead = ladderFeesAhead(top, toNext, perDay * daysLeft, gymExpMult, table, left);
+            const items = ((left - ahead) * seg.days) / daysLeft;
+            const here = ladderFeesAhead(top, toNext, perDay * seg.days, gymExpMult, table, left - items);
+            return { budget: items + here, cap: ladderTopWithin(top, left - items, table) };
+        };
         for (const seg of segs) {
             yield seg;
-            const open = openAt(top, knownSpecialists);
-            const { best } = gymsFor(stats, open, { table, active, drugsTaken: null });
-            // A specialist first used now: its membership is paid now.
-            let fees = 0;
-            for (const x of newMemberships(best, paid, table)) {
-                fees += x.cost;
-                paid.add(x.id);
-            }
-            const pc = { ...pc0, stats: { ...stats }, unlocked: open, best };
-            const state = { ...cur.state, stats: { ...stats } };
-            const unlock = unlockHook({ top, progress: toNext, gymExpMult, table, active, known: knownSpecialists, paid });
-            // Only the first stretch starts from the bars as they are now; later ones from a full bar (their day isn't known).
-            const segArgs = { ...cur, state, pc, settings: { ...cur.settings, horizonDays: seg.days, budget: Number.isFinite(budgetPerDay) ? Math.max(0, budgetPerDay * seg.days - fees) : Infinity }, events: segEvents(events, seg), unlock, live: Boolean(args.live) && !out.length };
-            const cmp = yield* compare(segArgs);
+            const openAll = openAt(top, knownSpecialists);
             // The gym to unlock: only for the stretches before it opens, with what's left of its date.
             const segOpenBy = openBy && top < openBy.gymId ? { gymId: openBy.gymId, name: openBy.name || null, days: openBy.by ? Math.ceil((openBy.by - seg.from) / DAY) : null, horizon: seg.days } : null;
-            const rec = recommend(cmp, { budget: budgetOf(segArgs.settings), bliss: pc.perks.bliss, pickBy: cur.pickBy || 'most', openBy: segOpenBy });
-            const r = cmp[rec.recommended];
+            // The stretch's comparison with these gyms open, these memberships held and this much of the fees paid now.
+            const first = !out.length;
+            const pickWith = function* (open, held, feesNow) {
+                const { best } = gymsFor(stats, open, { table, active, drugsTaken: null });
+                const pc = { ...pc0, stats: { ...stats }, unlocked: open, best };
+                const state = { ...cur.state, stats: { ...stats } };
+                const money = budgetFor(seg, feesNow);
+                const unlock = unlockHook({ top, progress: toNext, gymExpMult, table, active, known: knownSpecialists, paid: held, joinNew: !weigh, stopAt: money.cap });
+                // The first stretch starts from the bars as they are now; a later one from where the stretch before it ended.
+                const segArgs = { ...cur, state, pc, settings: { ...cur.settings, horizonDays: seg.days, budget: money.budget }, events: segEvents(events, seg), unlock, live: (Boolean(args.live) && first) || Boolean(cur.state.carried) };
+                const cmp = yield* compare(segArgs);
+                const rec = recommend(cmp, { budget: budgetOf(segArgs.settings), bliss: pc.perks.bliss, pickBy: cur.pickBy || 'most', openBy: segOpenBy });
+                // A probe may put another plan in a stretch's place (usePathPick): what the path would be with it.
+                const forced = pathPick ? pathPick({ index: out.length, seg, cmp, rec, budget: budgetOf(segArgs.settings), top }) : null;
+                if (forced && cmp[forced]) return { rec: { ...rec, recommended: forced }, r: cmp[forced], cap: money.cap };
+                return { rec, r: cmp[rec.recommended] || null, cap: money.cap };
+            };
+            // A specialist first used now: its membership is paid now. Under a budget (round 8) only when it pays: the
+            // stretch is compared both ways, with the gym and its fee carried by the days left, and without either.
+            const want = newMemberships(gymsFor(stats, openAll, { table, active, drugsTaken: null }).best, paid, table);
+            const feesAll = want.reduce((a, x) => a + x.cost, 0);
+            let fees = 0;
+            let joined = [];
+            let got;
+            if (!want.length || !weigh) {
+                for (const x of want) paid.add(x.id);
+                fees = feesAll;
+                joined = want;
+                got = yield* pickWith(openAll, paid, fees);
+            } else {
+                const yes = yield* pickWith(openAll, new Set([...paid, ...want.map((x) => x.id)]), feesAll);
+                const no = yield* pickWith(heldGyms(openAll, paid), paid, 0);
+                const feeShare = (feesAll * seg.days) / (totalDays - daysDone);
+                const per = (x, extra) => (x.r.cost + extra > 0 ? x.r.gained / (x.r.cost + extra) : Infinity);
+                const pays = yes.r && (!no.r || (cur.pickBy === 'value' ? per(yes, feeShare) >= per(no, 0) : yes.r.gained > no.r.gained));
+                if (pays) {
+                    for (const x of want) paid.add(x.id);
+                    fees = feesAll;
+                    joined = want;
+                }
+                got = pays ? yes : no;
+            }
+            const { rec, r, cap } = got;
             if (!r) break;
             const base = totalOf(stats) - startTotal;
             for (const v of r.daily) daily.push(Math.round(base + v));
+            for (let d = 0; d < r.daily.length; d++) costDaily.push(((r.costDaily && r.costDaily[d]) || 0) + (d ? 0 : fees));
             if (r.quart) quart.push(...r.quart);
             else for (let d = 0; d < r.daily.length; d++) quart.push(360, 720, 1080);
             for (const k of STATS) for (let d = 1; d <= r.daily.length; d++) statDaily[k].push(Math.round(perStat[k] + statCurveAt(r.statLine, k, dayEndMs(r.dayMin, d))));
@@ -9877,28 +11086,44 @@
             }
             for (const [id, n] of Object.entries(r.used || {})) if (typeof n === 'number') used[id] = (used[id] || 0) + n;
             cost += r.cost + fees;
+            // Rehab and overdoses (round 8): each stretch's part, added up for the path.
+            if (r.costParts) {
+                parts.rehab += r.costParts.rehab || 0;
+                parts.overdose += r.costParts.overdose || 0;
+                parts.rough = parts.rough || Boolean(r.costParts.rough);
+                parts.lost += r.overdoseLost || 0;
+            }
+            daysDone += seg.days;
             energy += r.energyTrained || 0;
             // The ladder: what this segment's energy opened (the simulator switched gyms when it did).
             for (const u of r.unlocked || []) unlocks.push({ gymId: u.gymId, day: Math.round((seg.from - start) / DAY) + Math.floor((u.at / Math.max(1, r.energyTrained || 1)) * seg.days), cost: u.cost });
             for (const u of r.unlocked || []) for (const id of u.joined || []) paid.add(id);
-            ({ top, toNext } = climb(top, toNext, r.energyTrained || 0, gymExpMult));
-            out.push({ from: seg.from, to: seg.to, days: seg.days, event: seg.event ? segEvents(events, seg).map((e) => e.id) : null, strategy: rec.recommended, gained: r.gained, cost: r.cost + fees, energy: r.energyTrained || 0, statsEnd: { ...stats }, candy: r.candy || null, refill: r.refill, booster: r.booster || null, ...(Number.isFinite(r.xanaxPerDay) ? { xanaxPerDay: r.xanaxPerDay } : {}), alternatives: rec.alternatives.slice(0, 3).map((a) => ({ id: a.id, deltaStatsPct: a.deltaStatsPct })) });
-            cur = carryOver(cur, r);
+            // The memberships joined at this stretch's start, listed with the gyms the path opens.
+            for (const x of joined) unlocks.push({ gymId: x.id, day: Math.round((seg.from - start) / DAY), cost: x.cost, member: true });
+            ({ top, toNext } = climb(top, toNext, r.energyTrained || 0, gymExpMult, cap));
+            out.push({ from: seg.from, to: seg.to, days: seg.days, ...(cap < GEORGES ? { cap } : {}), ...(joined.length ? { joined: joined.map((x) => x.id) } : {}), event: seg.event ? segEvents(events, seg).map((e) => e.id) : null, strategy: rec.recommended, gained: r.gained, cost: r.cost + fees, energy: r.energyTrained || 0, statsEnd: { ...stats }, candy: r.candy || null, refill: r.refill, booster: r.booster || null, ...(Number.isFinite(r.xanaxPerDay) ? { xanaxPerDay: r.xanaxPerDay } : {}), alternatives: rec.alternatives.slice(0, 3).map((a) => ({ id: a.id, deltaStatsPct: a.deltaStatsPct })) });
+            cur = carryOver(cur, r, seg.to);
         }
-        const result = { id: 'year', gained: Math.round(totalOf(stats) - startTotal), perStat: Object.fromEntries(STATS.map((k) => [k, Math.round(perStat[k])])), cost: Math.round(cost), energyTrained: energy, daily, used, unlocks, quart, statLine: { ...statLineFrom(statDaily, daily.length > STAT_LINE_DAILY_DAYS ? 7 : 1), dayMin: firstDayMin }, dayMin: firstDayMin };
-        const band = inputs ? yield* yearBandSteps(out, args, { inputs, events, gymExpMult, knownSpecialists, table, active, top0, toNext0, centre }) : null;
+        const result = { id: 'year', gained: Math.round(totalOf(stats) - startTotal), perStat: Object.fromEntries(STATS.map((k) => [k, Math.round(perStat[k])])), cost: Math.round(cost), energyTrained: energy, daily, costDaily, used, unlocks, quart, statLine: { ...statLineFrom(statDaily, daily.length > STAT_LINE_DAILY_DAYS ? 7 : 1), dayMin: firstDayMin }, dayMin: firstDayMin, ...(parts.rehab + parts.overdose > 0 ? { costParts: { rehab: Math.round(parts.rehab), overdose: Math.round(parts.overdose), rough: parts.rough }, overdoseLost: Math.round(parts.lost) } : {}) };
+        unlocks.sort((a, b) => a.day - b.day);
+        const band = inputs ? yield* yearBandSteps(out, args, { inputs, events, gymExpMult, knownSpecialists, table, active, top0, toNext0, centre, weigh }) : null;
         return { segments: out, result, band, unlocks, events };
     }
 
     /** Gym experience: the ladder gym reached after training `energy` more, and the progress toward the next. */
-    function climb(top, toNext, energy, gymExpMult = 1) {
+    function climb(top, toNext, energy, gymExpMult = 1, cap = GEORGES) {
         let t = top;
         let left = (toNext || 0) + energy;
-        while (t < GEORGES) {
+        while (t < GEORGES && t < cap) {
             const need = unlockEnergyAfter(t, gymExpMult);
             if (need === null || left < need) break;
             left -= need;
             t++;
+        }
+        // A gym not bought (`cap`): its bar is full and stays full; the energy trained past it opens nothing.
+        if (t >= cap && t < GEORGES) {
+            const need = unlockEnergyAfter(t, gymExpMult);
+            if (need !== null) left = Math.min(left, need);
         }
         return { top: t, toNext: t < GEORGES ? left : 0 };
     }
@@ -9911,7 +11136,7 @@
      * third of the band's time). A generator: it yields 'band' before each
      * stretch of each run (a chance for a break).
      */
-    function* yearBandSteps(segments, args, { inputs, events, gymExpMult, knownSpecialists, table, active, top0, toNext0, centre = false }) {
+    function* yearBandSteps(segments, args, { inputs, events, gymExpMult, knownSpecialists, table, active, top0, toNext0, centre = false, weigh = false }) {
         const run = function* (gainMult, lossMult) {
             let stats = { ...args.pc.stats };
             let top = top0;
@@ -9921,11 +11146,13 @@
             const t0 = totalOf(stats);
             for (const s of segments) {
                 yield 'band';
-                const open = openAt(top, knownSpecialists);
+                // The path's own memberships: under a budget the ones it joined at this stretch, else every one first used.
+                for (const id of s.joined || []) paid.add(id);
+                const open = weigh ? heldGyms(openAt(top, knownSpecialists), paid) : openAt(top, knownSpecialists);
                 const { best } = gymsFor(stats, open, { table, active, drugsTaken: null });
-                for (const x of newMemberships(best, paid, table)) paid.add(x.id);
+                if (!weigh) for (const x of newMemberships(best, paid, table)) paid.add(x.id);
                 const pc = { ...args.pc, stats: { ...stats }, unlocked: open, best };
-                const base = inputs({ ...cur, state: { ...cur.state, stats: { ...stats } }, pc, settings: { ...cur.settings, horizonDays: s.days }, live: Boolean(args.live) && s === segments[0] });
+                const base = inputs({ ...cur, state: { ...cur.state, stats: { ...stats } }, pc, settings: { ...cur.settings, horizonDays: s.days }, live: (Boolean(args.live) && s === segments[0]) || Boolean(cur.state.carried) });
                 const o = {
                     ...base,
                     perks: Object.fromEntries(STATS.map((k) => [k, ((base.perks && base.perks[k]) || 1) * gainMult])),
@@ -9936,14 +11163,14 @@
                     ...(Number.isFinite(s.xanaxPerDay) ? { xanaxPerDay: s.xanaxPerDay } : {}),
                     special: 0,
                     events: segEvents(events, s),
-                    unlock: unlockHook({ top, progress: toNext, gymExpMult, table, active, known: knownSpecialists, paid }),
+                    unlock: unlockHook({ top, progress: toNext, gymExpMult, table, active, known: knownSpecialists, paid, joinNew: !weigh, ...(Number.isFinite(s.cap) ? { stopAt: s.cap } : {}) }),
                 };
                 const r = simulateStrategy(s.strategy, o);
                 stats = { ...stats };
                 for (const k of STATS) stats[k] += r.perStat[k] || 0;
                 for (const u of r.unlocked || []) for (const id of u.joined || []) paid.add(id);
-                ({ top, toNext } = climb(top, toNext, r.energyTrained || 0, gymExpMult));
-                cur = carryOver(cur, r);
+                ({ top, toNext } = climb(top, toNext, r.energyTrained || 0, gymExpMult, Number.isFinite(s.cap) ? s.cap : GEORGES));
+                cur = carryOver(cur, r, s.to);
             }
             return Math.round(totalOf(stats) - t0);
         };
@@ -9961,9 +11188,9 @@
      *   - Create plan: 1, 3, 6 or 12 months from today, worked out from scratch
      *     from your stats, income, prices and gyms now;
      *   - Recalibrate (only on a click): re-reads everything as it is now and
-     *     re-plans the time left, keeping the end date (2 months into a year,
+     *     recalibrates the time left, keeping the end date (2 months into a year,
      *     still 10 months left).
-     * Nothing re-plans by itself. Everything else (today's steps and their
+     * Nothing recalibrates by itself. Everything else (today's steps and their
      * timing, the booster cooldown, links, gym marks, Buy, Progress, the Discord
      * pings) follows the saved plan with the same logic as before.
      *
@@ -9974,6 +11201,7 @@
      *   - `planNow` (GM, a few KB): what Torn's pages and the bot need to follow
      *     it (per plan: candy, refill, special refills, items used, gains, cost).
      */
+
 
 
 
@@ -10023,7 +11251,7 @@
     function slimResult(r) {
         if (!r) return null;
         const out = { id: r.id, gained: r.gained, cost: r.cost, used: r.used || {}, perStat: r.perStat || {}, energyTrained: r.energyTrained || 0 };
-        for (const k of ['candy', 'refill', 'refillGain', 'refillCost', 'specialHelps', 'specialGain', 'booster', 'blocked', 'xanaxPerDay']) if (r[k] !== undefined) out[k] = r[k];
+        for (const k of ['candy', 'refill', 'refillGain', 'refillCost', 'specialHelps', 'specialGain', 'booster', 'blocked', 'xanaxPerDay', 'cash', 'costParts', 'overdoseLost']) if (r[k] !== undefined) out[k] = r[k];
         return out;
     }
 
@@ -10044,7 +11272,7 @@
         let from = start;
         let d0 = 0;
         for (let i = 1; d0 < days; i++) {
-            // Month ends count from the plan's first day (`anchor`), so a re-plan mid-month keeps the plan's own months.
+            // Month ends count from the plan's first day (`anchor`), so a recalibrate mid-month keeps the plan's own months.
             if (addMonths(anchor, i) <= start) continue;
             const to = Math.min(addMonths(anchor, i), start + days * DAY);
             const d1 = Math.min(days, Math.round((to - start) / DAY));
@@ -10101,9 +11329,9 @@
      * @param {object[]} [o.jobWhatIf] - company what-ifs
      * @param {object|null} [o.prev] - the plan this one recalibrates (its start, end, history are kept)
      * @param {object|null} [o.year] - core/year.js yearSteps' value: the path followed (a plan per segment, re-picked
-     *   every 30 days and for each event), gyms opening, the events, the band
+     *   every 10 days and for each event), gyms opening, the events, the band
      */
-    function makeSavedPlan({ compare, rec, snapshot, start, end, months, days, budget, whatIf = null, jobWhatIf = [], prev = null, year = null, gymWorth = [], extras = 'done', now }) {
+    function makeSavedPlan({ compare, rec, snapshot, start, end, months, days, budget, whatIf = null, jobWhatIf = [], prev = null, year = null, gymWorth = [], extras = 'done', auto = false, now }) {
         const from = prev ? tornDayStart(now) : start;
         const best = compare && rec && rec.recommended ? compare[rec.recommended] : null;
         const history = prev ? (prev.history || []).slice(-(HISTORY_KEEP - 1)) : [];
@@ -10121,6 +11349,8 @@
             rev: now,
             createdAt: prev ? prev.createdAt : now,
             recalibratedAt: prev ? now : null,
+            // Who asked for the last recalibration: you (the button), or the plan itself (once a day, round 8).
+            recalibratedBy: prev ? (auto ? 'auto' : 'you') : null,
             start: prev ? prev.start : start,
             end: prev ? prev.end : end,
             months: prev ? prev.months : months,
@@ -10165,6 +11395,7 @@
             rev: saved.rev,
             createdAt: saved.createdAt,
             recalibratedAt: saved.recalibratedAt,
+            recalibratedBy: saved.recalibratedBy || null,
             start: saved.start,
             end: saved.end,
             months: saved.months,
@@ -10175,16 +11406,136 @@
             pickBy: saved.rec ? saved.rec.pickBy : null,
             warn,
             slim,
-            // Which plan the path follows when (a switch on its date is following the saved plan, not re-planning).
+            // Which plan the path follows when (a switch on its date is following the saved plan, not recalibrating).
             // When the what-ifs were added to the whole plan (other tabs read it again then).
             extrasAt: saved.extrasAt || null,
-            schedule: saved.year ? saved.year.segments.map((s) => ({ from: s.from, to: s.to, strategy: s.strategy, candy: s.candy || null, ...(Number.isFinite(s.xanaxPerDay) ? { xanaxPerDay: s.xanaxPerDay } : {}) })) : null,
+            schedule: saved.year ? scheduleOf(saved.year.segments) : null,
         };
+    }
+
+    /**
+     * The path as Torn's pages follow it: which plan from when to when, with its candy and Xanax a day. Stretches in a
+     * row that follow the same plan the same way are one entry (round 8: a stretch a week would be 52 entries a year, and
+     * this part is handed to every Torn page).
+     */
+    function scheduleOf(segments) {
+        const out = [];
+        for (const s of segments || []) {
+            const e = { from: s.from, to: s.to, strategy: s.strategy, candy: s.candy || null, ...(Number.isFinite(s.xanaxPerDay) ? { xanaxPerDay: s.xanaxPerDay } : {}) };
+            const last = out[out.length - 1];
+            const same = last && last.to === e.from && last.strategy === e.strategy && last.xanaxPerDay === e.xanaxPerDay && JSON.stringify(last.candy) === JSON.stringify(e.candy);
+            if (same) last.to = e.to;
+            else out.push(e);
+        }
+        return out;
     }
 
     /** A stored planNow this build can follow (else: no plan yet). */
     function usablePlanNow(p) {
         return p && p.v === SAVED_PLAN_V && p.slim && Number.isFinite(p.end) && p.recommended ? p : null;
+    }
+
+    /**
+     * The path's stretches as the Plan page lists them (round 8, mockup A: the path is the recommendation): stretches
+     * that follow the same plan in a row are one, their days, gain and cost added.
+     * @param {object[]} segments - the saved plan's `year.segments`
+     * @returns {Array<{from, to, days, strategy, gained, cost, candy, refill, xanax: number[], joined: number[]}>}
+     *   xanax: the Xanax a day of a small-budget stretch (each value once); joined: specialist gyms joined at its start
+     */
+    function pathStretches(segments) {
+        const out = [];
+        for (const s of segments || []) {
+            if (!s) continue;
+            const last = out[out.length - 1];
+            const xan = Number.isFinite(s.xanaxPerDay) ? s.xanaxPerDay : null;
+            if (last && last.strategy === s.strategy) {
+                last.to = s.to;
+                last.days += s.days;
+                last.gained += s.gained;
+                last.cost += s.cost;
+                if (xan !== null && !last.xanax.includes(xan)) last.xanax.push(xan);
+                last.joined.push(...(s.joined || []));
+            } else out.push({ from: s.from, to: s.to, days: s.days, strategy: s.strategy, gained: s.gained, cost: s.cost, candy: s.candy || null, refill: s.refill, xanax: xan === null ? [] : [xan], joined: [...(s.joined || [])] });
+        }
+        return out;
+    }
+
+    /**
+     * The plans a month follows, in order: the ones that take `minDays` or more of it (none does: the one with the
+     * most days). Empty for a month the path does not reach.
+     * @param {object[]} stretches - pathStretches()
+     */
+    function monthPlans(stretches, from, to, minDays = 5) {
+        const parts = [];
+        for (const s of stretches || []) {
+            const days = (Math.min(to, s.to) - Math.max(from, s.from)) / DAY;
+            if (days > 0) parts.push({ strategy: s.strategy, days });
+        }
+        const long = parts.filter((x) => x.days >= minDays);
+        const list = long.length ? long : parts.length ? [parts.reduce((a, b) => (b.days > a.days ? b : a))] : [];
+        return list.map((x) => x.strategy).filter((id, i, all) => i === 0 || all[i - 1] !== id);
+    }
+
+    /**
+     * Why the path is the recommendation, from its numbers: against the money and against the best single plan over
+     * the same days. `wins` is false when one plan the whole way gains more (the page then says so, not "wins").
+     * @param {object} o
+     * @param {{gained:number, cost:number}} o.path
+     * @param {number|null} o.budget - the money for these days (null: none)
+     * @param {string} o.pickBy - the Plan rule
+     * @param {{gained:number, cost:number}|null} o.single - the comparison's pick, one plan the whole way
+     * @param {string} o.singleName
+     * @returns {{wins:boolean, text:string}}
+     */
+    function pathWhy({ path, budget = null, pickBy = 'most', single = null, singleName = '' }) {
+        const limit = Number.isFinite(budget) && pickBy !== 'max' ? budget : null;
+        const mine = '+' + fmtShort(path.gained) + ' for ' + fmtMoney(path.cost);
+        const over = limit !== null && path.cost > limit ? ' It ends ' + fmtMoney(path.cost - limit) + ' over that: a gym’s fee near the end.' : '';
+        const head = (pickBy === 'value' ? 'the best value, stretch by stretch' : 'the most stats') + (limit !== null ? ' inside your ' + fmtMoney(limit) : '') + ': ' + mine + '.' + over;
+        if (!single) return { wins: true, text: head };
+        const theirs = '+' + fmtShort(single.gained) + ' for ' + fmtMoney(single.cost);
+        if (single.gained > path.gained && (limit === null || single.cost <= limit)) return { wins: false, text: 'The path: ' + mine + '. ' + singleName + ' the whole way gains more, ' + theirs + ': you can follow it below.' };
+        const inside = limit === null || single.cost <= limit;
+        return { wins: true, text: head + ' ' + (inside ? 'The best single plan' + (limit !== null ? ' inside it' : '') + ', ' + singleName + ', gains ' + theirs + '.' : 'No single plan fits it; the closest, ' + singleName + ', gains ' + theirs + '.') };
+    }
+
+    /** The daily recalibration waits this long after Torn's reset (the day's first reads and prices come in). */
+    const AUTO_RECAL_AFTER_MS = 2 * 60 * 1000;
+    /** A run that failed is tried again this much later, not every minute. */
+    const AUTO_RECAL_RETRY_MS = 30 * 60 * 1000;
+    /** The stats read it starts from must be this fresh. */
+    const AUTO_RECAL_STATE_MS = 10 * 60 * 1000;
+
+    /**
+     * Is the plan's own recalibration due (round 8; the accountant: "recalibrate once per day, at Torn's reset; keep
+     * the button")? Once a Torn day, from two minutes after the reset, or the first moment after that the app is open.
+     * A plan made or recalibrated today (by you or by itself) is done for the day.
+     * @param {object} o
+     * @param {object|null} o.planNow - the saved plan's small part ({rev, start, end, createdAt, recalibratedAt})
+     * @param {object} o.settings - {autoRecalibrate}: off only when set to false
+     * @param {object|null} [o.last] - the last try {day, at, ok}
+     * @param {number|null} [o.stateAt] - when your stats were last read
+     * @param {boolean} [o.busy] - a plan is being worked out
+     * @param {boolean} [o.stacking] - chain mode: Resume recalibrates
+     * @param {boolean} [o.overdose] - "Rehab done" recalibrates
+     * @param {number} o.now
+     * @returns {{due:boolean, why:string}}
+     */
+    function autoRecalibrateDue({ planNow, settings, last = null, stateAt = null, busy = false, stacking = false, overdose = false, now }) {
+        const no = (why) => ({ due: false, why });
+        if (settings && settings.autoRecalibrate === false) return no('off');
+        if (!planNow || !Number.isFinite(planNow.end)) return no('no plan');
+        if (now >= planNow.end) return no('ended');
+        const today = tornDayStart(now);
+        if (Math.max(planNow.createdAt || 0, planNow.recalibratedAt || 0, planNow.rev || 0) >= today) return no('done today');
+        if (now - today < AUTO_RECAL_AFTER_MS) return no('just after the reset');
+        if (busy) return no('busy');
+        if (stacking) return no('stacking');
+        if (overdose) return no('overdose');
+        if (last && last.day === today && last.ok === false && now - last.at < AUTO_RECAL_RETRY_MS) return no('tried');
+        if (last && last.day === today && last.ok === null && now - last.at < AUTO_RECAL_RETRY_MS) return no('another tab');
+        if (!Number.isFinite(stateAt) || now - stateAt > AUTO_RECAL_STATE_MS) return no('waiting for a read');
+        return { due: true, why: 'due' };
     }
 
     /* ===== src/platform/plan-store.js ===== */
@@ -11175,22 +12526,25 @@
     }
 
     /**
-     * The export's files: gym-samples.json, fights.json, model.json, meta.json.
+     * The export's files: gym-samples.json, fights.json, model.json, meta.json,
+     * and ledger.json when your books are read (core/ledger.js ledgerShape: names
+     * and counts, never an amount).
      * Player ids are left out (fights carry a hashed stand-in) unless asked.
      */
-    function exportFiles({ samples = [], fights = [], gymLog = [], learned = null, version = '', now = Date.now(), includeIds = false }) {
+    function exportFiles({ samples = [], fights = [], gymLog = [], learned = null, ledger = null, version = '', now = Date.now(), includeIds = false }) {
         const gym = samples.map((s) => ({ at: s.at || null, stat: s.stat, trains: s.trains, predicted: Math.round(s.predicted), actual: Math.round(s.actual), S: round4sig(s.S), H: s.H, dots: s.dots, E: s.E, perks: s.perks, gym: s.gym || null }));
         const fl = fights.map((f) => ({ at: f.at, who: includeIds ? f.key.split(':')[0] : f.who, predictedWin: f.predictedWin, won: f.won, predictedHpKept: f.predictedHpKept, hpKept: f.hpKept }));
         const model = learned ? { at: learned.at, gym: learned.gym ? { accepted: learned.gym.accepted, model: learned.gym.model, heldOut: learned.gym.heldOut, sessions: learned.gym.sessions } : null, fights: learned.fights ? { accepted: learned.fights.accepted, model: learned.fights.model, fights: learned.fights.fights } : null } : null;
         // Every TRAIN click from Torn's log (Full key): the stat before, trains, gym and gain, for checking the split on real sessions.
         const log = (gymLog || []).map((x) => ({ at: x.at, stat: x.stat, trains: x.trains, energy: x.energy, happy: x.happy, gym: x.gymId, before: x.before === null || x.before === undefined ? null : round4sig(x.before), gain: x.gain }));
-        const meta = { app: 'Torn Pumping Iron', version, exportedAt: new Date(now).toISOString(), sessions: gym.length, fights: fl.length, gymLog: log.length, ids: includeIds ? 'included' : 'left out' };
+        const meta = { app: 'Torn Pumping Iron', version, exportedAt: new Date(now).toISOString(), sessions: gym.length, fights: fl.length, gymLog: log.length, ledgerLines: ledger ? ledger.lines : 0, ids: includeIds ? 'included' : 'left out' };
         return [
             { name: 'gym-samples.json', data: JSON.stringify(gym) },
             { name: 'gym-log.json', data: JSON.stringify(log) },
             { name: 'fights.json', data: JSON.stringify(fl) },
             { name: 'model.json', data: JSON.stringify(model) },
             { name: 'meta.json', data: JSON.stringify(meta, null, 1) },
+            ...(ledger ? [{ name: 'ledger.json', data: JSON.stringify(ledger, null, 1) }] : []),
         ];
     }
 
@@ -11307,14 +12661,14 @@
     }
 
     /**
-     * A Create plan or Re-plan that finished (or failed): how long it took, how
+     * A Create plan or Recalibrate that finished (or failed): how long it took, how
      * much of that with the tab not in front, kept with the last few.
      * @param {object} run - {at, kind: 'create'|'replan', months, days, ms, hiddenMs, ok, error, cancelled}
      */
     function notePlanRun(run) {
         const list = [...(gmGet(K.planRuns, null) || []), run].slice(-PLAN_RUNS_KEPT);
         gmSet(K.planRuns, list);
-        const words = (run.kind === 'replan' ? 'Re-plan' : 'Create plan') + ' ' + (run.months || '?') + (run.months === 1 ? ' month' : ' months') + ' (' + (run.days || '?') + ' days)';
+        const words = (run.kind === 'replan' ? 'Recalibrate' : 'Create plan') + ' ' + (run.months || '?') + (run.months === 1 ? ' month' : ' months') + ' (' + (run.days || '?') + ' days)';
         const time = (run.ms / 1000).toFixed(1) + ' s' + (run.hiddenMs > 0 ? ', ' + (run.hiddenMs / 1000).toFixed(1) + ' s of it with the tab not in front' : '');
         if (run.ok) logNote(words + ' took ' + time);
         else if (run.cancelled) logNote(words + ' cancelled after ' + time);
@@ -11360,12 +12714,774 @@
         }
     }
 
+    /* ===== src/core/gympage.js ===== */
+    /*
+     * What the gym page marks say, worked out purely (DESIGN §5, ROUND4-PLAN
+     * §C5): the walk-through of the current train step, part by part ("George's:
+     * STR × 12 → Frontline Fitness: DEX × 8"). In the gym of the current part,
+     * that stat is outlined and Fill types the trains left; when the part is in
+     * another gym, that gym's button is outlined ("Next: Frontline Fitness · DEX
+     * × 8") and the stat boxes go grey. Progress comes from a snapshot taken
+     * when the step starts, moved on by every train Torn shows. The UI only
+     * draws this; nothing here (or there) clicks, trains or switches gyms.
+     */
+
+
+
+
+
+
+
+
+
+    /** A walk-through older than this is over (a session takes minutes; the next drug is hours away). */
+    const SESSION_MAX_MS = 3 * 60 * 60 * 1000;
+
+    /** This much more energy than the session still needs (a Xanax, a refill, a full bar) starts a new one. */
+    const NEW_SESSION_E = 50;
+
+    /** A step counts as now when it is due within this long. */
+    const DUE_SLACK_MS = 60 * 1000;
+
+    /** "George's: STR × 12" */
+    function partText(p) {
+        return p.gymName + ': ' + STAT_LABEL[p.stat] + ' × ' + p.trains;
+    }
+
+    /** "George's: STR × 12 → Frontline Fitness: DEX × 8" */
+    function partsText(parts) {
+        return (parts || []).map(partText).join(' → ');
+    }
+
+    /** All the energy there is now is kept for the plan (a jump's stack, a held boost Xanax, a console jump's bar). */
+    function keptAll(m) {
+        return Boolean((m && m.energyKept && m.energyKept.all) || (m && m.strip && m.strip.refill && m.strip.refill.stacking));
+    }
+
+    /**
+     * The train step the gym page walks through: the first step with trains
+     * that is due now; else the energy you have now, split the same way.
+     * @returns {{id, kind, label, at, items, parts}|null}
+     */
+    function currentTrainStep(m, now = m.now) {
+        const due = (m.steps || []).find((s) => s.parts && s.parts.length && s.at <= now + DUE_SLACK_MS);
+        if (due) return due;
+        // Energy the plan keeps on purpose (model.js keptEnergyOf): Xanax stacked for a jump, the daily choco boost's held
+        // Xanax, the console jump's bar under its stack, a war's reserve. It waits, so the page never says to train it now
+        // (round 7: between stacks it said "Train DEX × 100" with the jump's energy; the review: the same after "Xanax #2 ·
+        // keep the energy for the boost" and before a console jump's stack). Only what is above it is trained.
+        if (m.strip && m.strip.refill && m.strip.refill.stacking) return null;
+        const kept = m.energyKept || null;
+        if (kept && kept.all) return null;
+        const energy = Math.max(0, m.strip.energy.current - (kept ? kept.amount : 0));
+        const r = splitSession({
+            stats: m.pc.stats,
+            shares: m.shares,
+            energy,
+            happy: m.strip.happy.current,
+            happyMax: m.state.happy.maximum,
+            unlocked: m.pc.unlocked,
+            perks: m.pc.perks.mult,
+            keep: m.keep,
+            table: m.pc.table,
+            active: m.state.gymId,
+            happyLossMult: m.pc.perks.happyLossMult,
+        });
+        if (!r.parts.length) return null;
+        return { id: 'now', kind: 'now', label: 'The energy you have now', at: now, items: [], parts: r.parts };
+    }
+
+    /**
+     * What the page shows now: each stat from Torn's boxes where they show it
+     * (they change the moment a train lands), else from the model; energy from
+     * Torn's sidebar bar, else the model.
+     * @param {object} m - model
+     * @param {{stat, value}[]} [boxes] - readStatBoxes()
+     * @param {{current:number}|null} [bar] - readEnergyBar()
+     */
+    function pageReading(m, boxes = [], bar = null) {
+        const stats = { ...m.pc.stats };
+        for (const b of boxes || []) if (STATS.includes(b.stat) && Number.isFinite(b.value) && b.value > 0) stats[b.stat] = Math.max(stats[b.stat] || 0, b.value);
+        const energy = bar && Number.isFinite(bar.current) ? bar.current : m.strip.energy.current;
+        return { stats, energy, happy: m.strip.happy.current };
+    }
+
+    /** A new walk-through, snapshot of the stats and energy as the step starts. */
+    function startSession(step, reading, m, now) {
+        const spent = { str: 0, spd: 0, def: 0, dex: 0 };
+        return {
+            v: 1,
+            at: now,
+            build: m.build.id,
+            stepId: step.id,
+            label: step.label || '',
+            drug: (step.items || []).some((it) => it.id === XANAX),
+            parts: step.parts.map((p) => ({ gymId: p.gymId, gymName: p.gymName, stat: p.stat, trains: p.trains, perTrain: p.perTrain, gain: p.gain || 0, ...(p.stopAt !== undefined ? { stopAt: p.stopAt, stopReason: p.stopReason } : {}) })),
+            stats0: { ...reading.stats },
+            energy0: reading.energy,
+            happy0: reading.happy,
+            last: { stats: { ...reading.stats }, energy: reading.energy },
+            spent,
+            // Energy the step leaves on purpose (kept for a war, the console jump's bar, or a stop that keeps a specialist
+            // gym): not a sign of a new session.
+            spare: Math.max(0, Number(m.keepEnergy) || 0, m.energyKept && !m.energyKept.all ? Number(m.energyKept.amount) || 0 : 0),
+        };
+    }
+
+    /** Energy spent so far this session. */
+    function spentTotal(session) {
+        return STATS.reduce((a, k) => a + (session.spent[k] || 0), 0);
+    }
+
+    /**
+     * Count the trains that happened since the last reading. A stat that rose
+     * gets the energy that went (the sidebar's drop); when the bar hasn't moved
+     * yet, the trains the rise stands for (its gain ÷ the gain of one train in
+     * that part's gym), so the page moves on as soon as Torn shows the train.
+     * @returns {object} the session, moved on
+     */
+    function advanceSession(session, reading, { table = undefined, perks = null } = {}) {
+        const last = session.last;
+        const rose = STATS.filter((k) => reading.stats[k] - (last.stats[k] || 0) >= 1);
+        const spent = { ...session.spent };
+        if (rose.length) {
+            const happy = Math.max(0, (session.happy0 || 0) - HAPPY_LOSS_PER_ENERGY * spentTotal(session));
+            const est = {};
+            for (const k of rose) {
+                const part = session.parts.find((p) => p.stat === k);
+                const gym = part ? gymById(part.gymId, table) : null;
+                if (!gym || !(gym.dots[k] > 0)) {
+                    est[k] = 0;
+                    continue;
+                }
+                const one = gainPerTrain(k, last.stats[k], happy, gym.dots[k], gym.energy, perks ? perks[k] : 1);
+                est[k] = one > 0 ? Math.max(1, Math.round((reading.stats[k] - last.stats[k]) / one)) * gym.energy : 0;
+            }
+            const dE = Number.isFinite(last.energy) && Number.isFinite(reading.energy) ? last.energy - reading.energy : 0;
+            const estSum = rose.reduce((a, k) => a + est[k], 0);
+            for (const k of rose) spent[k] += dE > 0 ? (estSum > 0 ? (dE * est[k]) / estSum : dE / rose.length) : est[k];
+        }
+        const stats = { ...last.stats };
+        for (const k of STATS) stats[k] = Math.max(stats[k] || 0, reading.stats[k] || 0);
+        return { ...session, spent, last: { stats, energy: Number.isFinite(reading.energy) ? reading.energy : last.energy } };
+    }
+
+    /**
+     * The parts with what's done: each stat's energy spent fills its parts in
+     * order. `current` is the first part not finished (null = session done).
+     */
+    function sessionProgress(session) {
+        const used = { str: 0, spd: 0, def: 0, dex: 0 };
+        let current = null;
+        const parts = session.parts.map((p, i) => {
+            const avail = Math.max(0, (session.spent[p.stat] || 0) - used[p.stat]);
+            const done = Math.min(p.trains, Math.round(avail / p.perTrain));
+            used[p.stat] += done >= p.trains ? p.trains * p.perTrain : avail;
+            const q = { ...p, index: i, done, left: p.trains - done, energy: p.trains * p.perTrain };
+            if (q.left > 0 && current === null) current = q;
+            return q;
+        });
+        for (const q of parts) q.state = q.left === 0 ? 'done' : q === current ? 'current' : 'later';
+        return { parts, current, done: current === null };
+    }
+
+    /** Torn lists its gyms in groups of eight: the one a gym is in, to find its button. */
+    function gymGroupWord(gymId) {
+        const id = Number(gymId);
+        return id <= 8 ? 'a lightweight gym' : id <= 16 ? 'a middleweight gym' : id <= 24 ? 'a heavyweight gym' : 'a specialist gym';
+    }
+
+    /** Energy the session still needs. */
+    function sessionEnergyLeft(session) {
+        return sessionProgress(session).parts.reduce((a, p) => a + p.left * p.perTrain, 0);
+    }
+
+    /** Start a new walk-through? (none yet, another build, too old, or clearly more energy than it needs). */
+    function needsNewSession(session, reading, m, now) {
+        if (!session || session.v !== 1 || !Array.isArray(session.parts) || !session.parts.length) return true;
+        if (session.build !== m.build.id) return true;
+        if (!(now - session.at < SESSION_MAX_MS) || now < session.at) return true;
+        return Number.isFinite(reading.energy) && reading.energy - sessionEnergyLeft(session) - (session.spare || 0) >= NEW_SESSION_E;
+    }
+
+    /**
+     * The gym page's session as it should be now: moved on by this reading,
+     * or a new one when a new step has started.
+     * @returns {object|null}
+     */
+    function nextSession(prev, m, reading, now, ctx = {}) {
+        // A walk-through of "the energy you have now" ends once the plan keeps that energy (a Xanax stacked or held).
+        if (prev && prev.stepId === 'now' && keptAll(m)) prev = null;
+        if (!needsNewSession(prev, reading, m, now)) {
+            const moved = advanceSession(prev, reading, ctx);
+            // The energy is spent: a session with no drug to take can't train once more, so it's over and the page follows
+            // the plan's next step (the owner, 2026-10-03: 10 energy left, the page said "Train DEX × 9", the webpage
+            // "Take Xanax #1"). Its count of trains can lag Torn's; the bar can't.
+            const cur = sessionProgress(moved).current;
+            if (!(cur && !moved.drug && Number.isFinite(reading.energy) && reading.energy < cur.perTrain)) return moved;
+            const step = currentTrainStep(m, now);
+            return step && step.id !== prev.stepId ? startSession(step, reading, m, now) : null;
+        }
+        const step = currentTrainStep(m, now);
+        return step ? startSession(step, reading, m, now) : null;
+    }
+
+    /* ------------------------------------------- round 7: the gym page's states */
+
+    /** Rehab in Switzerland after an overdose: about this much a session (the owner's own log, 2026-10-02). */
+    const REHAB_COST = 215000;
+    const TRAVEL_URL = 'https://www.torn.com/travelagency.php';
+
+    /** A jump or a daily boost: candy or EDVD (or the console) with the drug, then train it all. Never FHC or cans. */
+    function isBoostStep(step) {
+        return Boolean(step) && (step.kind === 'jump' || step.kind === 'boost');
+    }
+
+    /** "EDVD × 5" from "Eat EDVD × 5"; the plan's mid-step words ("the boosters") read "Boosters". */
+    function eatWordsOf(text) {
+        const w = String(text || '').replace(/^Eat /, '');
+        return w === 'the boosters' ? 'Boosters' : w;
+    }
+
+    /**
+     * How far above its maximum happy must be to count the boosters as eaten: the plan's share of the boost (plan.js
+     * MID_BOOST_*: a stack of Xanax adds a few hundred), but never more than half the boost itself. Round 7 review: a small
+     * candy boost (Candy Kisses × 4 = +200, with the Xanax +275) never reached the 300 floor, so the page stayed on a red
+     * "EAT FIRST" with Fill held for the whole boost. Half of it is still more than its Xanax (+75) for any boost over 150.
+     */
+    function eatenOver(boostHappy) {
+        return boostEatenOver(boostHappy);
+    }
+
+    /** Happy the session's trains took so far (0.5 a train energy, by your perks): added back when the boost is judged. */
+    function sessionHappyTrained(session, happyLossMult = 1) {
+        if (!session || !session.spent) return 0;
+        return HAPPY_LOSS_PER_ENERGY * (Number(happyLossMult) || 1) * spentTotal(session);
+    }
+
+    /** The same, only for a session of this boost (started within its tick window, a few hours old at most). */
+    function boostHappyTrained(session, step, happyLossMult = 1, now = Date.now()) {
+        if (!session || !step || !Number.isFinite(session.at) || !(now - session.at < SESSION_MAX_MS)) return 0;
+        const from = (Number.isFinite(step.tick) ? step.tick : step.at) - 15 * 60e3;
+        return session.at >= from ? sessionHappyTrained(session, happyLossMult) : 0;
+    }
+
+    /**
+     * The model's cooldowns as they are now: the model measured them at m.now (up to a read ago), so the time since is
+     * taken off (round 7 review: a cooldown that had just ended still counted as running until the next read).
+     */
+    function agedCooldowns(m, now = Date.now()) {
+        const age = m && Number.isFinite(m.now) ? Math.max(0, now - m.now) : 0;
+        const left = (x) => (x && Number.isFinite(x.left) ? Math.max(0, x.left - age) : 0);
+        return { boosterLeft: left(m && m.strip && m.strip.booster), drugLeft: left(m && m.strip && m.strip.drug) };
+    }
+
+    /**
+     * A boost or jump step and how far it is, from the bars (round 7). Not eaten: happy not above its maximum (by the
+     * share of the boost the plan uses to tell a boost under way: plan.js MID_BOOST_*; a stack of Xanax adds a few hundred).
+     * Eaten: happy above it and the booster cooldown running. The drug (Ecstasy or Xanax): its cooldown running once the
+     * boosters are in, unless the plan still lists it to take (an earlier Xanax's cooldown that ends before the tick).
+     * @param {object} step - plan.js jump/boost step {items, actions, mid, deadline, gain, parts}
+     * @param {object} reads - {happy:{current,max}|null, boosterLeft:ms, drugLeft:ms, trained:boolean}
+     * @returns {{jump, eaten, drugIn, ready, eat, drug, deadline, gain, list:{id, text, done, next}[]}}
+     */
+    function boostProgress(step, { happy = null, boosterLeft = 0, drugLeft = 0, trained = false, happyTrained = 0 } = {}) {
+        const acts = Array.isArray(step.actions) ? step.actions : [];
+        const act = (id) => acts.find((a) => a.id === id) || null;
+        const eatA = act('eat');
+        const jpA = act('jp');
+        const drugA = act('drug');
+        const items = step.items || [];
+        const boostHappy = items.reduce((a, it) => a + (ITEMS[it.id] && ITEMS[it.id].kind === 'booster' ? (ITEMS[it.id].happy || 0) * (it.qty || 0) : 0), 0);
+        const over = eatenOver(boostHappy);
+        const live = happy && Number.isFinite(happy.current) && Number.isFinite(happy.max);
+        // The happy the step's trains took so far is added back: training it all must not read as "not eaten" again.
+        const h = live ? happy.current + Math.max(0, Number(happyTrained) || 0) : 0;
+        const eaten = live ? h >= happy.max + over && (boosterLeft > 0 || Boolean(step.mid)) : Boolean(step.mid || (eatA && eatA.done));
+        const drugToTake = items.some((it) => it.id === XANAX || it.id === ECSTASY);
+        const drugIn = !drugA ? eaten : eaten && (Boolean(drugA.done) || (drugLeft > 0 && !(step.mid && drugToTake)));
+        const drug = drugA ? drugA.text.replace(/^Take the /, '') : null;
+        const trainWords = (() => {
+            const by = {};
+            for (const p of step.parts || []) by[p.stat] = (by[p.stat] || 0) + p.trains;
+            const t = Object.entries(by).map(([k, n]) => STAT_LABEL[k] + ' × ' + n).join(' + ');
+            return t ? 'Train it all: ' + t : 'Train it all';
+        })();
+        const list = [];
+        if (eatA) list.push({ id: 'eat', text: eatWordsOf(eatA.text), done: eaten });
+        if (jpA) list.push({ id: 'jp', text: jpA.text, done: drugIn });
+        if (drugA) list.push({ id: 'drug', text: drug, done: drugIn });
+        list.push({ id: 'train', text: trainWords, done: Boolean(trained) });
+        if (act('refill')) list.push({ id: 'refill', text: 'Refill, then train again', done: false });
+        const next = list.findIndex((x) => !x.done);
+        list.forEach((x, i) => (x.next = i === next));
+        return { jump: step.kind === 'jump', eaten, drugIn, ready: eaten && drugIn, eat: eatA ? eatWordsOf(eatA.text) : null, drug, deadline: step.deadline || null, gain: step.gain || 0, list };
+    }
+
+    /*
+     * The overdose (owner: "happiness goes to 0"). Torn's overdose sets energy, happy (and nerve) to 0; a Xanax overdose
+     * also sets about a day of drug cooldown (docs/research-addiction-rehab.md). Round 7 review: happy 0 + energy 0 with a
+     * drug cooldown running is also a player with a small happy maximum who took a Xanax and trained it all (training
+     * costs 0.4–0.6 happy an energy), and the flag was kept for hours. So the bars at 0 count only with one more sign:
+     *   - a drug cooldown longer than any Xanax's (6–8 h): the overdose's ~24 h; or
+     *   - a sudden fall: minutes ago the bars held more happy than training all that energy could take.
+     * Once seen it is checked against every fresh reading: it ends with the cooldown, and as soon as the bars hold more
+     * than regeneration alone gives back since (a refill, a can, a drug: the plan goes on).
+     */
+
+    /** A drug cooldown longer than this is no Xanax's (360–480 min) or Ecstasy's: an overdose's (~24 h). */
+    const OD_CD_MS = 9 * 3600e3;
+    /** The reading before the fall counts for this long. */
+    const OD_FALL_MS = 15 * 60e3;
+    /** The most happy a train energy can cost (Torn: 0.4–0.6), and a little slack. */
+    const OD_TRAIN_LOSS = 0.6;
+    const OD_SLACK = 25;
+    /** Regeneration back from 0, generously (5 a tick, a tick every 5 minutes), plus a tick of slack. */
+    const OD_REGEN_PER_MS = 5 / (5 * 60e3);
+
+    const barNum = (b) => (b && Number.isFinite(b.current) ? b.current : null);
+
+    /** The last reading with something in the bars ({at, happy, energy}), for the next one to compare with. */
+    function nextBarsSeen(prevSeen, { happy = null, energy = null } = {}, now) {
+        const h = barNum(happy);
+        const e = barNum(energy);
+        if (h === null || e === null || (h === 0 && e === 0)) return prevSeen || null;
+        return { at: now, happy: h, energy: e };
+    }
+
+    /**
+     * An overdose seen on the bars: happy and energy at 0, a drug cooldown running, and either the overdose's long
+     * cooldown or a fall training can't explain (`before`: nextBarsSeen's last reading).
+     */
+    function isOverdose({ happy = null, energy = null, drugLeft = 0 } = {}, { before = null, now = 0 } = {}) {
+        if (barNum(happy) !== 0 || barNum(energy) !== 0 || !(drugLeft > 0)) return false;
+        if (drugLeft > OD_CD_MS) return true;
+        if (!before || !Number.isFinite(before.at) || now < before.at || now - before.at > OD_FALL_MS) return false;
+        return before.happy > 0 && before.happy > OD_TRAIN_LOSS * Math.max(0, before.energy) + OD_SLACK;
+    }
+
+    /** The bars still look like the overdose: no more than regeneration gives back since it was seen. */
+    function stillOverdosed(od, { happy = null, energy = null, drugLeft = null } = {}, now) {
+        if (drugLeft !== null && Number.isFinite(drugLeft) && !(drugLeft > 0)) return false;
+        const back = OD_REGEN_PER_MS * Math.max(0, now - od.at) + 5;
+        const h = barNum(happy);
+        const e = barNum(energy);
+        return !((h !== null && h > back) || (e !== null && e > back));
+    }
+
+    /**
+     * The overdose kept across reads (the bars climb again a tick later): {at, until: the drug cooldown's end} once seen,
+     * while fresh readings still look like it (stillOverdosed) and until that cooldown is over; null otherwise.
+     * @param {object|null} prev - the stored overdose
+     * @param {object} reads - {happy, energy, drugLeft}
+     * @param {number} now
+     * @param {object|null} [before] - nextBarsSeen's last reading with something in the bars
+     */
+    function nextOverdose(prev, reads, now, before = null) {
+        if (prev && Number.isFinite(prev.until) && now < prev.until && now >= (prev.at || 0)) {
+            // "Rehab done" pressed (`ended`): over for you, and not seen again on the same bars until its cooldown has ended.
+            if (prev.ended) return prev;
+            return stillOverdosed(prev, reads || {}, now) ? prev : null;
+        }
+        return isOverdose(reads, { before, now }) ? { at: now, until: now + reads.drugLeft } : null;
+    }
+
+    /** Is the stored overdose on now (seen, its cooldown still running, not ended by "Rehab done")? */
+    function overdoseOn(od, now) {
+        return Boolean(od && !od.ended && Number.isFinite(od.until) && now < od.until);
+    }
+
+    /**
+     * The overdose's words, the same on every surface (Home, the strip, Torn's panel, the gym page, Discord): one state,
+     * one wording (the owner, 2026-10-03: the Torn panel said it, Home still said "Train DEX × 6").
+     */
+    const OVERDOSE_WORDS = {
+        title: 'Overdosed',
+        pill: 'Overdosed · fly to Switzerland',
+        step: 'Fly to Switzerland',
+        sub: 'Rehab there: about $' + fmtInt(REHAB_COST) + ' a session. The plan is worked out again after rehab.',
+    };
+
+    /**
+     * The words while you are away from the gym (m.away), the same on every surface: back at a Torn time on the way
+     * home, where and when you land on the way out, "fly back" when you stand abroad.
+     */
+    function awayWords(away) {
+        if (away.flying && away.where === 'Torn') return { title: 'Flying', pill: 'Flying · back in Torn at ' + tornClock(away.until), step: 'Back in Torn at ' + tornClock(away.until), sub: 'The gym is closed while you travel. Your steps start again when you land.' };
+        if (away.flying) return { title: 'Flying', pill: 'Flying to ' + away.where + ' · lands ' + tornClock(away.until), step: 'Lands in ' + away.where + ' at ' + tornClock(away.until), sub: 'The gym is closed while you travel. Fly back to train.' };
+        return { title: 'Abroad', pill: 'In ' + away.where + ' · fly back to train', step: 'Fly back to Torn', sub: 'The gym is closed while you are in ' + away.where + '.' };
+    }
+
+    /**
+     * Which of the gym page's states it is (owner's picks, 2026-10-03; overlays.html §6):
+     *   stacking  stacking energy for a chain: training paused, no train marks
+     *   overdose  every jump mark stops; fly to Switzerland
+     *   away      flying or abroad: the gym is closed, no train marks, when you are back
+     *   wrong     the part is in another gym: that gym pulses, Fill waits
+     *   eat       a jump or daily boost with the boosters or the drug still to take: the stat pulses red, Fill waits
+     *   ready     the boosters and the drug are in: steady green, train it all
+     *   right     the right gym, train now (steady green)
+     *   done      the session is done; idle: nothing to train now
+     *   kept      nothing to train now because the plan keeps the energy (a jump's stack, the boost's held Xanax, the
+     *             console jump's bar, a war's reserve): the strip says how much and why; no train mark
+     */
+    function gymPageState({ step = null, cur = null, here = false, done = false, reads = {}, overdose = null, stacking = null, away = null, kept = null, now = 0 } = {}) {
+        if (stacking) return { kind: 'stacking', since: Number(stacking.since) || null, boost: null };
+        if (overdoseOn(overdose, now)) return { kind: 'overdose', at: overdose.at, cost: REHAB_COST, boost: null };
+        if (away) return { kind: 'away', away, boost: null };
+        const boost = isBoostStep(step) ? boostProgress(step, { ...reads, trained: done }) : null;
+        if (!cur && !done && kept && kept.amount > 0) return { kind: 'kept', kept, boost };
+        if (!cur) return { kind: done ? 'done' : 'idle', boost };
+        if (!here) return { kind: 'wrong', boost };
+        if (boost && !boost.ready) return { kind: 'eat', boost };
+        return { kind: boost ? 'ready' : 'right', boost };
+    }
+
+    const KEPT_FOR = { jump: 'the jump', boost: 'the boost', console: 'the console jump', war: 'the war' };
+
+    /** "Keeping 650 energy for the jump" */
+    function keptHead(k) {
+        return 'Keeping ' + fmtInt(k.amount) + ' energy for ' + (KEPT_FOR[k.why] || 'the plan');
+    }
+
+    /** Why it is kept, in a few words. */
+    function keptWhy(k) {
+        if (k.why === 'jump') return 'Xanax ' + k.stacked + ' of ' + k.stackTo + ' stacked · don’t train it now';
+        if (k.why === 'boost') return 'the Xanax waits for the boost after the tick · don’t train it now';
+        if (k.why === 'console') return 'it stays in the bar under the ' + k.stackTo + ' Xanax · don’t train it';
+        return 'kept for ' + (k.war || 'the enemy faction') + ' · Settings › Keep for war days';
+    }
+
+    /** "EDVD × 5, then the Ecstasy, then train it all" */
+    function eatOrder(boost) {
+        const parts = [];
+        for (const x of boost.list) if (!x.done && x.id !== 'train' && x.id !== 'refill') parts.push(x.id === 'drug' ? 'the ' + x.text : x.text);
+        parts.push('train it all');
+        return parts.map((p, i) => (i ? 'then ' + p : p)).join(', ');
+    }
+
+    /**
+     * @param {object} m - buildModel() output (m.stacking: {since}|null while stacking for a chain)
+     * @param {object} page - {selectedId, boxes: [{stat, locked, energyPerTrain}], reading,
+     *   reads: {happy, energy, boosterLeft, drugLeft} (the sidebar's bars, the model's cooldowns), overdose: {at, until}|null}
+     *   (overdose given, even null: what Torn's page sees on the sidebar now; left out: the model's shared `m.overdose`)
+     * @param {object|null} [session] - the walk-through (nextSession); null = the current step, nothing done yet
+     * @param {number} [now]
+     * @returns {{strip:string[], parts:object[], current:object|null, done:boolean, nextGym:{id, label, group}|null, switchHint:string|null,
+     *   perStat:object, pill:string|null, gym:object|null, hereGym:{id, wrong}|null, state:object, line:object}}
+     */
+    function planGymPage(m, page = {}, session = null, now = m.now) {
+        const table = m.pc.table;
+        const selectedId = Number(page.selectedId || m.state.gymId);
+        const gym = gymById(selectedId, table);
+        const stats = m.pc.stats;
+        const reading = page.reading || { stats, energy: m.strip.energy.current };
+        const energy = reading.energy;
+        const perStat = {};
+        const out = { strip: [], parts: [], current: null, done: false, nextGym: null, switchHint: null, perStat, pill: null, gym, hereGym: null, state: { kind: 'idle', boost: null }, line: null };
+        if (!gym) return out;
+        const due = currentTrainStep(m, now);
+        // "The energy you have now" while the plan keeps that energy: no walk-through (nextSession does the same).
+        if (session && session.stepId === 'now' && keptAll(m)) session = null;
+        if (!session) session = due ? startSession(due, reading, m, now) : null;
+        const prog = session ? sessionProgress(session) : { parts: [], current: null, done: false };
+        out.parts = prog.parts;
+        out.current = prog.current;
+        out.done = Boolean(session) && prog.done;
+        const cur = prog.current;
+        const here = Boolean(cur) && cur.gymId === selectedId;
+        const reads0 = page.reads || { happy: m.strip.happy ? { current: m.strip.happy.current, max: m.strip.happy.max } : null, energy: m.strip.energy, ...agedCooldowns(m, now) };
+        // The boost is judged with the happy this step's trains took added back (they don't un-eat it).
+        const reads = isBoostStep(due) ? { ...reads0, happyTrained: boostHappyTrained(session, due, m.pc.perks && m.pc.perks.happyLossMult, now) } : reads0;
+        const state = gymPageState({ step: due, cur, here, done: out.done, reads, overdose: 'overdose' in page ? page.overdose : m.overdose || null, stacking: m.stacking || null, away: m.away || null, kept: m.energyKept || null, now });
+        out.state = state;
+        const off = state.kind === 'stacking' || state.kind === 'overdose' || state.kind === 'away';
+
+        const total = totalOf(stats);
+        const tomorrow = (m.projection && m.projection[1]) || {};
+        const boxes = new Map((page.boxes || []).map((b) => [b.stat, b]));
+        const partsOfStat = (k) => prog.parts.filter((p) => p.stat === k);
+        // The word on a box that isn't trained now: in full (hover), and its small corner tag.
+        const greyWord = (stat, all, left, lockedHere) => {
+            if (all.length && !left.length) return { text: 'Done ✓ · ' + STAT_LABEL[stat] + ' × ' + all.reduce((a, p) => a + p.trains, 0), tag: 'done ✓' };
+            if (left.length) {
+                const p = left[0];
+                return p.gymId === selectedId ? { text: 'Next · ' + STAT_LABEL[stat] + ' × ' + p.left + ' after ' + (cur ? STAT_LABEL[cur.stat] : 'this'), tag: 'next · after ' + (cur ? STAT_LABEL[cur.stat] : 'this') } : { text: 'Later · ' + STAT_LABEL[stat] + ' × ' + p.left + ' at ' + p.gymName, tag: 'later · ' + p.gymName };
+            }
+            if (lockedHere) return { text: 'Not trained here', tag: 'not here' };
+            const share = total > 0 ? stats[stat] / total : 0;
+            if (share > m.shares[stat] + 0.005) return { text: 'Skip · ' + (share * 100).toFixed(0) + '% of total, over target', tag: 'skip · over target' };
+            if (tomorrow[stat] > 0) return { text: 'Next · starts tomorrow', tag: 'tomorrow' };
+            return { text: 'Skip · not in this session', tag: 'skip' };
+        };
+
+        for (const k of STATS) {
+            const box = boxes.get(k);
+            const locked = (box && box.locked) || !(gym.dots[k] > 0);
+            const mine = partsOfStat(k);
+            const open = mine.filter((p) => p.left > 0);
+            if (off) {
+                // Stacking for a chain, or an overdose: no train or jump mark anywhere (the strip says why).
+                perStat[k] = { kind: 'off', text: '' };
+            } else if (here && k === cur.stat) {
+                const n = cur.left;
+                const canNow = Number.isFinite(energy) ? Math.max(0, Math.min(n, Math.floor(energy / cur.perTrain))) : n;
+                const allEnergy = n * cur.perTrain > energy - cur.perTrain;
+                const gain = cur.trains > 0 ? (cur.gain * n) / cur.trains : 0;
+                const waitWord = canNow < n ? (canNow === 0 ? ' · energy ' + fmtInt(energy) + (session.drug ? ', take the Xanax first' : ', wait for more') : ' · ' + canNow + ' now, the rest after more energy') : '';
+                const b = state.boost;
+                const eat = state.kind === 'eat';
+                // No energy for one train yet: the step's Xanax comes first (or more energy); never "Train this" then.
+                const noE = canNow === 0 && !eat;
+                perStat[k] = {
+                    kind: 'train',
+                    // Drawn dashed grey, Fill held (marks.js).
+                    noEnergy: noE,
+                    // right / ready: steady green; eat: pulses red, Fill waits.
+                    mark: state.kind,
+                    hold: eat || noE,
+                    trains: n,
+                    fill: eat ? 0 : canNow,
+                    fillN: n,
+                    gain: Math.round(gain),
+                    tab: eat ? 'Eat first' : noE ? (session.drug ? 'Take the Xanax first' : 'Wait for energy') + ' · then ' + STAT_LABEL[k] + ' × ' + fmtInt(n) : state.kind === 'ready' ? 'Train it all · about ' + fmtSigned(Math.round(b.gain || gain)) : 'Train this · ' + fmtInt(n) + (cur.done > 0 ? ' left' : ' train' + (n === 1 ? '' : 's')) + ' · about ' + fmtSigned(gain),
+                    text: fmtInt(n) + ' train' + (n === 1 ? '' : 's') + (cur.done > 0 ? ' left' : ''),
+                    sub: eat ? b.list.filter((x) => !x.done && (x.id === 'eat' || x.id === 'drug' || x.id === 'jp')).map((x) => x.text).join(' + ') + ' first' : (allEnergy ? 'all ' + (state.kind === 'ready' ? fmtInt(energy) + ' ' : 'your ') + 'energy' : fmtInt(n * cur.perTrain) + ' energy') + ' · about ' + fmtSigned(gain) + waitWord,
+                    warn: cur.stopAt !== undefined ? 'Stop at ' + n + ' trains. More puts you under the rule for ' + cur.stopReason + ' and you lose it.' : null,
+                };
+            } else if (cur && !here && k === cur.stat && !locked) {
+                // The wrong gym: the stat the part trains is marked dashed grey, and Fill waits until you switch.
+                perStat[k] = { kind: 'wait', trains: cur.left, fill: 0, fillN: cur.left, tab: 'After you switch: ' + STAT_LABEL[k] + ' × ' + cur.left, text: 'switch gyms first', sub: '' };
+            } else if (cur && !here) {
+                // The current part is in another gym: the strip says so in one line; Torn's boxes are left as they are
+                // (owner, round 6: greying them read as "the gym is disabled"). A part already done here still says so.
+                const w = mine.length && !open.length ? greyWord(k, mine, open, locked) : { text: '', tag: '' };
+                perStat[k] = { kind: 'away', text: w.text, tag: w.tag };
+            } else {
+                const w = greyWord(k, mine, open, locked);
+                perStat[k] = { kind: open.length ? 'next' : mine.length ? 'done' : w.text === 'Not trained here' ? 'none' : w.text.startsWith('Next') ? 'next' : 'skip', text: w.text, tag: w.tag };
+            }
+        }
+
+        const target = cur ? gymById(cur.gymId, table) : null;
+        out.target = target;
+        if (cur && !here && !off) {
+            const k = cur.stat;
+            const label = 'Next: ' + cur.gymName + ' · ' + STAT_LABEL[k] + ' × ' + cur.left;
+            out.nextGym = { id: cur.gymId, label, group: gymGroupWord(cur.gymId) };
+            const dots = (g) => (g.dots[k] > 0 ? STAT_LABEL[k] + ' ' + g.dots[k] : 'no ' + STAT_LABEL[k]);
+            out.switchHint = 'you’re in ' + gym.name + ' (' + dots(gym) + ') · switch to ' + cur.gymName + (target ? ' (' + dots(target) + ')' : '');
+        }
+        // The gym you're in: a steady outline, green when the part is here, red when it isn't.
+        if (cur && !off) out.hereGym = { id: selectedId, wrong: !here, label: here ? 'Train here · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left : 'Wrong gym' };
+
+        out.strip.push(m.build.name);
+        let nextGymWords = null;
+        if (m.nextGym && m.nextGym.gym) {
+            const ng = m.nextGym.gym;
+            const k = cur ? cur.stat : STATS.reduce((a, x) => (m.shares[x] - stats[x] / total > m.shares[a] - stats[a] / total ? x : a), 'str');
+            nextGymWords = ng.name + (m.nextGym.known ? ' in ' + fmtInt(m.nextGym.energyLeft) + ' E' : ' next') + ', ' + STAT_LABEL[k] + ' ' + ng.dots[k] + ' there';
+            out.strip.push(nextGymWords);
+        }
+
+        // The strip's one line: its colour, a bold head, the words, a small source; a link for an overdose.
+        const b = state.boost;
+        const finish = b && b.deadline ? 'finish before ' + tornClock(b.deadline) : null;
+        const what = b ? (b.jump ? 'Jump' : 'Boost') : null;
+        if (state.kind === 'stacking') {
+            out.line = { tone: 'amber', head: 'Stacking for a chain', text: 'training paused · no train marks until you resume', src: null };
+            out.pill = 'Stacking for a chain · training paused';
+        } else if (state.kind === 'overdose') {
+            out.line = { tone: 'amber', head: 'Overdosed', text: 'happy and energy went to 0 · no training now · fly to Switzerland for rehab, about $' + fmtInt(REHAB_COST) + ' a session · the plan is worked out again after rehab', src: null, link: { text: 'Open Travel', href: TRAVEL_URL } };
+            out.pill = OVERDOSE_WORDS.pill;
+        } else if (state.kind === 'away') {
+            const w = awayWords(state.away);
+            out.line = { tone: 'amber', head: w.title, text: w.step.charAt(0).toLowerCase() + w.step.slice(1) + ' · ' + w.sub.charAt(0).toLowerCase() + w.sub.slice(1), src: null };
+            out.pill = w.pill;
+        } else if (state.kind === 'wrong') {
+            out.line = { tone: 'red', head: 'Wrong gym', text: out.switchHint + (b && !b.ready ? ' · eat first: ' + eatOrder(b) : ''), src: null };
+            out.pill = 'Wrong gym · switch to ' + cur.gymName;
+        } else if (state.kind === 'eat') {
+            out.line = { tone: 'red', head: what + ': eat first', text: eatOrder(b), src: finish };
+            out.pill = 'Eat first · ' + (b.list.find((x) => x.next) || { text: 'the boosters' }).text;
+        } else if (state.kind === 'ready') {
+            out.line = { tone: 'green', head: what + ' ready' + (reads.happy && Number.isFinite(reads.happy.current) ? ' · happy ' + fmtInt(reads.happy.current) : ''), text: 'train it all' + (b.list.some((x) => x.id === 'refill') ? ', then the refill' : ''), src: finish };
+            out.pill = 'Train it all · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
+        } else if (state.kind === 'right' && perStat[cur.stat] && perStat[cur.stat].noEnergy) {
+            // No energy for one train yet: the bar says what comes first, never "Train" (the owner, 2026-10-03: the card
+            // said "Take the Xanax first" while the bar above it still said "Train DEX × 25").
+            out.pill = perStat[cur.stat].tab;
+            out.line = { tone: 'plain', head: out.pill.split(' · then ')[0], text: 'then ' + STAT_LABEL[cur.stat] + ' × ' + cur.left + ' here', src: nextGymWords };
+        } else if (state.kind === 'right') {
+            out.line = { tone: 'green', head: 'Train ' + STAT_LABEL[cur.stat] + ' × ' + cur.left + ' here', text: [gym.name, m.build.name].join(' · '), src: nextGymWords };
+            out.pill = 'Train ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
+        } else if (state.kind === 'done') {
+            out.line = { tone: 'plain', head: 'Session done', text: m.build.name, src: nextGymWords };
+            out.pill = 'Session done';
+        } else if (state.kind === 'kept') {
+            // No pill: the panel keeps the plan's next step and its countdown ("Xanax #3 of 4 · don't train").
+            const k = state.kept;
+            const next = (m.steps || []).find((s) => s.at > now - DUE_SLACK_MS) || null;
+            out.line = { tone: 'plain', head: keptHead(k), text: keptWhy(k), src: next ? 'next: ' + tornClock(next.at) + ' ' + String(next.label || '').split(' · ')[0] : null };
+        } else {
+            out.pill = energy < gym.energy ? 'Energy ' + fmtInt(energy) + ' · wait for the next step' : null;
+            out.line = { tone: 'plain', head: out.pill || 'Nothing to train now', text: m.build.name, src: nextGymWords };
+        }
+        return out;
+    }
+
+    /**
+     * The panel on the gym page, from planGymPage's state (overlays.html §6): its colour, a small title, the big step,
+     * one muted line, a checklist on a jump or boost, and its one action.
+     * @returns {{tone, title, step, sub, checklist:{text, done, next}[]|null, action:{text, href}|null}|null} null: the usual panel
+     */
+    function gymPanel(plan) {
+        const st = plan && plan.state;
+        if (!st) return null;
+        const cur = plan.current;
+        const b = st.boost;
+        const when = b && b.deadline ? 'finish before ' + tornClock(b.deadline) : null;
+        const what = b ? (b.jump ? 'Jump' : 'Boost') : '';
+        if (st.kind === 'overdose') return { tone: 'amber', title: OVERDOSE_WORDS.title, step: OVERDOSE_WORDS.step, sub: OVERDOSE_WORDS.sub, checklist: null, action: { text: 'Open Travel', href: TRAVEL_URL } };
+        if (st.kind === 'away') {
+            const w = awayWords(st.away);
+            return { tone: 'amber', title: w.title, step: w.step, sub: w.sub, checklist: null, action: null };
+        }
+        if (st.kind === 'stacking') return { tone: 'amber', title: 'Stacking', step: 'Stacking for a chain', sub: 'Training paused · no train marks until you resume', checklist: null, action: null };
+        if (st.kind === 'wrong') {
+            const g = plan.gym;
+            const t = plan.target || gymById(cur.gymId);
+            const k = cur.stat;
+            const there = STAT_LABEL[k] + ' trains at ' + (t ? t.dots[k] : '?') + ' there';
+            const sub = g && t && g.dots[k] > 0 ? there + ', ' + g.dots[k] + ' here: ' + (t.dots[k] / g.dots[k]).toFixed(1) + '× the gain for the same energy' : there + ', not at all here';
+            return { tone: 'red', title: 'Wrong gym', step: 'Switch to ' + cur.gymName, sub, checklist: b && !b.ready ? b.list : null, action: null };
+        }
+        if (st.kind === 'eat') return { tone: 'red', title: what + (b.deadline ? ' · ' + tornClock(b.deadline) : ''), step: (b.list.find((x) => x.next) || { text: 'Eat first' }).text, sub: [when, 'seen from your bars'].filter(Boolean).join(' · '), checklist: b.list, action: null };
+        if (st.kind === 'ready') return { tone: 'green', title: what + ' · now', step: 'Train it all: ' + STAT_LABEL[cur.stat] + ' × ' + cur.left, sub: [when, 'about ' + fmtSigned(Math.round(b.gain))].filter(Boolean).join(' · '), checklist: b.list, action: null };
+        const ps = cur && plan.perStat && plan.perStat[cur.stat];
+        // No energy for a train yet (the step's Xanax first): the panel says that, never "Train" (the owner, 2026-10-03).
+        if (st.kind === 'right' && ps && ps.noEnergy) return { tone: null, title: 'Next', step: ps.tab.split(' · then ')[0], sub: 'then ' + STAT_LABEL[cur.stat] + ' × ' + cur.left + (cur.gymName ? ' at ' + cur.gymName : ''), checklist: null, action: null };
+        if (st.kind === 'right') return { tone: 'green', title: 'Now', step: 'Train ' + STAT_LABEL[cur.stat] + ' × ' + cur.left, sub: [cur.gymName, plan.perStat[cur.stat] && plan.perStat[cur.stat].gain ? 'about ' + fmtSigned(plan.perStat[cur.stat].gain) : null].filter(Boolean).join(' · '), checklist: null, action: null };
+        return null;
+    }
+
+    /* ------------------------------------------------ Home and Plan lines */
+
+    /** The first step that trains (its parts say which gym for which stat right now). */
+    function firstTrainStep(m) {
+        return (m.steps || []).find((s) => s.parts && s.parts.length) || null;
+    }
+
+    /**
+     * "Train in": which gym for which stat right now, from the next training
+     * step, e.g. [{gymName:"George's", stats:['STR']}, {gymName:'Balboas Gym', stats:['DEX']}].
+     * Without a planned train today, each stat under its share at its best gym.
+     */
+    function trainIn(m) {
+        const step = firstTrainStep(m);
+        const out = [];
+        const add = (gymName, k) => {
+            let g = out.find((x) => x.gymName === gymName);
+            if (!g) out.push((g = { gymName, stats: [] }));
+            if (!g.stats.includes(STAT_LABEL[k])) g.stats.push(STAT_LABEL[k]);
+        };
+        if (step) for (const p of step.parts) add(p.gymName, p.stat);
+        else {
+            const total = totalOf(m.pc.stats);
+            for (const k of STATS) if (m.pc.best[k] && total > 0 && m.pc.stats[k] / total < m.shares[k]) add(m.pc.best[k].name, k);
+        }
+        return out;
+    }
+
+    /** "George's for STR · Balboas Gym for DEX" */
+    function trainInText(m) {
+        return trainIn(m).map((g) => g.gymName + ' for ' + g.stats.join(', ')).join(' · ');
+    }
+
+    /**
+     * The "why" when the next session mixes stats (owner, 2026-09-29): "STR + DEX this session: +20% toward
+     * Hank's vs STR only". Toward the build = stat points that close a gap to the build's shares (points past a
+     * stat's share count nothing). The one-stat way puts the whole session's energy into the stat the mix trains
+     * most, at its rate in this session. Null for a one-stat session or when the mix isn't ahead by half a percent.
+     */
+    function whyMix(m) {
+        const step = firstTrainStep(m);
+        if (!step || !m.pc || !m.shares) return null;
+        const by = {};
+        const order = [];
+        for (const p of step.parts) {
+            if (!by[p.stat]) {
+                by[p.stat] = { gain: 0, energy: 0 };
+                order.push(p.stat);
+            }
+            by[p.stat].gain += p.gain || 0;
+            by[p.stat].energy += p.energy || 0;
+        }
+        if (order.length < 2) return null;
+        const top = order.reduce((a, b) => (by[b].energy > by[a].energy ? b : a));
+        const total = totalOf(m.pc.stats);
+        const gap = (k) => Math.max(0, (m.shares[k] || 0) * total - (m.pc.stats[k] || 0));
+        const energy = order.reduce((a, k) => a + by[k].energy, 0);
+        const mix = order.reduce((a, k) => a + Math.min(by[k].gain, gap(k)), 0);
+        const one = by[top].energy > 0 ? Math.min((by[top].gain / by[top].energy) * energy, gap(top)) : 0;
+        if (!(one > 0) || !(mix > one)) return null;
+        const pct = (100 * (mix - one)) / one;
+        if (pct < 0.5) return null;
+        const name = (m.build && m.build.base && BUILDS[m.build.base] ? BUILDS[m.build.base].name : (m.build && m.build.name) || 'your build').replace(/, .*$/, '');
+        const text = order.map((k) => STAT_LABEL[k]).join(' + ') + ' this session: +' + (pct < 10 ? pct.toFixed(1) : Math.round(pct)) + '% toward ' + name + ' vs ' + STAT_LABEL[top] + ' only';
+        return { stats: order, top, pct, mix: Math.round(mix), one: Math.round(one), text, title: 'Stat points that close a gap to ' + name + '’s shares (points past a stat’s share don’t count): about ' + fmtSigned(Math.round(mix)) + ' this way, ' + fmtSigned(Math.round(one)) + ' with ' + STAT_LABEL[top] + ' only, the same energy' };
+    }
+
+    /**
+     * The "why" when the next session trains one stat only: "Training STR only:
+     * 6 pts under Hank's, about 9 days to catch up". Null when it mixes stats.
+     */
+    function whyOneStat(m) {
+        const step = firstTrainStep(m);
+        if (!step) return null;
+        const stats = [...new Set(step.parts.map((p) => p.stat))];
+        if (stats.length !== 1) return null;
+        const k = stats[0];
+        const total = totalOf(m.pc.stats);
+        const pts = total > 0 ? (m.shares[k] - m.pc.stats[k] / total) * 100 : 0;
+        const name = (m.build.base && BUILDS[m.build.base] ? BUILDS[m.build.base].name : m.build.name).replace(/, .*$/, '');
+        const days = m.buildCatchUp ? m.buildCatchUp[k] : undefined;
+        const ptsText = pts >= 1 ? Math.round(pts) + ' pts' : pts > 0 ? pts.toFixed(1) + ' pts' : null;
+        let text = 'Training ' + STAT_LABEL[k] + ' only: ' + (ptsText ? ptsText + ' under ' + name : 'it is the one ' + name + ' needs now');
+        if (ptsText && days !== undefined) text += days === null ? ', more than 30 days to catch up' : days > 0 ? ', about ' + days + ' day' + (days === 1 ? '' : 's') + ' to catch up' : '';
+        return { stat: k, pts, days: days === undefined ? null : days, text };
+    }
+
+    /**
+     * The step the panel shows next, from the bars as Torn's own page shows them now (the owner, 2026-10-03: he
+     * trained, the panel's header said "Session done" at once and its card kept "Train DEX × 6 · 150 energy" until
+     * the next read of his state). A train on the energy at hand that is due, with less energy in the bar than one
+     * of its trains costs, is the one just done: the step after it is next.
+     * @param {object[]} steps - the model's steps (today's, in order)
+     * @param {{energy?: {current:number}}} reads - the bars as the page shows them
+     * @param {number} now
+     * @returns {{next: object|null, rest: object[], spent: boolean}} rest: the steps after `next`
+     */
+    function liveNextStep(steps, reads, now) {
+        const list = steps || [];
+        const first = list[0] || null;
+        const perTrain = first && Array.isArray(first.parts) && first.parts.length ? Math.min(...first.parts.map((x) => (x.perTrain > 0 ? x.perTrain : Infinity))) : Infinity;
+        const energy = reads && reads.energy ? Number(reads.energy.current) : NaN;
+        const spent = Boolean(first && first.kind === 'natural' && first.at <= now && Number.isFinite(perTrain) && Number.isFinite(energy) && energy < perTrain);
+        return { next: spent ? list[1] || null : first, rest: list.slice(spent ? 2 : 1), spent };
+    }
+
     /* ===== src/runtime.js ===== */
     /*
      * What every tab shares at run time: the one Torn client (85/min across
      * tabs, visible only, silent while Torn Trading runs), the state feed, and the model every surface renders
      * from. Userscript-only; core/ and api/ stay plain modules.
      */
+
+
+
+
+
 
 
 
@@ -11526,13 +13642,72 @@
         return Boolean(getKey(K.fullKey)) && st.ok === true && !st.dead;
     }
 
+    /** Your stocks held for benefit blocks, priced (the passive-income read, every 6 hours); null until a price is read. */
+    const blocksOf = (statics) => (statics.passive ? stockBlocks(statics.passive.userStocks, statics.passive.tornStocks) : null);
+
+    /** Your habit: what the gym really cost a day over the last 30 Torn days (receipts: what was used, priced); null under 3 days of them. */
+    function habitNow(now = Date.now()) {
+        const rc = archived(K.receipts, null);
+        const today = tornDayStart(now);
+        const sum = rc ? summarizeReceipts(rc, today - 29 * 86400e3, today, { prices: getPrices(), priceHistory: archived(K.priceHistory, null) }) : null;
+        return sum && sum.days >= INCOME_MIN_DAYS ? sum.cost / sum.days : null;
+    }
+
     /**
-     * Income (Auto, "Plan from my income"): from the money log (Full key) or the
-     * networth history, plus what the gym plan spent meanwhile. Read when a plan
-     * is made or recalibrated, and on the webpage to show it.
-     * @param {function} steadyPerDay - the steady plan's cost a day, while receipts cover under 3 days (it doesn't depend on the budget)
+     * Your books (round 7, R7.5): the stored money log as a ledger, its statements, and the budget offer for a plan of
+     * `days`. Null until the log is read in its new form. Worked out once per log read, cash figure and length.
      */
-    function autoFor(plan, settings, statics, steadyPerDay) {
+    function booksFor({ settings, statics, habitPerDay, days, now = Date.now() }) {
+        const ml = pageGet(K.moneyLog, null);
+        if (!ml || ml.v !== 2 || !Array.isArray(ml.lines) || !ml.lines.length) return null;
+        const inv = statics.inventory || {};
+        const liquid = Number.isFinite(inv.cash) ? inv.cash : null;
+        const cb = statics.passive && statics.passive.cityBank;
+        const overrides = settings.oneOffs || {};
+        const sig = [ml.at, ml.lines.length, liquid, Math.round(habitPerDay || 0), Math.round(days), cb ? cb.until : 0, settings.keepAside || 0, settings.budgetPick || '', JSON.stringify(overrides)].join('|');
+        if (pi.booksMemo && pi.booksMemo.sig === sig) return pi.booksMemo.books;
+        const ledger = ledgerOf(ml.lines, { from: ml.from, to: ml.at, isGymItem: (id) => Boolean(ITEMS[id]), overrides });
+        const flow = cashflowOf({ ledger, liquid, bank: cb && cb.amount > 0 ? { amount: cb.amount, profit: cb.profit, until: cb.until ? cb.until * 1000 : null } : null, blocks: blocksOf(statics), habitPerDay, now });
+        const books = { ...budgetOffer({ flow, days, keepAside: settings.keepAside || 0, now, pick: settings.budgetPick || null }), flow, ledger, at: ml.at };
+        pi.booksMemo = { sig, books };
+        return books;
+    }
+
+    /**
+     * Your books to look at (Settings › Developer; the Ledger tab): the ledger over the days the log covers, its
+     * statements, and the reconciliation over the days both the log and Torn's networth history cover (opening liquid +
+     * in − out = closing liquid). Null until the money log is read.
+     */
+    function booksReport(now = Date.now()) {
+        const ml = pageGet(K.moneyLog, null);
+        if (!ml || ml.v !== 2 || !Array.isArray(ml.lines)) return null;
+        const statics = getShared(K.userStatic, {}) || {};
+        const settings = getSettings();
+        const inv = statics.inventory || {};
+        const cb = statics.passive && statics.passive.cityBank;
+        const isGymItem = (id) => Boolean(ITEMS[id]);
+        const overrides = settings.oneOffs || {};
+        const ledger = ledgerOf(ml.lines, { from: ml.from, to: ml.at, isGymItem, overrides });
+        const flow = cashflowOf({ ledger, liquid: Number.isFinite(inv.cash) ? inv.cash : null, bank: cb && cb.amount > 0 ? { amount: cb.amount, profit: cb.profit, until: cb.until ? cb.until * 1000 : null } : null, blocks: blocksOf(statics), habitPerDay: habitNow(now), now });
+        // Liquid money at two moments (personal stats at past dates, the main key): the oldest one the log reaches back to, and the newest.
+        const snaps = (statics.income || []).filter((s) => s && Number.isFinite(s.at) && Number.isFinite(s.cash)).sort((a, b) => a.at - b.at);
+        const close = snaps[snaps.length - 1] || null;
+        const open = snaps.find((s) => s.at >= ml.from) || null;
+        const span = open && close && close.at > open.at ? { from: open.at, to: Math.min(close.at, ml.at) } : null;
+        const recon = span ? reconcile({ ledger: ledgerOf(ml.lines, { ...span, isGymItem, overrides }), opening: open.cash, closing: close.cash }) : null;
+        // Investments that would grow recurring income (the accountant's ask): benefit blocks and the bank, against free cash.
+        const pv = statics.passive || {};
+        const ideas = investmentIdeas({ moneyStocks: pv.moneyStocks || [], userStocks: pv.userStocks || [], bank: cb && cb.amount > 0 ? { amount: cb.amount, profit: cb.profit, duration: cb.duration } : null, freeCash: flow.have.free });
+        return { at: ml.at, from: ml.from, days: ledger.days, lines: ml.lines.length, ledger, flow, recon, reconSpan: span, ideas, now };
+    }
+
+    /**
+     * The money a plan may spend (Auto): from your books (the money log, Full key), or the networth history until the
+     * log is read. Read when a plan is made or recalibrated, and on the webpage to show it.
+     * @param {function} steadyPerDay - the steady plan's cost a day, while receipts cover under 3 days (it doesn't depend on the budget)
+     * @param {number} [days] - the plan's length (the cash check runs over it)
+     */
+    function autoFor(plan, settings, statics, steadyPerDay, days = null) {
         // What the gym really cost over the same days (receipts), added back: it left your networth and shows in the log's "out".
         // Never the plan's own projected cost, which would feed the budget back into itself.
         const now = Date.now();
@@ -11542,14 +13717,17 @@
         const sum = rc ? summarizeReceipts(rc, today - 29 * 86400e3, today, { prices: getPrices(), priceHistory: archived(K.priceHistory, null) }) : null;
         const spentPerDay = sum && sum.days >= INCOME_MIN_DAYS ? sum.cost / sum.days : plan.pickBy === 'auto' && hasFullKey() ? steadyPerDay() : 0;
         const income = incomeFrom(statics.income || [], { spentPerDay });
-        const ml = pageGet(K.moneyLog, null);
-        // The income that is certain (bank, dividends, rent), read with the main key: the floor under the rest.
+        // The income that is certain (bank, dividends, rent), read with the main key: the floor until the books are read.
         const pv = statics.passive || null;
         const floor = pv ? incomeFloor({ ...pv, meId: statics.keyInfo && statics.keyInfo.userId, now }) : null;
-        const breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now(), ml.days || null, floor) : null;
-        const auto = autoState({ plan, settings, hasFullKey: hasFullKey(), income, log: breakdown, spentPerDay, floor });
-        auto.breakdown = breakdown;
+        // Your habit: what the gym really cost a day (receipts), once they cover enough days.
+        const books = hasFullKey() ? booksFor({ settings, statics, habitPerDay: sum && sum.days >= INCOME_MIN_DAYS ? sum.cost / sum.days : null, days: days || settings.horizonDays || 30, now }) : null;
+        const auto = autoState({ plan, settings, hasFullKey: hasFullKey(), income, books, floor });
+        // The lines behind "comes in", biggest first (the Plan page lists them).
+        auto.breakdown = books ? { days: books.flow.days, lines: books.flow.comesIn.map((l) => ({ title: l.title, dir: l.perDay >= 0 ? 'in' : 'out', n: l.n, perDay: Math.abs(l.perDay) })) } : null;
         auto.income = income;
+        // Your books whatever the Plan rule: every plan's cash check runs on them (createPlan).
+        auto.offer = books;
         return auto;
     }
 
@@ -11612,10 +13790,10 @@
     const RUN_SHARE = { compare: 0.4, path: 0.45, band: 0.15 };
 
     /**
-     * Create plan (1, 3, 6 or 12 months) or Re-plan, on a click only: every plan
+     * Create plan (1, 3, 6 or 12 months) or Recalibrate, on a click only: every plan
      * is worked out over the plan's days from what's true now (stats, income,
      * prices, gyms), the best one is recommended, and the whole thing is saved
-     * with what it saw. Re-plan keeps the plan's start and end and re-plans only
+     * with what it saw. Recalibrate keeps the plan's start and end and recalibrates only
      * the days left.
      *
      * Round 7 (R7.3b): worked out in slices of about 30 ms with breaks that are
@@ -11627,9 +13805,9 @@
      *   what-ifs are waited for
      * @returns {Promise<object|null>} the saved plan (null: cancelled)
      */
-    async function createPlan({ months = 1, recalibrate = false, pause: pauseIn = null } = {}) {
+    async function createPlan({ months = 1, recalibrate = false, auto: byItself = false, pause: pauseIn = null } = {}) {
         if (pi.planBusy) return pi.planBusy.promise;
-        const busy = { recalibrate, months, at: Date.now(), promise: null, part: 'start', done: 0, words: 'Reading what is true now', cancel: false };
+        const busy = { recalibrate, auto: byItself, months, at: Date.now(), promise: null, part: 'start', done: 0, words: 'Reading what is true now', cancel: false };
         const cancelled = () => busy.cancel === true;
         // Breaks for the page: a message to ourselves, not a timer (a hidden tab's timers run once a second at best:
         // 3 seconds of work took minutes), and only once 30 ms of work is done since the last one.
@@ -11660,7 +13838,7 @@
             const state = s && s.api ? normalizeState(s.api, s.at) : null;
             if (!state) throw new Error('Waiting for the first read of your stats.');
             const prev = recalibrate ? await loadSavedPlan() : null;
-            if (recalibrate && !(prev && prev.v === SAVED_PLAN_V)) throw new Error('No plan to re-plan yet: create one first.');
+            if (recalibrate && !(prev && prev.v === SAVED_PLAN_V)) throw new Error('No plan to recalibrate yet: create one first.');
             if (recalibrate && planProgress(prev, now).ended) throw new Error('Your plan has ended: create a new one.');
             const plan = getPlan();
             const settings = getSettings();
@@ -11673,7 +13851,7 @@
             const prices = getPrices();
             const special = specialLeft(plan, state);
             // Money a day: Auto from your income (Full key), "Max gains" none, else the budget you set, per day.
-            const auto = autoFor(plan, settings, statics, () => steadyCostPerDay({ state, pc, shares, settings: { ...settings, horizonDays: 30 }, prices, special, statics }));
+            const auto = autoFor(plan, settings, statics, () => steadyCostPerDay({ state, pc, shares, settings: { ...settings, horizonDays: 30 }, prices, special, statics }), win.days);
             const perDay = plan.pickBy === 'max' ? Infinity : auto.ready ? auto.budgetPerDay : budgetOf(settings) / (settings.horizonDays || 30);
             const runSettings = { ...settings, horizonDays: win.days, budget: Number.isFinite(perDay) ? perDay * win.days : Infinity };
             const pickBy = effectivePickBy(PICK_BY[plan.pickBy] ? plan.pickBy : 'most', auto);
@@ -11691,17 +13869,19 @@
             // The comparison: each plan over the whole length (its id is yielded as it starts).
             const names = [];
             const nPlans = 8;
-            const compare = await runSliced(compareSteps({ ...args, events: segEvents(events, { from, to: win.end }), unlock: hook }), pause, (v) => {
+            const compared = await runSliced(compareSteps({ ...args, events: segEvents(events, { from, to: win.end }), unlock: hook }), pause, (v) => {
                 if (typeof v !== 'string') return;
                 names.push(v);
                 tell('compare', (RUN_SHARE.compare * (names.length - 0.5)) / Math.max(nPlans, names.length), 'Comparing plans: ' + ((STRATEGIES_NAME(v) || v).toLowerCase()) + ' (' + names.length + ')');
             });
+            // The cash check on the days each plan really pays (a jump buys in lumps); the cost of every day is not kept.
+            const compare = Object.fromEntries(Object.entries(compared).map(([id, r]) => [id, withCash(r, auto.offer)]));
             // Round 7: a gym to unlock never outranks stats. Every plan says when it opens the gym; an "open it by" date
             // leaves out the plans that miss it, then the Plan rule picks as usual.
             const openBy = openByOf(plan, pc, from, win.days);
             const budget = budgetOf(runSettings);
             const rec = recommend(compare, { budget, bliss: pc.perks.bliss, pickBy, openBy });
-            // The path: the best plan again every 30 days and for each event, from the stats projected for that day.
+            // The path: the best plan again every 10 days and for each event, from the stats projected for that day.
             const nSegs = Math.max(1, segmentsOf(from, win.end, events).length);
             let seg = 0;
             let band = 0;
@@ -11715,10 +13895,11 @@
                     tell('band', RUN_SHARE.compare + RUN_SHARE.path + (RUN_SHARE.band * band) / (2 * nSegs), 'The range of the plan (a little better, a little worse)');
                 }
             });
+            year.result = withCash(year.result, auto.offer);
             tell('save', 1, 'Saving your plan');
             const snapshot = snapshotOf({ state, pc, statics, plan, prices: livePrices(prices), income: auto.ready ? { perDay: auto.perDay, source: auto.source, days: auto.days, certain: auto.floor ? { perDay: auto.floor.perDay, bank: auto.floor.bank, dividends: auto.floor.dividends, rent: auto.floor.rent } : null } : null, budgetPerDay: Number.isFinite(perDay) ? perDay : null, held: heldBoosters(statics.inventory), now });
             // The what-ifs come after the plan is saved and shown (`extras: 'pending'` until they are in).
-            const saved = makeSavedPlan({ compare, rec, snapshot, start: win.start, end: win.end, months: win.months, days: win.days, budget, whatIf: null, jobWhatIf: [], prev, year, gymWorth: [], extras: 'pending', now });
+            const saved = makeSavedPlan({ compare, rec, snapshot, start: win.start, end: win.end, months: win.months, days: win.days, budget, whatIf: null, jobWhatIf: [], prev, year, gymWorth: [], extras: 'pending', auto: byItself, now });
             const best = compare[rec.recommended];
             const warn = {};
             for (const [id, r] of Object.entries(compare)) if (r && best && id !== rec.recommended) warn[id] = pickWarning(best, r, { bliss: pc.perks.bliss, days: win.days }).warn;
@@ -11731,8 +13912,8 @@
             const keep = recalibrate && cur.strategyPicked && compare[cur.strategy];
             const strategy = keep ? cur.strategy : year.segments.length ? year.segments[0].strategy : rec.recommended;
             setPlan({ ...cur, strategy, strategyPicked: Boolean(keep), createdAt: now });
-            recordPlanLine(saved, keep ? strategy : 'path', now, recalibrate ? 'replan' : 'create');
-            extrasCtx = { args, compare, rec, bliss: pc.perks.bliss, gymArgs: { ...args, events: segEvents(events, { from, to: win.end }) }, hookFor };
+            recordPlanLine(saved, keep ? strategy : 'path', now, recalibrate ? (byItself ? 'auto' : 'replan') : 'create');
+            extrasCtx = { args, compare, rec, offer: auto.offer, bliss: pc.perks.bliss, gymArgs: { ...args, events: segEvents(events, { from, to: win.end }) }, hookFor };
             return saved;
         })();
         busy.promise = run;
@@ -11751,7 +13932,7 @@
         };
         const doc = typeof document !== 'undefined' && typeof document.addEventListener === 'function' ? document : null;
         if (doc) doc.addEventListener('visibilitychange', onVis);
-        logAction(recalibrate ? 'Re-plan pressed' : 'Create plan pressed (' + months + (months === 1 ? ' month)' : ' months)'));
+        logAction(recalibrate ? (byItself ? 'Recalibrating by itself (once a day)' : 'Recalibrate pressed') : 'Create plan pressed (' + months + (months === 1 ? ' month)' : ' months)'));
         const done = (ok, error, saved) => {
             if (doc) doc.removeEventListener('visibilitychange', onVis);
             if (hidAt !== null) hiddenMs += Date.now() - hidAt;
@@ -11793,8 +13974,9 @@
             // Is each gym the recommended plan opens worth its fee: the plan with and without it.
             const gymWorth = await runSliced(gymWorthSteps(ctx.compare[ctx.rec.recommended], ctx.gymArgs, ctx.hookFor), pause);
             // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
-            const whatIf = ctx.bliss ? null : await runSliced(blissWhatIfSteps(ctx.args), pause);
-            const jobWhatIf = await runSliced(companyWhatIfSteps({ ...ctx.args, compare: ctx.compare, recommended: ctx.rec.recommended }), pause);
+            const whatIfRuns = ctx.bliss ? null : await runSliced(blissWhatIfSteps(ctx.args), pause);
+            const whatIf = whatIfRuns ? Object.fromEntries(Object.entries(whatIfRuns).map(([id, r]) => [id, withCash(r, ctx.offer)])) : null;
+            const jobWhatIf = (await runSliced(companyWhatIfSteps({ ...ctx.args, compare: ctx.compare, recommended: ctx.rec.recommended }), pause)).map((w) => ({ ...w, result: withCash(w.result, ctx.offer) }));
             if (!alive()) return null;
             const next = { ...pi.saved, gymWorth, whatIf, jobWhatIf, extras: 'done', extrasAt: Date.now() };
             await saveSavedPlan(next);
@@ -11819,7 +14001,7 @@
         return STRATEGIES[id] ? STRATEGIES[id].short : null;
     }
 
-    /** Recalibrate (a click): the plan's end stays, the days left are re-planned from what's true now. */
+    /** Recalibrate (a click): the plan's end stays, the days left are recalibrated from what's true now. */
     function recalibratePlan(o = {}) {
         return createPlan({ ...o, recalibrate: true });
     }
@@ -11837,13 +14019,56 @@
     }
 
     /**
-     * Resume (round 7): stacking ends and the plan is re-planned at once from your bars, the same run as Re-plan (its
-     * light sweep included). No saved plan to re-plan (none yet, or it has ended): today's steps simply come back.
-     * @returns {Promise<object|null>} the re-planned saved plan, or null
+     * Resume (round 7): stacking ends and the plan is recalibrated at once from your bars, the same run as Recalibrate (its
+     * light sweep included). No saved plan to recalibrate (none yet, or it has ended): today's steps simply come back.
+     * @returns {Promise<object|null>} the recalibrated saved plan, or null
      */
     function resumeTraining(o = {}) {
         setStacking(false);
         logAction('Resume pressed (stacking ends)');
+        refresh();
+        const pn = planNowStored();
+        if (!pn || planProgress(pn, Date.now()).ended) return Promise.resolve(null);
+        return recalibratePlan(o);
+    }
+
+    /**
+     * The overdose, one state for every surface (the owner, 2026-10-03: Torn's panel said "Overdosed", Home still said
+     * "Train DEX × 6"). Seen on your bars (core/gympage.js nextOverdose) and stored in GM: Torn's pages check it against
+     * the sidebar's bars, the webpage against Torn's API answer, and the model carries it as `m.overdose`. Home, the
+     * strip, the panel and the bot's sync hold the training steps back while it is on.
+     * @param {object} reads - {happy:{current}, energy:{current}, drugLeft: ms}
+     * @param {number} now
+     * @param {object|null} [before] - nextBarsSeen's last reading with something in the bars
+     * @returns {{at:number, until:number}|null} the overdose while it is on
+     */
+    function overdoseSeen(reads, now = Date.now(), before = null) {
+        const prev = get(K.overdose, null);
+        const next = nextOverdose(prev, reads, now, before);
+        if (JSON.stringify(next) !== JSON.stringify(prev)) set(K.overdose, next);
+        return overdoseOn(next, now) ? next : null;
+    }
+
+    /** The same from Torn's API answer (the webpage has no sidebar to read). */
+    function overdoseFromState(state, now) {
+        const prev = get(K.overdose, null);
+        // A read from before it was seen (Torn's page saw it on the bars first) says nothing about it.
+        if (prev && state.at < (prev.at || 0)) return overdoseOn(prev, now) ? prev : null;
+        const reads = { happy: state.happy ? { current: state.happy.current } : null, energy: state.energy ? { current: state.energy.current } : null, drugLeft: Math.max(0, (state.drugCd || 0) * 1000 - Math.max(0, now - state.at)) };
+        const od = overdoseSeen(reads, now, pi.barsSeen || null);
+        pi.barsSeen = nextBarsSeen(pi.barsSeen || null, reads, state.at);
+        return od;
+    }
+
+    /**
+     * Home's "Rehab done · recalibrate": the overdose is over for you (kept as ended until its cooldown has run out, so the
+     * same bars aren't read as a new one), and the plan is recalibrated at once from your bars, like Resume.
+     * @returns {Promise<object|null>} the recalibrated saved plan, or null
+     */
+    function overdoseDone(o = {}) {
+        const od = get(K.overdose, null);
+        if (od) set(K.overdose, { ...od, ended: Date.now() });
+        logAction('Rehab done pressed (the overdose is over)');
         refresh();
         const pn = planNowStored();
         if (!pn || planProgress(pn, Date.now()).ended) return Promise.resolve(null);
@@ -11916,9 +14141,9 @@
             planSettings = { ...settings, horizonDays: pn.days, budget: pn.budget === null ? Infinity : pn.budget };
         }
         // Income (Plan's "Plan from my income"): read on the webpage only, where a plan is made.
-        const auto = app ? autoFor(plan, settings, statics, () => (pn && pn.slim.steady ? pn.slim.steady.cost / pn.days : 0)) : null;
+        const auto = app ? autoFor(plan, settings, statics, () => (pn && pn.slim.steady ? pn.slim.steady.cost / pn.days : 0), pn ? pn.days : null) : null;
         const planInfo = pn ? { start: pn.start, end: pn.end, months: pn.months, days: pn.days, from: pn.from, createdAt: pn.createdAt, recalibratedAt: pn.recalibratedAt, progress: planProgress(pn, now), whole: Boolean(saved) } : null;
-        const m = buildModel({ state, statics, plan: followed, onPath: Boolean(seg && seg.strategy), settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: (app ? archived(K.statsHistory, {}) : get(K.statsHistory, {})) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), stacking: getStacking(), now });
+        const m = buildModel({ state, statics, plan: followed, onPath: Boolean(seg && seg.strategy), settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: (app ? archived(K.statsHistory, {}) : get(K.statsHistory, {})) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), stacking: getStacking(), overdose: overdoseFromState(state, now), now });
         if (m.ready) {
             m.strategy = followed.strategy;
             m.planBusy = pi.planBusy ? { recalibrate: pi.planBusy.recalibrate, months: pi.planBusy.months, at: pi.planBusy.at, done: pi.planBusy.done, words: pi.planBusy.words } : null;
@@ -11954,10 +14179,10 @@
 
     /**
      * The plan's line (core/planline.js; Progress, the Plan card, Home): a new
-     * line from this moment, from your stats now. Create plan and Re-plan start
+     * line from this moment, from your stats now. Create plan and Recalibrate start
      * the saved plan's own run; a pick (or back to the saved plan) follows that
      * plan's saved run from where it stands today. The lines before it stay
-     * (round 7: a pick no longer re-bases the line, Re-plan no longer wipes it).
+     * (round 7: a pick no longer re-bases the line, Recalibrate no longer wipes it).
      * @param {string} why - 'create' | 'replan' | 'pick' | 'path'
      */
     function recordPlanLine(saved, strategy, now, why) {
@@ -12143,6 +14368,8 @@
         gmOnChange(K.skipped, refresh);
         // "I'm stacking" or Resume in another tab: this one follows at once (Torn's pages too).
         gmOnChange(K.stacking, refresh);
+        // An overdose seen (or ended) in another tab: this one follows at once.
+        gmOnChange(K.overdose, refresh);
         gmOnChange(K.settings, refresh);
         gmOnChange(K.stateError, refresh);
         gmOnChange(K.apiKeyDead, refresh);
@@ -12438,6 +14665,8 @@
     function planPayload(m) {
         if (!m || !m.ready) return null;
         // type 'jump' + noRefill: a Worker from before round 7 ignores chain but still holds back the energy-full and refill pings.
+        // Overdosed (the one stored state, m.overdose): no steps either, and the bot says "Overdosed · fly to Switzerland" once.
+        if (m.overdose) return { type: 'jump', noRefill: true, steps: [], overdose: { at: Math.floor(m.overdose.at / 1000), until: Math.floor(m.overdose.until / 1000) } };
         if (m.stacking) return { type: 'jump', noRefill: true, steps: [], chain: { since: Math.floor(m.stacking.since / 1000) } };
         return { type: m.steps.some((s) => s.kind === 'stack' || s.kind === 'jump') ? 'jump' : 'steady', steps: stepsForWorker(m.upcoming || m.steps), ...(m.noRefill ? { noRefill: true } : {}) };
     }
@@ -12659,7 +14888,7 @@
         const plan = planPayload(m);
         if (!plan) return false;
         // "I'm stacking" and Resume change it too.
-        const sig = JSON.stringify([plan.chain ? plan.chain.since : 0, plan.steps.map((s) => [s.kind, s.label, Math.round(s.at / 300)])]);
+        const sig = JSON.stringify([plan.chain ? plan.chain.since : 0, plan.overdose ? plan.overdose.at : 0, plan.steps.map((s) => [s.kind, s.label, Math.round(s.at / 300)])]);
         const pendingAcks = w.pendingAcks || [];
         const targetsDue = sync.targets && sync.targetsSig !== w.targetsSig && now - (w.targetsAt || 0) >= TARGETS_EVERY_MS;
         // Logged in with Discord: a new main key goes along once (the service pauses pings on a refused key until then).
@@ -12671,7 +14900,8 @@
         const eyeDue = Boolean(eye.sig) && eye.sig !== w.eyeSig;
         const due = sig !== w.lastSig || now - (w.lastSync || 0) >= SYNC_EVERY_MS || pendingAcks.length > 0 || targetsDue || keyDue || eyeDue;
         // "I'm stacking" and Resume go at once, not behind the one-a-minute gate (a ping could slip out in that minute).
-        const chainFlip = (plan.chain ? plan.chain.since : 0) !== (w.lastChain || 0);
+        // An overdose seen (or over) goes at once too.
+        const chainFlip = (plan.chain ? plan.chain.since : 0) !== (w.lastChain || 0) || (plan.overdose ? plan.overdose.at : 0) !== (w.lastOverdose || 0);
         if (!due || (!chainFlip && now - (w.lastSync || 0) < SYNC_MIN_MS)) return false;
         const statics = get(K.userStatic, {}) || {};
         const ki = statics.keyInfo || {};
@@ -12684,7 +14914,7 @@
             body.war = eye.war;
             body.watch = eye.watch;
         }
-        set(K.worker, { ...w, lastSync: now, lastSig: sig, lastChain: plan.chain ? plan.chain.since : 0, pendingAcks: [], ...(targetsDue ? { targetsSig: sync.targetsSig, targetsAt: now } : {}), ...(keyDue ? { keyTag: tag } : {}), ...(eyeDue ? { eyeSig: eye.sig } : {}) });
+        set(K.worker, { ...w, lastSync: now, lastSig: sig, lastChain: plan.chain ? plan.chain.since : 0, lastOverdose: plan.overdose ? plan.overdose.at : 0, pendingAcks: [], ...(targetsDue ? { targetsSig: sync.targetsSig, targetsAt: now } : {}), ...(keyDue ? { keyTag: tag } : {}), ...(eyeDue ? { eyeSig: eye.sig } : {}) });
         workerSync(body)
             .then((r) => {
                 const acked = applyAcks(r.acks, Date.now());
@@ -12745,6 +14975,11 @@
         while (el.firstChild) el.removeChild(el.firstChild);
         for (const c of [].concat(children)) if (c) el.appendChild(c);
         return el;
+    }
+
+    /** A small tick for a step that is done (the rail on Home, the panel's list on Torn's pages). */
+    function tickMark(color = '#9bdc8a') {
+        return h('svg', { class: 'tick', viewBox: '0 0 12 12', 'aria-hidden': 'true' }, [h('polyline', { points: '2,6.5 5,9.5 10,3', fill: 'none', stroke: color, 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' })]);
     }
 
     /** A polyline sparkline in a w×h box from values (nulls skipped). */
@@ -12973,7 +15208,7 @@
     /* A plan being worked out (the Plan card): the card's own day line, filling */
     .planrun { margin-top: 16px; }
     .planrun .dayline i { transition: none; opacity: .72; }
-    /* Re-plan running (the owner's pick, 2A in mockups/round7/animation-options.html): a light crosses the whole bar, so it
+    /* Recalibrate running (the owner's pick, 2A in mockups/round7/animation-options.html): a light crosses the whole bar, so it
        shows even at 2%. Transform only. Still under the PC's "reduce motion" and with Settings › Animations off. */
     .planrun .dayline::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, rgba(255,255,255,0) 38%, rgba(255,255,255,.7) 50%, rgba(255,255,255,0) 62%); transform: translateX(-100%); animation: pi-sweep 1.8s linear infinite; }
     @keyframes pi-sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
@@ -13128,6 +15363,40 @@
     .tbl tr.ih td { height: var(--row); background: #191c1f; }
     .tbl tr.ih b { font-size: 14px; color: var(--white); }
     .tbl tr.sub td:first-child { padding-left: 24px; }
+    /* The Ledger tab (round 8, option A adjusted): the statement's totals, the warning for lines not sorted, the chips. */
+    .tbl tr.sum td { border-top: 1px solid var(--line2); }
+    .tbl tr.sum.key td { background: #1b1e21; }
+    .tbl tr.sum.key b.w { color: var(--chalk); }
+    .tbl .c-cost { color: var(--text); }
+    .ledger-st td small, .ledger-st th small { margin-left: 4px; }
+    .main > div.ledger-warn { border-color: var(--warn); }
+    .ledger-unsorted { margin: 0; padding-left: 20px; display: grid; gap: 6px; }
+    .ledger-chips { flex-wrap: wrap; margin-bottom: 16px; }
+    .ledger-chips .btn.on { background: var(--chalk); color: var(--on-chalk); border-color: var(--chalk); }
+    .ledger-tick { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; cursor: pointer; white-space: nowrap; }
+    .ledger-one { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 13px; }
+    .ledger-one b { white-space: nowrap; }
+    .ledger-idea { display: grid; gap: 4px; padding: 10px 0; border-top: 1px solid var(--line); font-size: 13px; }
+    .ledger-idea > div:first-child { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+    /* Plan's money block (the owner's pick P1): six figures in a row; the budget choice where a plan is made. */
+    .figs6 { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 14px; }
+    .figs6 .figc { padding: 16px 18px; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+    .figs6 .figc:first-child { border-left: 0; }
+    .figs6 .figc .lab { white-space: normal; }
+    .figs6 .figc b { font: 600 20px var(--sans); color: var(--white); }
+    .figs6 .figc small { color: var(--muted); font-size: 13px; }
+    .figs6 .figc.ok b { color: var(--chalk); }
+    .figs6 .figc.ok small { color: var(--good); }
+    .figs6 .figc.warn b, .figs6 .figc.warn small { color: var(--warn); }
+    @media (max-width: 1280px) { .figs6 { grid-template-columns: repeat(3, minmax(0, 1fr)); } .figs6 .figc:nth-child(4) { border-left: 0; } .figs6 .figc:nth-child(n+4) { border-top: 1px solid var(--line); } }
+    .budgets { display: grid; gap: 8px; margin-top: 16px; max-width: 760px; }
+    .budgets .bud { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 10px 14px; border: 1px solid var(--line2); border-radius: 10px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+    .budgets .bud.on { border-color: var(--chalk); background: #202428; }
+    .budgets .bud:focus-visible { outline: 2px solid var(--chalk); outline-offset: 2px; }
+    .budgets .bud b { color: var(--white); font-weight: 600; }
+    .budgets .bud .tag { margin-left: 8px; }
+    .budgets .bud small { display: block; color: var(--muted); font-size: 13px; }
+    .budgets .bud .r { text-align: right; white-space: nowrap; }
     .verdict { font-size: 13px; }
     svg.ch { width: 100%; display: block; overflow: visible; }
     svg.ch text { font: 11px var(--sans); fill: var(--muted); }
@@ -13169,6 +15438,14 @@
     .months .mo em { display: block; font-style: normal; color: var(--chalk); font-size: 12px; font-weight: 500; margin-top: 2px; }
     .months .mo.past { opacity: .55; }
     .months .mo.now { border-color: var(--chalk); }
+    /* round 8: each month names the plans it follows */
+    .months .mo .mh { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+    .months .mo .mh b { display: inline; margin-top: 0; color: var(--white); }
+    .months .mo .mp { display: block; color: var(--text); margin-top: 2px; line-height: 1.35; overflow-wrap: anywhere; }
+    /* round 8: the path's stretches (the line under the stretch you are in) */
+    .tbl tr.what td { height: auto; border-top: 0; padding-top: 0; padding-bottom: 10px; }
+    .tbl td.nw { white-space: nowrap; }
+    .tbl td > .second { color: var(--muted); font-size: 13px; }
     /* Breathing room and cards (owner, round 3; round 7 type pass): one level of cards; the page's primary block has a soft chalk edge. */
     .app { --row: 44px; --pad: 16px; --gap: 24px; --sec: 24px; }
     .top { padding: 0 var(--edge); }
@@ -13257,6 +15534,90 @@
     .eye-bg { display: flex; align-items: center; gap: 8px; margin-top: 16px; color: var(--muted); font-size: 13px; }
     .eye-bg .track { flex: 0 0 180px; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
     .eye-bg .fill { height: 100%; background: var(--chalk); }
+    /* ---- Round 8: today's steps as one rail (the owner's pick B in mockups/round8/steps-panel.html) ----
+       The plate with the one ring that leaves it (his pick 1D in mockups/round7/animation-options.html) marks the action
+       of the moment: one ring on the page, never two. Opacity and transform only. Under the PC's "reduce motion" and with
+       Settings › Animations off nothing moves: the ring stays drawn around the plate. */
+    .pl { position: relative; display: inline-block; width: 14px; height: 14px; border-radius: 50%; background: var(--chalk); box-shadow: inset 0 0 0 3px var(--chalk), inset 0 0 0 4px #2a2d31; flex: none; }
+    .pl::before { content: ""; position: absolute; left: 50%; top: 50%; width: 4px; height: 4px; margin: -2px 0 0 -2px; border-radius: 50%; background: var(--on-chalk); }
+    .pl.ring::after { content: ""; position: absolute; inset: 0; border-radius: 50%; border: 1.5px solid var(--chalk); opacity: 0; animation: pi-ring 2s ease-out infinite; }
+    @keyframes pi-ring { 0% { transform: scale(1); opacity: .75; } 70%, 100% { transform: scale(2.4); opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) { .pl.ring::after { animation: none; opacity: .55; transform: scale(1.7); } }
+    .pi-root.still .pl.ring::after { animation: none; opacity: .55; transform: scale(1.7); }
+    svg.tick { display: block; width: 14px; height: 14px; }
+    .rail { list-style: none; margin: 0; padding: 0; }
+    .rail > li { position: relative; display: grid; grid-template-columns: 20px 52px minmax(0, 1fr) auto; gap: 0 12px; align-items: center; min-height: 44px; padding: 4px 0; }
+    .rail > li::before { content: ""; position: absolute; left: 9px; top: 0; bottom: 0; width: 2px; background: var(--line2); }
+    .rail > li:first-child::before { top: 22px; }
+    .rail > li:last-child::before { bottom: calc(100% - 22px); }
+    .rail > li:only-child::before { display: none; }
+    .rail > li.now:first-child::before { top: 40px; }
+    .rail > li.now:last-child::before { bottom: calc(100% - 40px); }
+    .rail .node { position: relative; z-index: 1; width: 20px; height: 20px; display: grid; place-items: center; background: var(--card); border-radius: 50%; }
+    .rail .dot { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--dim); background: var(--card); }
+    .rail .dot.on { border-color: var(--chalk); background: var(--chalk); }
+    .rail .dot.open { border-color: var(--chalk); }
+    .rail .t { color: var(--muted); white-space: nowrap; }
+    .rail .t small { display: block; font-size: 12px; line-height: 1.2; }
+    .rail .s { color: var(--muted); font-size: 13px; }
+    .rail .in { color: var(--muted); font-size: 13px; text-align: right; white-space: nowrap; }
+    .rail > li.done, .rail > li.done .t, .rail > li.done .s { color: var(--dim); }
+    .rail > li.done .in { color: var(--good); }
+    .rail > li.now { align-items: start; padding: 10px 0; }
+    .rail > li.now > .node { margin-top: 20px; }
+    .rail > li.now > .t { margin-top: 20px; color: var(--chalk); font-weight: 500; }
+    .nb { grid-column: 3 / -1; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px 24px; align-items: center; padding: 20px 24px; border-radius: 12px; background: var(--card2); min-width: 0; }
+    .nb.solo { grid-template-columns: minmax(0, 1fr); }
+    .nb .big1 { display: block; font-size: 17px; font-weight: 600; line-height: 1.35; color: var(--white); }
+    .nb .side { display: flex; flex-direction: column; align-items: flex-end; gap: 12px; }
+    .nb .side small { color: var(--muted); font-size: 13px; }
+    .nb .k { font: 600 12px var(--sans); color: var(--on-chalk); background: var(--chalk); border-radius: 6px; padding: 4px 8px; }
+    .nb .cd { font: 600 40px/1 var(--serif); color: var(--chalk); white-space: nowrap; }
+    .nb .acts { flex-direction: column; align-items: stretch; }
+    .nb .btn:not(.primary) { background: transparent; }
+    .nb .stackbox { padding: 0; background: none; }
+    .nb .stackbox .big { display: flex; align-items: center; gap: 12px; }
+    .nb .stackbox .cd { font-size: 28px; margin-left: auto; }
+    .subr { list-style: none; margin: 0; padding: 0; }
+    .subr li { position: relative; display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 12px; align-items: start; padding: 5px 0; font-size: 13px; color: var(--muted); }
+    .subr li::before { content: ""; position: absolute; left: 9px; top: 0; bottom: 0; width: 2px; background: var(--line2); }
+    .subr li:first-child::before { top: 14px; }
+    .subr li:last-child::before { bottom: calc(100% - 14px); }
+    .subr li:only-child::before { display: none; }
+    .subr .node, .subr .dot { background: var(--card2); }
+    .subr .a { font-weight: 500; color: var(--text); }
+    .subr li.now { padding: 10px 0; }
+    .subr li.now .a { display: block; font-size: 17px; font-weight: 600; line-height: 1.2; color: var(--white); }
+    .subr li.done .a, .subr li.done .s { color: var(--dim); }
+    /* ---- Round 8: Torn Eye (mockups/round8/torn-eye.html): sort by a column, the war question, the chain counter ---- */
+    .sortb { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font: 500 13px var(--sans); }
+    .sortb:hover { color: var(--text); }
+    .sortb .arr { width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid currentColor; opacity: .35; }
+    .sortb.on { color: var(--white); }
+    .sortb.on .arr { opacity: 1; }
+    .sortb.up .arr { transform: rotate(180deg); }
+    .sortb:focus-visible { outline: 2px solid var(--chalk); outline-offset: 3px; border-radius: 4px; }
+    .btn.line { background: transparent; border-color: var(--chalk); color: var(--chalk); }
+    .eye-rule.sorted { display: inline-flex; align-items: center; gap: 12px; }
+    .ask { display: flex; align-items: center; gap: 24px; padding: 16px 20px; margin-bottom: 16px; border-radius: 12px; background: var(--card2); border: 1px solid color-mix(in srgb, var(--chalk) 40%, transparent); }
+    .ask b { display: block; color: var(--white); font: 600 17px/1.35 var(--sans); }
+    .ask span { color: var(--muted); font-size: 13px; }
+    .ask .acts { margin-left: auto; flex: none; }
+    .answ { display: flex; align-items: center; gap: 10px; margin: -4px 0 16px; color: var(--text); font-size: 13px; }
+    .answ i { width: 8px; height: 8px; border-radius: 50%; background: var(--chalk); flex: none; }
+    .lnk { background: none; border: 0; padding: 0; color: var(--link); font: 500 13px var(--sans); cursor: pointer; }
+    .lnk:hover { text-decoration: underline; }
+    .lnk:focus-visible { outline: 2px solid var(--chalk); outline-offset: 3px; border-radius: 4px; }
+    .tk.set { box-shadow: 0 0 0 3px color-mix(in srgb, var(--chalk) 12%, transparent); }
+    .chainc { margin: 0 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--card2); }
+    .chainc-side { padding: 10px 14px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: 10px; row-gap: 2px; align-items: baseline; font-variant-numeric: tabular-nums; }
+    .chainc-side + .chainc-side { border-top: 1px solid var(--line); }
+    .chainc .who { grid-column: 1 / 3; color: var(--muted); font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .chainc .time { color: var(--white); font: 600 16px/1.2 var(--sans); }
+    .chainc .time.low { color: var(--warn); }
+    .chainc .n { color: var(--white); font: 600 24px/1.1 var(--sans); }
+    .chainc .bonus { grid-column: 2 / 4; color: var(--muted); font-size: 13px; }
+    .chainc .bonus b { color: var(--text); font-weight: 600; }
     `;
 
     /* ===== src/ui/app/common.js ===== */
@@ -13264,6 +15625,7 @@
      * Pieces every webpage tab shares: the status strip, the stats-vs-build rows,
      * section headers, time words. All numbers come from the model.
      */
+
 
 
 
@@ -13328,12 +15690,14 @@
             stCell('Energy', s.energy.current + ' / ' + s.energy.max, null, (100 * s.energy.current) / Math.max(1, s.energy.max), 'var(--chalk)', s.energy.fullAt ? 'Full at ' + clock(s.energy.fullAt, settings) : 'Full'),
             stCell('Happy', fmtInt(s.happy.current), null, (100 * Math.min(s.happy.current, s.happy.max)) / Math.max(1, s.happy.max), 'var(--good)', 'Max ' + fmtInt(s.happy.max) + (s.happy.property ? ' · ' + s.happy.property : '')),
             (() => {
-                const c = stCell('Drug', drugTxt, s.drug.left > 0 ? 'warn' : 'good', drugPct, 'var(--warn)', 'Xanax ' + Math.min(s.drug.xanaxDone + 1, Math.max(1, s.drug.xanaxPlanned)) + ' of ' + Math.max(1, s.drug.xanaxPlanned) + ' today');
+                // Overdosed (m.overdose, the one stored state): the cell says so instead of "Xanax 2 of 3 today".
+                const c = stCell('Drug', drugTxt, s.drug.left > 0 ? 'warn' : 'good', drugPct, 'var(--warn)', m.overdose ? OVERDOSE_WORDS.pill : 'Xanax ' + Math.min(s.drug.xanaxDone + 1, Math.max(1, s.drug.xanaxPlanned)) + ' of ' + Math.max(1, s.drug.xanaxPlanned) + ' today');
+                if (m.overdose) c.setAttribute('data-overdose', 'on');
                 if (s.drug.left > 0) c.querySelector('b').setAttribute('data-cd', String(now + s.drug.left));
                 return c;
             })(),
             withBooster ? stCell('Booster', boosterTxt, s.booster.left > 0 ? null : 'good', s.booster.capH ? (100 * Math.min(s.booster.left, s.booster.capH * 3600e3)) / (s.booster.capH * 3600e3) : 0, 'var(--chalk)', boosterWords(s.booster, now)) : null,
-            stCell('Refill', s.refill.free ? 'Unused' : 'Used', null, s.refill.free ? 0 : 100, 'var(--chalk)', s.refill.free ? (s.refill.plannedAt ? 'Planned ' + clock(s.refill.plannedAt, settings) : s.refill.stacking ? 'No use while stacked' : 'Use before 00:00') : 'Next at 00:00 Torn time'),
+            stCell('Refill', s.refill.free ? 'Unused' : 'Used', null, s.refill.free ? 0 : 100, 'var(--chalk)', s.refill.free ? (m.overdose ? 'After rehab' : m.stacking ? 'Kept for the chain' : s.refill.plannedAt ? 'Planned ' + clock(s.refill.plannedAt, settings) : s.refill.stacking ? 'No use while stacked' : 'Use before 00:00') : 'Next at 00:00 Torn time'),
         ]);
     }
 
@@ -13597,700 +15961,6 @@
         return svg;
     }
 
-    /* ===== src/core/gympage.js ===== */
-    /*
-     * What the gym page marks say, worked out purely (DESIGN §5, ROUND4-PLAN
-     * §C5): the walk-through of the current train step, part by part ("George's:
-     * STR × 12 → Frontline Fitness: DEX × 8"). In the gym of the current part,
-     * that stat is outlined and Fill types the trains left; when the part is in
-     * another gym, that gym's button is outlined ("Next: Frontline Fitness · DEX
-     * × 8") and the stat boxes go grey. Progress comes from a snapshot taken
-     * when the step starts, moved on by every train Torn shows. The UI only
-     * draws this; nothing here (or there) clicks, trains or switches gyms.
-     */
-
-
-
-
-
-
-
-
-
-    /** A walk-through older than this is over (a session takes minutes; the next drug is hours away). */
-    const SESSION_MAX_MS = 3 * 60 * 60 * 1000;
-
-    /** This much more energy than the session still needs (a Xanax, a refill, a full bar) starts a new one. */
-    const NEW_SESSION_E = 50;
-
-    /** A step counts as now when it is due within this long. */
-    const DUE_SLACK_MS = 60 * 1000;
-
-    /** "George's: STR × 12" */
-    function partText(p) {
-        return p.gymName + ': ' + STAT_LABEL[p.stat] + ' × ' + p.trains;
-    }
-
-    /** "George's: STR × 12 → Frontline Fitness: DEX × 8" */
-    function partsText(parts) {
-        return (parts || []).map(partText).join(' → ');
-    }
-
-    /** All the energy there is now is kept for the plan (a jump's stack, a held boost Xanax, a console jump's bar). */
-    function keptAll(m) {
-        return Boolean((m && m.energyKept && m.energyKept.all) || (m && m.strip && m.strip.refill && m.strip.refill.stacking));
-    }
-
-    /**
-     * The train step the gym page walks through: the first step with trains
-     * that is due now; else the energy you have now, split the same way.
-     * @returns {{id, kind, label, at, items, parts}|null}
-     */
-    function currentTrainStep(m, now = m.now) {
-        const due = (m.steps || []).find((s) => s.parts && s.parts.length && s.at <= now + DUE_SLACK_MS);
-        if (due) return due;
-        // Energy the plan keeps on purpose (model.js keptEnergyOf): Xanax stacked for a jump, the daily choco boost's held
-        // Xanax, the console jump's bar under its stack, a war's reserve. It waits, so the page never says to train it now
-        // (round 7: between stacks it said "Train DEX × 100" with the jump's energy; the review: the same after "Xanax #2 ·
-        // keep the energy for the boost" and before a console jump's stack). Only what is above it is trained.
-        if (m.strip && m.strip.refill && m.strip.refill.stacking) return null;
-        const kept = m.energyKept || null;
-        if (kept && kept.all) return null;
-        const energy = Math.max(0, m.strip.energy.current - (kept ? kept.amount : 0));
-        const r = splitSession({
-            stats: m.pc.stats,
-            shares: m.shares,
-            energy,
-            happy: m.strip.happy.current,
-            happyMax: m.state.happy.maximum,
-            unlocked: m.pc.unlocked,
-            perks: m.pc.perks.mult,
-            keep: m.keep,
-            table: m.pc.table,
-            active: m.state.gymId,
-            happyLossMult: m.pc.perks.happyLossMult,
-        });
-        if (!r.parts.length) return null;
-        return { id: 'now', kind: 'now', label: 'The energy you have now', at: now, items: [], parts: r.parts };
-    }
-
-    /**
-     * What the page shows now: each stat from Torn's boxes where they show it
-     * (they change the moment a train lands), else from the model; energy from
-     * Torn's sidebar bar, else the model.
-     * @param {object} m - model
-     * @param {{stat, value}[]} [boxes] - readStatBoxes()
-     * @param {{current:number}|null} [bar] - readEnergyBar()
-     */
-    function pageReading(m, boxes = [], bar = null) {
-        const stats = { ...m.pc.stats };
-        for (const b of boxes || []) if (STATS.includes(b.stat) && Number.isFinite(b.value) && b.value > 0) stats[b.stat] = Math.max(stats[b.stat] || 0, b.value);
-        const energy = bar && Number.isFinite(bar.current) ? bar.current : m.strip.energy.current;
-        return { stats, energy, happy: m.strip.happy.current };
-    }
-
-    /** A new walk-through, snapshot of the stats and energy as the step starts. */
-    function startSession(step, reading, m, now) {
-        const spent = { str: 0, spd: 0, def: 0, dex: 0 };
-        return {
-            v: 1,
-            at: now,
-            build: m.build.id,
-            stepId: step.id,
-            label: step.label || '',
-            drug: (step.items || []).some((it) => it.id === XANAX),
-            parts: step.parts.map((p) => ({ gymId: p.gymId, gymName: p.gymName, stat: p.stat, trains: p.trains, perTrain: p.perTrain, gain: p.gain || 0, ...(p.stopAt !== undefined ? { stopAt: p.stopAt, stopReason: p.stopReason } : {}) })),
-            stats0: { ...reading.stats },
-            energy0: reading.energy,
-            happy0: reading.happy,
-            last: { stats: { ...reading.stats }, energy: reading.energy },
-            spent,
-            // Energy the step leaves on purpose (kept for a war, the console jump's bar, or a stop that keeps a specialist
-            // gym): not a sign of a new session.
-            spare: Math.max(0, Number(m.keepEnergy) || 0, m.energyKept && !m.energyKept.all ? Number(m.energyKept.amount) || 0 : 0),
-        };
-    }
-
-    /** Energy spent so far this session. */
-    function spentTotal(session) {
-        return STATS.reduce((a, k) => a + (session.spent[k] || 0), 0);
-    }
-
-    /**
-     * Count the trains that happened since the last reading. A stat that rose
-     * gets the energy that went (the sidebar's drop); when the bar hasn't moved
-     * yet, the trains the rise stands for (its gain ÷ the gain of one train in
-     * that part's gym), so the page moves on as soon as Torn shows the train.
-     * @returns {object} the session, moved on
-     */
-    function advanceSession(session, reading, { table = undefined, perks = null } = {}) {
-        const last = session.last;
-        const rose = STATS.filter((k) => reading.stats[k] - (last.stats[k] || 0) >= 1);
-        const spent = { ...session.spent };
-        if (rose.length) {
-            const happy = Math.max(0, (session.happy0 || 0) - HAPPY_LOSS_PER_ENERGY * spentTotal(session));
-            const est = {};
-            for (const k of rose) {
-                const part = session.parts.find((p) => p.stat === k);
-                const gym = part ? gymById(part.gymId, table) : null;
-                if (!gym || !(gym.dots[k] > 0)) {
-                    est[k] = 0;
-                    continue;
-                }
-                const one = gainPerTrain(k, last.stats[k], happy, gym.dots[k], gym.energy, perks ? perks[k] : 1);
-                est[k] = one > 0 ? Math.max(1, Math.round((reading.stats[k] - last.stats[k]) / one)) * gym.energy : 0;
-            }
-            const dE = Number.isFinite(last.energy) && Number.isFinite(reading.energy) ? last.energy - reading.energy : 0;
-            const estSum = rose.reduce((a, k) => a + est[k], 0);
-            for (const k of rose) spent[k] += dE > 0 ? (estSum > 0 ? (dE * est[k]) / estSum : dE / rose.length) : est[k];
-        }
-        const stats = { ...last.stats };
-        for (const k of STATS) stats[k] = Math.max(stats[k] || 0, reading.stats[k] || 0);
-        return { ...session, spent, last: { stats, energy: Number.isFinite(reading.energy) ? reading.energy : last.energy } };
-    }
-
-    /**
-     * The parts with what's done: each stat's energy spent fills its parts in
-     * order. `current` is the first part not finished (null = session done).
-     */
-    function sessionProgress(session) {
-        const used = { str: 0, spd: 0, def: 0, dex: 0 };
-        let current = null;
-        const parts = session.parts.map((p, i) => {
-            const avail = Math.max(0, (session.spent[p.stat] || 0) - used[p.stat]);
-            const done = Math.min(p.trains, Math.round(avail / p.perTrain));
-            used[p.stat] += done >= p.trains ? p.trains * p.perTrain : avail;
-            const q = { ...p, index: i, done, left: p.trains - done, energy: p.trains * p.perTrain };
-            if (q.left > 0 && current === null) current = q;
-            return q;
-        });
-        for (const q of parts) q.state = q.left === 0 ? 'done' : q === current ? 'current' : 'later';
-        return { parts, current, done: current === null };
-    }
-
-    /** Torn lists its gyms in groups of eight: the one a gym is in, to find its button. */
-    function gymGroupWord(gymId) {
-        const id = Number(gymId);
-        return id <= 8 ? 'a lightweight gym' : id <= 16 ? 'a middleweight gym' : id <= 24 ? 'a heavyweight gym' : 'a specialist gym';
-    }
-
-    /** Energy the session still needs. */
-    function sessionEnergyLeft(session) {
-        return sessionProgress(session).parts.reduce((a, p) => a + p.left * p.perTrain, 0);
-    }
-
-    /** Start a new walk-through? (none yet, another build, too old, or clearly more energy than it needs). */
-    function needsNewSession(session, reading, m, now) {
-        if (!session || session.v !== 1 || !Array.isArray(session.parts) || !session.parts.length) return true;
-        if (session.build !== m.build.id) return true;
-        if (!(now - session.at < SESSION_MAX_MS) || now < session.at) return true;
-        return Number.isFinite(reading.energy) && reading.energy - sessionEnergyLeft(session) - (session.spare || 0) >= NEW_SESSION_E;
-    }
-
-    /**
-     * The gym page's session as it should be now: moved on by this reading,
-     * or a new one when a new step has started.
-     * @returns {object|null}
-     */
-    function nextSession(prev, m, reading, now, ctx = {}) {
-        // A walk-through of "the energy you have now" ends once the plan keeps that energy (a Xanax stacked or held).
-        if (prev && prev.stepId === 'now' && keptAll(m)) prev = null;
-        if (!needsNewSession(prev, reading, m, now)) {
-            const moved = advanceSession(prev, reading, ctx);
-            // The energy is spent: a session with no drug to take can't train once more, so it's over and the page follows
-            // the plan's next step (the owner, 2026-10-03: 10 energy left, the page said "Train DEX × 9", the webpage
-            // "Take Xanax #1"). Its count of trains can lag Torn's; the bar can't.
-            const cur = sessionProgress(moved).current;
-            if (!(cur && !moved.drug && Number.isFinite(reading.energy) && reading.energy < cur.perTrain)) return moved;
-            const step = currentTrainStep(m, now);
-            return step && step.id !== prev.stepId ? startSession(step, reading, m, now) : null;
-        }
-        const step = currentTrainStep(m, now);
-        return step ? startSession(step, reading, m, now) : null;
-    }
-
-    /* ------------------------------------------- round 7: the gym page's states */
-
-    /** Rehab in Switzerland after an overdose: about this much a session (the owner's own log, 2026-10-02). */
-    const REHAB_COST = 215000;
-    const TRAVEL_URL = 'https://www.torn.com/travelagency.php';
-
-    /** A jump or a daily boost: candy or EDVD (or the console) with the drug, then train it all. Never FHC or cans. */
-    function isBoostStep(step) {
-        return Boolean(step) && (step.kind === 'jump' || step.kind === 'boost');
-    }
-
-    /** "EDVD × 5" from "Eat EDVD × 5"; the plan's mid-step words ("the boosters") read "Boosters". */
-    function eatWordsOf(text) {
-        const w = String(text || '').replace(/^Eat /, '');
-        return w === 'the boosters' ? 'Boosters' : w;
-    }
-
-    /**
-     * How far above its maximum happy must be to count the boosters as eaten: the plan's share of the boost (plan.js
-     * MID_BOOST_*: a stack of Xanax adds a few hundred), but never more than half the boost itself. Round 7 review: a small
-     * candy boost (Candy Kisses × 4 = +200, with the Xanax +275) never reached the 300 floor, so the page stayed on a red
-     * "EAT FIRST" with Fill held for the whole boost. Half of it is still more than its Xanax (+75) for any boost over 150.
-     */
-    function eatenOver(boostHappy) {
-        const b = Math.max(0, Number(boostHappy) || 0);
-        const over = Math.max(MID_BOOST_MIN, MID_BOOST_SHARE * b);
-        return b > 0 ? Math.min(over, b / 2) : over;
-    }
-
-    /** Happy the session's trains took so far (0.5 a train energy, by your perks): added back when the boost is judged. */
-    function sessionHappyTrained(session, happyLossMult = 1) {
-        if (!session || !session.spent) return 0;
-        return HAPPY_LOSS_PER_ENERGY * (Number(happyLossMult) || 1) * spentTotal(session);
-    }
-
-    /** The same, only for a session of this boost (started within its tick window, a few hours old at most). */
-    function boostHappyTrained(session, step, happyLossMult = 1, now = Date.now()) {
-        if (!session || !step || !Number.isFinite(session.at) || !(now - session.at < SESSION_MAX_MS)) return 0;
-        const from = (Number.isFinite(step.tick) ? step.tick : step.at) - 15 * 60e3;
-        return session.at >= from ? sessionHappyTrained(session, happyLossMult) : 0;
-    }
-
-    /**
-     * The model's cooldowns as they are now: the model measured them at m.now (up to a read ago), so the time since is
-     * taken off (round 7 review: a cooldown that had just ended still counted as running until the next read).
-     */
-    function agedCooldowns(m, now = Date.now()) {
-        const age = m && Number.isFinite(m.now) ? Math.max(0, now - m.now) : 0;
-        const left = (x) => (x && Number.isFinite(x.left) ? Math.max(0, x.left - age) : 0);
-        return { boosterLeft: left(m && m.strip && m.strip.booster), drugLeft: left(m && m.strip && m.strip.drug) };
-    }
-
-    /**
-     * A boost or jump step and how far it is, from the bars (round 7). Not eaten: happy not above its maximum (by the
-     * share of the boost the plan uses to tell a boost under way: plan.js MID_BOOST_*; a stack of Xanax adds a few hundred).
-     * Eaten: happy above it and the booster cooldown running. The drug (Ecstasy or Xanax): its cooldown running once the
-     * boosters are in, unless the plan still lists it to take (an earlier Xanax's cooldown that ends before the tick).
-     * @param {object} step - plan.js jump/boost step {items, actions, mid, deadline, gain, parts}
-     * @param {object} reads - {happy:{current,max}|null, boosterLeft:ms, drugLeft:ms, trained:boolean}
-     * @returns {{jump, eaten, drugIn, ready, eat, drug, deadline, gain, list:{id, text, done, next}[]}}
-     */
-    function boostProgress(step, { happy = null, boosterLeft = 0, drugLeft = 0, trained = false, happyTrained = 0 } = {}) {
-        const acts = Array.isArray(step.actions) ? step.actions : [];
-        const act = (id) => acts.find((a) => a.id === id) || null;
-        const eatA = act('eat');
-        const jpA = act('jp');
-        const drugA = act('drug');
-        const items = step.items || [];
-        const boostHappy = items.reduce((a, it) => a + (ITEMS[it.id] && ITEMS[it.id].kind === 'booster' ? (ITEMS[it.id].happy || 0) * (it.qty || 0) : 0), 0);
-        const over = eatenOver(boostHappy);
-        const live = happy && Number.isFinite(happy.current) && Number.isFinite(happy.max);
-        // The happy the step's trains took so far is added back: training it all must not read as "not eaten" again.
-        const h = live ? happy.current + Math.max(0, Number(happyTrained) || 0) : 0;
-        const eaten = live ? h >= happy.max + over && (boosterLeft > 0 || Boolean(step.mid)) : Boolean(step.mid || (eatA && eatA.done));
-        const drugToTake = items.some((it) => it.id === XANAX || it.id === ECSTASY);
-        const drugIn = !drugA ? eaten : eaten && (Boolean(drugA.done) || (drugLeft > 0 && !(step.mid && drugToTake)));
-        const drug = drugA ? drugA.text.replace(/^Take the /, '') : null;
-        const trainWords = (() => {
-            const by = {};
-            for (const p of step.parts || []) by[p.stat] = (by[p.stat] || 0) + p.trains;
-            const t = Object.entries(by).map(([k, n]) => STAT_LABEL[k] + ' × ' + n).join(' + ');
-            return t ? 'Train it all: ' + t : 'Train it all';
-        })();
-        const list = [];
-        if (eatA) list.push({ id: 'eat', text: eatWordsOf(eatA.text), done: eaten });
-        if (jpA) list.push({ id: 'jp', text: jpA.text, done: drugIn });
-        if (drugA) list.push({ id: 'drug', text: drug, done: drugIn });
-        list.push({ id: 'train', text: trainWords, done: Boolean(trained) });
-        if (act('refill')) list.push({ id: 'refill', text: 'Refill, then train again', done: false });
-        const next = list.findIndex((x) => !x.done);
-        list.forEach((x, i) => (x.next = i === next));
-        return { jump: step.kind === 'jump', eaten, drugIn, ready: eaten && drugIn, eat: eatA ? eatWordsOf(eatA.text) : null, drug, deadline: step.deadline || null, gain: step.gain || 0, list };
-    }
-
-    /*
-     * The overdose (owner: "happiness goes to 0"). Torn's overdose sets energy, happy (and nerve) to 0; a Xanax overdose
-     * also sets about a day of drug cooldown (docs/research-addiction-rehab.md). Round 7 review: happy 0 + energy 0 with a
-     * drug cooldown running is also a player with a small happy maximum who took a Xanax and trained it all (training
-     * costs 0.4–0.6 happy an energy), and the flag was kept for hours. So the bars at 0 count only with one more sign:
-     *   - a drug cooldown longer than any Xanax's (6–8 h): the overdose's ~24 h; or
-     *   - a sudden fall: minutes ago the bars held more happy than training all that energy could take.
-     * Once seen it is checked against every fresh reading: it ends with the cooldown, and as soon as the bars hold more
-     * than regeneration alone gives back since (a refill, a can, a drug: the plan goes on).
-     */
-
-    /** A drug cooldown longer than this is no Xanax's (360–480 min) or Ecstasy's: an overdose's (~24 h). */
-    const OD_CD_MS = 9 * 3600e3;
-    /** The reading before the fall counts for this long. */
-    const OD_FALL_MS = 15 * 60e3;
-    /** The most happy a train energy can cost (Torn: 0.4–0.6), and a little slack. */
-    const OD_TRAIN_LOSS = 0.6;
-    const OD_SLACK = 25;
-    /** Regeneration back from 0, generously (5 a tick, a tick every 5 minutes), plus a tick of slack. */
-    const OD_REGEN_PER_MS = 5 / (5 * 60e3);
-
-    const barNum = (b) => (b && Number.isFinite(b.current) ? b.current : null);
-
-    /** The last reading with something in the bars ({at, happy, energy}), for the next one to compare with. */
-    function nextBarsSeen(prevSeen, { happy = null, energy = null } = {}, now) {
-        const h = barNum(happy);
-        const e = barNum(energy);
-        if (h === null || e === null || (h === 0 && e === 0)) return prevSeen || null;
-        return { at: now, happy: h, energy: e };
-    }
-
-    /**
-     * An overdose seen on the bars: happy and energy at 0, a drug cooldown running, and either the overdose's long
-     * cooldown or a fall training can't explain (`before`: nextBarsSeen's last reading).
-     */
-    function isOverdose({ happy = null, energy = null, drugLeft = 0 } = {}, { before = null, now = 0 } = {}) {
-        if (barNum(happy) !== 0 || barNum(energy) !== 0 || !(drugLeft > 0)) return false;
-        if (drugLeft > OD_CD_MS) return true;
-        if (!before || !Number.isFinite(before.at) || now < before.at || now - before.at > OD_FALL_MS) return false;
-        return before.happy > 0 && before.happy > OD_TRAIN_LOSS * Math.max(0, before.energy) + OD_SLACK;
-    }
-
-    /** The bars still look like the overdose: no more than regeneration gives back since it was seen. */
-    function stillOverdosed(od, { happy = null, energy = null, drugLeft = null } = {}, now) {
-        if (drugLeft !== null && Number.isFinite(drugLeft) && !(drugLeft > 0)) return false;
-        const back = OD_REGEN_PER_MS * Math.max(0, now - od.at) + 5;
-        const h = barNum(happy);
-        const e = barNum(energy);
-        return !((h !== null && h > back) || (e !== null && e > back));
-    }
-
-    /**
-     * The overdose kept across reads (the bars climb again a tick later): {at, until: the drug cooldown's end} once seen,
-     * while fresh readings still look like it (stillOverdosed) and until that cooldown is over; null otherwise.
-     * @param {object|null} prev - the stored overdose
-     * @param {object} reads - {happy, energy, drugLeft}
-     * @param {number} now
-     * @param {object|null} [before] - nextBarsSeen's last reading with something in the bars
-     */
-    function nextOverdose(prev, reads, now, before = null) {
-        if (prev && Number.isFinite(prev.until) && now < prev.until && now >= (prev.at || 0)) return stillOverdosed(prev, reads || {}, now) ? prev : null;
-        return isOverdose(reads, { before, now }) ? { at: now, until: now + reads.drugLeft } : null;
-    }
-
-    /**
-     * Which of the gym page's states it is (owner's picks, 2026-10-03; overlays.html §6):
-     *   stacking  stacking energy for a chain: training paused, no train marks
-     *   overdose  every jump mark stops; fly to Switzerland
-     *   wrong     the part is in another gym: that gym pulses, Fill waits
-     *   eat       a jump or daily boost with the boosters or the drug still to take: the stat pulses red, Fill waits
-     *   ready     the boosters and the drug are in: steady green, train it all
-     *   right     the right gym, train now (steady green)
-     *   done      the session is done; idle: nothing to train now
-     *   kept      nothing to train now because the plan keeps the energy (a jump's stack, the boost's held Xanax, the
-     *             console jump's bar, a war's reserve): the strip says how much and why; no train mark
-     */
-    function gymPageState({ step = null, cur = null, here = false, done = false, reads = {}, overdose = null, stacking = null, kept = null, now = 0 } = {}) {
-        if (stacking) return { kind: 'stacking', since: Number(stacking.since) || null, boost: null };
-        if (overdose && now < overdose.until) return { kind: 'overdose', at: overdose.at, cost: REHAB_COST, boost: null };
-        const boost = isBoostStep(step) ? boostProgress(step, { ...reads, trained: done }) : null;
-        if (!cur && !done && kept && kept.amount > 0) return { kind: 'kept', kept, boost };
-        if (!cur) return { kind: done ? 'done' : 'idle', boost };
-        if (!here) return { kind: 'wrong', boost };
-        if (boost && !boost.ready) return { kind: 'eat', boost };
-        return { kind: boost ? 'ready' : 'right', boost };
-    }
-
-    const KEPT_FOR = { jump: 'the jump', boost: 'the boost', console: 'the console jump', war: 'the war' };
-
-    /** "Keeping 650 energy for the jump" */
-    function keptHead(k) {
-        return 'Keeping ' + fmtInt(k.amount) + ' energy for ' + (KEPT_FOR[k.why] || 'the plan');
-    }
-
-    /** Why it is kept, in a few words. */
-    function keptWhy(k) {
-        if (k.why === 'jump') return 'Xanax ' + k.stacked + ' of ' + k.stackTo + ' stacked · don’t train it now';
-        if (k.why === 'boost') return 'the Xanax waits for the boost after the tick · don’t train it now';
-        if (k.why === 'console') return 'it stays in the bar under the ' + k.stackTo + ' Xanax · don’t train it';
-        return 'kept for ' + (k.war || 'the enemy faction') + ' · Settings › Keep for war days';
-    }
-
-    /** "EDVD × 5, then the Ecstasy, then train it all" */
-    function eatOrder(boost) {
-        const parts = [];
-        for (const x of boost.list) if (!x.done && x.id !== 'train' && x.id !== 'refill') parts.push(x.id === 'drug' ? 'the ' + x.text : x.text);
-        parts.push('train it all');
-        return parts.map((p, i) => (i ? 'then ' + p : p)).join(', ');
-    }
-
-    /**
-     * @param {object} m - buildModel() output (m.stacking: {since}|null while stacking for a chain)
-     * @param {object} page - {selectedId, boxes: [{stat, locked, energyPerTrain}], reading,
-     *   reads: {happy, energy, boosterLeft, drugLeft} (the sidebar's bars, the model's cooldowns), overdose: {at, until}|null}
-     * @param {object|null} [session] - the walk-through (nextSession); null = the current step, nothing done yet
-     * @param {number} [now]
-     * @returns {{strip:string[], parts:object[], current:object|null, done:boolean, nextGym:{id, label, group}|null, switchHint:string|null,
-     *   perStat:object, pill:string|null, gym:object|null, hereGym:{id, wrong}|null, state:object, line:object}}
-     */
-    function planGymPage(m, page = {}, session = null, now = m.now) {
-        const table = m.pc.table;
-        const selectedId = Number(page.selectedId || m.state.gymId);
-        const gym = gymById(selectedId, table);
-        const stats = m.pc.stats;
-        const reading = page.reading || { stats, energy: m.strip.energy.current };
-        const energy = reading.energy;
-        const perStat = {};
-        const out = { strip: [], parts: [], current: null, done: false, nextGym: null, switchHint: null, perStat, pill: null, gym, hereGym: null, state: { kind: 'idle', boost: null }, line: null };
-        if (!gym) return out;
-        const due = currentTrainStep(m, now);
-        // "The energy you have now" while the plan keeps that energy: no walk-through (nextSession does the same).
-        if (session && session.stepId === 'now' && keptAll(m)) session = null;
-        if (!session) session = due ? startSession(due, reading, m, now) : null;
-        const prog = session ? sessionProgress(session) : { parts: [], current: null, done: false };
-        out.parts = prog.parts;
-        out.current = prog.current;
-        out.done = Boolean(session) && prog.done;
-        const cur = prog.current;
-        const here = Boolean(cur) && cur.gymId === selectedId;
-        const reads0 = page.reads || { happy: m.strip.happy ? { current: m.strip.happy.current, max: m.strip.happy.max } : null, energy: m.strip.energy, ...agedCooldowns(m, now) };
-        // The boost is judged with the happy this step's trains took added back (they don't un-eat it).
-        const reads = isBoostStep(due) ? { ...reads0, happyTrained: boostHappyTrained(session, due, m.pc.perks && m.pc.perks.happyLossMult, now) } : reads0;
-        const state = gymPageState({ step: due, cur, here, done: out.done, reads, overdose: page.overdose || null, stacking: m.stacking || null, kept: m.energyKept || null, now });
-        out.state = state;
-        const off = state.kind === 'stacking' || state.kind === 'overdose';
-
-        const total = totalOf(stats);
-        const tomorrow = (m.projection && m.projection[1]) || {};
-        const boxes = new Map((page.boxes || []).map((b) => [b.stat, b]));
-        const partsOfStat = (k) => prog.parts.filter((p) => p.stat === k);
-        // The word on a box that isn't trained now: in full (hover), and its small corner tag.
-        const greyWord = (stat, all, left, lockedHere) => {
-            if (all.length && !left.length) return { text: 'Done ✓ · ' + STAT_LABEL[stat] + ' × ' + all.reduce((a, p) => a + p.trains, 0), tag: 'done ✓' };
-            if (left.length) {
-                const p = left[0];
-                return p.gymId === selectedId ? { text: 'Next · ' + STAT_LABEL[stat] + ' × ' + p.left + ' after ' + (cur ? STAT_LABEL[cur.stat] : 'this'), tag: 'next · after ' + (cur ? STAT_LABEL[cur.stat] : 'this') } : { text: 'Later · ' + STAT_LABEL[stat] + ' × ' + p.left + ' at ' + p.gymName, tag: 'later · ' + p.gymName };
-            }
-            if (lockedHere) return { text: 'Not trained here', tag: 'not here' };
-            const share = total > 0 ? stats[stat] / total : 0;
-            if (share > m.shares[stat] + 0.005) return { text: 'Skip · ' + (share * 100).toFixed(0) + '% of total, over target', tag: 'skip · over target' };
-            if (tomorrow[stat] > 0) return { text: 'Next · starts tomorrow', tag: 'tomorrow' };
-            return { text: 'Skip · not in this session', tag: 'skip' };
-        };
-
-        for (const k of STATS) {
-            const box = boxes.get(k);
-            const locked = (box && box.locked) || !(gym.dots[k] > 0);
-            const mine = partsOfStat(k);
-            const open = mine.filter((p) => p.left > 0);
-            if (off) {
-                // Stacking for a chain, or an overdose: no train or jump mark anywhere (the strip says why).
-                perStat[k] = { kind: 'off', text: '' };
-            } else if (here && k === cur.stat) {
-                const n = cur.left;
-                const canNow = Number.isFinite(energy) ? Math.max(0, Math.min(n, Math.floor(energy / cur.perTrain))) : n;
-                const allEnergy = n * cur.perTrain > energy - cur.perTrain;
-                const gain = cur.trains > 0 ? (cur.gain * n) / cur.trains : 0;
-                const waitWord = canNow < n ? (canNow === 0 ? ' · energy ' + fmtInt(energy) + (session.drug ? ', take the Xanax first' : ', wait for more') : ' · ' + canNow + ' now, the rest after more energy') : '';
-                const b = state.boost;
-                const eat = state.kind === 'eat';
-                // No energy for one train yet: the step's Xanax comes first (or more energy); never "Train this" then.
-                const noE = canNow === 0 && !eat;
-                perStat[k] = {
-                    kind: 'train',
-                    // Drawn dashed grey, Fill held (marks.js).
-                    noEnergy: noE,
-                    // right / ready: steady green; eat: pulses red, Fill waits.
-                    mark: state.kind,
-                    hold: eat || noE,
-                    trains: n,
-                    fill: eat ? 0 : canNow,
-                    fillN: n,
-                    gain: Math.round(gain),
-                    tab: eat ? 'Eat first' : noE ? (session.drug ? 'Take the Xanax first' : 'Wait for energy') + ' · then ' + STAT_LABEL[k] + ' × ' + fmtInt(n) : state.kind === 'ready' ? 'Train it all · about ' + fmtSigned(Math.round(b.gain || gain)) : 'Train this · ' + fmtInt(n) + ' train' + (n === 1 ? '' : 's') + (cur.done > 0 ? ' left' : '') + ' · about ' + fmtSigned(gain),
-                    text: fmtInt(n) + ' train' + (n === 1 ? '' : 's') + (cur.done > 0 ? ' left' : ''),
-                    sub: eat ? b.list.filter((x) => !x.done && (x.id === 'eat' || x.id === 'drug' || x.id === 'jp')).map((x) => x.text).join(' + ') + ' first' : (allEnergy ? 'all ' + (state.kind === 'ready' ? fmtInt(energy) + ' ' : 'your ') + 'energy' : fmtInt(n * cur.perTrain) + ' energy') + ' · about ' + fmtSigned(gain) + waitWord,
-                    warn: cur.stopAt !== undefined ? 'Stop at ' + n + ' trains. More puts you under the rule for ' + cur.stopReason + ' and you lose it.' : null,
-                };
-            } else if (cur && !here && k === cur.stat && !locked) {
-                // The wrong gym: the stat the part trains is marked dashed grey, and Fill waits until you switch.
-                perStat[k] = { kind: 'wait', trains: cur.left, fill: 0, fillN: cur.left, tab: 'After you switch: ' + STAT_LABEL[k] + ' × ' + cur.left, text: 'switch gyms first', sub: '' };
-            } else if (cur && !here) {
-                // The current part is in another gym: the strip says so in one line; Torn's boxes are left as they are
-                // (owner, round 6: greying them read as "the gym is disabled"). A part already done here still says so.
-                const w = mine.length && !open.length ? greyWord(k, mine, open, locked) : { text: '', tag: '' };
-                perStat[k] = { kind: 'away', text: w.text, tag: w.tag };
-            } else {
-                const w = greyWord(k, mine, open, locked);
-                perStat[k] = { kind: open.length ? 'next' : mine.length ? 'done' : w.text === 'Not trained here' ? 'none' : w.text.startsWith('Next') ? 'next' : 'skip', text: w.text, tag: w.tag };
-            }
-        }
-
-        const target = cur ? gymById(cur.gymId, table) : null;
-        out.target = target;
-        if (cur && !here && !off) {
-            const k = cur.stat;
-            const label = 'Next: ' + cur.gymName + ' · ' + STAT_LABEL[k] + ' × ' + cur.left;
-            out.nextGym = { id: cur.gymId, label, group: gymGroupWord(cur.gymId) };
-            const dots = (g) => (g.dots[k] > 0 ? STAT_LABEL[k] + ' ' + g.dots[k] : 'no ' + STAT_LABEL[k]);
-            out.switchHint = 'you’re in ' + gym.name + ' (' + dots(gym) + ') · switch to ' + cur.gymName + (target ? ' (' + dots(target) + ')' : '');
-        }
-        // The gym you're in: a steady outline, green when the part is here, red when it isn't.
-        if (cur && !off) out.hereGym = { id: selectedId, wrong: !here, label: here ? 'Train here · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left : 'Wrong gym' };
-
-        out.strip.push(m.build.name);
-        let nextGymWords = null;
-        if (m.nextGym && m.nextGym.gym) {
-            const ng = m.nextGym.gym;
-            const k = cur ? cur.stat : STATS.reduce((a, x) => (m.shares[x] - stats[x] / total > m.shares[a] - stats[a] / total ? x : a), 'str');
-            nextGymWords = ng.name + (m.nextGym.known ? ' in ' + fmtInt(m.nextGym.energyLeft) + ' E' : ' next') + ', ' + STAT_LABEL[k] + ' ' + ng.dots[k] + ' there';
-            out.strip.push(nextGymWords);
-        }
-
-        // The strip's one line: its colour, a bold head, the words, a small source; a link for an overdose.
-        const b = state.boost;
-        const finish = b && b.deadline ? 'finish before ' + tornClock(b.deadline) : null;
-        const what = b ? (b.jump ? 'Jump' : 'Boost') : null;
-        if (state.kind === 'stacking') {
-            out.line = { tone: 'amber', head: 'Stacking for a chain', text: 'training paused · no train marks until you resume', src: null };
-            out.pill = 'Stacking for a chain · training paused';
-        } else if (state.kind === 'overdose') {
-            out.line = { tone: 'amber', head: 'Overdosed', text: 'happy and energy went to 0 · no training now · fly to Switzerland for rehab, about $' + fmtInt(REHAB_COST) + ' a session · the plan is worked out again after rehab', src: null, link: { text: 'Open Travel', href: TRAVEL_URL } };
-            out.pill = 'Overdosed · fly to Switzerland';
-        } else if (state.kind === 'wrong') {
-            out.line = { tone: 'red', head: 'Wrong gym', text: out.switchHint + (b && !b.ready ? ' · eat first: ' + eatOrder(b) : ''), src: null };
-            out.pill = 'Wrong gym · switch to ' + cur.gymName;
-        } else if (state.kind === 'eat') {
-            out.line = { tone: 'red', head: what + ': eat first', text: eatOrder(b), src: finish };
-            out.pill = 'Eat first · ' + (b.list.find((x) => x.next) || { text: 'the boosters' }).text;
-        } else if (state.kind === 'ready') {
-            out.line = { tone: 'green', head: what + ' ready' + (reads.happy && Number.isFinite(reads.happy.current) ? ' · happy ' + fmtInt(reads.happy.current) : ''), text: 'train it all' + (b.list.some((x) => x.id === 'refill') ? ', then the refill' : ''), src: finish };
-            out.pill = 'Train it all · ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
-        } else if (state.kind === 'right') {
-            out.line = { tone: 'green', head: 'Train ' + STAT_LABEL[cur.stat] + ' × ' + cur.left + ' here', text: [gym.name, m.build.name].join(' · '), src: nextGymWords };
-            out.pill = 'Train ' + STAT_LABEL[cur.stat] + ' × ' + cur.left;
-        } else if (state.kind === 'done') {
-            out.line = { tone: 'plain', head: 'Session done', text: m.build.name, src: nextGymWords };
-            out.pill = 'Session done';
-        } else if (state.kind === 'kept') {
-            // No pill: the panel keeps the plan's next step and its countdown ("Xanax #3 of 4 · don't train").
-            const k = state.kept;
-            const next = (m.steps || []).find((s) => s.at > now - DUE_SLACK_MS) || null;
-            out.line = { tone: 'plain', head: keptHead(k), text: keptWhy(k), src: next ? 'next: ' + tornClock(next.at) + ' ' + String(next.label || '').split(' · ')[0] : null };
-        } else {
-            out.pill = energy < gym.energy ? 'Energy ' + fmtInt(energy) + ' · wait for the next step' : null;
-            out.line = { tone: 'plain', head: out.pill || 'Nothing to train now', text: m.build.name, src: nextGymWords };
-        }
-        return out;
-    }
-
-    /**
-     * The panel on the gym page, from planGymPage's state (overlays.html §6): its colour, a small title, the big step,
-     * one muted line, a checklist on a jump or boost, and its one action.
-     * @returns {{tone, title, step, sub, checklist:{text, done, next}[]|null, action:{text, href}|null}|null} null: the usual panel
-     */
-    function gymPanel(plan) {
-        const st = plan && plan.state;
-        if (!st) return null;
-        const cur = plan.current;
-        const b = st.boost;
-        const when = b && b.deadline ? 'finish before ' + tornClock(b.deadline) : null;
-        const what = b ? (b.jump ? 'Jump' : 'Boost') : '';
-        if (st.kind === 'overdose') return { tone: 'amber', title: 'Overdosed', step: 'Fly to Switzerland', sub: 'Rehab there: about $' + fmtInt(st.cost) + ' a session. The plan is worked out again after rehab.', checklist: null, action: { text: 'Open Travel', href: TRAVEL_URL } };
-        if (st.kind === 'stacking') return { tone: 'amber', title: 'Stacking', step: 'Stacking for a chain', sub: 'Training paused · no train marks until you resume', checklist: null, action: null };
-        if (st.kind === 'wrong') {
-            const g = plan.gym;
-            const t = plan.target || gymById(cur.gymId);
-            const k = cur.stat;
-            const there = STAT_LABEL[k] + ' trains at ' + (t ? t.dots[k] : '?') + ' there';
-            const sub = g && t && g.dots[k] > 0 ? there + ', ' + g.dots[k] + ' here: ' + (t.dots[k] / g.dots[k]).toFixed(1) + '× the gain for the same energy' : there + ', not at all here';
-            return { tone: 'red', title: 'Wrong gym', step: 'Switch to ' + cur.gymName, sub, checklist: b && !b.ready ? b.list : null, action: null };
-        }
-        if (st.kind === 'eat') return { tone: 'red', title: what + (b.deadline ? ' · ' + tornClock(b.deadline) : ''), step: (b.list.find((x) => x.next) || { text: 'Eat first' }).text, sub: [when, 'seen from your bars'].filter(Boolean).join(' · '), checklist: b.list, action: null };
-        if (st.kind === 'ready') return { tone: 'green', title: what + ' · now', step: 'Train it all: ' + STAT_LABEL[cur.stat] + ' × ' + cur.left, sub: [when, 'about ' + fmtSigned(Math.round(b.gain))].filter(Boolean).join(' · '), checklist: b.list, action: null };
-        const ps = cur && plan.perStat && plan.perStat[cur.stat];
-        // No energy for a train yet (the step's Xanax first): the panel says that, never "Train" (the owner, 2026-10-03).
-        if (st.kind === 'right' && ps && ps.noEnergy) return { tone: null, title: 'Next', step: ps.tab.split(' · then ')[0], sub: 'then ' + STAT_LABEL[cur.stat] + ' × ' + cur.left + (cur.gymName ? ' at ' + cur.gymName : ''), checklist: null, action: null };
-        if (st.kind === 'right') return { tone: 'green', title: 'Now', step: 'Train ' + STAT_LABEL[cur.stat] + ' × ' + cur.left, sub: [cur.gymName, plan.perStat[cur.stat] && plan.perStat[cur.stat].gain ? 'about ' + fmtSigned(plan.perStat[cur.stat].gain) : null].filter(Boolean).join(' · '), checklist: null, action: null };
-        return null;
-    }
-
-    /* ------------------------------------------------ Home and Plan lines */
-
-    /** The first step that trains (its parts say which gym for which stat right now). */
-    function firstTrainStep(m) {
-        return (m.steps || []).find((s) => s.parts && s.parts.length) || null;
-    }
-
-    /**
-     * "Train in": which gym for which stat right now, from the next training
-     * step, e.g. [{gymName:"George's", stats:['STR']}, {gymName:'Balboas Gym', stats:['DEX']}].
-     * Without a planned train today, each stat under its share at its best gym.
-     */
-    function trainIn(m) {
-        const step = firstTrainStep(m);
-        const out = [];
-        const add = (gymName, k) => {
-            let g = out.find((x) => x.gymName === gymName);
-            if (!g) out.push((g = { gymName, stats: [] }));
-            if (!g.stats.includes(STAT_LABEL[k])) g.stats.push(STAT_LABEL[k]);
-        };
-        if (step) for (const p of step.parts) add(p.gymName, p.stat);
-        else {
-            const total = totalOf(m.pc.stats);
-            for (const k of STATS) if (m.pc.best[k] && total > 0 && m.pc.stats[k] / total < m.shares[k]) add(m.pc.best[k].name, k);
-        }
-        return out;
-    }
-
-    /** "George's for STR · Balboas Gym for DEX" */
-    function trainInText(m) {
-        return trainIn(m).map((g) => g.gymName + ' for ' + g.stats.join(', ')).join(' · ');
-    }
-
-    /**
-     * The "why" when the next session mixes stats (owner, 2026-09-29): "STR + DEX this session: +20% toward
-     * Hank's vs STR only". Toward the build = stat points that close a gap to the build's shares (points past a
-     * stat's share count nothing). The one-stat way puts the whole session's energy into the stat the mix trains
-     * most, at its rate in this session. Null for a one-stat session or when the mix isn't ahead by half a percent.
-     */
-    function whyMix(m) {
-        const step = firstTrainStep(m);
-        if (!step || !m.pc || !m.shares) return null;
-        const by = {};
-        const order = [];
-        for (const p of step.parts) {
-            if (!by[p.stat]) {
-                by[p.stat] = { gain: 0, energy: 0 };
-                order.push(p.stat);
-            }
-            by[p.stat].gain += p.gain || 0;
-            by[p.stat].energy += p.energy || 0;
-        }
-        if (order.length < 2) return null;
-        const top = order.reduce((a, b) => (by[b].energy > by[a].energy ? b : a));
-        const total = totalOf(m.pc.stats);
-        const gap = (k) => Math.max(0, (m.shares[k] || 0) * total - (m.pc.stats[k] || 0));
-        const energy = order.reduce((a, k) => a + by[k].energy, 0);
-        const mix = order.reduce((a, k) => a + Math.min(by[k].gain, gap(k)), 0);
-        const one = by[top].energy > 0 ? Math.min((by[top].gain / by[top].energy) * energy, gap(top)) : 0;
-        if (!(one > 0) || !(mix > one)) return null;
-        const pct = (100 * (mix - one)) / one;
-        if (pct < 0.5) return null;
-        const name = (m.build && m.build.base && BUILDS[m.build.base] ? BUILDS[m.build.base].name : (m.build && m.build.name) || 'your build').replace(/, .*$/, '');
-        const text = order.map((k) => STAT_LABEL[k]).join(' + ') + ' this session: +' + (pct < 10 ? pct.toFixed(1) : Math.round(pct)) + '% toward ' + name + ' vs ' + STAT_LABEL[top] + ' only';
-        return { stats: order, top, pct, mix: Math.round(mix), one: Math.round(one), text, title: 'Stat points that close a gap to ' + name + '’s shares (points past a stat’s share don’t count): about ' + fmtSigned(Math.round(mix)) + ' this way, ' + fmtSigned(Math.round(one)) + ' with ' + STAT_LABEL[top] + ' only, the same energy' };
-    }
-
-    /**
-     * The "why" when the next session trains one stat only: "Training STR only:
-     * 6 pts under Hank's, about 9 days to catch up". Null when it mixes stats.
-     */
-    function whyOneStat(m) {
-        const step = firstTrainStep(m);
-        if (!step) return null;
-        const stats = [...new Set(step.parts.map((p) => p.stat))];
-        if (stats.length !== 1) return null;
-        const k = stats[0];
-        const total = totalOf(m.pc.stats);
-        const pts = total > 0 ? (m.shares[k] - m.pc.stats[k] / total) * 100 : 0;
-        const name = (m.build.base && BUILDS[m.build.base] ? BUILDS[m.build.base].name : m.build.name).replace(/, .*$/, '');
-        const days = m.buildCatchUp ? m.buildCatchUp[k] : undefined;
-        const ptsText = pts >= 1 ? Math.round(pts) + ' pts' : pts > 0 ? pts.toFixed(1) + ' pts' : null;
-        let text = 'Training ' + STAT_LABEL[k] + ' only: ' + (ptsText ? ptsText + ' under ' + name : 'it is the one ' + name + ' needs now');
-        if (ptsText && days !== undefined) text += days === null ? ', more than 30 days to catch up' : days > 0 ? ', about ' + days + ' day' + (days === 1 ? '' : 's') + ' to catch up' : '';
-        return { stat: k, pts, days: days === undefined ? null : days, text };
-    }
-
     /* ===== src/core/gymlog.js ===== */
     /*
      * Your trains from Torn's own log (owner, 2026-09-30: "how about tracking of
@@ -14452,7 +16122,7 @@
      * plan's lines read by time (core/planline.js). Round 7: "you" on a past day
      * is that day's last read, so the plan is read at the same moment (the day's
      * end; today: now); history from before the plan stays on the chart; a pick
-     * or a Re-plan starts a new line and the old one stays.
+     * or a Recalibrate starts a new line and the old one stays.
      */
     function seriesFor(m, ctx, range) {
         const hist = ctx.history || {};
@@ -14637,7 +16307,7 @@
         const perDay = line ? line.cost / days : m.spend ? m.spend.perDay : 0;
         const spent = perDay * dayN;
         return h('div', {}, [
-            sectionHead('Budget', meta([fmtMoney(budget) + ' for ' + days + ' days' + (auto ? ' · Auto, from your income' : '')]), null, 'h3'),
+            sectionHead('Budget', meta([fmtMoney(budget) + ' for ' + days + ' days' + (auto ? ' · Auto, from your books' : '')]), null, 'h3'),
             h('dl', { class: 'facts num' }, [
                 h('dt', { text: 'At the plan’s pace' }),
                 h('dd', {}, ['about ' + fmtMoney(spent) + ' · day ' + dayN + ' of ' + days, h('div', { class: 'mini' }, [h('i', { style: 'width:' + (budget ? Math.min(100, (100 * spent) / budget) : 0).toFixed(0) + '%;background:var(--muted)' })])]),
@@ -14936,9 +16606,10 @@
     /* ===== src/ui/app/home.js ===== */
     /*
      * Home (mockups/round3/S-home.html): one question, "what do I do today?".
-     * The Now band and today's steps (the page's primary card), you against the
-     * build, the next 7 days; Buy today, Heads-up, the plan in one line and this
-     * week in the pane.
+     * Today's steps as one rail with the step of the moment on it (the page's
+     * primary card; round 8, mockups/round8/steps-panel.html pick B), you against
+     * the build, the next 7 days; Buy today, Heads-up, the plan in one line and
+     * this week in the pane.
      */
 
 
@@ -14992,27 +16663,160 @@
         }
     }
 
-    /** "George's: STR × 12 → Frontline Fitness: DEX × 8 · +72,335 · 400 energy". */
-    function stepSub(s) {
-        const parts = [];
-        const gyms = [...new Set(Object.values(s.gyms || {}).filter(Boolean))];
-        if (s.parts && s.parts.length) parts.push(partsText(s.parts));
-        else if (gyms.length) parts.push(gyms.join(' / '));
-        if (s.gain) parts.push(fmtSigned(s.gain));
-        if (s.energy) parts.push(fmtInt(s.energy) + ' energy');
-        if (s.note) parts.push(s.note);
-        return parts.join(' · ');
+    /**
+     * Where a step's trains go, what they gain and the energy: "Gun Shop · about +1,391 · 270 energy" (one gym: its
+     * name; more: "George's: STR × 12 → Frontline Fitness: DEX × 8").
+     */
+    function trainDetail(s, about = true) {
+        const out = [];
+        const parts = s.parts || [];
+        const gyms = [...new Set(parts.length ? parts.map((p) => p.gymName) : Object.values(s.gyms || {}).filter(Boolean))];
+        if (gyms.length > 1 && parts.length) out.push(partsText(parts));
+        else if (gyms.length) out.push(gyms.join(' / '));
+        if (s.gain) out.push((about ? 'about ' : '') + fmtSigned(s.gain));
+        if (s.energy) out.push(fmtInt(s.energy) + ' energy');
+        return out.join(' · ');
     }
 
-    /** One click to the exact Torn page for this step: the gym (Fill is ready there), the items page, the points page. */
-    function stepLinks(s) {
-        const items = (s.items || []).filter((it) => it.id !== POINTS && ITEMS[it.id]);
+    /**
+     * A step as its actions in order (round 8, the owner's pick B in mockups/round8/steps-panel.html): "Take Xanax #2,
+     * then train DEX × 27" is 1 Take Xanax #2, 2 Train DEX × 27; a jump or boost is its own list, ticked from the bars
+     * (gympage.js boostProgress). `now` is the action of the moment: the first one not done (none once all are).
+     * @param {object} step - plan.js step
+     * @param {object} [o] - reads: {happy:{current,max}, boosterLeft, drugLeft, happyTrained, trained} (a boost's progress);
+     *   steps: the day's steps (the refill that follows a boost gives its line's gain)
+     * @returns {{id, text, detail, done, now, page: 'items'|'points'|'gym'|null}[]} page: the Torn page it is done on
+     */
+    function subSteps(step, { reads = null, steps = [] } = {}) {
+        if (!step) return [];
         const out = [];
-        const trains = Object.keys(s.trains || {}).length > 0;
-        if (s.kind === 'refill') out.push(h('a', { class: 'btn' + (trains ? '' : ' primary'), href: pointsUrl(), target: '_blank', rel: 'noopener', text: 'Points' }));
-        if (items.length) out.push(h('a', { class: 'btn' + (trains ? '' : ' primary'), href: itemsUrl(), target: '_blank', rel: 'noopener', text: 'Items' }));
-        if (trains) out.push(h('a', { class: 'btn primary', href: gymUrl(), target: '_blank', rel: 'noopener', text: 'Open the gym' }));
+        const join = (...x) => x.filter(Boolean).join(' · ');
+        if (isBoostStep(step)) {
+            const b = boostProgress(step, reads || {});
+            const happy = reads && reads.happy && Number.isFinite(reads.happy.current) ? reads.happy.current : null;
+            // The plan's own words for an action still to do ("Eat EDVD × 5", "Take the Ecstasy"); done, it is its name.
+            const said = (id) => ((step.actions || []).find((a) => a.id === id) || {}).text || null;
+            const refill = (steps || []).find((x) => x !== step && x.kind === 'refill') || null;
+            for (const a of b.list) {
+                if (a.id === 'eat') out.push({ id: a.id, text: a.done ? a.text : said('eat') || a.text, detail: a.done && !b.drugIn && happy !== null ? 'happy ' + fmtInt(happy) : '', done: a.done, page: 'items' });
+                else if (a.id === 'drug') {
+                    const doubled = b.eaten && happy !== null ? ': ' + fmtInt(happy) + ' → ' + fmtInt(Math.min(HAPPY_CAP, happy * ITEMS[ECSTASY].happyMult)) : '';
+                    const todo = /Ecstasy/.test(a.text) ? 'doubles your happy' + doubled : '+' + ITEMS[XANAX].energy + ' energy';
+                    out.push({ id: a.id, text: a.done ? a.text : said('drug') || a.text, detail: a.done ? (happy !== null ? 'happy ' + fmtInt(happy) : '') : todo, done: a.done, page: 'items' });
+                } else if (a.id === 'train') out.push({ id: a.id, text: a.text, detail: trainDetail(step), done: a.done, page: 'gym' });
+                // The refill is a step of its own on the day's line (its Points button comes with its turn): no page here.
+                else if (a.id === 'refill') out.push({ id: a.id, text: a.text, detail: refill && refill.gain ? 'about ' + fmtSigned(refill.gain) : '', done: a.done, page: null });
+                else out.push({ id: a.id, text: a.text, detail: '', done: a.done, page: null });
+            }
+        } else {
+            const trains = trainsText(step.trains);
+            const items = (step.items || []).filter((it) => it.qty > 0);
+            const points = items.find((it) => it.id === POINTS) || null;
+            const page = step.kind === 'refill' ? 'points' : items.some((it) => it.id !== POINTS && ITEMS[it.id]) ? 'items' : null;
+            if (step.kind === 'stack' || step.kind === 'hold') {
+                // "Xanax #1 of 4 · don't train": the Xanax is the action, the rest is said under it.
+                const [what, ...rest] = String(step.label).split(' · ');
+                out.push({ id: 'use', text: 'Take ' + what, detail: join(rest.join(' · '), step.note), done: false, page });
+            } else if (step.kind === 'natural' || !trains) {
+                out.push({ id: trains ? 'train' : 'use', text: stepWords(step), detail: join(trains ? trainDetail(step) : '', step.note), done: false, page: trains ? 'gym' : page });
+            } else {
+                const adds = step.kind === 'xanax' ? '+' + ITEMS[XANAX].energy + ' energy' : points ? fmtInt(points.qty) + ' points' : '';
+                out.push({ id: 'use', text: stepWords({ ...step, trains: {} }), detail: adds, done: false, page });
+                out.push({ id: 'train', text: 'Train ' + trains, detail: join(trainDetail(step), step.note), done: false, page: 'gym' });
+            }
+        }
+        const now = out.findIndex((x) => !x.done);
+        out.forEach((x, i) => (x.now = i === now));
         return out;
+    }
+
+    /** "Take Xanax #2" → "take Xanax #2" after "then" or "Next at 17:00:"; an item's name ("EDVD × 5 + …") stays as it is. */
+    function lowerAction(words) {
+        return /^(Take|Use|Train|Eat|Refill|Natural)\b/.test(words) ? words.charAt(0).toLowerCase() + words.slice(1) : words;
+    }
+
+    /**
+     * The panel's words for the plan's next step on Torn's pages (round 8, the owner's pick B). Due now (a jump or boost:
+     * within the minute): the action of the moment in the bar and in big type, what follows it on one line, the step's
+     * actions as a list, and the plate's ring. Still ahead: "Nothing due now" ("Session done" right after a train) and
+     * "Next at 17:00: …" with the countdown; nothing rings.
+     * @param {object} next - the step
+     * @param {object} o - now; boost: gympage.js boostProgress() of a jump or boost due now, else null; sessionOver: the
+     *   train before it was just done; reads and steps: as for subSteps
+     * @returns {{acting, pillText, pillNow?, cdAt?, tone, ring, label, cardStep, cardSub, checklist?}}
+     */
+    function panelStep(next, { now, boost = null, sessionOver = false, reads = null, steps = [] } = {}) {
+        const acting = next.at <= now || Boolean(boost);
+        const gain = next.gain ? 'about +' + fmtInt(next.gain) + (next.energy ? ' · ' + fmtInt(next.energy) + ' energy' : '') : '';
+        if (!acting) {
+            const at = clock(next.at);
+            return { acting, pillText: 'Nothing due', cdAt: next.at, tone: null, ring: false, label: 'Next at ' + at, cardStep: sessionOver ? 'Session done' : 'Nothing due now', cardSub: 'Next at ' + at + ': ' + [lowerAction(stepWords(next)), gain].filter(Boolean).join(' · ') };
+        }
+        const subs = subSteps(next, { reads, steps });
+        const cur = subs.find((x) => x.now) || null;
+        const after = cur ? subs[subs.indexOf(cur) + 1] || null : null;
+        const out = {
+            acting,
+            pillText: cur ? cur.text : next.label.split(' · ')[0],
+            // A chalk edge only when it's time to act.
+            tone: 'chalk',
+            ring: Boolean(cur),
+            label: 'Now',
+            cardStep: cur ? cur.text : stepWords(next),
+            cardSub: [after ? 'then ' + lowerAction(after.text.split(':')[0]) : '', gain].filter(Boolean).join(' · ') || null,
+        };
+        // A jump or boost counts down to the tick that resets the happy; any other step due says "Now".
+        if (boost && boost.deadline > now) out.cdAt = boost.deadline;
+        else out.pillNow = 'Now';
+        if (subs.length > 1) out.checklist = subs.map((x) => ({ text: x.text, done: x.done, next: x.now }));
+        if (boost) {
+            out.tone = boost.ready ? 'green' : 'red';
+            out.label = (boost.jump ? 'Jump' : 'Boost') + (boost.ready ? ' · now' : boost.deadline ? ' · finish before ' + clock(boost.deadline) : '');
+        }
+        return out;
+    }
+
+    /** The step's Torn pages, the action of the moment first (it is the primary button): Items, Points, the gym. */
+    function stepButtons(subs) {
+        const to = { points: ['Points', pointsUrl], items: ['Items', itemsUrl], gym: ['Open the gym', gymUrl] };
+        const pages = [];
+        for (const x of subs) if (!x.done && x.page && !pages.includes(x.page)) pages.push(x.page);
+        return pages.map((p, i) => h('a', { class: 'btn' + (i === 0 ? ' primary' : ''), href: to[p][1](), target: '_blank', rel: 'noopener', text: to[p][0] }));
+    }
+
+    /*
+     * Today as one rail (round 8, the owner's pick B): the day is one line from done to later, the step of the moment a
+     * box on it, its actions hanging under it on the same line. The plate with the ring (his pick 1D) marks the one
+     * action to do now: one ring on the page, never two; a countdown never rings, and nothing rings when there is
+     * nothing you can do.
+     */
+
+    /** The app's plate; `ring`: the one ring that leaves it. */
+    const plateMark = (ring = false) => h('span', { class: 'pl' + (ring ? ' ring' : ''), 'aria-hidden': 'true' });
+    /** A point on the rail: hollow (later), `on` (the step of the moment), `open` (nothing to do now). */
+    const railDot = (cls = '') => h('span', { class: 'dot' + (cls ? ' ' + cls : '') });
+
+    /** One row of the rail: its point on the line, its time, what it is, and what stands on the right. */
+    function railRow(cls, node, when, body, right = null) {
+        return h('li', { class: cls || null }, [h('span', { class: 'node' }, [node]), h('span', { class: 't num' }, [].concat(when)), body, right]);
+    }
+
+    /** The step of the moment's actions, under each other: done ones ticked, the one to do now large with the ring. */
+    function subList(subs) {
+        const n = subs.length;
+        return h(
+            'ol',
+            { class: 'subr' },
+            subs.map((x, i) => {
+                const under = x.now ? [n > 1 ? 'Step ' + (i + 1) + ' of ' + n : '', x.detail].filter(Boolean).join(' · ') : x.detail ? ' · ' + x.detail : '';
+                return h('li', { class: x.done ? 'done' : x.now ? 'now' : null }, [h('span', { class: 'node' }, [x.done ? tickMark() : x.now ? plateMark(true) : railDot()]), h('div', {}, [h('b', { class: 'a', text: x.text }), under ? h('span', { class: 's', text: under }) : null])]);
+            }),
+        );
+    }
+
+    /** A state that takes the whole day (stacking, overdosed, flying) as the rail's one point, its box beside it. */
+    function railBox(node, when, box) {
+        return h('ol', { class: 'rail' }, [railRow('now', node, when, h('div', { class: 'nb solo' }, [box]))]);
     }
 
     /**
@@ -15112,7 +16916,7 @@
     /** Share bar against the target, "24.9% → 27.8%", what's left, and today's trains (none while stacking for a chain). */
     function youVsBuild(m, ctx = null) {
         const tot = {};
-        for (const st of m.stacking ? [] : m.steps) for (const [k, n] of Object.entries(st.trains || {})) tot[k] = (tot[k] || 0) + n;
+        for (const st of m.stacking || m.overdose || m.away ? [] : m.steps) for (const [k, n] of Object.entries(st.trains || {})) tot[k] = (tot[k] || 0) + n;
         const only = Object.keys(tot).length === 1 ? Object.keys(tot)[0] : null;
         const rows = m.statRows.map((r) => {
             const k = r.stat;
@@ -15138,7 +16942,8 @@
 
     function buildFoot(m, ctx = null) {
         const foot = [];
-        const tin = trainInText(m);
+        // Overdosed, stacking, flying: nothing is trained now, so no gym to train in.
+        const tin = m.overdose || m.stacking || m.away ? null : trainInText(m);
         if (tin) foot.push(h('span', {}, ['Train in ', h('b', { text: tin })]));
         // Why this session mixes stats (or trains one): "STR + DEX this session: +8.4% toward Hank's vs STR only".
         const why = ctx && ctx.plan && ctx.plan.goal ? null : whyMix(m) || whyOneStat(m);
@@ -15234,7 +17039,7 @@
 
     /*
      * Stacking for a chain (round 7, the owner's pick in mockups/round7/home.html): a small card on top of the pane turns
-     * it on; Today then shows that training waits instead of the steps, and Resume re-plans at once (Re-plan's run, its
+     * it on; Today then shows that training waits instead of the steps, and Resume recalibrates at once (Recalibrate's run, its
      * light sweep included). The flag is stored for every tab (platform/store.js K.stacking); the model carries it as
      * `m.stacking = {since}`.
      */
@@ -15258,10 +17063,10 @@
             h('div', { class: 'chain-row' }, [
                 h('div', {}, [
                     h('div', { class: 'chain-state', text: st ? 'Stacking since ' + sinceWords(st.since, m.now, ctx.settings) : 'Training' }),
-                    h('p', { text: st ? 'Resume re-plans from your bars right away.' : 'Stacking energy for a chain?' }),
+                    h('p', { text: st ? 'Resume recalibrates from your bars right away.' : 'Stacking energy for a chain?' }),
                 ]),
                 st
-                    ? h('button', { class: 'btn primary', type: 'button', disabled: busy, title: 'Training steps come back and the plan is re-planned now, from your bars', onclick: () => ctx.resumeStacking && ctx.resumeStacking(), text: 'Resume' })
+                    ? h('button', { class: 'btn primary', type: 'button', disabled: busy, title: 'Training steps come back and the plan is recalibrated now, from your bars', onclick: () => ctx.resumeStacking && ctx.resumeStacking(), text: 'Resume' })
                     : h('button', { class: 'btn', type: 'button', disabled: busy, title: 'No training steps and no Discord pings about energy or training until you resume', onclick: () => ctx.startStacking && ctx.startStacking(), text: 'I’m stacking' }),
             ]),
         ]);
@@ -15277,12 +17082,12 @@
                 h('li', {}, [h('b', { text: 'No Discord pings' }), ' about energy or training']),
                 h('li', {}, ['Energy now ', h('b', { text: fmtInt(e.current) + ' / ' + fmtInt(e.max) }), ', kept for the chain']),
             ]),
-            h('button', { class: 'btn primary', type: 'button', disabled: Boolean(m.planBusy), onclick: () => ctx.resumeStacking && ctx.resumeStacking(), text: 'Resume and re-plan' }),
+            h('button', { class: 'btn primary', type: 'button', disabled: Boolean(m.planBusy), onclick: () => ctx.resumeStacking && ctx.resumeStacking(), text: 'Resume and recalibrate' }),
         ]);
     }
 
     /**
-     * Re-plan running (Resume starts it from here): the Plan card's bar with the owner's light sweep (2A; still with
+     * Recalibrate running (Resume starts it from here): the Plan card's bar with the owner's light sweep (2A; still with
      * Settings › Animations off or the PC's reduce-motion). app.js planProgress moves it without a redraw.
      */
     function homeRun(m, ctx) {
@@ -15292,7 +17097,7 @@
             return err ? h('p', { class: 'c-bad', style: 'margin:8px 0 0', text: err }) : null;
         }
         return h('div', { class: 'planrun', role: 'status', 'aria-live': 'polite' }, [
-            h('div', { class: 'dayline', role: 'progressbar', 'aria-label': busy.recalibrate ? 'Re-planning' : 'Working out your plan' }, [h('i', { 'data-plan-bar': '1', style: 'width:' + Math.round(100 * Math.max(0.02, busy.done || 0)) + '%' })]),
+            h('div', { class: 'dayline', role: 'progressbar', 'aria-label': busy.recalibrate ? 'Recalibrating' : 'Working out your plan' }, [h('i', { 'data-plan-bar': '1', style: 'width:' + Math.round(100 * Math.max(0.02, busy.done || 0)) + '%' })]),
             h('div', { class: 'row', style: 'justify-content:space-between;margin-top:6px' }, [h('span', { class: 'pc-sub num', 'data-plan-words': '1', text: planRunWords(busy) }), h('span', { class: 'muted', style: 'font-size:12px', text: 'Today’s steps follow your bars meanwhile' })]),
         ]);
     }
@@ -15300,7 +17105,11 @@
     function renderHome(m, ctx) {
         const s = ctx.settings;
         const now = m.now;
+        // An overdose first (you can't train either way), then stacking for a chain.
+        if (m.overdose) return renderOverdose(m, ctx);
         if (m.stacking) return renderStacking(m, ctx);
+        // Flying or abroad: the gym is closed (Torn's own page says so), whatever the plan has next.
+        if (m.away) return renderAway(m, ctx);
         const next = m.next;
         const late = next && next.kind === 'xanax' && m.strip.drug.left === 0;
         // "On plan" only while no step is waiting on you (the plan re-times, so a due step is the one sign of being behind).
@@ -15322,38 +17131,54 @@
             ]),
         );
 
-        const nowBand = next
-            ? h('div', { class: 'nowb num' }, [
-                  next.at > now ? cd(next.at, now, { cls: 'cd' }) : h('span', { class: 'k', text: 'NOW' }),
-                  h('div', {}, [h('b', { text: stepWords(next) }), h('br'), h('span', { class: 's', text: stepSub(next) })]),
-                  h('div', { class: 'acts' }, stepLinks(next)),
-              ])
-            : h('div', { class: 'nowb num' }, [h('span', { class: 'k', text: 'DONE' }), h('div', {}, [h('b', { text: 'Nothing left today' }), h('br'), h('span', { class: 's', text: 'Tomorrow’s plan starts at 00:00 Torn time' })]), h('div')]);
+        // A step past midnight says its day (round 7: tomorrow's jump was listed under Today with a clock only).
+        const dayWord = (at) => (tornDayStart(at) > tornDayStart(now) ? (Math.round((tornDayStart(at) - tornDayStart(now)) / DAY) === 1 ? 'tomorrow' : DAY_NAMES[new Date(at).getUTCDay()]) : null);
+        const when = (at) => (dayWord(at) ? [h('small', { text: dayWord(at) }), clock(at, s)] : [clock(at, s)]);
+        // A jump or boost due within the minute counts as now (as on Torn's panel), like a step whose time has come.
+        const due = Boolean(next && (next.at <= now || (isBoostStep(next) && next.at <= now + DUE_SLACK_MS)));
+        const subs = due ? subSteps(next, { reads: { happy: { current: m.strip.happy.current, max: m.strip.happy.max }, boosterLeft: m.strip.booster.left, drugLeft: m.strip.drug.left }, steps: m.steps }) : [];
 
-        const rows = [];
-        for (const d of m.done) rows.push(h('tr', { class: 'done' }, [h('td', { class: 't', text: clock(d.at, s) }), h('td', { text: d.label }), h('td', { text: Object.keys(d.trained || {}).map((k) => STAT_LABEL[k]).join(' · ') || '—' }), h('td', { class: 'r', text: d.gain ? fmtSigned(d.gain) : '' }), h('td', { class: 'r ok', text: 'Done' })]));
+        const rail = [];
+        for (const d of m.done) {
+            const trained = Object.keys(d.trained || {}).map((k) => STAT_LABEL[k]).join(' · ');
+            rail.push(railRow('done', tickMark(), clock(d.at, s), h('div', {}, [h('span', { text: d.label }), trained || d.gain ? h('span', { class: 's', text: ' · ' + [trained, d.gain ? fmtSigned(d.gain) : ''].filter(Boolean).join(' · ') }) : null]), h('span', { class: 'in', text: 'Done' })));
+        }
+        if (due) {
+            // The step of the moment: its actions on the rail, the ring on the one to do now; the buttons follow it.
+            const strict = isBoostStep(next) && next.deadline > now;
+            const side = [strict ? cd(next.deadline, now, { cls: 'cd num' }) : h('span', { class: 'k', text: 'NOW' }), strict ? h('small', { text: 'until ' + clock(next.deadline, s) + ', when happy resets' }) : null];
+            const links = stepButtons(subs);
+            if (links.length) side.push(h('div', { class: 'acts' }, links));
+            const note = isBoostStep(next) && next.note && !next.mid ? h('div', { class: 's', text: next.note }) : null;
+            rail.push(railRow('now', railDot('on'), 'now', h('div', { class: 'nb num' }, [h('div', {}, [subList(subs), note]), h('div', { class: 'side' }, side)])));
+        } else if (next) {
+            // Nothing to do yet: said in words, with the countdown; a countdown never rings.
+            const what = [lowerAction(stepWords(next)), trainDetail(next, false), next.note].filter(Boolean).join(' · ');
+            rail.push(
+                railRow('now', railDot('open'), when(next.at), h('div', { class: 'nb num' }, [
+                    h('div', {}, [h('b', { class: 'big1', text: 'Nothing due now' }), h('span', { class: 's', text: 'Next ' + (dayWord(next.at) ? dayWord(next.at) + ' ' : '') + 'at ' + clock(next.at, s) + ': ' + what })]),
+                    h('div', { class: 'side' }, [cd(next.at, now, { cls: 'cd num' }), h('small', { text: 'next at ' + clock(next.at, s) })]),
+                ])),
+            );
+        } else {
+            rail.push(railRow('now', railDot('open'), '', h('div', { class: 'nb num' }, [h('div', {}, [h('b', { class: 'big1', text: 'Nothing left today' }), h('span', { class: 's', text: 'Tomorrow’s plan starts at 00:00 Torn time' })]), h('div', { class: 'side' }, [h('span', { class: 'k', text: 'DONE' })])])));
+        }
         m.steps.slice(next ? 1 : 0).forEach((st) => {
-            const k = Object.keys(st.trains || {});
-            rows.push(
-                h('tr', {}, [
-                    // A step past midnight says its day (round 7: tomorrow's jump was listed under Today with a clock only).
-                    h('td', { class: 't' }, tornDayStart(st.at) > tornDayStart(now) ? [h('small', { class: 'muted', text: Math.round((tornDayStart(st.at) - tornDayStart(now)) / DAY) === 1 ? 'tomorrow' : DAY_NAMES[new Date(st.at).getUTCDay()] }), h('br'), clock(st.at, s)] : [clock(st.at, s)]),
-                    h('td', {}, [h('b', { class: 'w', text: st.label }), st.mid && st.note ? h('div', { class: 'muted', style: 'font-size:12px', text: st.note }) : null]),
-                    h('td', {}, [h('span', { class: k.length === 1 ? 's-' + k[0] : null, text: trainsText(st.trains) || '—' })]),
-                    h('td', { class: 'r', text: st.gain ? fmtSigned(st.gain) : '' }),
-                    h('td', { class: 'r muted' }, [st.at > now ? cd(st.at, now, { cls: 'when' }) : h('span', { class: 'when', text: 'now' })]),
-                ]),
+            const trains = trainsText(st.trains);
+            rail.push(
+                railRow(
+                    null,
+                    railDot(),
+                    when(st.at),
+                    h('div', {}, [h('b', { class: 'white', text: st.label }), trains || st.gain ? h('span', { class: 's', text: ' · ' + [trains, st.gain ? fmtSigned(st.gain) : ''].filter(Boolean).join(' · ') }) : null, st.mid && st.note ? h('div', { class: 's', text: st.note }) : null]),
+                    h('span', { class: 'in num' }, st.at > now ? ['in ', cd(st.at, now)] : ['now']),
+                ),
             );
         });
-        const steps = rows.length
-            ? h('table', { class: 'tbl num', style: 'margin-top:8px' }, [
-                  h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Step' }), h('th', { style: 'width:190px', text: 'Train' }), h('th', { class: 'r', style: 'width:110px', text: 'Gain' }), h('th', { class: 'r', style: 'width:110px', text: 'In' })])]),
-                  h('tbody', {}, rows),
-              ])
-            : null;
+        const steps = h('ol', { class: 'rail', 'data-rail': due ? 'due' : next ? 'wait' : 'done' }, rail);
         const foot = h('div', { class: 'row muted num', style: 'justify-content:space-between;margin-top:6px;font-size:12px;gap:12px;flex-wrap:wrap' }, [h('span', {}, ['So far ', h('b', { class: 'white', text: fmtSigned(m.gainedToday) }), ' of ' + fmtInt(plannedToday) + ' today']), h('span', { text: dayResetWords(m) + ' · ' + xanaxCdWords(m.xanaxCd) })]);
 
-        const lead = h('div', { class: 'lead' }, [head, homeRun(m, ctx), nowBand, steps, foot]);
+        const lead = h('div', { class: 'lead' }, [head, homeRun(m, ctx), steps, foot]);
         const week = weekChart(m, ctx);
         return {
             strip: true,
@@ -15363,14 +17188,74 @@
     }
 
     function headsCard(m, ctx) {
-        const heads = m.stacking ? m.heads.filter((x) => !trainingHead(x)) : m.heads;
+        const heads = m.stacking || m.overdose || m.away ? m.heads.filter((x) => !trainingHead(x)) : m.heads;
         return h('div', {}, [sectionHead('Heads-up', null, null, 'h3'), headsList(heads.length ? heads : [{ tone: 'good', text: 'Nothing needs you' }], (tab) => ctx.go(tab))]);
+    }
+
+    /**
+     * Home while overdosed (the owner, 2026-10-03: Torn's panel said "Overdosed · fly to Switzerland" while Today still
+     * said "Train DEX × 6" and ticked the Xanax step Done). The same stored state as the panel (`m.overdose`): no steps,
+     * what to do, what it costs, and "Rehab done · recalibrate" (Resume's run). It also ends by itself with the overdose's
+     * drug cooldown, or as soon as your bars hold more than regeneration gives back (a refill, a can, a drug).
+     */
+    function overdoseBox(m, ctx) {
+        const od = m.overdose;
+        const e = m.strip.energy;
+        return h('div', { class: 'stackbox num', role: 'status', 'data-overdose': 'on' }, [
+            h('div', { class: 'big', text: OVERDOSE_WORDS.pill }),
+            h('ul', {}, [
+                h('li', {}, [h('b', { text: 'No training steps' }), ' until rehab is done']),
+                h('li', {}, ['Rehab there: about ', h('b', { text: fmtMoney(REHAB_COST) }), ' a session']),
+                h('li', {}, ['No drug until ', h('b', { text: clock(od.until, ctx.settings) }), ' (', cd(od.until, m.now, { cls: 'when' }), ') · energy now ' + fmtInt(e.current) + ' / ' + fmtInt(e.max)]),
+                h('li', {}, [h('b', { text: 'No Discord pings' }), ' about energy or training']),
+            ]),
+            h('div', { class: 'row', style: 'gap:8px;flex-wrap:wrap' }, [
+                h('a', { class: 'btn primary', href: TRAVEL_URL, target: '_blank', rel: 'noopener', text: 'Open Travel' }),
+                h('button', { class: 'btn', type: 'button', disabled: Boolean(m.planBusy), title: 'Training steps come back and the plan is recalibrated now, from your bars', onclick: () => ctx.endOverdose && ctx.endOverdose(), text: 'Rehab done · recalibrate' }),
+            ]),
+        ]);
+    }
+
+    function renderOverdose(m, ctx) {
+        const head = sectionHead('Today', meta([dateLine(m.now) + ' · ', h('b', { style: 'color:var(--warn)', text: 'overdosed' })]));
+        // Flying to Switzerland is the one thing to do: the rail's point is the plate with the ring.
+        const lead = h('div', { class: 'lead' }, [head, homeRun(m, ctx), railBox(plateMark(true), 'now', overdoseBox(m, ctx))]);
+        return {
+            strip: true,
+            main: [lead, youVsBuild(m, ctx), weekChart(m, ctx)].filter(Boolean),
+            pane: [gainsCard(m), buyCard(m, ctx), headsCard(m, ctx), planLine(m, ctx), weekCard(m, ctx)],
+        };
+    }
+
+    /**
+     * Home while you fly or stand abroad (the owner's live page, 2026-10-03: "Train DEX × 6" in the air). The same state
+     * as Torn's panel (`m.away`): no step to do now, when you are back, and what comes first when you land.
+     */
+    function renderAway(m, ctx) {
+        const w = awayWords(m.away);
+        const first = m.steps[0] || null;
+        const box = h('div', { class: 'stackbox num', role: 'status', 'data-away': 'on' }, [
+            h('div', { class: 'big' }, [h('span', { text: w.pill }), m.away.flying ? cd(m.away.until, m.now, { cls: 'cd num' }) : null]),
+            h('ul', {}, [
+                h('li', {}, [h('b', { text: 'No training' }), ' until you are back in Torn: the gym is closed while you travel']),
+                first ? h('li', {}, ['First when you land: ', h('b', { text: first.label.split(' · ')[0] + (trainsText(first.trains) ? ', then ' + trainsText(first.trains) : '') })]) : null,
+                m.away.flying ? h('li', {}, [m.away.where === 'Torn' ? 'Back at ' : 'Lands at ', h('b', { text: clock(m.away.until, ctx.settings) }), ' (', cd(m.away.until, m.now, { cls: 'when' }), ')']) : null,
+            ]),
+        ]);
+        const head = sectionHead('Today', meta([dateLine(m.now) + ' · ', h('b', { style: 'color:var(--warn)', text: m.away.flying ? 'flying' : 'abroad' })]));
+        // Nothing you can do until you land: nothing rings; the rail's time is when you are back.
+        const lead = h('div', { class: 'lead' }, [head, homeRun(m, ctx), railBox(railDot('open'), m.away.flying ? clock(m.away.until, ctx.settings) : 'now', box)]);
+        return {
+            strip: true,
+            main: [lead, youVsBuild(m, ctx), weekChart(m, ctx)].filter(Boolean),
+            pane: [chainCard(m, ctx), gainsCard(m), buyCard(m, ctx), headsCard(m, ctx), planLine(m, ctx), weekCard(m, ctx)],
+        };
     }
 
     /** Home while stacking for a chain: Today says training waits; no steps, no 48 h look-ahead, no training heads-up. */
     function renderStacking(m, ctx) {
         const head = sectionHead('Today', meta([dateLine(m.now) + ' · ', h('b', { style: 'color:var(--warn)', text: 'training paused' })]));
-        const lead = h('div', { class: 'lead' }, [head, stackingBox(m, ctx)]);
+        const lead = h('div', { class: 'lead' }, [head, railBox(railDot('open'), 'now', stackingBox(m, ctx))]);
         return {
             strip: true,
             main: [lead, youVsBuild(m, ctx), weekChart(m, ctx)].filter(Boolean),
@@ -15387,7 +17272,15 @@
      * Is Bliss. Then the Recommended card, every other plan with why it isn't
      * the pick (plans that don't fit you hidden behind a tick), and where your
      * energy comes from. Pane: the 30-day chart, the build, the Bliss card.
+     *
+     * Round 8 (mockups/round8/plan-path.html, the owner's pick A): a saved plan
+     * is a path of stretches, and the path is what is recommended. The plan card
+     * says "your path" with Now and Next, each month names the plans it follows,
+     * Recommended is the table of stretches, and the single plans are listed as
+     * "One plan the whole way", every one clickable (the best of them included).
      */
+
+
 
 
 
@@ -15507,7 +17400,7 @@
         const a = m.auto;
         if (pickBy === 'max') return [h('span', { class: 'muted', text: '· no budget' })];
         if (pickBy === 'auto' && a && a.ready) {
-            return [t('lab', 'with'), h('b', { class: 'white num', text: fmtMoney(Math.round(a.budgetPerDay)) + ' a day' }), h('span', { class: 'muted', text: a.source === 'floor' ? 'from your certain income (bank, dividends, rent)' : 'from your income (last ' + Math.round(a.days) + ' days' + (a.source === 'log' ? ', money log' : ', networth') + ')' + (a.floor && a.floor.perDay > 0 ? ' · ' + fmtMoney(Math.round(a.floor.perDay)) + ' of it certain' : '') }), h('span', { class: 'info', title: (a.source === 'log' ? 'Income = money in less money out a day in your money log (Full key), plus what the gym plan spends.' : 'Income = how fast your networth grew (Torn’s own history), plus what the gym plan spends; your money log has nothing readable yet.') + (a.networthPerDay !== null && a.source === 'log' ? ' Cross-check: your networth grew ' + fmtMoney(Math.round(a.networthPerDay)) + ' a day.' : '') + ' Auto spends at most that a day.', text: 'i' })];
+            return [t('lab', 'with'), h('b', { class: 'white num', text: Number.isFinite(a.budgetPerDay) ? fmtMoney(Math.round(a.budgetPerDay)) + ' a day' : 'no limit' }), h('span', { class: 'muted', text: a.source === 'books' ? 'from your books (last ' + Math.round(a.days) + ' days)' : a.source === 'floor' ? 'from your certain income (bank, dividends, rent)' : 'from your income (last ' + Math.round(a.days) + ' days, networth)' + (a.floor && a.floor.perDay > 0 ? ' · ' + fmtMoney(Math.round(a.floor.perDay)) + ' of it certain' : '') }), h('span', { class: 'info', title: (a.source === 'books' ? a.books.why + ' Your books are your money log (Full key), each line once, sorted by Torn’s log type; one-offs and money that only changed place are not counted.' : 'Income = how fast your networth grew (Torn’s own history), plus what the gym plan spends; your money log is not read yet.') + (a.networthPerDay !== null && a.source === 'books' ? ' Cross-check: your networth grew ' + fmtMoney(Math.round(a.networthPerDay)) + ' a day.' : '') + ' Auto spends at most that a day.', text: 'i' })];
         }
         // Round 6: a budget a day (the plan's length comes from Create plan).
         const perDay = Math.round((s.budget || 0) / (s.horizonDays || 30));
@@ -15558,17 +17451,17 @@
         const bliss = m.pc && m.pc.perks.bliss;
         bar2.push(t('lab', 'Ignorance Is Bliss'), h('span', { class: 'tag' + (bliss ? ' good' : ''), text: bliss ? 'Active' + (m.pc.perks.blissDays ? ' · ' + m.pc.perks.blissDays + ' days' : '') : 'Not active' }), h('span', { class: 'info', title: 'Read from your perks: the book’s line shows while it is active (31 days). The plan counts it the day it shows.', text: 'i' }));
         // The note for the whole bar sits at the right of the second line, so the first never wraps for it.
-        bar2.push(h('span', { class: 'muted', style: 'margin-left:auto', text: 'Used by the next Create plan or Re-plan' }));
+        bar2.push(h('span', { class: 'muted', style: 'margin-left:auto', text: 'Used by the next Create plan or Recalibrate' }));
         return [bar1, bar2];
     }
 
     /**
-     * "Open it by" (round 7, optional): a date for the gym to unlock. With one, the next Create plan or Re-plan leaves
+     * "Open it by" (round 7, optional): a date for the gym to unlock. With one, the next Create plan or Recalibrate leaves
      * out the plans that open it later; without one the gym is only shown on every plan. It never outranks stats.
      */
     function openByInput(goal, ctx) {
         const value = goal.by ? new Date(goal.by - 1).toISOString().slice(0, 10) : '';
-        const inp = h('input', { class: 'inp num', type: 'date', 'aria-label': 'Open it by', title: 'Optional: plans that open the gym after this day are left out of the next Create plan or Re-plan. The gym never outranks stats otherwise.', style: 'width:138px', value });
+        const inp = h('input', { class: 'inp num', type: 'date', 'aria-label': 'Open it by', title: 'Optional: plans that open the gym after this day are left out of the next Create plan or Recalibrate. The gym never outranks stats otherwise.', style: 'width:138px', value });
         inp.addEventListener('change', () => {
             const day = Date.parse(inp.value + 'T00:00:00Z');
             // Through that Torn day: its end.
@@ -15619,7 +17512,7 @@
         // What the saved plan was made with (round 6: its budget and income are the ones it saw, until you recalibrate).
         const snap = m.savedPlan ? m.savedPlan.snapshot : null;
         const autoOn = Boolean(snap && snap.income && rec.pickBy === 'auto');
-        const money = autoOn ? fmtMoney(Math.round(snap.budgetPerDay)) + ' a day from your income' : snap && snap.budgetPerDay !== null ? fmtMoney(Math.round(snap.budgetPerDay)) + ' a day' : 'no budget';
+        const money = autoOn ? (snap.budgetPerDay === null ? 'no limit, your pick' : fmtMoney(Math.round(snap.budgetPerDay)) + (snap.income.source === 'books' ? ' a day from your books' : ' a day from your income')) : snap && snap.budgetPerDay !== null ? fmtMoney(Math.round(snap.budgetPerDay)) + ' a day' : 'no budget';
         const kids = [
             sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + money + ' · ' + days + ' days'])),
             h('div', { class: 'prime num' }, [
@@ -15689,11 +17582,11 @@
         return h('div', { class: 'note2 num' }, [h('b', { class: 'white', text: 'Daily refill: worth it.' }), words ? ' It adds' + words + '.' : ' It fits your budget.']);
     }
 
-    /** Where Auto's income comes from, from the money log (the Full key). */
+    /** What comes in, from your books (the money log, Full key): the biggest lines, a day. */
     function incomeLines(b) {
         const top = b.lines.filter((l) => l.dir === 'in').slice(0, 4);
         if (!top.length) return null;
-        return h('div', { class: 'note2 num', style: 'margin-top:8px' }, ['Coming in (your money log, ' + Math.round(b.days) + ' days): ', top.map((l) => l.title + ' ' + fmtMoney(Math.round(l.perDay)) + '/day').join(' · ')]);
+        return h('div', { class: 'note2 num', style: 'margin-top:8px' }, ['Coming in (your books, ' + Math.round(b.days) + ' days): ', top.map((l) => l.title + ' ' + fmtMoney(Math.round(l.perDay)) + '/day').join(' · ')]);
     }
 
     /**
@@ -15822,6 +17715,204 @@
         ]);
     }
 
+    /** The saved plan's path (round 8: the path is the recommendation), or null for a plan saved without one. */
+    function pathOf(m) {
+        const y = m.savedPlan && m.savedPlan.year;
+        return y && y.path && Array.isArray(y.segments) && y.segments.length ? y : null;
+    }
+
+    const shortOf = (id) => (STRATEGIES[id] || {}).short || id;
+    const shortDay = (ms) => new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    const stretchWord = (n) => n + (n === 1 ? ' stretch' : ' stretches');
+    const xanaxWords = (list) => (list.length ? (list.length > 1 ? Math.min(...list) + ' to ' + Math.max(...list) : list[0]) + ' Xanax a day' : null);
+
+    /** The stretch the day is in (before the path starts: the first; after it ends: the last). */
+    function stretchNow(stretches, now) {
+        const i = stretches.findIndex((x) => now >= x.from && now < x.to);
+        return i >= 0 ? i : now < stretches[0].from ? 0 : stretches.length - 1;
+    }
+
+    /** What the saved plan was made with, in words: "$4M a day", "$4M a day from your books", "no budget". */
+    function madeWith(m, rec) {
+        const snap = m.savedPlan ? m.savedPlan.snapshot : null;
+        const autoOn = Boolean(snap && snap.income && rec.pickBy === 'auto');
+        const money = autoOn ? (snap.budgetPerDay === null ? 'no limit, your pick' : fmtMoney(Math.round(snap.budgetPerDay)) + (snap.income.source === 'books' ? ' a day from your books' : ' a day from your income')) : snap && snap.budgetPerDay !== null ? fmtMoney(Math.round(snap.budgetPerDay)) + ' a day' : 'no budget';
+        return { snap, autoOn, money };
+    }
+
+    /** Recommended, as the path: its stretches with plan, dates, gain and cost, and why it is the pick. */
+    function pathCard(m, ctx, rec, compare, days, y) {
+        const sp = m.savedPlan;
+        const path = y.path;
+        const stretches = pathStretches(y.segments);
+        const following = !ctx.plan.strategyPicked;
+        const cur = stretchNow(stretches, m.now);
+        const { autoOn, money } = madeWith(m, rec);
+        const a = m.auto;
+        const figs = [
+            h('div', { class: 'fig' }, [t('lab', days + ' days'), h('b', { class: 'good', text: '+' + fmtShort(path.gained) })]),
+            h('div', { class: 'fig' }, [t('lab', 'Cost'), h('b', { text: fmtMoney(path.cost) })]),
+            h('div', { class: 'fig' }, [t('lab', 'Per $1M'), h('b', { text: path.cost > 0 ? chartNum(perMillion(path)) + ' stats' : '—' })]),
+            h('div', { class: 'fig' }, [t('lab', 'A day'), h('b', { text: fmtMoney(path.cost / days) })]),
+        ];
+        const rows = [];
+        stretches.forEach((x, i) => {
+            const here = following && i === cur;
+            const joins = x.joined.map((id) => (gymById(id) || {}).name).filter(Boolean);
+            rows.push(
+                h('tr', { class: here ? 'sel' : null }, [
+                    h('td', { class: 'nw', text: shortDay(x.from) + ' → ' + shortDay(x.to) }),
+                    h('td', {}, [h('small', { text: kindOf(x.strategy) + ' ' }), h('b', { class: 'w', text: (STRATEGIES[x.strategy] || {}).name || x.strategy }), xanaxWords(x.xanax) ? h('small', { text: ' · ' + xanaxWords(x.xanax) }) : null, joins.length ? h('small', { text: ' · join ' + joins.join(', ') }) : null, here ? h('span', { class: 'tag chalk', style: 'margin-left:8px', text: 'you are here' }) : null]),
+                    h('td', { class: 'r', text: String(x.days) }),
+                    h('td', { class: 'r', text: '+' + fmtShort(x.gained) }),
+                    h('td', { class: 'r', text: fmtMoney(x.cost) }),
+                    h('td', { class: 'r', text: fmtMoney(x.cost / Math.max(1, x.days)) }),
+                ]),
+            );
+            // What you do in the stretch you are in: one line under its row.
+            if (here) {
+                const what = planWhat(x.strategy, { candy: x.candy, xanaxPerDay: x.xanax.length === 1 ? x.xanax[0] : undefined, used: x.refill === false ? {} : { [POINTS]: 1 } });
+                rows.push(h('tr', { class: 'sel what' }, [h('td', { colspan: '6', class: 'second', text: 'Now: ' + what.charAt(0).toLowerCase() + what.slice(1) })]));
+            }
+        });
+        const why = pathWhy({ path, budget: sp.budget, pickBy: rec.pickBy || 'most', single: compare[rec.recommended], singleName: STRATEGIES[rec.recommended].name });
+        const afford = autoOn && a ? affordLine(a, path.cost / days, path.cash || null) : null;
+        const using = ctx.plan.strategy;
+        const kids = [
+            sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + money + ' · ' + days + ' days'])),
+            h('div', { class: 'prime num' }, [
+                h('div', {}, [h('span', { class: 'pill-tag chalk', text: 'Path' }), h('span', { class: 'k', style: 'margin-left:8px', text: 'The best plan for each stretch' }), h('div', { class: 'd', style: 'margin-top:6px', text: 'Picked again every 10 days and around events, from the stats you will have by then.' })]),
+                h('div', { class: 'figs' }, figs),
+                h('table', { class: 'tbl' }, [
+                    h('thead', {}, [h('tr', {}, [h('th', { style: 'width:158px', text: 'When' }), h('th', { text: 'Plan' }), h('th', { class: 'r', style: 'width:52px', text: 'Days' }), h('th', { class: 'r', style: 'width:84px', text: 'Stats' }), h('th', { class: 'r', style: 'width:76px', text: 'Cost' }), h('th', { class: 'r', style: 'width:72px', text: 'A day' })])]),
+                    h('tbody', {}, rows),
+                    h('tfoot', {}, [h('tr', {}, [h('td', { text: 'Whole plan' }), h('td', { text: stretchWord(stretches.length) }), h('td', { class: 'r', text: String(days) }), h('td', { class: 'r' }, [h('b', { text: '+' + fmtShort(path.gained) })]), h('td', { class: 'r' }, [h('b', { text: fmtMoney(path.cost) })]), h('td', { class: 'r' }, [h('b', { text: fmtMoney(path.cost / days) })])])]),
+                ]),
+                h('div', { class: 'why' }, [
+                    h('div', {}, [(why.wins ? 'Wins because: ' : '') + why.text + (afford ? ' ' + afford : '') + ' ', following ? h('span', { class: 'c-good', text: 'You’re on it.' }) : null]),
+                    following ? null : h('div', { class: 'acts', style: 'margin-top:4px' }, [h('button', { class: 'btn primary', type: 'button', onclick: () => { ctx.ui.planPick = null; ctx.followPath(); }, text: 'Use the path' }), h('span', {}, ['You follow ', h('b', { class: 'white', text: (STRATEGIES[using] || {}).name || using }), ' the whole way.'])]),
+                ]),
+            ]),
+            ctx.plan.pickBy === 'auto' && a && a.wait ? h('div', { class: 'warnb', style: 'margin-top:10px' }, [h('b', { text: a.needsKey ? 'Auto mode needs a Full key' : 'Reading your income' }), h('p', { text: a.wait }), a.needsKey ? h('div', { class: 'acts' }, [h('button', { class: 'btn primary sm', type: 'button', onclick: () => ctx.go('settings'), text: 'Add it in Settings' })]) : null]) : null,
+            autoOn && a && a.breakdown && a.breakdown.lines.length ? incomeLines(a.breakdown) : null,
+            m.unlock ? unlockBlock(m, ctx, days) : null,
+            gymWorthLines(m, days),
+            h('div', { class: 'note2', text: 'If you’re late: steady and goal plans re-time by themselves. Jump plans warn 5 min before the tick, then re-time.' }),
+        ];
+        if (ctx.ui.goalForm) kids.push(goalForm(m, ctx));
+        return h('div', { class: 'lead' }, kids);
+    }
+
+    /** What leaving the path for one plan the whole way means, asked once before it is followed. */
+    function wholeWayWarning(r, name, path, { budget = null, days }) {
+        const less = r.gained < path.gained;
+        const over = Number.isFinite(budget) && r.cost > budget;
+        const d = r.cost - path.cost;
+        return {
+            title: name + ' the whole way ' + (less ? 'gains less than the path' : over ? 'is over your budget' : 'is not the path'),
+            text: days + ' days: about +' + fmtShort(r.gained) + ' stats, against +' + fmtShort(path.gained) + ' on the path, and ' + fmtMoney(Math.abs(d)) + (d >= 0 ? ' more.' : ' less.') + (over ? ' Over your ' + fmtMoney(budget) + ' budget by ' + fmtMoney(r.cost - budget) + '.' : '') + ' The path changes plan on its dates; one plan the whole way does not.',
+        };
+    }
+
+    /** "One plan the whole way": every single plan over the same days, against the path; a click follows it (after its warning). */
+    function singlePlans(m, ctx, rec, compare, days, y) {
+        const sp = m.savedPlan;
+        const path = y.path;
+        const budget = Number.isFinite(sp.budget) && (rec.pickBy || 'most') !== 'max' ? sp.budget : null;
+        const showAll = Boolean(ctx.ui.planShowAll);
+        const hiddenAlts = rec.alternatives.filter((x) => !x.fits);
+        const following = !ctx.plan.strategyPicked;
+        const using = ctx.plan.strategy;
+        const over = (r) => (budget !== null && r.cost > budget ? r.cost - budget : 0);
+        // The best of them first, then the ones inside your budget by stats, then the ones over it, the least over first.
+        const ids = [rec.recommended, ...rec.alternatives.filter((x) => x.fits || showAll).map((x) => x.id)].filter((id) => compare[id]);
+        const rest = ids.slice(1).sort((p, q) => (over(compare[p]) > 0) - (over(compare[q]) > 0) || (over(compare[p]) > 0 ? over(compare[p]) - over(compare[q]) : compare[q].gained - compare[p].gained));
+        const rows = [];
+        for (const id of [ids[0], ...rest]) {
+            const r = compare[id];
+            const st = STRATEGIES[id];
+            const current = !following && id === using;
+            const pending = ctx.ui.planPick === id && !current;
+            const dp = path.gained > 0 ? (100 * (r.gained - path.gained)) / path.gained : 0;
+            const dc = r.cost - path.cost;
+            rows.push(
+                h('tr', {
+                    class: 'click' + (current ? ' sel' : '') + (pending ? ' pending' : ''),
+                    tabindex: '0',
+                    role: 'button',
+                    'aria-label': 'Follow ' + st.name + ' the whole way',
+                    onkeydown: (e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            e.currentTarget.click();
+                        }
+                    },
+                    onclick: () => {
+                        ctx.ui.planPick = current || pending ? null : id;
+                        ctx.rerender();
+                    },
+                }, [
+                    h('td', {}, [
+                        h('small', { text: kindOf(id) + ' ' }),
+                        h('b', { class: 'w', text: st.name }),
+                        id === rec.recommended ? h('span', { class: 'tag good', style: 'margin-left:8px', text: budget !== null && r.cost <= budget ? 'best one inside your budget' : 'best single plan' }) : null,
+                        current ? h('span', { class: 'tag chalk', style: 'margin-left:8px', text: 'current plan' }) : null,
+                        pending ? h('span', { class: 'tag warn', style: 'margin-left:8px', text: 'picked · see the warning' }) : null,
+                        h('div', { class: 'second', title: r.candy ? tierWords(r.candy.id) || null : null, text: planWhat(id, r) }),
+                    ]),
+                    h('td', { class: 'r' }, ['+' + fmtShort(r.gained), h('br'), h('span', { class: dp >= 0 ? 'c-good' : 'c-bad', style: 'white-space:nowrap', text: fmtPct(dp) })]),
+                    h('td', { class: 'r' }, [fmtMoney(r.cost), h('br'), h('span', { class: dc > 0 ? 'c-bad' : 'c-good', style: 'white-space:nowrap', text: (dc >= 0 ? '+' : '−') + fmtMoney(Math.abs(dc)) })]),
+                    h('td', { class: 'r' }, budget !== null ? [over(r) > 0 ? h('span', { class: 'c-warn', text: 'Over by ' + fmtMoney(over(r)) }) : h('span', { class: 'c-good', text: 'Inside it' }), h('br'), h('small', { text: fmtMoney(r.cost / days) + ' a day' })] : [fmtMoney(r.cost / days)]),
+                ]),
+            );
+        }
+        // The what-ifs (Ignorance Is Bliss, a company): not plans you can follow today, against the path too.
+        const whatIfRow = (cls, title, what, r, note) => {
+            const dp = path.gained > 0 ? (100 * (r.gained - path.gained)) / path.gained : 0;
+            const dc = r.cost - path.cost;
+            return h('tr', { class: cls }, [
+                h('td', {}, [h('b', { class: 'w', text: title }), ' ', h('span', { class: 'tag', text: 'what-if' }), h('div', { class: 'second', text: what + ' · ' + note })]),
+                h('td', { class: 'r', text: fmtPct(dp) }),
+                h('td', { class: 'r', text: (dc >= 0 ? '+' : '−') + fmtMoney(Math.abs(dc)) }),
+                h('td', { class: 'r', text: fmtMoney(r.cost / days) + (budget !== null ? ' a day' : '') }),
+            ]);
+        };
+        for (const w of Object.values(m.whatIf || {})) {
+            const st = STRATEGIES[w.id];
+            rows.push(whatIfRow('whatif', st.name === 'Steady with Bliss' ? st.name : st.name + ' with Bliss', planWhat(w.id, w), w, 'needs Ignorance Is Bliss active; see the Bliss card'));
+        }
+        for (const w of m.jobWhatIf || []) rows.push(whatIfRow('whatif job', w.title, planWhat(w.strategy, w.result), w.result, w.note));
+        const tick = hiddenAlts.length
+            ? h('button', { type: 'button', class: 'tk', 'aria-pressed': String(showAll), onclick: () => { ctx.ui.planShowAll = !showAll; ctx.rerender(); } }, [h('i'), 'Show plans that don’t fit you (' + hiddenAlts.length + ')'])
+            : null;
+        const one = hiddenAlts.length === 1;
+        const hidden = hiddenAlts.length && !showAll ? h('div', { class: 'note2', text: 'Hidden: ' + hiddenAlts.map((x) => STRATEGIES[x.id].name).join(', ') + ' — ' + (one ? 'it gains' : 'they gain') + ' under half of what the best single plan in your limit does at ' + fmtShort(m.total) + ' total, or ' + (one ? 'doesn’t' : 'don’t') + ' fit you.' }) : null;
+        const pick = ctx.ui.planPick;
+        let warn = null;
+        if (pick && compare[pick]) {
+            const w = wholeWayWarning(compare[pick], STRATEGIES[pick].name, path, { budget, days });
+            warn = h('div', { class: 'warnb num', style: 'margin-bottom:12px' }, [
+                h('b', { text: w.title }),
+                h('p', { text: w.text }),
+                h('div', { class: 'acts' }, [
+                    h('button', { class: 'btn primary', type: 'button', onclick: () => { ctx.ui.planPick = null; ctx.rerender(); }, text: following ? 'Keep the path' : 'Keep ' + shortOf(using).toLowerCase() }),
+                    h('button', { class: 'btn', type: 'button', onclick: () => { ctx.ui.planPick = null; pickPlan(ctx, pick); }, text: 'Use it anyway' }),
+                ]),
+            ]);
+        }
+        const snap = sp.snapshot;
+        return h('div', {}, [
+            sectionHead('One plan the whole way', meta(['against the path · click a row to follow it']), tick),
+            warn,
+            h('table', { class: 'tbl num' }, [
+                h('thead', {}, [h('tr', {}, [h('th', { text: 'Plan' }), h('th', { class: 'r', style: 'width:84px', title: 'Stats gained over the ' + days + ' days, and the difference from the path', text: 'Stats' }), h('th', { class: 'r', style: 'width:92px', title: 'What it costs over the ' + days + ' days, and the difference from the path', text: 'Cost' }), h('th', { class: 'r', style: 'width:136px', text: budget !== null && snap && snap.budgetPerDay !== null ? 'Your ' + fmtMoney(Math.round(snap.budgetPerDay)) + ' a day' : 'A day' })])]),
+                h('tbody', {}, rows),
+            ]),
+            h('div', { class: 'note2', text: 'Stats and cost are for all ' + days + ' days; the second line is the difference from the path.' }),
+            hidden,
+        ]);
+    }
+
     function ladderCard(m, ctx) {
         const l = m.ladder;
         if (!l) return null;
@@ -15843,24 +17934,34 @@
         ]);
     }
 
-    function chartCard(m, ctx, rec, compare, days) {
+    function chartCard(m, ctx, rec, compare, days, y = null) {
         const showAll = Boolean(ctx.ui.planShowAll);
         const fit = new Set([rec.recommended, ...rec.alternatives.filter((a) => a.fits || showAll).map((a) => a.id)]);
         const series = [];
+        // With a path: the path is the chalk line, the single plans the dim ones; a plan far over your budget (half
+        // again or more) is left off, or its line would flatten the rest.
+        const budget = y && Number.isFinite(m.savedPlan.budget) && (rec.pickBy || 'most') !== 'max' ? m.savedPlan.budget : null;
+        let leftOff = 0;
         for (const id of Object.keys(compare)) {
             if (!fit.has(id)) continue;
             const r = compare[id];
-            const isRec = id === rec.recommended;
-            series.push({ name: (STRATEGIES[id] || {}).short || id, color: isRec ? 'var(--chalk)' : r.gained < compare[rec.recommended].gained * 0.8 ? 'var(--warn)' : 'var(--dim)', width: isRec ? 2.5 : 1.5, values: [0, ...r.daily], rec: isRec });
+            if (budget !== null && r.cost > budget * 1.5) {
+                leftOff++;
+                continue;
+            }
+            const isRec = !y && id === rec.recommended;
+            series.push({ name: (STRATEGIES[id] || {}).short || id, color: isRec ? 'var(--chalk)' : !y && r.gained < compare[rec.recommended].gained * 0.8 ? 'var(--warn)' : 'var(--dim)', width: isRec ? 2.5 : 1.5, values: [0, ...r.daily], rec: isRec });
         }
+        if (y) series.push({ name: 'the path', color: 'var(--chalk)', width: 2.5, values: [0, ...y.path.daily], rec: true });
         for (const w of Object.values(m.whatIf || {})) series.push({ name: (STRATEGIES[w.id].short || w.id) + ' + Bliss', color: 'var(--dim)', dash: '4 3', width: 1.2, values: [0, ...w.daily] });
         series.sort((a, b) => (a.rec ? 1 : 0) - (b.rec ? 1 : 0));
         const max = Math.max(1, ...series.map((s) => Math.max(...s.values)));
         const top = Math.pow(10, Math.floor(Math.log10(max)));
         return h('div', {}, [
-            sectionHead(days + ' days', meta(['stats gained, each plan']), null, 'h3'),
+            sectionHead(days + ' days', meta([y ? 'stats gained' : 'stats gained, each plan']), null, 'h3'),
             lineChart(series, { w: 360, h: 190, left: 36, right: 96, xLabels: [[0, 'today'], [days, days + ' d']], grid: [Math.floor(max / top) * top], n: days + 1, label: 'Stats gained over ' + days + ' days, each plan' }),
-            h('div', { class: 'legend2', style: 'margin-top:6px' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), 'recommended']), m.whatIf ? h('span', {}, [h('i', { class: 'dash', style: 'color:var(--dim)' }), 'with Bliss (what-if)']) : null]),
+            h('div', { class: 'legend2', style: 'margin-top:6px' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), y ? 'the path' : 'recommended']), y ? h('span', {}, [h('i', { style: 'background:var(--dim)' }), 'one plan the whole way']) : null, m.whatIf ? h('span', {}, [h('i', { class: 'dash', style: 'color:var(--dim)' }), 'with Bliss (what-if)']) : null]),
+            leftOff ? h('div', { class: 'note2', text: (leftOff === 1 ? 'One plan' : leftOff + ' plans') + ' far over your budget ' + (leftOff === 1 ? 'is' : 'are') + ' left off the chart.' }) : null,
         ]);
     }
 
@@ -15929,6 +18030,52 @@
         return h('div', {}, [sectionHead('Ignorance Is Bliss', meta([bliss ? 'active' : 'not active']), null, 'h3'), h('div', { class: 'bliss num' }, lines)]);
     }
 
+    /**
+     * The money block (the owner's pick P1, mockups/round8/ledger.html): six figures in a row from your books, each with
+     * one line under it. The budget choice is not here: it opens at Create plan.
+     */
+    function moneyCard(m, ctx, perDay, cash, days, followed = null) {
+        const offer = m.auto && m.auto.offer;
+        // Rehab and overdoses are part of the plan's cost (round 8): said here, with or without your books.
+        const rehab = followed ? rehabLine(followed, days) : null;
+        if (!offer || !offer.flow) return rehab ? h('div', { 'data-money': '1' }, [sectionHead('Money', null, null, 'h3'), rehab]) : null;
+        const figs = moneyFigures({ offer, perDay, cash, days });
+        return h('div', { 'data-money': '1' }, [
+            sectionHead('Money', meta(['from your books, ' + Math.round(offer.flow.days) + ' days · ', h('a', { href: '#ledger', onclick: (e) => { e.preventDefault(); ctx.go('ledger'); }, text: 'Open Ledger' })]), null, 'h3'),
+            h('div', { class: 'figs6 num' }, figs.map((f) => h('div', { class: 'figc' + (f.tone ? ' ' + f.tone : ''), 'data-fig': f.id }, [h('span', { class: 'lab', text: f.label }), h('b', { text: f.value }), h('small', { text: f.sub })]))),
+            rehab,
+        ]);
+    }
+
+    /** "In this plan's cost: rehab about $185k a day · overdoses about $20k a day", and the training an overdose is expected to stop. */
+    function rehabLine(r, days) {
+        const words = rehabWords(r.costParts, days, fmtMoney);
+        if (!words) return null;
+        return h('div', { class: 'note2 num', 'data-rehab': '1', title: 'A Xanax adds 35 addiction points and an Ecstasy 20, less your faction’s cut; 20 fade every night; the rest is paid off in rehab. An overdose is counted as what it is expected to cost. The plan never tells you when to rehab.' }, ['In this plan’s cost: ' + words + (r.costParts.rough ? ' (your lifetime rehabs are not read yet: a session is priced as a new player’s)' : '') + (r.overdoseLost > 0 ? ' · overdoses are expected to stop about ' + fmtShort(r.overdoseLost) + ' stats of training, not taken off the plan’s line' : '') + '.']);
+    }
+
+    /**
+     * What the plan may spend, asked where a plan is made (P1: "the budget choice opens at Create plan"): the books'
+     * offers, each checked against your free cash over the plan's days; the one the books recommend is marked, and your
+     * own choice is kept for the next Create plan or Recalibrate.
+     */
+    function budgetChoice(m, ctx) {
+        const offer = m.auto && m.auto.offer;
+        if (!offer || ctx.plan.pickBy !== 'auto') return null;
+        const cur = offer.picked || (offer.recommended === 'covers' ? null : offer.recommended);
+        const pick = (id) => ctx.setSettings({ budgetPick: id === offer.recommended ? null : id });
+        return h('div', { class: 'budgets', role: 'radiogroup', 'aria-label': 'What the plan may spend', 'data-budgets': '1' }, [
+            h('div', { class: 'lab', text: 'What the plan may spend · from your books' }),
+            ...offer.options.map((o) =>
+                h('button', { type: 'button', role: 'radio', class: 'bud' + (o.id === cur ? ' on' : ''), 'aria-checked': String(o.id === cur), onclick: () => pick(o.id) }, [
+                    h('span', {}, [h('b', { text: o.name }), o.id === offer.recommended ? h('span', { class: 'tag good', text: 'Recommended' }) : null, h('small', { text: o.what })]),
+                    h('span', { class: 'r num' }, [h('b', { text: Number.isFinite(o.perDay) ? fmtMoney(Math.round(o.perDay)) + ' a day' : 'no limit' }), h('small', { class: o.fits === false ? 'c-warn' : 'c-good', text: o.fits === null ? 'checked day by day once picked' : o.fits ? 'your free cash lasts' : 'runs out on day ' + o.runsOutDay })]),
+                ]),
+            ),
+            offer.recommended === 'covers' && !offer.picked ? h('div', { class: 'note2', style: 'margin-top:0', text: offer.why }) : null,
+        ]);
+    }
+
     /** The lengths Create plan offers (owner: 1 / 3 / 6 / 12 months). */
     const PLAN_LENGTHS = [1, 3, 6, 12];
     const monthsWord = (n) => n + (n === 1 ? ' month' : ' months');
@@ -15951,7 +18098,7 @@
     function planRun(busy, ctx) {
         if (!busy) return null;
         return h('div', { class: 'planrun', role: 'status', 'aria-live': 'polite' }, [
-            h('div', { class: 'dayline', role: 'progressbar', 'aria-label': busy.recalibrate ? 'Re-planning' : 'Working out your plan' }, [h('i', { 'data-plan-bar': '1', style: 'width:' + Math.round(100 * Math.max(0.02, busy.done || 0)) + '%' })]),
+            h('div', { class: 'dayline', role: 'progressbar', 'aria-label': busy.recalibrate ? 'Recalibrating' : 'Working out your plan' }, [h('i', { 'data-plan-bar': '1', style: 'width:' + Math.round(100 * Math.max(0.02, busy.done || 0)) + '%' })]),
             h('div', { class: 'row', style: 'justify-content:space-between;margin-top:6px' }, [
                 h('span', { class: 'pc-sub num', 'data-plan-words': '1', text: planRunWords(busy) }),
                 h('span', { class: 'row', style: 'gap:10px' }, [h('span', { class: 'muted', style: 'font-size:13px', text: 'You can keep using the page, or leave it: your plan stays as it is until this is done.' }), h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.cancelPlan && ctx.cancelPlan(), text: 'Cancel' })]),
@@ -15968,9 +18115,9 @@
 
     /**
      * Your plan (round 6, the owner's pick: mockup A's card with C's months).
-     * Nothing re-plans by itself: Create plan (1, 3, 6 or 12 months, from
-     * scratch) and Recalibrate (any time: the days left from today, same end)
-     * are the only things that work a plan out.
+     * Create plan (1, 3, 6 or 12 months, from scratch) and Recalibrate (any
+     * time: the days left from today, same end) work a plan out; round 8: the
+     * plan also recalibrates by itself once a Torn day (autoLine, its switch).
      */
     function planCard(m, ctx) {
         const sv = m.saved;
@@ -15984,6 +18131,7 @@
                     lengthChoice(ctx, 3),
                     h('button', { class: 'btn primary', type: 'button', disabled: Boolean(busy), onclick: () => startPlan(ctx, months), text: busy ? 'Working out your plan…' : 'Create plan' }),
                 ]),
+                budgetChoice(m, ctx),
                 planRun(busy, ctx),
                 err,
             ]);
@@ -15992,25 +18140,39 @@
         const p = sv.progress || { day: 1, of: sv.days, ended: false };
         const last = m.savedPlan && m.savedPlan.history && m.savedPlan.history.length ? m.savedPlan.history[m.savedPlan.history.length - 1] : null;
         const incomeMove = last && last.from.budgetPerDay !== null && last.to.budgetPerDay !== null && Math.round(last.from.budgetPerDay) !== Math.round(last.to.budgetPerDay) ? ' on ' + fmtMoney(Math.round(last.to.budgetPerDay)) + ' a day (was ' + fmtMoney(Math.round(last.from.budgetPerDay)) + ')' : '';
-        const sub = [dayWord(sv.start) + ' → ' + dayWord(sv.end), p.ended ? 'ended' : 'day ' + p.day + ' of ' + p.of, 'made ' + dayWord(sv.createdAt), sv.recalibratedAt ? 're-planned ' + dayWord(sv.recalibratedAt) + incomeMove : null, ctx.plan.strategyPicked ? 'following ' + S.short.toLowerCase() + ', your pick' : null].filter(Boolean).join(' · ');
+        // Round 8: the plan is a path of stretches. On it, the card says where you are and what comes next; off it, your pick.
+        const y = pathOf(m);
+        const stretches = y ? pathStretches(y.segments) : [];
+        const onPath = Boolean(y) && !ctx.plan.strategyPicked;
+        const sub = [dayWord(sv.start) + ' → ' + dayWord(sv.end), p.ended ? 'ended' : 'day ' + p.day + ' of ' + p.of, 'made ' + dayWord(sv.createdAt), sv.recalibratedAt ? 'recalibrated ' + dayWord(sv.recalibratedAt) + (sv.recalibratedBy === 'auto' ? ' by itself' : '') + incomeMove : null, y ? stretchWord(stretches.length) : ctx.plan.strategyPicked ? 'following ' + S.short.toLowerCase() + ', your pick' : null].filter(Boolean).join(' · ');
+        let where = null;
+        if (onPath && !p.ended) {
+            const i = stretchNow(stretches, m.now);
+            const x = stretches[i];
+            const next = stretches[i + 1] || null;
+            const day = Math.min(x.days, Math.max(1, Math.floor((m.now - x.from) / 86400e3) + 1));
+            where = h('div', { class: 'pc-sub num' }, ['Now ', h('b', { class: 'white', text: shortOf(x.strategy) }), ', day ' + day + ' of ' + x.days + ' · ', ...(next ? ['then ', h('b', { class: 'white', text: shortOf(next.strategy) }), ' from ' + shortDay(next.from)] : ['to the plan’s end'])]);
+        } else if (y && ctx.plan.strategyPicked) where = h('div', { class: 'pc-sub num' }, ['Following ', h('b', { class: 'white', text: S.name }), ' the whole way, your pick']);
         // The line above is time (day N of M). Beside it: what you gained against what the plan said by now, since the
         // line you follow began (round 7: the card's line never said whether you were on the plan).
         const pr = progressOf(ctx.planLines || [], m.now, m.total);
         const soFar = pr && !p.ended ? h('div', { class: 'pc-sub num' }, ['The line is time: day ' + p.day + ' of ' + p.of + '. Stats: ', h('b', { class: 'white', text: fmtSigned(pr.gained) }), ' of ' + fmtSigned(pr.planned) + ' planned so far' + (pr.pct !== null ? ' (' + Math.round(pr.pct) + '%)' : '') + ', +' + fmtShort(pr.whole) + ' by the end · ', h('a', { href: '#progress', onclick: (e) => { e.preventDefault(); ctx.go('progress'); }, text: 'Progress' })]) : null;
-        // A build picked after the plan was made: today's steps follow it at once, the plan's numbers don't until a Re-plan.
+        // A build picked after the plan was made: today's steps follow it at once, the plan's numbers don't until a Recalibrate.
         const madeFor = m.savedPlan && m.savedPlan.snapshot ? m.savedPlan.snapshot.build : null;
-        const buildMoved = madeFor && ctx.plan.build && madeFor !== ctx.plan.build ? h('div', { class: 'pc-sub' }, [h('span', { class: 'tag warn', text: 'Build changed' }), ' Today’s steps already train toward ' + resolveBuild(ctx.plan.build).name + '; this plan’s numbers are for ' + resolveBuild(madeFor).name + '. ', h('b', { class: 'white', text: 'Re-plan to use it.' })]) : null;
+        const buildMoved = madeFor && ctx.plan.build && madeFor !== ctx.plan.build ? h('div', { class: 'pc-sub' }, [h('span', { class: 'tag warn', text: 'Build changed' }), ' Today’s steps already train toward ' + resolveBuild(ctx.plan.build).name + '; this plan’s numbers are for ' + resolveBuild(madeFor).name + '. ', h('b', { class: 'white', text: 'Recalibrate to use it.' })]) : null;
         const kids = [
             h('div', { class: 'pc-top' }, [
                 h('div', { class: 'pc-what' }, [
-                    h('div', { class: 'pc-title', text: monthsWord(sv.months).replace(' months', '-month').replace(' month', '-month') + ' plan · ' + S.name }),
+                    h('div', { class: 'pc-title', text: monthsWord(sv.months).replace(' months', '-month').replace(' month', '-month') + ' plan · ' + (onPath ? 'your path' : S.name) }),
                     h('div', { class: 'pc-sub num', text: sub }),
                     h('div', { class: 'dayline', role: 'img', 'aria-label': 'Day ' + p.day + ' of ' + p.of }, [h('i', { style: 'width:' + Math.min(100, (100 * p.day) / Math.max(1, p.of)).toFixed(1) + '%' })]),
+                    where,
                     soFar,
                     buildMoved,
+                    autoLine(ctx, p),
                 ]),
                 h('div', { class: 'acts' }, [
-                    h('button', { class: 'btn primary', type: 'button', disabled: Boolean(busy) || p.ended, title: 'Re-reads your stats, income, prices and gyms now and re-plans the days left; the end date stays', onclick: () => { ctx.ui.newPlan = false; ctx.ui.replaceAsk = false; ctx.recalibratePlan(); }, text: busy && busy.recalibrate ? 'Re-planning…' : 'Re-plan' }),
+                    h('button', { class: 'btn primary', type: 'button', disabled: Boolean(busy) || p.ended, title: 'Re-reads your stats, income, prices and gyms now and recalibrates the days left; the end date stays', onclick: () => { ctx.ui.newPlan = false; ctx.ui.replaceAsk = false; ctx.recalibratePlan(); }, text: busy && busy.recalibrate ? 'Recalibrating…' : 'Recalibrate' }),
                     h('button', { class: 'btn ghost', type: 'button', disabled: Boolean(busy), 'aria-expanded': String(Boolean(ctx.ui.newPlan)), onclick: () => { ctx.ui.newPlan = !ctx.ui.newPlan; ctx.ui.replaceAsk = false; ctx.rerender(); }, text: busy && !busy.recalibrate ? 'Working out…' : 'New plan…' }),
                 ]),
             ]),
@@ -16031,11 +18193,29 @@
                     ctx.ui.replaceAsk ? null : h('span', { class: 'muted', text: 'replaces this plan (kept in its history)' }),
                 ]),
             );
+            const choice = budgetChoice(m, ctx);
+            if (choice) kids.push(choice);
         }
         const running = planRun(busy, ctx);
         if (running) kids.push(running);
         if (err) kids.push(err);
         return h('div', { class: 'lead plancard' }, kids);
+    }
+
+    /**
+     * The plan recalibrates by itself once a day (round 8): the card says so, says when a try failed, and holds the
+     * switch. The Recalibrate button beside it is the manual one, any time.
+     */
+    function autoLine(ctx, p) {
+        if (p.ended) return null;
+        const on = ctx.settings.autoRecalibrate !== false;
+        const last = ctx.autoRecal;
+        const failed = on && last && last.ok === false ? h('span', { class: 'c-warn', text: ' Today’s try did not finish (' + (last.error || 'no reason given') + '): it is tried again half an hour later, or press Recalibrate. ' }) : null;
+        return h('div', { class: 'pc-sub', 'data-auto-recal': on ? 'on' : 'off' }, [
+            on ? 'Recalibrates by itself once a day, just after Torn’s reset, or the first time this page is open that day. ' : 'The daily recalibration is off: the plan changes only when you press Recalibrate. ',
+            failed,
+            h('a', { href: '#plan', onclick: (e) => { e.preventDefault(); ctx.setSettings({ autoRecalibrate: !on }); }, text: on ? 'Turn off' : 'Turn on' }),
+        ]);
     }
 
     /** The plan's months (mockup C): total stats planned at each month's end, "you are here", the rough ones marked "~". */
@@ -16047,6 +18227,8 @@
         const picked = ctx.plan.strategyPicked && sp.compare && sp.compare[m.strategy] ? sp.compare[m.strategy] : null;
         const monthly = picked ? monthlyOf(picked, { start: sp.from, days: sp.days, stats: sp.snapshot.stats, anchor: sp.start }) : sp.monthly;
         if (monthly.length < 2) return null;
+        const yp = pathOf(m);
+        const stretches = yp ? pathStretches(yp.segments) : [];
         const now = m.now;
         const total = (st) => Object.values(st || {}).reduce((a, v) => a + (Number(v) || 0), 0);
         const cells = monthly.map((mo, i) => {
@@ -16054,18 +18236,20 @@
             const cur = now >= mo.from && now < mo.to;
             const rough = i >= 3;
             const name = new Date(mo.to - 1).toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' });
-            return h('div', { class: 'mo' + (past ? ' past' : '') + (cur ? ' now' : ''), title: dayWord(mo.from) + ' → ' + dayWord(mo.to) + ': +' + fmtShort(mo.gained) + ' for ' + fmtMoney(mo.cost) }, [h('span', { text: name }), h('b', { text: (rough ? '~' : '') + fmtShort(total(mo.stats)) }), cur ? h('em', { text: 'you are here' }) : null]);
+            // The plans the month follows (round 8): the path's stretches that take 5 days or more of it, or your own pick.
+            const plans = picked ? [m.strategy] : stretches.length ? monthPlans(stretches, mo.from, mo.to) : [];
+            return h('div', { class: 'mo' + (past ? ' past' : '') + (cur ? ' now' : ''), title: dayWord(mo.from) + ' → ' + dayWord(mo.to) + ': +' + fmtShort(mo.gained) + ' for ' + fmtMoney(mo.cost) }, [h('span', { class: 'mh' }, [h('span', { text: name }), h('b', { text: (rough ? '~' : '') + fmtShort(total(mo.stats)) })]), plans.length ? h('span', { class: 'mp', text: plans.map(shortOf).join(' → ') }) : null, cur ? h('em', { text: 'you are here' }) : null]);
         });
         const costs = monthly.map((x) => x.cost).filter((x) => x > 0);
         const y = sp.year;
         const foot = [
             costs.length ? 'About ' + fmtMoney(Math.min(...costs)) + (Math.max(...costs) > Math.min(...costs) * 1.05 ? '–' + fmtMoney(Math.max(...costs)) : '') + ' a month' : null,
             picked ? 'whole plan ~+' + fmtShort(picked.gained) + ' on ' + ((STRATEGIES[m.strategy] || {}).short || m.strategy).toLowerCase() + ', your pick' : y && y.band && y.path ? 'whole plan ~+' + fmtShort(y.path.gained) + ' (range +' + fmtShort(y.band.low) + ' to +' + fmtShort(y.band.high) + ': the model’s own error; later months are rougher)' : null,
-            y && y.unlocks && y.unlocks.length ? 'gyms: ' + y.unlocks.slice(0, 3).map((u) => ((gymById(u.gymId) || {}).name || 'gym ' + u.gymId) + ' ~day ' + u.day).join(', ') : null,
+            y && y.unlocks && y.unlocks.length ? 'gyms: ' + y.unlocks.slice(0, 3).map((u) => (u.member ? 'join ' : '') + ((gymById(u.gymId) || {}).name || 'gym ' + u.gymId) + (u.member ? ' (' + fmtMoney(u.cost) + ') day ' + (u.day + 1) : ' ~day ' + u.day)).join(', ') : null,
         ].filter(Boolean);
         return h('div', {}, [
-            sectionHead('Your ' + monthly.length + ' months', meta(['total stats planned at each month’s end'])),
-            h('div', { class: 'months num', style: 'grid-template-columns:repeat(' + Math.min(12, monthly.length) + ',minmax(0,1fr))' }, cells),
+            sectionHead('Your ' + monthly.length + ' months', meta([yp ? 'the plan each month follows · total stats planned at its end' : 'total stats planned at each month’s end'])),
+            h('div', { class: 'months num', style: 'grid-template-columns:repeat(' + Math.min(yp ? 6 : 12, monthly.length) + ',minmax(0,1fr))' }, cells),
             foot.length ? h('div', { class: 'note2 num', text: foot.join(' · ') }) : null,
         ]);
     }
@@ -16081,10 +18265,15 @@
             const loading = m.saved && !m.saved.whole && !m.planBusy ? h('p', { class: 'muted', style: 'margin:0', text: 'Loading your saved plan…' }) : null;
             return { ctl: controls(m, ctx), main: [planCard(m, ctx), loading].filter(Boolean), pane: [] };
         }
+        // Round 8: a saved plan with a path shows the path as what is recommended, and the single plans as "one plan the
+        // whole way"; a plan saved without one keeps the cards it had.
+        const y = pathOf(m);
+        // The plan you follow: the path, or your own pick of one plan the whole way.
+        const followed = y && !ctx.plan.strategyPicked ? y.path : compare[m.strategy] || compare[rec.recommended];
         return {
             ctl: controls(m, ctx),
-            main: [planCard(m, ctx), monthsRow(m, ctx), recommendedCard(m, ctx, rec, compare, days), otherPlans(m, ctx, rec, compare, days), ladderCard(m, ctx)].filter(Boolean),
-            pane: [chartCard(m, ctx, rec, compare, days), buildCard(m, ctx), blissCard(m, ctx, rec, compare, days)],
+            main: [planCard(m, ctx), monthsRow(m, ctx), y ? pathCard(m, ctx, rec, compare, days, y) : recommendedCard(m, ctx, rec, compare, days), moneyCard(m, ctx, followed.cost / days, followed.cash || null, days, followed), y ? singlePlans(m, ctx, rec, compare, days, y) : otherPlans(m, ctx, rec, compare, days), ladderCard(m, ctx)].filter(Boolean),
+            pane: [chartCard(m, ctx, rec, compare, days, y), buildCard(m, ctx), blissCard(m, ctx, rec, compare, days)],
         };
     }
 
@@ -17326,6 +19515,7 @@
 
 
 
+
     /** SHA-256 of the developer key (the key itself lives only on the owner's laptop). */
     const DEV_KEY_SHA256 = '867b596b74aed64f484c60611ac2b3cc03c7ceb45230a140e4be5a8330d660e2';
 
@@ -17357,7 +19547,7 @@
 
     function exportZip(ctx) {
         const d = ctx.dev.data();
-        const files = exportFiles({ samples: d.samples, fights: d.fights, gymLog: d.gymLog, learned: d.learned, version: d.version, now: Date.now() });
+        const files = exportFiles({ samples: d.samples, fights: d.fights, gymLog: d.gymLog, learned: d.learned, ledger: d.ledger, version: d.version, now: Date.now() });
         download(makeZip(files), 'learning-' + new Date().toISOString().slice(0, 10) + '.zip');
     }
 
@@ -17438,6 +19628,41 @@
     }
 
     /**
+     * Your books (round 7, R7.5): the money log as a ledger. By account: lines,
+     * money in, money out, net; the reconciliation (opening
+     * liquid + in − out = closing liquid) with its gap; the log types the table
+     * does not know. On your screen only; none of it is in the report zip.
+     */
+    function booksBlock(dev) {
+        const b = dev.books ? dev.books() : null;
+        const head = sectionHead('Your books', meta([b ? b.lines + ' log lines, each once · ' + Math.round(b.days) + ' days · read ' + new Date(b.at).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : 'the money log as a ledger']), null, 'h3');
+        if (!b) return h('div', {}, [head, h('p', { class: 'muted', style: 'margin:0', text: 'Nothing read yet: the money log needs the Full key (Settings), and is read every 6 hours.' })]);
+        const m = (v) => (v ? fmtMoney(Math.round(v)) : '—');
+        const rows = Object.values(b.ledger.accounts).map((a) =>
+            h('tr', {}, [
+                h('td', {}, [h('b', { class: 'w', text: a.name }), h('br'), h('small', { class: 'muted', text: (LEDGER_ACCOUNTS.find((x) => x.id === a.id) || {}).what || '' })]),
+                h('td', { class: 'r', text: fmtInt(a.n) }),
+                h('td', { class: 'r', text: m(a.in) }),
+                h('td', { class: 'r', text: m(a.out) }),
+                h('td', { class: 'r ' + (a.net < 0 ? 'c-warn' : ''), text: a.net ? (a.net < 0 ? '−' : '') + fmtMoney(Math.abs(Math.round(a.net))) : '—' }),
+            ]),
+        );
+        const r = b.recon;
+        const day = (t) => new Date(t).toISOString().slice(0, 10);
+        const reconLine = r
+            ? h('div', { class: 'note2 num' }, [h('b', { class: r.reconciled ? 'c-good' : 'c-warn', text: r.reconciled ? 'Reconciled · ' : 'Off · ' }), day(b.reconSpan.from) + ' to ' + day(b.reconSpan.to) + ': liquid ' + fmtMoney(Math.round(r.opening)) + ' + in ' + fmtMoney(Math.round(r.in)) + ' − out ' + fmtMoney(Math.round(r.out)) + ' = ' + fmtMoney(Math.round(r.expected)) + '; Torn says ' + fmtMoney(Math.round(r.closing)) + '. ' + r.words])
+            : h('div', { class: 'note2', text: 'The reconciliation needs your liquid money at two dates the log covers (Torn’s networth history, read every 6 hours): not there yet.' });
+        const unsorted = b.ledger.unsorted.length ? h('div', { class: 'note2 c-warn', text: 'Not sorted (no amount is read from these until the table knows them): ' + b.ledger.unsorted.map((u) => (u.title || 'type ' + u.type) + ' (' + u.type + ') × ' + u.n).join(' · ') }) : h('div', { class: 'note2', text: 'Every line is sorted: no log type the table does not know.' });
+        return h('div', {}, [
+            head,
+            h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'Account' }), h('th', { class: 'r', style: 'width:56px', text: 'Lines' }), h('th', { class: 'r', style: 'width:110px', text: 'In' }), h('th', { class: 'r', style: 'width:110px', text: 'Out' }), h('th', { class: 'r', style: 'width:110px', text: 'Net' })])]), h('tbody', {}, rows)]),
+            h('div', { class: 'note2 num', text: 'Comes in a day, recurring income less committed costs: ' + (b.flow.earnsPerDay < 0 ? '−' : '') + fmtMoney(Math.abs(Math.round(b.flow.earnsPerDay))) + ' · gym items and rehab bought: ' + fmtMoney(Math.round(b.flow.trainingPerDay)) + ' a day · the statements are on the Ledger tab' }),
+            reconLine,
+            unsorted,
+        ]);
+    }
+
+    /**
      * Money log fields (round 7, C.0): your money log by Torn's log type, with
      * the names of each type's data fields and which one was read as the amount.
      * Names and counts only, never an amount: the money accounts are written
@@ -17447,7 +19672,6 @@
         const mf = dev.moneyFields ? dev.moneyFields() : { at: null, list: [] };
         const head = sectionHead('Money log fields', meta([mf.list.length ? mf.list.length + ' log types · read ' + new Date(mf.at).toISOString().slice(0, 16).replace('T', ' ') + ' UTC · names only, never an amount' : 'names only, never an amount']), null, 'h3');
         if (!mf.list.length) return h('div', {}, [head, h('p', { class: 'muted', style: 'margin:0', text: 'Nothing read yet: the money log needs the Full key (Settings), and is read every 6 hours. A log read before this version has no field names: save the Full key again, or wait for the next read.' })]);
-        const amountWords = (a) => Object.entries(a || {}).sort((x, y) => y[1] - x[1]).map(([k, n]) => k + ' × ' + n).join(', ');
         const rows = mf.list.map((r) =>
             h('tr', {}, [
                 h('td', {}, [h('b', { class: 'w', text: r.title || '(no title)' }), h('br'), h('small', { class: 'muted', text: r.category || '' })]),
@@ -17455,13 +19679,13 @@
                 h('td', { class: 'r', text: fmtInt(r.lines) }),
                 h('td', { class: 'r', text: String(r.days) }),
                 h('td', { style: 'white-space:normal', text: r.fields.map((f) => f.name + ' (' + f.is + ')').join(', ') || 'no data fields' }),
-                h('td', { class: /none read/.test(amountWords(r.amount)) ? 'c-warn' : '', style: 'white-space:normal', text: amountWords(r.amount) }),
+                h('td', { class: LEDGER_TYPES[r.type] ? '' : 'c-warn', style: 'white-space:normal', text: LEDGER_TYPES[r.type] ? (LEDGER_ACCOUNTS.find((a) => a.id === LEDGER_TYPES[r.type].account) || {}).name + (LEDGER_TYPES[r.type].sign > 0 ? ' +' : ' −') : 'Not sorted' }),
             ]),
         );
         return h('div', {}, [
             head,
-            h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'Log line' }), h('th', { class: 'r', style: 'width:60px', text: 'Type' }), h('th', { class: 'r', style: 'width:56px', text: 'Lines' }), h('th', { class: 'r', style: 'width:52px', text: 'Days' }), h('th', { text: 'Data fields' }), h('th', { style: 'width:180px', text: 'Read as the amount' })])]), h('tbody', {}, rows)]),
-            h('div', { class: 'note2', text: 'A line listed under two of Torn’s categories counts once. “(none read)”: no field of that line was taken as its amount today.' }),
+            h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'Log line' }), h('th', { class: 'r', style: 'width:60px', text: 'Type' }), h('th', { class: 'r', style: 'width:56px', text: 'Lines' }), h('th', { class: 'r', style: 'width:52px', text: 'Days' }), h('th', { text: 'Data fields' }), h('th', { style: 'width:180px', text: 'Booked as' })])]), h('tbody', {}, rows)]),
+            h('div', { class: 'note2', text: 'A line listed under two of Torn’s categories counts once. “Not sorted”: the ledger’s table does not know that log type yet, so no amount is read from it.' }),
         ]);
     }
 
@@ -17593,7 +19817,7 @@
                 ]),
             ]),
         ];
-        return { ctl: [ctl], main: [learned, scat, errChart, eye, moneyFieldsBlock(dev)], pane };
+        return { ctl: [ctl], main: [learned, scat, errChart, eye, booksBlock(dev), moneyFieldsBlock(dev)], pane };
     }
 
     void fmtPct;
@@ -17635,7 +19859,7 @@
     function buildReport(ctx, now = Date.now()) {
         const r = ctx.report.data();
         const learning = exportFiles({ samples: r.learn.samples, fights: r.learn.fights, gymLog: r.learn.gymLog, learned: r.learn.learned, version: r.state.version, now });
-        return reportFiles({ happened: reportFormState.happened, expected: reportFormState.expected, shots: reportFormState.shots, log: r.log, state: r.state, player: r.player, saved: r.saved, learning, moneyFields: r.moneyFields, statsHistory: r.statsHistory, env: r.env, now });
+        return reportFiles({ happened: reportFormState.happened, expected: reportFormState.expected, shots: reportFormState.shots, log: r.log, state: r.state, player: r.player, saved: r.saved, learning, moneyFields: r.moneyFields, ledger: r.ledger, statsHistory: r.statsHistory, env: r.env, now });
     }
 
     function downloadReport(ctx) {
@@ -17657,7 +19881,7 @@
         if (!ctx.report) return null;
         const r = ctx.report.data();
         const errors = r.log.filter((e) => e.kind === 'error').length;
-        const happened = h('textarea', { class: 'inp ta', rows: '4', 'aria-label': 'What happened', placeholder: 'For example: I pressed Re-plan for 12 months, the bar stopped at "month 5" and nothing changed.' });
+        const happened = h('textarea', { class: 'inp ta', rows: '4', 'aria-label': 'What happened', placeholder: 'For example: I pressed Recalibrate for 12 months, the bar stopped at "month 5" and nothing changed.' });
         happened.value = reportFormState.happened;
         happened.addEventListener('input', () => (reportFormState.happened = happened.value));
         const expected = h('textarea', { class: 'inp ta', rows: '2', 'aria-label': 'What you expected', placeholder: 'For example: the new plan in a few seconds.' });
@@ -17678,7 +19902,7 @@
                 h('button', { type: 'button', class: 'x', 'aria-label': 'Remove ' + s.name, onclick: () => { URL.revokeObjectURL(s.url); reportFormState.shots.splice(i, 1); ctx.rerender(); }, text: '×' }),
             ]),
         );
-        const includes = reportIncludes({ shots: reportFormState.shots.length, log: r.log, player: r.player, saved: r.saved, gymLog: r.learn.gymLog.length, moneyTypes: (r.moneyFields || []).length });
+        const includes = reportIncludes({ shots: reportFormState.shots.length, log: r.log, player: r.player, saved: r.saved, gymLog: r.learn.gymLog.length, moneyTypes: (r.moneyFields || []).length, ledgerLines: r.ledger ? r.ledger.lines : 0 });
         const state = h('span', { class: 'state ' + (errors ? 'bad' : 'off') }, [h('i'), errors ? errors + (errors === 1 ? ' error logged' : ' errors logged') : 'Nothing logged as an error']);
         return h('div', { class: 'sec' }, [
             h('div', {}, [h('h3', { text: 'Report a problem' }), state]),
@@ -17754,7 +19978,7 @@
 
     /** Auto mode's Full key: only in this browser, only for your log (money and gym trains). */
     const TOS_FULL = [
-        ['Data storage', 'Only locally, in this browser: the key, a summary of your money log (titles, amounts, times; 30 days) and your gym trains from the log (stat, trains, energy, gym, gain; up to 120 days)'],
+        ['Data storage', 'Only locally, in this browser: the key, your money log’s lines as Torn gives them (type, amounts, times, the other player’s id; 30 days) and your gym trains from the log (stat, trains, energy, gym, gain; up to 120 days)'],
         ['Data sharing', 'Nobody. Never sent to the Pumping Iron service, FFScouter, TornStats or TornW3B'],
         ['Purpose of use', 'Personal gain: Auto mode sizes your gym plan to your income; Progress shows the trains you did while Pumping Iron wasn’t open (e.g. on your phone)'],
         ['Key storage & sharing', 'Stored locally / Not shared'],
@@ -18097,6 +20321,308 @@
         return { main: [tornSec, fullSec, discordSec, ffsSec, tsSec, overlaySec, displaySec, reportSec, devSec].filter(Boolean), pane };
     }
 
+    /* ===== src/ui/app/ledger-tab.js ===== */
+    /*
+     * The Ledger tab (round 8; the owner's pick: mockups/round8/ledger.html
+     * option A, adjusted to the accountant's answers in docs/LEDGER-ANSWERS.txt).
+     * Statements first: the statement of cash received and paid in six sections
+     * by what a line is, what you own as free and restricted cash, then every
+     * account and every line. A log type the table does not know is a warning at
+     * the top, with "Export log" for what we need to teach it. Every figure is to
+     * the dollar and opens to Torn's own log lines.
+     */
+
+
+
+
+
+
+    /** Lines shown in "Every line" before "Show all". */
+    const LEDGER_LINES_SHOWN = 12;
+
+    const ledgerDay = (at) => {
+        const d = new Date(at);
+        return d.getUTCDate() + ' ' + MONTH_NAMES[d.getUTCMonth()];
+    };
+    const ledgerWhen = (at) => ledgerDay(at) + ' ' + new Date(at).toISOString().slice(11, 16);
+    /** A figure of the statement: to the dollar, a cost in brackets (the accountant's way), nothing as a dash. */
+    const ledgerFig = (v) => (Math.round(v) === 0 ? '–' : v < 0 ? '(' + fmtDollars(-v) + ')' : fmtDollars(v));
+
+    /** Save text as a file from our own page (never on torn.com). */
+    function ledgerSave(text, name, type) {
+        const url = URL.createObjectURL(new Blob([text], { type }));
+        const a = h('a', { href: url, download: name, style: 'display:none' });
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+            URL.revokeObjectURL(url);
+            a.remove();
+        }, 1000);
+    }
+
+    /** "Export log": the log types, their field names and counts (never an amount), so the table can be taught. */
+    function exportLedgerLog(b, ctx) {
+        const mf = ctx.dev && ctx.dev.moneyFields ? ctx.dev.moneyFields() : { list: [] };
+        ledgerSave(ledgerExportOf({ ledger: b.ledger, fields: mf.list, version: ctx.version || '', now: Date.now() }), 'pumping-iron-ledger-log-' + new Date().toISOString().slice(0, 10) + '.json', 'application/json');
+    }
+
+    /**
+     * The warning (the owner's word, 2026-10-03): a line the table does not know is flagged here, on the Ledger tab,
+     * with which lines and how many, and a button that exports what we need to fix it.
+     */
+    function unsortedWarning(b, ctx) {
+        const list = b.ledger.unsorted || [];
+        if (!list.length) return null;
+        const n = list.reduce((s, u) => s + u.n, 0);
+        return h('div', { class: 'lead ledger-warn', role: 'alert', 'data-ledger-warn': '1' }, [
+            h('div', { class: 'sh' }, [h('h2', { text: n + (n === 1 ? ' log line is' : ' log lines are') + ' not sorted' }), h('span', { class: 'tag warn', text: 'The figures below leave ' + (n === 1 ? 'it' : 'them') + ' out' })]),
+            h('p', { style: 'margin:0 0 12px', text: 'Pumping Iron has not met ' + (list.length === 1 ? 'this kind of log line' : 'these kinds of log line') + ' before, so it reads no amount from ' + (n === 1 ? 'it' : 'them') + ' and your cash will not reconcile until it knows ' + (n === 1 ? 'it' : 'them') + '.' }),
+            h('ul', { class: 'ledger-unsorted' }, list.map((u) => h('li', {}, [h('b', { class: 'white', text: u.title || 'Log type ' + u.type }), ' ', h('span', { class: 'muted num', text: 'type ' + u.type + ' · ' + u.n + (u.n === 1 ? ' line' : ' lines') })]))),
+            h('div', { class: 'row', style: 'margin-top:16px;gap:12px;align-items:center' }, [
+                h('button', { class: 'btn primary', type: 'button', 'data-ledger-export': '1', onclick: () => exportLedgerLog(b, ctx), text: 'Export log' }),
+                h('span', { class: 'muted', text: 'The file holds log types, field names and counts, never an amount: send it with Settings › Report a problem and the table gets fixed.' }),
+            ]),
+        ]);
+    }
+
+    /** The statement of cash received and paid: six sections by what a line is, with the three results between them. */
+    function statementCard(b) {
+        const f = b.flow;
+        const days = Math.round(f.days);
+        const sec = Object.fromEntries(f.sections.map((s) => [s.id, s]));
+        const rows = [];
+        const head = (n, s) => rows.push(h('tr', { class: 'ih' }, [h('td', { class: 'num', style: 'width:28px', text: String(n) }), h('td', { colspan: '4' }, [h('b', { text: s.name }), ' ', h('small', { text: s.what })])]));
+        const line = (l, daily) =>
+            rows.push(
+                h('tr', {}, [
+                    h('td'),
+                    h('td', {}, [l.title + ' ', h('small', { class: 'num', text: String(l.type) }), l.internal ? h('small', { text: ' · wallet ↔ vault, not added' }) : null]),
+                    h('td', { class: 'r num', text: fmtInt(l.n) }),
+                    h('td', { class: 'r num' + (l.total < 0 ? ' c-cost' : ''), text: ledgerFig(l.total) }),
+                    h('td', { class: 'r num muted', text: daily ? ledgerFig(l.perDay) : '' }),
+                ]),
+            );
+        const total = (label, v, perDay, cls = '') => rows.push(h('tr', { class: 'sum ' + cls }, [h('td'), h('td', {}, [h('b', { class: 'w', text: label })]), h('td'), h('td', { class: 'r num' }, [h('b', { class: 'w', text: ledgerFig(v) })]), h('td', { class: 'r num', text: perDay === null ? '' : ledgerFig(perDay) })]));
+        const section = (n, s) => {
+            head(n, s);
+            if (!s.lines.length) rows.push(h('tr', {}, [h('td'), h('td', { class: 'muted', colspan: '4', text: 'Nothing in these ' + days + ' days.' })]));
+            for (const l of s.lines) line(l, s.daily);
+            total('Total ' + s.name.replace(/^What you chose to spend it on$/, 'chosen spending').replace(/^[A-Z]/, (c) => c.toLowerCase()), s.total, s.daily ? s.perDay : null);
+        };
+        section(1, sec.recurring);
+        section(2, sec.committed);
+        total('Disposable income · 1 less 2, what is yours to spend', f.disposable.total, f.disposable.perDay, 'key');
+        section(3, sec.spending);
+        total('Surplus (deficit) from these ' + days + ' days · disposable income less 3', f.surplus.total, f.surplus.perDay, 'key');
+        section(4, sec.uncontrollable);
+        section(5, sec.nonrecurring);
+        section(6, sec.transfers);
+        total('Change in cash by the books · surplus (deficit) + 4 + 5 + 6', f.change, null, 'key');
+        // The reconciliation: the books against Torn's own cash figure at two dates.
+        const r = b.recon;
+        if (r) {
+            rows.push(h('tr', { class: 'ih' }, [h('td'), h('td', { colspan: '4' }, [h('b', { text: 'Does it add up?' }), ' ', h('small', { text: ledgerDay(b.reconSpan.from) + ' to ' + ledgerDay(b.reconSpan.to) + ' · your cash by the books against Torn’s own figure' })])]));
+            const kv = (label, v, cls = '') => rows.push(h('tr', { class: cls }, [h('td'), h('td', { text: label }), h('td'), h('td', { class: 'r num', text: fmtDollars(v) }), h('td')]));
+            kv('Cash on ' + ledgerDay(b.reconSpan.from) + ' · wallet + vault', r.opening);
+            kv('Cash by the books · + received − paid', r.expected);
+            kv('Cash Torn says, ' + ledgerDay(b.reconSpan.to), r.closing);
+            rows.push(h('tr', { class: 'sum key', 'data-ledger-recon': r.reconciled ? 'reconciled' : 'off' }, [h('td'), h('td', {}, [h('span', { class: 'tag ' + (r.reconciled ? 'good' : 'warn'), text: r.reconciled ? 'Reconciled' : 'Off by ' + fmtDollars(Math.abs(r.gap)) }), ' ', h('span', { class: r.reconciled ? 'muted' : 'c-warn', text: r.words.replace(/^(Reconciled|Off by [^:]+): /, '') })]), h('td'), h('td', { class: 'r num' }, [h('b', { class: 'w', text: (r.gap > 0 ? '+' : '') + fmtDollars(r.gap) })]), h('td')]));
+        }
+        return h('div', { class: 'lead' }, [
+            sectionHead('How your income was worked out', meta([fmtInt(b.ledger.entries.length) + ' log lines, each once · ' + ledgerDay(b.ledger.from) + ' to ' + ledgerDay(b.ledger.to) + ' · booked by what each line is · to the dollar'])),
+            h('table', { class: 'tbl num ledger-st' }, [
+                h('thead', {}, [h('tr', {}, [h('th'), h('th', { text: 'Statement of cash received and paid' }), h('th', { class: 'r', style: 'width:56px', text: 'Lines' }), h('th', { class: 'r', style: 'width:170px', text: days + ' days' }), h('th', { class: 'r', style: 'width:130px', text: 'A day' })])]),
+                h('tbody', {}, rows),
+            ]),
+            r ? null : h('div', { class: 'note2', text: 'The check against Torn’s own cash figure needs your cash at two dates the log covers (read every 6 hours): not there yet.' }),
+        ]);
+    }
+
+    /** What you own: free cash (what the gym may use) and restricted cash, as the accountant asked for it. */
+    function ownCard(b) {
+        const hv = b.flow.have;
+        if (hv.liquid === null) return h('div', {}, [sectionHead('What you own', null, null, 'h3'), h('p', { class: 'muted', style: 'margin:0', text: 'Your cash has not been read yet.' })]);
+        const kept = hv.restricted.filter((r) => r.fromCash);
+        const row = (label, sub, v, cls = '') => h('tr', { class: cls }, [h('td', {}, [cls ? h('b', { class: 'w', text: label }) : label, sub ? h('small', { text: ' ' + sub }) : null]), h('td', { class: 'r num' }, [cls ? h('b', { class: 'w', text: fmtDollars(v) }) : fmtDollars(v)])]);
+        const until = (r) => (r.until ? 'until ' + ledgerDay(r.until) + (r.profit > 0 ? ' · then +' + fmtMoney(Math.round(r.profit)) + ' profit, counted on the day it is paid' : '') : '');
+        const rows = [
+            row('Cash', 'wallet + vault', hv.liquid),
+            ...kept.map((r) => row('Less: ' + r.name.toLowerCase(), fmtMoney(Math.round(r.perDay)) + ' a day, for the days not paid yet', -r.amount)),
+            row('Total free cash', 'what the gym, or an investment, may use', hv.free, 'sum key'),
+            h('tr', { class: 'ih' }, [h('td', { colspan: '2' }, [h('b', { text: 'Restricted cash' }), ' ', h('small', { text: 'yours, but not for spending' })])]),
+            ...hv.restricted.map((r) => row(r.name, r.id === 'bank' ? until(r) : r.id === 'blocks' ? r.lines.map((l) => l.name + ' × ' + l.blocks).join(', ') + ' · at today’s price' : 'held out of your cash, above', r.amount)),
+            hv.restricted.length ? row('Total restricted cash', '', hv.restrictedTotal, 'sum') : h('tr', {}, [h('td', { class: 'muted', colspan: '2', text: 'Nothing restricted: no bank deposit, no benefit block, no upkeep owed.' })]),
+            hv.otherStocks > 0 ? row('Other stocks', 'not held for a block · at today’s price', hv.otherStocks) : null,
+        ];
+        return h('div', {}, [sectionHead('What you own', meta(['free cash is what a plan spends from · restricted cash never is']), null, 'h3'), h('table', { class: 'tbl num', 'data-ledger-own': '1' }, [h('tbody', {}, rows)])]);
+    }
+
+    /** Every account, opening to its log types. */
+    function accountsCard(b) {
+        const days = b.ledger.days;
+        const m = (v) => (v ? fmtDollars(v) : '·');
+        const rows = [];
+        for (const a of LEDGER_ACCOUNTS) {
+            const acc = b.ledger.accounts[a.id];
+            const mine = b.ledger.types.filter((t) => t.account === a.id);
+            const daily = a.kind === 'income' || a.kind === 'spend';
+            rows.push(
+                h('tr', { class: 'ih' }, [
+                    h('td', {}, [h('b', { text: a.name }), ' ', h('small', { text: a.what })]),
+                    h('td', { class: 'r', text: fmtInt(acc.n) }),
+                    h('td'),
+                    h('td', { class: 'r', text: m(acc.in) }),
+                    h('td', { class: 'r', text: m(acc.out) }),
+                    h('td', { class: 'r' }, [h('b', { class: 'w', text: acc.net ? (acc.net > 0 ? '+' : '') + fmtDollars(acc.net) : '·' }), daily && acc.net ? h('small', { text: ' ' + (acc.net > 0 ? '+' : '') + fmtMoney(Math.round(acc.net / days)) + ' a day' }) : null]),
+                ]),
+            );
+            for (const t of mine) rows.push(h('tr', { class: 'sub' }, [h('td', {}, [h('small', { class: 'num', text: String(t.type) + ' ' }), t.title]), h('td', { class: 'r', text: fmtInt(t.n) }), h('td', { class: 'r', text: String(t.days) }), h('td', { class: 'r', text: m(t.in) }), h('td', { class: 'r', text: m(t.out) }), h('td')]));
+        }
+        return h('div', {}, [
+            sectionHead('By account', meta(['every account opens to Torn’s own log lines']), null, 'h3'),
+            h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'Account' }), h('th', { class: 'r', style: 'width:56px', text: 'Lines' }), h('th', { class: 'r', style: 'width:52px', text: 'Days' }), h('th', { class: 'r', style: 'width:140px', text: 'In' }), h('th', { class: 'r', style: 'width:140px', text: 'Out' }), h('th', { class: 'r', style: 'width:230px', text: 'Net · a day' })])]), h('tbody', {}, rows)]),
+        ]);
+    }
+
+    /** Is a line non-recurring by its type (before any tick of yours)? */
+    const ledgerByNature = (e) => Boolean(LEDGER_TYPES[e.type]) && LEDGER_TYPES[e.type].account === 'nonrecurring';
+
+    /** Every line, newest first: filter by account, tick a line to count it as non-recurring (or not), download them all. */
+    function linesCard(b, ctx) {
+        const names = Object.fromEntries(LEDGER_ACCOUNTS.map((a) => [a.id, a.name]));
+        const all = b.ledger.entries;
+        const filter = ctx.ui.ledgerFilter || 'all';
+        const shown = filter === 'all' ? all : all.filter((e) => e.account === filter);
+        const list = ctx.ui.ledgerAll ? shown : shown.slice(0, LEDGER_LINES_SHOWN);
+        const chip = (id, label, n) => h('button', { type: 'button', class: 'btn sm' + (filter === id ? ' on' : ''), 'aria-pressed': String(filter === id), onclick: () => { ctx.ui.ledgerFilter = id; ctx.ui.ledgerAll = false; ctx.rerender(); }, text: label + ' ' + fmtInt(n) });
+        const chips = [chip('all', 'All', all.length), ...LEDGER_ACCOUNTS.filter((a) => b.ledger.accounts[a.id].n).map((a) => chip(a.id, a.name, b.ledger.accounts[a.id].n))];
+        const tick = (e, on) => {
+            const next = { ...(ctx.settings.oneOffs || {}) };
+            // A tick that says what the line already is by its type is no tick at all.
+            if (on === ledgerByNature(e)) delete next[e.id];
+            else next[e.id] = on;
+            ctx.setSettings({ oneOffs: next });
+        };
+        const rows = list.map((e) =>
+            h('tr', {}, [
+                h('td', { class: 't', style: 'width:110px', text: ledgerWhen(e.at) }),
+                h('td', {}, [e.title + ' ', h('small', { class: 'num', text: String(e.type) })]),
+                h('td', { class: e.known ? '' : 'c-warn', text: names[e.account] || e.account }),
+                h('td', { class: 'r', text: e.amount > 0 ? fmtDollars(e.amount) : '' }),
+                h('td', { class: 'r', text: e.amount < 0 ? fmtDollars(-e.amount) : '' }),
+                h('td', { class: 'r' }, [e.known && !e.internal && LEDGER_ACCOUNTS.find((a) => a.id === e.account).kind !== 'balance' ? h('label', { class: 'ledger-tick' }, [h('input', { type: 'checkbox', checked: e.oneOff, 'aria-label': 'Non-recurring', onchange: (ev) => tick(e, ev.target.checked) }), ' non-recurring']) : null]),
+            ]),
+        );
+        return h('div', {}, [
+            sectionHead('Every line', meta(['newest first · tick a line to keep it out of the daily figures, untick one to count it as usual money']), h('button', { class: 'btn sm', type: 'button', 'data-ledger-csv': '1', onclick: () => ledgerSave(ledgerCsv(b.ledger), 'pumping-iron-ledger-' + new Date().toISOString().slice(0, 10) + '.csv', 'text/csv'), text: 'Download CSV' }), 'h3'),
+            h('div', { class: 'row ledger-chips', role: 'group', 'aria-label': 'Account' }, chips),
+            h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'When (TCT)' }), h('th', { text: 'Torn’s log line' }), h('th', { style: 'width:190px', text: 'Account' }), h('th', { class: 'r', style: 'width:130px', text: 'In' }), h('th', { class: 'r', style: 'width:130px', text: 'Out' }), h('th', { class: 'r', style: 'width:140px', text: 'Count as' })])]), h('tbody', {}, rows)]),
+            shown.length > list.length ? h('div', { class: 'note2' }, ['Showing ' + list.length + ' of ' + fmtInt(shown.length) + ' lines · ', h('a', { href: '#ledger', onclick: (ev) => { ev.preventDefault(); ctx.ui.ledgerAll = true; ctx.rerender(); }, text: 'Show all' })]) : null,
+        ]);
+    }
+
+    /** The side pane's "A day": what a plan counts on, what the gym costs you, and the budget the books offer. */
+    function ledgerDayFacts(b, m, ctx) {
+        const f = b.flow;
+        const offer = m.auto && m.auto.offer ? m.auto.offer : null;
+        const habit = offer ? offer.habitPerDay : f.habitPerDay !== null ? f.habitPerDay : f.trainingPerDay;
+        const pick = offer ? offer.options.find((o) => o.id === offer.recommended) || { name: 'what your free cash covers' } : null;
+        const kv = (label, sub, value, cls = '') => [h('dt', {}, [h('span', { class: 'white', text: label }), sub ? h('span', { text: ' · ' + sub }) : null]), h('dd', { class: 'num ' + cls, text: value })];
+        return h('div', {}, [
+            sectionHead('A day', meta(['what the plan uses']), null, 'h3'),
+            h('dl', { class: 'kv', 'data-ledger-day': '1' }, [
+                ...kv('Comes in a day', 'recurring income less committed costs', (f.earnsPerDay < 0 ? '−' : '') + fmtMoney(Math.abs(Math.round(f.earnsPerDay))), f.earnsPerDay < 0 ? 'c-warn' : 'white'),
+                ...kv('The gym costs you a day', f.habitPerDay !== null ? 'your habit, from what you used' : 'gym items and rehab bought', fmtMoney(Math.round(habit)), 'white'),
+                ...kv('Total free cash', 'wallet + vault, less what is kept back', f.have.free === null ? 'not read yet' : fmtMoney(Math.round(f.have.free)), 'white'),
+                ...kv('Restricted cash', f.have.locked && f.have.locked.until ? 'the bank until ' + ledgerDay(f.have.locked.until) : '', fmtMoney(Math.round(f.have.restrictedTotal))),
+                ...(offer ? kv('A plan may spend', pick.name.toLowerCase(), fmtMoney(Math.round(offer.perDay)) + ' a day', 'white') : []),
+            ]),
+            offer ? h('p', { class: 'why ok', style: 'margin:16px 0 0', text: offer.why }) : null,
+            h('p', { class: 'muted', style: 'margin:12px 0 0;font-size:13px', text: 'The casino, gifts and sales are never counted on ahead: they reach the plan as cash, at the next recalibration.' }),
+            h('div', { style: 'margin-top:16px' }, [h('a', { class: 'btn sm', href: '#plan', onclick: (ev) => { ev.preventDefault(); ctx.go && ctx.go('plan'); }, text: 'Open Plan' })]),
+        ]);
+    }
+
+    /** How many ideas the pane lists. */
+    const LEDGER_IDEAS_SHOWN = 4;
+
+    /**
+     * The side pane's investment ideas (the accountant's ask): what would add to recurring income, best return a year
+     * first, against your free cash. A list to choose from, never a step of the plan.
+     */
+    function investFacts(b) {
+        const list = (b.ideas || []).slice(0, LEDGER_IDEAS_SHOWN);
+        if (!list.length) return null;
+        const days = (d) => (d >= 730 ? (d / 365).toFixed(1) + ' years' : Math.round(d) + ' days');
+        return h('div', { 'data-ledger-ideas': '1' }, [
+            sectionHead('Growing your recurring income', meta(['best return a year first']), null, 'h3'),
+            ...list.map((x) =>
+                h('div', { class: 'ledger-idea' }, [
+                    h('div', {}, [h('b', { class: 'white', text: x.name }), h('span', { class: 'tag ' + (x.fits === null ? '' : x.fits ? 'good' : 'warn'), text: x.fits === null ? 'cash not read' : x.fits ? 'your free cash covers it' : fmtMoney(Math.round(x.short)) + ' short' })]),
+                    h('div', { class: 'muted num', text: fmtMoney(Math.round(x.cost)) + ' · ' + x.what }),
+                    h('div', { class: 'num' }, [h('b', { class: 'white', text: '+' + fmtMoney(Math.round(x.perDay)) + ' a day' }), ' · ' + x.yearlyPct.toFixed(1) + '% a year · pays for itself in ' + days(x.paybackDays)]),
+                ]),
+            ),
+            h('p', { class: 'muted', style: 'margin:12px 0 0;font-size:13px', text: 'At today’s share prices. Shares can lose value, and selling them ends the benefit; the bank’s money is locked until its term ends. Money put here becomes restricted cash: the plan no longer spends it.' }),
+        ]);
+    }
+
+    /** The side pane's non-recurring lines: on their own, never in a daily figure. */
+    function nonRecurringFacts(b) {
+        const list = b.flow.oneOffs;
+        const sum = list.reduce((n, e) => n + e.amount, 0);
+        return h('div', {}, [
+            sectionHead('Non-recurring', meta([list.length ? list.length + (list.length === 1 ? ' line' : ' lines') + ', not counted · ' + (sum > 0 ? '+' : '') + fmtMoney(Math.round(sum)) + ' together' : 'none in these days']), null, 'h3'),
+            ...list.slice(0, 8).map((e) => h('div', { class: 'ledger-one' }, [h('span', {}, [h('span', { class: 'white', text: e.title }), h('span', { class: 'muted', text: ' · ' + ledgerDay(e.at) + (e.ticked ? ' · your tick' : '') })]), h('b', { class: 'num ' + (e.amount < 0 ? 'c-cost' : 'white'), text: (e.amount > 0 ? '+' : '') + fmtMoney(Math.round(e.amount)) })])),
+            list.length > 8 ? h('div', { class: 'note2', text: 'and ' + (list.length - 8) + ' more, in “Every line” under Non-recurring.' }) : null,
+            h('p', { class: 'muted', style: 'margin:12px 0 0;font-size:13px', text: 'Gifts, money sent, trades, auctions and points sold are non-recurring by what they are, whatever their size. Untick a line in the list to count it as usual money.' }),
+        ]);
+    }
+
+    /** The side pane's table of how each log type is booked, with "Export log". */
+    function bookingFacts(b, ctx) {
+        const names = Object.fromEntries(LEDGER_ACCOUNTS.map((a) => [a.id, a.name]));
+        const rows = Object.entries(LEDGER_TYPES).map(([type, s]) => h('tr', {}, [h('td', { class: 't num', text: type }), h('td', { text: s.title }), h('td', { text: names[s.account] + (s.gain ? ' · its gain or loss non-recurring' : '') }), h('td', { class: 'r', text: s.internal ? '=' : s.sign > 0 ? '+' : '−' })]));
+        const n = (b.ledger.unsorted || []).reduce((s, u) => s + u.n, 0);
+        return h('div', {}, [
+            sectionHead('The account table', null, null, 'h3'),
+            h('p', { class: 'muted', style: 'margin:0 0 12px;font-size:13px', text: 'Booked by Torn’s log type number, never by words in a title. A type the table does not know is “Not sorted” and no amount is read from it.' }),
+            h('dl', { class: 'kv' }, [h('dt', { text: 'Not sorted' }), h('dd', { class: n ? 'c-warn' : 'c-good', text: n ? n + (n === 1 ? ' line' : ' lines') : 'none' })]),
+            h('details', { class: 'dis', style: 'margin-top:12px' }, [h('summary', { text: 'How each of Torn’s log lines is booked (' + Object.keys(LEDGER_TYPES).length + ' types)' }), h('table', { class: 'tbl num', style: 'margin-top:12px' }, [h('tbody', {}, rows)])]),
+            h('div', { style: 'margin-top:16px' }, [h('button', { class: 'btn sm', type: 'button', onclick: () => exportLedgerLog(b, ctx), text: 'Export log' })]),
+        ]);
+    }
+
+    function renderLedger(m, ctx) {
+        const b = ctx.books ? ctx.books() : null;
+        const fk = ctx.fullKey || {};
+        if (!b) {
+            const why = !fk.has
+                ? 'The ledger is read from your money log, which needs a Full key: add one in Settings. It stays in this browser and is used for nothing else.'
+                : !fk.ok
+                  ? 'The Full key in Settings is not working' + (fk.error ? ' (' + fk.error + ')' : '') + ': save it again.'
+                  : 'Your money log has not been read yet. It is read every 6 hours; “Read now” asks Torn at once.';
+            return {
+                ctl: [[h('span', { class: 'muted', text: 'Your money as books: every log line once, sorted by what it is' }), h('span', { class: 'grow' }), fk.ok ? h('button', { class: 'btn sm', type: 'button', disabled: Boolean(ctx.ui.ledgerReading), onclick: () => ctx.readBooks && ctx.readBooks(), text: ctx.ui.ledgerReading ? 'Reading…' : 'Read now' }) : null]],
+                main: [h('div', { class: 'lead' }, [sectionHead('Ledger'), h('p', { style: 'margin:0', text: why }), fk.has ? null : h('div', { style: 'margin-top:16px' }, [h('a', { class: 'btn primary', href: '#settings', onclick: (ev) => { ev.preventDefault(); ctx.go && ctx.go('settings'); }, text: 'Open Settings' })])])],
+                pane: [],
+            };
+        }
+        const r = b.recon;
+        const ctl = [
+            h('span', { class: 'muted num', text: fmtInt(b.ledger.entries.length) + ' log lines, each once · ' + Math.round(b.days) + ' days · read ' + ledgerWhen(b.at) + ' TCT' }),
+            h('button', { class: 'btn sm', type: 'button', disabled: Boolean(ctx.ui.ledgerReading), title: 'Reads your money log from Torn now (it is read by itself every 6 hours)', onclick: () => ctx.readBooks && ctx.readBooks(), text: ctx.ui.ledgerReading ? 'Reading…' : 'Read now' }),
+            ctx.ui.ledgerError ? h('span', { class: 'c-warn', text: ctx.ui.ledgerError }) : null,
+            h('span', { class: 'grow' }),
+            r ? h('span', { class: 'tag ' + (r.reconciled ? 'good' : 'warn'), text: r.reconciled ? 'Reconciled' : 'Off by ' + fmtDollars(Math.abs(r.gap)) }) : h('span', { class: 'muted', text: 'not checked against Torn’s cash yet' }),
+        ];
+        return {
+            ctl: [ctl],
+            main: [unsortedWarning(b, ctx), statementCard(b), ownCard(b), accountsCard(b), linesCard(b, ctx)].filter(Boolean),
+            pane: [ledgerDayFacts(b, m, ctx), investFacts(b), nonRecurringFacts(b), bookingFacts(b, ctx)].filter(Boolean),
+        };
+    }
+
     /* ===== src/ui/app/app.js ===== */
     /*
      * The webpage: a full-page shadow host drawn over app.html's placeholder
@@ -18115,16 +20641,18 @@
 
 
 
+
     const APP_TABS = [
         ['home', 'Home'],
         ['plan', 'Plan'],
         ['buy', 'Buy'],
         ['progress', 'Progress'],
+        ['ledger', 'Ledger'],
         ['eye', 'Torn Eye'],
         ['settings', 'Settings'],
     ];
 
-    const RENDERERS = { home: renderHome, plan: renderPlan, buy: renderBuy, progress: renderProgress, settings: renderSettings };
+    const RENDERERS = { home: renderHome, plan: renderPlan, buy: renderBuy, progress: renderProgress, ledger: renderLedger, settings: renderSettings };
 
     // Round 7 type pass: Source Serif 4 for titles and the one big number, Inter for the rest (webpage only; torn.com uses Segoe UI).
     // Loaded into the document: @font-face rules there reach the app's shadow root.
@@ -19369,6 +21897,176 @@
         return Object.fromEntries(kept);
     }
 
+    /* ------------------------------------------------ round 8: sort by a column (mockups/round8/torn-eye.html §2, his pick A) */
+
+    /** The columns a click sorts by, with the words for each way ("Sorted by HP kept, most first"). */
+    const SORT_KEYS = {
+        band: { label: 'Band', words: ['Stomp first', 'Fair first'] },
+        level: { label: 'Lvl', words: ['highest first', 'lowest first'] },
+        respect: { label: 'Respect', words: ['most first', 'least first'] },
+        keep: { label: 'HP kept', words: ['most first', 'least first'] },
+        win: { label: 'Win', words: ['highest first', 'lowest first'] },
+        status: { label: 'Status', words: ['ready first', 'away first'] },
+        hit: { label: 'Last hit', words: ['newest first', 'not hit first'] },
+    };
+
+    /** A kept sort as {key, dir: 1|-1}, or null (the default order) for anything else. */
+    function sortOf(s) {
+        return s && SORT_KEYS[s.key] ? { key: s.key, dir: s.dir === -1 ? -1 : 1 } : null;
+    }
+
+    /** A click on a column head: a new column sorts its first way; the same column again flips it. */
+    function nextSort(cur, key) {
+        const c = sortOf(cur);
+        if (!SORT_KEYS[key]) return c;
+        return c && c.key === key ? { key, dir: -c.dir } : { key, dir: 1 };
+    }
+
+    /** "HP kept, most first". */
+    function sortWords(s) {
+        const c = sortOf(s);
+        return c ? SORT_KEYS[c.key].label + ', ' + SORT_KEYS[c.key].words[c.dir === 1 ? 0 : 1] : '';
+    }
+
+    /** Where a row's status falls when sorting by it: ready, not read, anything else, hospital (by out-time), away, jail. */
+    const SORT_STATE_RANK = { okay: 0, unknown: 1, other: 2, hospital: 3, travel: 4, jail: 5 };
+
+    /**
+     * When you last attacked each player, from your own attacks as read (the last 100, any result): Map id → ms.
+     * A player not in it was not hit lately; whether ever is not known.
+     */
+    function lastHits(attacks) {
+        const out = new Map();
+        for (const a of attacks || []) {
+            const id = Number(a && a.def);
+            const at = (Number(a && a.ended) || 0) * 1000;
+            if (id > 0 && at > 0 && !(out.get(id) >= at)) out.set(id, at);
+        }
+        return out;
+    }
+
+    /** The Last hit cell: "today", "5 d ago"; "—" when none of your attacks read is on them. */
+    function lastHitText(at, now = Date.now()) {
+        if (!(at > 0)) return '—';
+        const d = Math.floor(Math.max(0, now - at) / 86400000);
+        return d < 1 ? 'today' : d + ' d ago';
+    }
+
+    /**
+     * The listed rows sorted by a column; rows that tie keep the default order (band, respect, HP kept, win). No sort:
+     * the default order itself.
+     * @param {object[]} rows - listTargets().rows
+     * @param {{key, dir}|null} sort
+     * @param {object} o - {now, hits: lastHits()}
+     */
+    function sortTargets(rows, sort, { now = Date.now(), hits = new Map() } = {}) {
+        const list = [...(rows || [])].sort(byOrder);
+        const s = sortOf(sort);
+        if (!s) return list;
+        const pc = (v) => (Number.isFinite(v) ? Math.round(v * 100) : -1);
+        const outAt = (r) => (r.hospitalUntil && r.hospitalUntil > now ? r.hospitalUntil : Number(r.status && r.status.until) * 1000 || Infinity);
+        const cmp = {
+            band: (a, b) => bandRank(a.band) - bandRank(b.band),
+            level: (a, b) => (Number(b.level) || 0) - (Number(a.level) || 0),
+            respect: (a, b) => shownRespect(b.respect) - shownRespect(a.respect),
+            keep: (a, b) => pc(b.forecast && b.forecast.keep) - pc(a.forecast && a.forecast.keep),
+            win: (a, b) => pc(b.forecast && b.forecast.pWin) - pc(a.forecast && a.forecast.pWin),
+            status: (a, b) => {
+                const sa = rowState(a, now);
+                const d = SORT_STATE_RANK[sa] - SORT_STATE_RANK[rowState(b, now)];
+                return d || (sa === 'hospital' ? outAt(a) - outAt(b) : 0);
+            },
+            hit: (a, b) => (hits.get(Number(b.id)) || 0) - (hits.get(Number(a.id)) || 0),
+        }[s.key];
+        // A stable sort over the default order: ties stay as they were.
+        return list.sort((a, b) => s.dir * cmp(a, b) || 0);
+    }
+
+    /* ------------------------------------------------ round 8: the Next button on the attack page (torn-eye.html §4, his pick A) */
+
+    /** The list handed to Torn's pages is this long at most (Tampermonkey gives it to every Torn page). */
+    const NEXT_KEEP = 40;
+
+    /** A handed-over list older than this is not walked (the targets themselves are asked again every 6 h). */
+    const NEXT_FRESH_MS = 6 * 60 * 60 * 1000;
+
+    /**
+     * The list the Torn Eye tab shows, as a small table for Torn's attack page: in the list's own order and filters, each
+     * row [id, name, level, band, respect, HP kept %, where, out-time ms]. `where`: 'ok', '?' (not read: it may be
+     * ready), 'hosp', 'away', 'jail'.
+     * @param {'targets'|'war'} mode
+     * @param {object[]} rows - Targets rows (band, respect, forecast, status, hospitalUntil, hit) or War rows (state, until, view, m)
+     */
+    function nextTable(mode, rows, now = Date.now()) {
+        const out = [];
+        for (const r of rows || []) {
+            if (out.length >= NEXT_KEEP) break;
+            const v = mode === 'war' ? r.view || {} : r;
+            const f = v.forecast || null;
+            let where;
+            let until = 0;
+            if (mode === 'war') {
+                if (r.state === 'fallen') continue;
+                where = r.state === 'okay' || r.state === 'early' ? 'ok' : r.state === 'hospital' ? 'hosp' : r.state === 'jail' ? 'jail' : 'away';
+                until = where === 'hosp' ? (Number(r.until) || 0) * 1000 : 0;
+            } else {
+                const s = rowState(r, now);
+                where = s === 'okay' ? 'ok' : s === 'hospital' ? 'hosp' : s === 'travel' ? 'away' : s === 'jail' ? 'jail' : '?';
+                // A hospital stay with no out-time read (your own hit): the hour a hit counts for.
+                if (where === 'hosp') until = r.hospitalUntil && r.hospitalUntil > now ? r.hospitalUntil : Number(r.status && r.status.until) * 1000 > now ? Number(r.status.until) * 1000 : r.hit ? r.hit.at + OWN_HIT_MS : 0;
+            }
+            const name = mode === 'war' ? (r.m && r.m.name) || v.name : r.name;
+            const level = mode === 'war' ? (r.m && r.m.level) || v.level : r.level;
+            out.push([Number(r.id), name || null, Number(level) || null, v.band || 'none', Number.isFinite(v.respect) && v.respect > 0 ? Math.round(v.respect * 100) / 100 : null, f && Number.isFinite(f.keep) ? Math.round(f.keep * 100) : null, where, until]);
+        }
+        return { at: now, mode: mode === 'war' ? 'war' : 'targets', rows: out };
+    }
+
+    /** What changes a handed-over list (its age left out): written again only when this does. */
+    function nextTableSig(t) {
+        return t ? t.mode + '|' + JSON.stringify(t.rows) : '';
+    }
+
+    /**
+     * The next player to open from the attack page: the first ready one after the player you are on, in the list's order
+     * (from its top when they are not in it, round to its top at its end), skipping who is not ready and the attack pages
+     * you opened in the last ten minutes (you were just there).
+     * @param {object|null} table - nextTable()
+     * @param {number} currentId - the player being attacked
+     * @param {object} o - {now, opened: Set of ids opened lately}
+     * @returns {{list: boolean, mode, next: {id, name, level, band, respect, keep}|null, skipped: {hosp, away, jail, opened}}}
+     *   list: false when no list was handed over (or it is too old)
+     */
+    function nextTarget(table, currentId, { now = Date.now(), opened = new Set() } = {}) {
+        const skipped = { hosp: 0, away: 0, jail: 0, opened: 0 };
+        if (!table || !Array.isArray(table.rows) || !(now - (Number(table.at) || 0) < NEXT_FRESH_MS)) return { list: false, mode: 'targets', next: null, skipped };
+        const rows = table.rows;
+        const at = rows.findIndex((r) => Number(r[0]) === Number(currentId));
+        for (let i = 1; i <= rows.length; i++) {
+            const r = rows[(at + i + rows.length) % rows.length];
+            const id = Number(r[0]);
+            if (id === Number(currentId)) continue;
+            if (opened.has(id)) skipped.opened++;
+            else if (r[6] === 'hosp' && !(r[7] > 0 && r[7] <= now)) skipped.hosp++;
+            else if (r[6] === 'away') skipped.away++;
+            else if (r[6] === 'jail') skipped.jail++;
+            else return { list: true, mode: table.mode === 'war' ? 'war' : 'targets', next: { id, name: r[1], level: r[2], band: r[3], respect: r[4], keep: r[5] }, skipped };
+        }
+        return { list: true, mode: table.mode === 'war' ? 'war' : 'targets', next: null, skipped };
+    }
+
+    /** "skips 3 not ready: 2 in hospital, 1 away"; '' when nothing was skipped. */
+    function skippedText(skipped) {
+        const s = skipped || {};
+        const parts = [];
+        if (s.hosp) parts.push(s.hosp + ' in hospital');
+        if (s.away) parts.push(s.away + ' away');
+        if (s.jail) parts.push(s.jail + ' in jail');
+        if (s.opened) parts.push(s.opened + ' you just opened');
+        const n = (s.hosp || 0) + (s.away || 0) + (s.jail || 0) + (s.opened || 0);
+        return n ? 'skips ' + n + ' not ready: ' + parts.join(', ') : '';
+    }
+
     /* ===== src/core/eye/watch.js ===== */
     /*
      * Torn Eye's watch list (ROUND4-PLAN §I, the owner's idea). Up to 20
@@ -19575,6 +22273,7 @@
 
 
 
+
     const EYE_MODES = [
         ['targets', 'Targets'],
         ['war', 'War'],
@@ -19761,10 +22460,21 @@
         });
     }
 
+    /**
+     * A column head you can sort by (round 8, the owner's pick A): a click sorts by it, a click again flips it; the way
+     * back to the default order is the bar's order line (targetChips).
+     */
+    function sortHead(key, sort, ctx) {
+        const col = SORT_KEYS[key];
+        const on = Boolean(sort) && sort.key === key;
+        return h('button', { type: 'button', class: 'sortb' + (on ? ' on' : '') + (on && sort.dir === -1 ? ' up' : ''), 'data-sort': key, title: 'Sort by ' + col.label, 'aria-label': 'Sort by ' + col.label + (on ? ' (' + col.words[sort.dir === 1 ? 0 : 1] + ')' : ''), onclick: () => { ctx.ui.eyeSort = nextSort(sort, key); ctx.ui.eyePage = 0; ctx.rerender(); } }, [col.label, h('i', { class: 'arr' })]);
+    }
+
     /** One page of targets (only these 20 are built). The numbers in the list's order: respect, HP kept, win. */
-    function targetsTable(rows, { now, ctx, checking }) {
-        const head = ['Band', 'Player', 'Lvl', 'Respect', 'HP kept', 'Win', 'Status', 'Active', 'From', '', ''];
-        const right = [2, 3, 4, 5, 7];
+    function targetsTable(rows, { now, ctx, checking, sort = null, hits = new Map() }) {
+        const head = ['Band', 'Player', 'Lvl', 'Respect', 'HP kept', 'Win', 'Status', 'Active', 'Last hit', 'From', '', ''];
+        const sortBy = { 0: 'band', 2: 'level', 3: 'respect', 4: 'keep', 5: 'win', 6: 'status', 8: 'hit' };
+        const right = [2, 3, 4, 5, 7, 8];
         const open = ctx.ui.eyeOpen;
         const down = (r) => {
             const s = rowState(r, now);
@@ -19785,6 +22495,8 @@
                 h('td', { class: 'r', text: r.forecast ? pct(r.forecast.pWin) : '—' }),
                 statusCell(r, now, checking),
                 h('td', { class: 'r muted', text: ago(r.lastAction, now) }),
+                // When you last attacked them, from your attacks as read (the last 100): none of them, "—".
+                h('td', { class: 'r' + (hits.get(Number(r.id)) ? '' : ' muted'), 'data-col': 'hit', title: hits.get(Number(r.id)) ? null : 'None of your last attacks read was on them.', text: lastHitText(hits.get(Number(r.id)), now) }),
                 h('td', { class: 'muted', text: sourceShort(r, now) }),
                 h('td', { class: 'r', style: 'width:40px' }, [starBtn(ctx, r)]),
                 h('td', { class: 'r' }, [
@@ -19803,7 +22515,7 @@
             return body;
         };
         return h('table', { class: 'tbl num eyelist' }, [
-            h('thead', {}, [h('tr', {}, head.map((x, i) => h('th', { class: [right.includes(i) ? 'r' : '', i === 3 ? 'key' : ''].filter(Boolean).join(' ') || null, style: i === 0 ? 'width:110px' : null, text: x })))]),
+            h('thead', {}, [h('tr', {}, head.map((x, i) => h('th', { class: [right.includes(i) ? 'r' : '', i === 3 && !sort ? 'key' : ''].filter(Boolean).join(' ') || null, style: i === 0 ? 'width:110px' : null, 'aria-sort': sort && sortBy[i] === sort.key ? (sort.dir === 1 ? 'descending' : 'ascending') : null }, sortBy[i] ? [sortHead(sortBy[i], sort, ctx)] : [x])))]),
             h('tbody', {}, rows.flatMap(rowOf)),
         ]);
     }
@@ -19821,8 +22533,18 @@
         return h('div', { class: 'eye-pager', role: 'navigation', 'aria-label': 'Pages' }, kids);
     }
 
+    /**
+     * The order line at the end of the bar. Sorted by a column (round 8, his pick A) it turns into the way back:
+     * "Sorted by HP kept, most first" and a Default order button.
+     */
+    function orderRule(ctx, sort) {
+        if (!sort) return h('span', { class: 'eye-rule', 'data-order': 'default' }, ['Order: ', h('b', { text: 'band' }), ' › ', h('b', { text: 'respect' }), ' › ', h('b', { text: 'HP kept' }), ' › ', h('b', { text: 'win' })]);
+        const col = SORT_KEYS[sort.key];
+        return h('span', { class: 'eye-rule sorted', 'data-order': sort.key }, [h('span', {}, ['Sorted by ', h('b', { text: col.label }), ', ' + col.words[sort.dir === 1 ? 0 : 1]]), h('button', { class: 'btn sm line', type: 'button', 'data-act': 'default-order', onclick: () => { ctx.ui.eyeSort = null; ctx.ui.eyePage = 0; ctx.rerender(); }, text: 'Default order' })]);
+    }
+
     /** The band chips and "Ready now" (Targets). */
-    function targetChips(ctx, f, list) {
+    function targetChips(ctx, f, list, sort = null) {
         const set = (k, v) => {
             ctx.ui.eyeFilters = { ...f, [k]: v };
             ctx.ui.eyePage = 0;
@@ -19834,15 +22556,28 @@
             BAND_CHIPS.map((b) => h('button', { type: 'button', class: 'eye-chip', 'aria-pressed': String(f.band === b), onclick: () => set('band', b) }, [b === 'all' ? null : h('i', { style: 'background:' + BAND_COLORS[b] }), CHIP_WORDS[b], h('span', { text: ' ' + list.counts[b] })])),
         );
         const ready = h('button', { type: 'button', class: 'eye-chip', 'data-act': 'ready', 'aria-pressed': String(f.ready), title: 'Hides hospital, abroad, traveling and jail (players you hit leave the list)', onclick: () => set('ready', !f.ready) }, ['Ready now', f.ready && list.hidden ? h('span', { text: ' · ' + list.hidden + ' hidden' }) : null]);
-        return [bands, h('div', { class: 'eye-chips' }, [ready]), h('span', { class: 'eye-rule' }, ['Order: ', h('b', { text: 'band' }), ' › ', h('b', { text: 'respect' }), ' › ', h('b', { text: 'HP kept' }), ' › ', h('b', { text: 'win' })])];
+        return [bands, h('div', { class: 'eye-chips' }, [ready]), orderRule(ctx, sort)];
+    }
+
+    /**
+     * A hospital row in a termed war (round 8): they med out, so it says when they are due back, or that you just hit
+     * them ("You hit 3m ago · med out due"), not a far-off clock.
+     */
+    function termedTd(w, hit, now) {
+        // In a span: the greyed row dims its cells, the clock stays amber (the mockup's look).
+        if (hit && hit.kind === 'hit') return h('td', { 'data-termed': 'hit' }, [h('span', { class: 'cdn', text: 'You hit ' + Math.max(1, Math.round((now - hit.at) / 60000)) + 'm ago · med out due' })]);
+        const until = w.until * 1000;
+        return h('td', { 'data-termed': 'hosp' }, [h('span', { class: 'cdn' }, until > now ? ['Hospital · ', cd(until, now), ' · back soon'] : ['Hospital · back soon'])]);
     }
 
     /** War and Watched rows share one layout: band edge, online dot, status with out-times and landings, win and HP kept. */
-    function memberRow(w, { now, ctx, first, extra = [], respect = true }) {
+    function memberRow(w, { now, ctx, first, extra = [], respect = true, termed = false, hits = null }) {
         const r = w.view || { band: 'none' };
         const m = w.m;
         const act = activityOf(m, now);
         const attackable = w.state === 'okay' || w.state === 'early';
+        // A termed war: a hospital row keeps its place, greyed, until they are out.
+        const medOut = termed && w.state === 'hospital';
         const cells = [
             edgeTd(r.band || 'none', [bandCell(r.band || 'none')]),
             h('td', {}, [dot(act.kind), h('a', { href: profileUrl(w.id), target: '_blank', rel: 'noopener' }, [h('b', { class: 'w', text: m.name || String(w.id) })])]),
@@ -19851,10 +22586,10 @@
             h('td', { class: 'r', text: r.forecast && r.forecast.keep !== null ? pct(r.forecast.keep) : '—' }),
         ];
         if (respect) cells.push(h('td', { class: 'r', text: r.respect ? r.respect.toFixed(2) : '—' }));
-        cells.push(statusTd(w.parts, now, ctx.settings), h('td', { class: 'muted', text: act.text }));
+        cells.push(medOut ? termedTd(w, hits ? hits.get(Number(w.id)) : null, now) : statusTd(w.parts, now, ctx.settings), h('td', { class: 'muted', text: act.text }));
         cells.push(...extra);
         cells.push(h('td', { class: 'r' }, [attackable || w.state === 'hospital' ? attackBtn(w.id, first && attackable, r.band === 'low') : null]));
-        return h('tr', { class: w.state === 'fallen' ? 'whatif' : null }, cells);
+        return h('tr', { class: w.state === 'fallen' || medOut ? 'whatif' : null, 'data-state': w.state }, cells);
     }
 
     function memberHead(cols, widths = {}) {
@@ -19862,10 +22597,10 @@
         return h('thead', {}, [h('tr', {}, cols.map((x, i) => h('th', { class: right.has(x) ? 'r' : null, style: i === 0 ? 'width:110px' : widths[x] || null, text: x })))]);
     }
 
-    function warTable(rows, { now, ctx }) {
+    function warTable(rows, { now, ctx, termed = false, hits = null }) {
         let first = true;
         const body = rows.map((w) => {
-            const tr = memberRow(w, { now, ctx, first, extra: [h('td', { class: 'r', style: 'width:40px' }, [starBtn(ctx, { id: w.id, name: w.m.name, level: w.m.level })])] });
+            const tr = memberRow(w, { now, ctx, first, termed, hits, extra: [h('td', { class: 'r', style: 'width:40px' }, [starBtn(ctx, { id: w.id, name: w.m.name, level: w.m.level })])] });
             if (w.state === 'okay' || w.state === 'early') first = false;
             return tr;
         });
@@ -19930,7 +22665,7 @@
     }
 
     /** Members (war or watched) with their view, state and status parts. */
-    function memberRows(members, e, { now, early = new Set(), flights = {}, war = false }) {
+    function memberRows(members, e, { now, early = new Set(), flights = {}, war = false, termed = false }) {
         const views = new Map((members || []).map((mm) => [Number(mm.id), e.view(Number(mm.id), { level: mm.level, name: mm.name, life: mm.life || null }, { war })]));
         const bands = {};
         const respect = {};
@@ -19945,7 +22680,7 @@
             }
         }
         // Within a band the one order: respect, then HP kept, then win.
-        return sortWar(members || [], { bands, respect, keep, win, early, nowS: Math.floor(now / 1000) }).map((r) => ({ ...r, view: views.get(r.id), parts: statusParts(r.m, { now, seenAt: flights[r.id] ? flights[r.id].at : null, early: r.state === 'early' }) }));
+        return sortWar(members || [], { bands, respect, keep, win, early, nowS: Math.floor(now / 1000), termed }).map((r) => ({ ...r, view: views.get(r.id), parts: statusParts(r.m, { now, seenAt: flights[r.id] ? flights[r.id].at : null, early: r.state === 'early' }) }));
     }
 
     function warControls(ctx, e) {
@@ -19980,35 +22715,93 @@
         ]);
     }
 
+    /**
+     * The chain counter in the chain mode card (round 8: "wire in the chain counters"): per chain the count, the time left
+     * on the 5:00 timer (amber under a minute) and the hits to the next bonus. Yours is read with your bars (about every
+     * 30 s; Torn's own page shows it live), the enemy's every 30 s while you are at war. Nothing read: it says so.
+     * @param {{mine: object|null, enemy: {fid, name, raw}|null}|null} chains - app-page.js chainsNow()
+     */
+    function chainCounter(chains, now = Date.now()) {
+        const sides = [{ who: 'Your faction', side: chainSide(chains ? chains.mine : null, now) }];
+        if (chains && chains.enemy) sides.push({ who: chains.enemy.name || 'Enemy faction', side: chainSide(chains.enemy.raw, now) });
+        return h(
+            'div',
+            { class: 'chainc', 'data-chain-counter': '1' },
+            sides.map(({ who, side }) => {
+                const timed = side.state === 'on' || side.state === 'cooldown';
+                const bonus = side.state === 'on' && side.next ? [h('b', { text: String(side.next.hits) }), chainBonusText(side).replace(/^\d+/, '')] : [chainBonusText(side)];
+                return h('div', { class: 'chainc-side', 'data-chain': side.state }, [
+                    h('span', { class: 'who', text: who }),
+                    h('span', { class: 'time' + (side.low ? ' low' : '') }, [timed ? cd(side.until, now) : '—']),
+                    h('b', { class: 'n', text: side.count === null ? '—' : fmtInt(side.count) }),
+                    h('span', { class: 'bonus' }, bonus),
+                ]);
+            }),
+        );
+    }
+
+    /**
+     * Chain mode (the owner, session 9): a card over "How sure", like war mode. A chain needs your energy, so chain mode
+     * stacks it: no training steps and no pings about energy or training until it is turned off, which recalibrates from
+     * your bars. It is the same one state as Home's "I'm stacking" (`m.stacking`). While it is on it carries the chain
+     * counter.
+     */
+    function chainModeCard(m, ctx) {
+        const st = (m && m.stacking) || null;
+        const busy = Boolean(m && m.planBusy);
+        return h('div', { 'data-chain-mode': st ? 'on' : 'off' }, [
+            sectionHead('Chain mode', meta([st ? 'on since ' + clock(st.since, ctx.settings) + ' · stacking' : 'off']), null, 'h3'),
+            // While it is on, the chain counter (round 8): your chain from your bars, the enemy's when you are at war.
+            st ? chainCounter(ctx.eye && ctx.eye.chains ? ctx.eye.chains() : null, Date.now()) : null,
+            h('p', { class: 'muted', style: 'margin:0 0 10px', text: st ? 'Your energy is kept for the chain: no training steps, and no Discord pings about energy or training. Ending it recalibrates from your bars.' : 'Chaining? Chain mode stacks your energy: no training steps, and no Discord pings about energy or training, until you end it.' }),
+            st
+                ? h('button', { class: 'btn primary', type: 'button', disabled: busy, onclick: () => ctx.resumeStacking && ctx.resumeStacking(), text: 'End chain mode · recalibrate' })
+                : h('button', { class: 'btn', type: 'button', disabled: busy, onclick: () => ctx.startStacking && ctx.startStacking(), text: 'Chain mode' }),
+        ]);
+    }
+
     function renderEye(m, ctx) {
         const e = ctx.eye;
         const now = Date.now();
         const ui = ctx.ui;
         const mode = eyeModeOf(ui);
         // Kept filters of older versions (sort, level range, the seven Show ticks) are ignored.
-        const f = eyeFilters(ui.eyeFilters);
+        let f = eyeFilters(ui.eyeFilters);
+        // War mode by itself (round 8): this war's answer to "Termed war / med-out deal?" sets the ticks, once per answer
+        // on this page (the ticks still work by hand after it).
+        const warNow = mode === 'war' && e.war ? e.war.state() : null;
+        const ask = (warNow && warNow.ask) || null;
+        const termed = ask && (ask.termed === true || ask.termed === false) ? ask.termed : null;
+        if (ask && termed !== null && ui.eyeWarSet !== ask.key + ':' + termed) {
+            ui.eyeWarSet = ask.key + ':' + termed;
+            ui.eyeFilters = { ...f, ...termedFilters(termed) };
+            f = eyeFilters(ui.eyeFilters);
+        }
         const reload = () => e.load({ ...TARGET_LOAD });
         const watch = e.watch ? e.watch.state() : { list: [], states: {}, flights: {}, offers: [] };
         const stored = e.stored ? e.stored() : null;
         const rowsAll = mode === 'targets' ? e.rows() : [];
         const list = mode === 'targets' ? listTargets(rowsAll, { band: f.band, ready: f.ready, now }) : null;
+        // Sorted by a column (round 8): the whole list, before it is cut into pages; null is the default order.
+        const sort = sortOf(ui.eyeSort);
+        const hits = mode === 'targets' ? lastHits(e.attacks ? e.attacks() : []) : new Map();
 
         // Controls
         const modeSeg = h('div', { class: 'seg modes', role: 'group', 'aria-label': 'Mode' }, EYE_MODES.map(([k, label]) => h('button', { type: 'button', 'aria-pressed': String(k === mode), onclick: () => { ui.eyeMode = k; ctx.rerender(); }, text: k === 'watched' && watch.list.length ? label + ' ' + watch.list.length : label })));
         const bar1 = [modeSeg];
         if (mode === 'war' && e.war) bar1.push(...warControls(ctx, e));
         if (mode === 'targets') {
-            bar1.push(...targetChips(ctx, f, list));
-        } else if (mode === 'war') {
-            bar1.push(h('span', { class: 'muted', text: 'attackable now first, then out of hospital soonest' }));
-        } else {
+            bar1.push(...targetChips(ctx, f, list, sort));
+        } else if (mode !== 'war') {
             bar1.push(h('span', { class: 'sep' }), h('span', { class: 'muted', text: watch.list.length + ' of ' + WATCH_MAX + ' · read every 60 s while this is open' }));
         }
         const bar2 =
             mode === 'war'
                 ? [
                       t('lab', 'Show'),
-                      h('div', { class: 'ticks', role: 'group', 'aria-label': 'Show' }, EYE_TICKS.map(([k, label]) => h('button', { type: 'button', class: 'tk', 'aria-pressed': String(Boolean(f[k])), onclick: () => { ui.eyeFilters = { ...f, [k]: !f[k] }; ctx.rerender(); } }, [h('i'), label]))),
+                      // The ticks the answer set have a soft ring.
+                      h('div', { class: 'ticks', role: 'group', 'aria-label': 'Show' }, EYE_TICKS.map(([k, label]) => h('button', { type: 'button', class: 'tk' + (termed !== null && k in termedFilters(termed) ? ' set' : ''), 'data-tick': k, 'aria-pressed': String(Boolean(f[k])), onclick: () => { ui.eyeFilters = { ...f, [k]: !f[k] }; ctx.rerender(); } }, [h('i'), label]))),
+                      h('span', { class: 'eye-rule', 'data-war-order': termed === true ? 'termed' : 'ready' }, termed === true ? [h('b', { text: 'Stomp' }), ', then ', h('b', { text: 'respect' }), ' · hospital keeps its place'] : ['ready first, then out of hospital soonest']),
                   ]
                 : [];
 
@@ -20029,11 +22822,14 @@
         const heads = headsUps(watch.list, watch.states, watch.flights, now);
 
         if (mode === 'war') {
-            const w = e.war ? e.war.state() : { members: [], enemies: [] };
-            let rows = memberRows(w.members || [], e, { now, early: w.early || new Set(), flights: watch.flights, war: true });
-            rows = rows.filter((r) => !(f.warHideLow && r.band === 'low') && !(f.warHideHosp && r.state === 'hospital') && !(f.warHideTravel && (r.state === 'traveling' || r.state === 'abroad')));
-            const sum = warSummary(rows, Math.floor(now / 1000));
-            const fallen = rows.filter((r) => r.state === 'fallen').length;
+            const w = warNow || { members: [], enemies: [] };
+            const everyone = memberRows(w.members || [], e, { now, early: w.early || new Set(), flights: watch.flights, war: true, termed: termed === true });
+            const away = (r) => r.state === 'traveling' || r.state === 'abroad';
+            const rows = everyone.filter((r) => !(f.warHideLow && r.band === 'low') && !(f.warHideHosp && r.state === 'hospital') && !(f.warHideTravel && away(r)));
+            // The war list as it shows: the attack page's Next button walks it ("Next enemy").
+            if (e.shown && w.fid && (w.members || []).length) e.shown('war', rows);
+            const sum = warSummary(everyone, Math.floor(now / 1000));
+            const fallen = everyone.filter((r) => r.state === 'fallen').length;
             const empty = w.fid
                 ? w.loading && !rows.length
                     ? 'Reading the faction…'
@@ -20043,16 +22839,50 @@
                   : w.warsLoading
                     ? 'Looking for your faction’s wars…'
                     : 'Your faction isn’t at war right now. Type a faction’s id to watch it anyway.';
+            // Your faction's own war (round 8): war mode turned itself on, the question once per war, then the answer in a line.
+            const answer = (v) => () => {
+                if (v === null) ui.eyeWarSet = null;
+                e.war.termed(v);
+            };
+            const began = ask && ask.start && Math.abs(ask.autoAt - ask.start * 1000) < 15 * 60000;
+            const autoMeta = ask ? 'War mode turned itself on at ' + clock(ask.autoAt, ctx.settings) + (began ? ', when your faction’s ' + WAR_KIND_WORDS[ask.kind] + ' began' : ': your faction is in a ' + WAR_KIND_WORDS[ask.kind]) : null;
+            const askCard =
+                ask && termed === null
+                    ? h('div', { class: 'ask', 'data-war-ask': 'ask' }, [
+                          h('div', {}, [h('b', { text: 'Termed war / med-out deal?' }), h('span', { text: 'You hit, they med out, you hit again. Your answer sets this war’s filters. Asked once per war.' })]),
+                          h('div', { class: 'acts' }, [h('button', { class: 'btn primary', type: 'button', 'data-termed': 'yes', onclick: answer(true), text: 'Yes' }), h('button', { class: 'btn', type: 'button', 'data-termed': 'no', onclick: answer(false), text: 'No' })]),
+                      ])
+                    : ask
+                      ? h('div', { class: 'answ', 'data-war-ask': termed ? 'yes' : 'no' }, [h('i'), h('span', { text: TERMED_WORDS[termed ? 'yes' : 'no'] }), h('button', { class: 'lnk', type: 'button', 'data-termed': 'change', onclick: answer(null), text: 'Change' })])
+                      : null;
+            // What the ticks hide right now, said under the list (by your answer, or by your own ticks after it).
+            let hiddenNote = null;
+            if (ask) {
+                const hosp = f.warHideHosp ? everyone.filter((r) => r.state === 'hospital') : [];
+                const gone = f.warHideTravel ? everyone.filter(away) : [];
+                const outs = hosp.map((r) => r.until * 1000).filter((t) => t > now);
+                const parts = [];
+                if (hosp.length) parts.push(h('span', {}, [hosp.length + ' in hospital', ...(outs.length ? [' (next out in ', cd(Math.min(...outs), now), ')'] : [])]));
+                if (gone.length) parts.push(h('span', { text: gone.length + ' away' }));
+                const sets = termed !== null ? termedFilters(termed) : null;
+                const byAnswer = Boolean(sets) && f.warHideHosp === sets.warHideHosp && f.warHideTravel === sets.warHideTravel;
+                const kids = termed === null ? ['Not answered yet: the list is as it is today' + (parts.length || f.warHideLow ? '.' : ', everyone shown.')] : parts.length ? [byAnswer ? 'Hidden by your answer: ' : 'Hidden by your ticks: ', ...parts.flatMap((p, i) => (i ? [' · ', p] : [p])), '.'] : [byAnswer ? 'Nobody is hidden by your answer right now.' : 'Nobody is hidden right now.'];
+                if (termed === true && !f.warHideHosp) kids.push(' Hospital rows stay: they med out.');
+                hiddenNote = h('div', { class: 'note2', 'data-war-hidden': '1' }, kids);
+            }
             main.push(
                 h('div', { class: 'lead', 'data-mode': 'war' }, [
-                    sectionHead('War' + (w.name ? ' · ' + w.name : ''), meta(['everyone, coloured by how the fight goes for you · attackable now first, then who’s out soonest' + (w.fid ? ' · read every 10 s while open' : '')])),
+                    sectionHead('War' + (w.name ? ' · ' + w.name : ''), meta([(autoMeta || 'everyone, coloured by how the fight goes for you · attackable now first, then who’s out soonest') + (w.fid ? ' · read every 10 s while open' : '')])),
+                    askCard,
                     w.error && rows.length ? h('div', { class: 'why', style: 'margin-bottom:8px', text: 'Couldn’t read the faction just now: ' + w.error }) : null,
-                    rows.length ? warTable(rows, { now, ctx }) : h('p', { class: 'muted', style: 'margin:0', text: empty }),
+                    rows.length ? warTable(rows, { now, ctx, termed: termed === true, hits: termed === true && e.hits ? e.hits() : null }) : h('p', { class: 'muted', style: 'margin:0', text: empty }),
+                    hiddenNote,
                     h('div', { class: 'note2', text: 'War shows everyone, even under 50% HP kept (red: the colour tells you the risk) and the fallen (greyed, at the bottom). Landing times are estimated from when we first saw them fly and the standard flight time.' }),
                 ]),
             );
-            const outs = rows.filter((r) => r.state === 'hospital').slice(0, 5);
-            const lands = rows.filter((r) => r.state === 'traveling' && r.parts.at).sort((a, b) => a.parts.at - b.parts.at).slice(0, 3);
+            // The side pane counts everyone, whatever the ticks hide (a real war hides hospital rows; who is out next stays here).
+            const outs = everyone.filter((r) => r.state === 'hospital').sort((a, b) => (a.until || Infinity) - (b.until || Infinity)).slice(0, 5);
+            const lands = everyone.filter((r) => r.state === 'traveling' && r.parts.at).sort((a, b) => a.parts.at - b.parts.at).slice(0, 3);
             pane.push(
                 h('div', {}, [
                     sectionHead('Next out of hospital', null, null, 'h3'),
@@ -20062,7 +22892,7 @@
                               ...lands.flatMap((r) => [h('dt', { text: '~' + clock(r.parts.at, ctx.settings) }), h('dd', { text: (r.m.name || r.id) + ' lands' })]),
                           ])
                         : h('p', { class: 'muted', style: 'margin:0', text: 'Nobody in hospital.' }),
-                    h('div', { class: 'note2', text: sum.attackable + ' attackable now · ' + rows.filter((r) => r.state === 'hospital' && r.until * 1000 - now < 5 * 60000).length + ' out within 5 min · ' + (sum.traveling + rows.filter((r) => r.state === 'abroad').length) + ' traveling or abroad · ' + rows.filter((r) => r.band === 'low').length + ' under 50%' + (fallen ? ' · ' + fallen + ' fallen' : '') }),
+                    h('div', { class: 'note2', text: sum.attackable + ' attackable now · ' + everyone.filter((r) => r.state === 'hospital' && r.until * 1000 - now < 5 * 60000).length + ' out within 5 min · ' + everyone.filter(away).length + ' traveling or abroad · ' + everyone.filter((r) => r.band === 'low').length + ' under 50%' + (fallen ? ' · ' + fallen + ' fallen' : '') }),
                 ]),
             );
             if (heads.length) pane.push(headsUpBlock(heads, now, ctx.settings));
@@ -20101,7 +22931,9 @@
             main.push(h('div', { class: 'lead', 'data-mode': 'watched' }, kids));
             pane.push(heads.length ? headsUpBlock(heads, now, ctx.settings) : h('div', {}, [sectionHead('Heads-up', meta(['watched players']), null, 'h3'), h('p', { class: 'muted', style: 'margin:0', text: 'Nothing coming up in the next 3 minutes.' })]));
         } else {
-            const rows = list.rows;
+            const rows = sort ? sortTargets(list.rows, sort, { now, hits }) : list.rows;
+            // The list as it shows, in its order: the attack page's Next button walks it (round 8).
+            if (e.shown && stored && Array.isArray(stored.list)) e.shown('targets', rows);
             const pg = pageOf(rows, ui.eyePage || 0);
             if ((ui.eyePage || 0) !== pg.page) ui.eyePage = pg.page;
             const statuses = e.statuses || null;
@@ -20120,7 +22952,7 @@
             else if (!rows.length) {
                 const text = msg.kind !== 'none' ? msg.text : list.counts.all ? (f.ready && list.hidden ? 'Nobody ready now: ' + list.hidden + ' hidden (hospital, away or jail).' : 'Nobody in this band.') : 'No targets yet.';
                 body = h('p', { class: msg.kind === 'dead' || msg.kind === 'error' ? 'c-bad' : 'muted', style: 'margin:0' }, [text, msg.kind === 'dead' ? h('span', {}, [' · ', h('a', { href: '#settings', onclick: (ev) => { ev.preventDefault(); ctx.go('settings'); }, text: 'check it in Settings' })]) : null]);
-            } else body = targetsTable(pg.rows, { now, ctx, checking });
+            } else body = targetsTable(pg.rows, { now, ctx, checking, sort, hits });
             const notes = [];
             const d = (stored && stored.dropped) || {};
             if (stored && stored.list && stored.list.length) {
@@ -20149,6 +22981,7 @@
             if (heads.length) pane.push(headsUpBlock(heads, now, ctx.settings));
         }
 
+        pane.push(chainModeCard(m, ctx));
         const src = e.sources();
         pane.push(
             h('div', {}, [
@@ -20189,11 +23022,25 @@
 
     const WEAPON_SLOTS = ['1', '2', '3'];
     const ARMOUR_SLOTS = ['4', '6', '7', '8', '9'];
+    const TEMP_SLOT = '5';
     const DAMAGE_BONUSES = /^(Powerful|Specialist|Empower|Deadeye)$/i;
 
     function numOr(v, d = 0) {
         const n = Number(v);
         return Number.isFinite(n) ? n : d;
+    }
+
+    /**
+     * Is the fight over? Either side's life at 0, or Torn's attackStatus saying so [check live: its word once a fight has
+     * ended is in no source read; "end" and the like are guesses]. Any other word: not over (the Next button then just
+     * does not glow; it works all the same).
+     */
+    function fightOver(db) {
+        if (!db || typeof db !== 'object') return false;
+        const life = db.usersLife || {};
+        const zero = (side) => Boolean(side) && side.currentLife !== undefined && side.currentLife !== null && Number(side.currentLife) <= 0;
+        if (zero(life.attacker) || zero(life.defender)) return true;
+        return /^(end|ended|finished|over|won|lost|stalemate|timeout|escaped?)$/i.test(String(db.attackStatus || ''));
     }
 
     /** The attackData JSON (with or without the DB wrapper) → the defender's side. */
@@ -20219,6 +23066,9 @@
             }
         }
         const real = items.filter((i) => Number(i.slot) >= 1 && Number(i.slot) <= 9 && i.armouryId && i.armouryId !== '0');
+        const visible = real.length > 0 || db.showEnemyItems === true;
+        // Their temporary (slot 5) has no copy id of its own: kept, for the fight card, once their gear shows.
+        const temps = visible ? items.filter((i) => i.slot === TEMP_SLOT && i.name && !real.includes(i)) : [];
         return {
             defenderId: numOr(du.userID, null),
             defenderName: du.playername || null,
@@ -20226,9 +23076,32 @@
             maxLife: numOr(du.maxlife ?? (db.usersLife && db.usersLife.defender && db.usersLife.defender.maxLife), null),
             attackerId: db.attackerUser ? numOr(db.attackerUser.userID, null) : null,
             status: db.attackStatus || null,
-            visible: real.length > 0 || db.showEnemyItems === true,
-            items: real,
+            over: fightOver(db),
+            visible,
+            items: real.concat(temps).sort((a, b) => Number(a.slot) - Number(b.slot)),
         };
+    }
+
+    /** Is this the same gear (the same copies in the same slots, with the same numbers)? */
+    function sameGear(a, b) {
+        const sig = (list) => (list || []).map((i) => [i.slot, i.id, i.armouryId, i.dmg, i.acc, i.armour].join(':')).sort().join('|');
+        return sig(a) === sig(b);
+    }
+
+    /**
+     * Two copies of the stored gear ({playerId: {items, seenAt}}) as one: per player the one seen last. Round 8 (B.6):
+     * each Torn tab wrote its own whole copy, so a tab that loaded before a fight wiped the gear that fight saved.
+     * @param {number} [clearedAt] - a Clear on either site (ms): gear seen before it is left out
+     */
+    function mergeGear(a, b, clearedAt = 0) {
+        const out = {};
+        for (const src of [a, b]) {
+            for (const [id, rec] of Object.entries(src || {})) {
+                if (!rec || !Array.isArray(rec.items) || (Number(rec.seenAt) || 0) < clearedAt) continue;
+                if (!out[id] || (Number(out[id].seenAt) || 0) < (Number(rec.seenAt) || 0)) out[id] = rec;
+            }
+        }
+        return out;
     }
 
     /** What the sim uses from a set of items: {dmg, acc, armour, dmgBonus, text}. */
@@ -20259,6 +23132,39 @@
             bonuses: (e.bonuses || []).map((b) => ({ title: String(b.title || ''), value: numOr(b.value) })),
         }));
         return gearSummary(items) || DEFAULT_GEAR;
+    }
+
+    /* ------------------------------------------------ round 8: the loadout on the fight card (torn-eye.html §5, his pick B) */
+
+    const GEAR_SLOT_WORDS = { 1: 'Primary', 2: 'Secondary', 3: 'Melee', 5: 'Temporary' };
+
+    /**
+     * The fight card's two lists from the stored items: weapons (primary, secondary, melee, temporary) and armour (head
+     * to foot), each piece with its own numbers. A number Torn did not give is null (shown empty, never made up).
+     * @returns {{weapons: {name, sub, dmg, acc}[], armour: {name, sub, armour}[]}}
+     */
+    function gearRows(items) {
+        const list = items || [];
+        const by = (order) => order.flatMap((s) => list.filter((i) => String(i.slot) === s));
+        const bonus = (i) => (i.bonuses || []).filter((b) => b && b.title).map((b) => b.title + (b.value ? ' ' + b.value + '%' : '')).join(', ');
+        const num = (v) => (Number(v) > 0 ? Number(v) : null);
+        return {
+            weapons: by([...WEAPON_SLOTS, TEMP_SLOT]).map((i) => ({ name: i.name, sub: [GEAR_SLOT_WORDS[i.slot], bonus(i)].filter(Boolean).join(' · '), dmg: i.slot === TEMP_SLOT ? null : num(i.dmg), acc: i.slot === TEMP_SLOT ? null : num(i.acc) })),
+            armour: by(['6', '4', '7', '9', '8']).map((i) => ({ name: i.name, sub: bonus(i), armour: num(i.armour) })),
+        };
+    }
+
+    /** "The fight counts their best weapon (68.2 damage, 57.4 accuracy, +24%) and their armour on average (45.3)." */
+    function gearCountedText(items) {
+        const g = gearSummary(items);
+        if (!g) return '';
+        const list = items || [];
+        const one = (v) => (Math.round(v * 10) / 10).toFixed(1);
+        const hasWeapon = list.some((i) => WEAPON_SLOTS.includes(String(i.slot)) && i.dmg > 0);
+        const hasArmour = list.some((i) => ARMOUR_SLOTS.includes(String(i.slot)) && i.armour > 0);
+        const weapon = hasWeapon ? 'their best weapon (' + one(g.dmg) + ' damage, ' + one(g.acc) + ' accuracy' + (g.dmgBonus ? ', +' + g.dmgBonus + '%' : '') + ')' : 'a usual weapon (none was seen)';
+        const armour = hasArmour ? 'their armour on average (' + one(g.armour) + ')' : 'a usual armour (no armour value was seen)';
+        return 'The fight counts ' + weapon + ' and ' + armour + '.';
     }
 
     /* ===== src/eye-service.js ===== */
@@ -20303,6 +23209,12 @@
     const FLIGHTS_KEY = 'eyeFlights';
     /** GM storage: the bands the Torn Eye tab's war mode worked out (warBandTable in core/eye/war.js), for Torn's war page. */
     const WAR_BANDS_KEY = 'eyeWarBands';
+    /** GM storage: the war that turned war mode on by itself and the answer to "Termed war / med-out deal?" (core/eye/war.js warAskNext). */
+    const WAR_ASK_KEY = 'eyeWarAsk';
+    /** GM storage: the enemy's chain as the Torn Eye tab last read it ({at, fid, name, current, max, until, cooldownUntil}), for the chain counter on Torn's pages. */
+    const EYE_CHAIN_KEY = 'eyeChain';
+    /** GM storage: the list the Torn Eye tab shows, in its order (core/eye/targets.js nextTable), for the attack page's Next button. */
+    const EYE_NEXT_KEY = 'eyeNext';
 
     const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(), timer: null, listeners: [], mem: new Map(), fc: new Map(), flushing: null, again: false, todo: new Map(), working: false, idling: false, side: null };
 
@@ -20357,7 +23269,13 @@
             for (const id of ids.slice(0, ids.length - 3000)) delete c.players[id];
         }
         c.savedAt = Date.now();
-        idbSet('eye', c).catch(() => {});
+        // Read, merge, write in one transaction (round 8, B.6): each Torn tab holds its own copy, and a plain put of this
+        // one wiped the gear another tab's fight had saved since it loaded. The gear seen last per player is kept.
+        const clearedAt = Number(get('eyeClearAt', 0)) || 0;
+        idbUpdate('eye', (prev) => {
+            c.gear = mergeGear(prev && !((prev.savedAt || 0) < clearedAt) ? prev.gear : null, c.gear, clearedAt);
+            return c;
+        }).catch(() => {});
     }
 
     function saveSoon() {
@@ -20418,14 +23336,33 @@
         }
     }
 
-    /** Remember a player's gear from the attack page. */
+    /** The same gear answered again (Torn answers after every hit) is kept as it is for this long. */
+    const GEAR_RESAVE_MS = 60 * 1000;
+
+    /**
+     * Remember a player's gear from the attack page. Round 8 (B.6, "why theirs isn't stored"): it waited 1.5 s after the
+     * last answer for the whole cache's write, the wait started again with every hit, and leaving the page inside it (the
+     * next target) dropped it. It is now written at once and by itself, onto what is stored (never this tab's old copy).
+     * @returns {Promise<boolean>} whether it was new (or seen again after GEAR_RESAVE_MS)
+     */
     async function saveGear(playerId, items) {
         const c = await cache();
-        c.gear[playerId] = { items, seenAt: Date.now() };
+        const now = Date.now();
+        const had = c.gear[playerId];
+        if (had && now - had.seenAt < GEAR_RESAVE_MS && sameGear(had.items, items)) return false;
+        const rec = { items, seenAt: now };
+        c.gear[playerId] = rec;
+        const clearedAt = Number(get('eyeClearAt', 0)) || 0;
+        idbUpdate('eye', (prev) => {
+            const kept = prev && prev.players && !((prev.savedAt || 0) < clearedAt) ? prev : { players: {}, gear: {} };
+            kept.gear = mergeGear(kept.gear, { [playerId]: rec }, clearedAt);
+            kept.savedAt = now;
+            return kept;
+        }).catch(() => {});
         // The count is shared (GM storage) so the webpage can show it; the gear itself stays with Torn's pages.
         set('eyeGearCount', Object.keys(c.gear).length);
-        saveSoon();
         notify();
+        return true;
     }
 
     async function gearCount() {
@@ -20441,7 +23378,7 @@
         await idbSet('eye', eye.cache).catch(() => {});
         set('myAttacks', null);
         pageSet(TARGETS_KEY, null);
-        for (const k of [WATCH_KEY, 'eyeWarAuto', WAR_BANDS_KEY]) set(k, null);
+        for (const k of [WATCH_KEY, 'eyeWarAuto', WAR_BANDS_KEY, WAR_ASK_KEY, EYE_CHAIN_KEY, EYE_NEXT_KEY]) set(k, null);
         pageSet(WATCH_STATE_KEY, null);
         pageSet(FLIGHTS_KEY, null);
         statusRun.map = {};
@@ -20762,7 +23699,8 @@
             forecast: main,
             plain: f,
             withGear: fGear,
-            gear: gearRec ? { text: gThem ? gThem.text : '', seenAt: gearRec.seenAt } : null,
+            // `items`: each piece as the attack page gave it (the fight card lists them, round 8).
+            gear: gearRec ? { text: gThem ? gThem.text : '', seenAt: gearRec.seenAt, items: gearRec.items || [] } : null,
             band,
             respect,
             ours: ff,
@@ -21318,11 +24256,17 @@
 
 
 
-
-    /** How often the money log is read, how far back, and how many categories at most (one call each). */
+    /** How often the money log is read and how far back. */
     const MONEY_LOG_EVERY_MS = 6 * 60 * 60 * 1000;
     const MONEY_LOG_DAYS = 30;
-    const MONEY_LOG_MAX_CATS = 8;
+    /** Torn's log categories that hold every line that moved your wallet (ids from /torn/logcategories). */
+    const MONEY_LOG_CATS = [
+        { id: 17, title: 'Money incoming' },
+        { id: 14, title: 'Money outgoing' },
+    ];
+    /** The stored row's shape: 2 = lines as Torn gave them, each once (round 7, R7.5). */
+    const MONEY_LOG_V = 2;
+    const MONEY_LOG_MAX_LINES = 3000;
 
     /** Save and check the Full key (Settings). */
     async function saveFullKey(v) {
@@ -21343,7 +24287,7 @@
             // Another key may be another account: its gym log starts fresh.
             pageSet(K.gymLog, null);
             refreshMoneyLog({ force: true }).catch(() => {});
-            return { ok: true, text: getPlan().pickBy === 'auto' ? 'Saved · Full key. Auto mode is on.' : 'Saved · Full key. Pick Auto (from your income) on Plan to use it.' };
+            return { ok: true, text: getPlan().pickBy === 'auto' ? 'Saved · Full key. Auto mode is on.' : 'Saved · Full key. Pick Auto (from your books) on Plan to use it.' };
         } catch (error) {
             set(K.fullKeyState, { ok: false, error: String((error && error.message) || error), at: Date.now() });
             return { ok: false, text: String((error && error.message) || error) };
@@ -21398,22 +24342,24 @@
     }
 
     /**
-     * Read the money log (Full key), at most every 6 hours: the log categories
-     * about money (Torn's own list, read with the main key), 30 days back.
+     * Read the money log (Full key), at most every 6 hours: Torn's "Money
+     * incoming" and "Money outgoing" (every line that moved your wallet), 30
+     * days back, each line once. Round 7 (R7.5): the stored row keeps the lines
+     * as Torn gave them (log id, log type id, time, data) for the ledger
+     * (core/ledger.js); a row from before that is read again once.
      */
     async function refreshMoneyLog({ force = false, now = Date.now() } = {}) {
         const st = get(K.fullKeyState, {}) || {};
         if (!getKey(K.fullKey) || !st.ok || st.dead || isPaused()) return null;
         const prev = pageGet(K.moneyLog, null);
-        if (!force && prev && now - prev.at < MONEY_LOG_EVERY_MS) return prev;
-        const cats = (await fetchLogCategories(tornClient())).filter((c) => MONEY_LOG_CATEGORY.test(String(c.title || ''))).slice(0, MONEY_LOG_MAX_CATS);
-        const log = await fetchMoneyLog(fullKeyClient(), { from: Math.floor(now / 1000) - MONEY_LOG_DAYS * 86400, categories: cats });
-        // Only what the breakdown needs (title, amount, time), newest 1,500.
-        // Only the lines from when every category is complete count (a busy category's page may not reach back 30 days).
-        const since = log.coveredFrom || now - MONEY_LOG_DAYS * 86400e3;
-        const kept = log.filter((e) => e.at >= since);
-        // `fields` (round 7, C.0): the log by type with its data field names, for Settings › Developer and the report zip.
-        const row = { at: now, days: Math.max(1, (now - since) / 86400e3), cats: cats.map((c) => c.title), log: kept.slice(0, 1500).map((e) => ({ at: e.at, title: e.title, money: e.money })), fields: log.fields || [] };
+        if (!force && prev && prev.v === MONEY_LOG_V && now - prev.at < MONEY_LOG_EVERY_MS) return prev;
+        const from = Math.floor(now / 1000) - MONEY_LOG_DAYS * 86400;
+        const log = await fetchMoneyLog(fullKeyClient(), { from, categories: MONEY_LOG_CATS });
+        // Only the days every category is complete for count (a very busy log may not reach back 30 days in its pages).
+        const since = log.coveredFrom || from * 1000;
+        const lines = log.filter((e) => e.at >= since).slice(0, MONEY_LOG_MAX_LINES);
+        // `fields` (C.0): the log by type with its data field names, for Settings › Developer and the report zip.
+        const row = { v: MONEY_LOG_V, at: now, from: since, days: Math.max(1, (now - since) / 86400e3), cats: MONEY_LOG_CATS.map((c) => c.title), lines, fields: log.fields || [] };
         pageSet(K.moneyLog, row);
         return row;
     }
@@ -21487,11 +24433,15 @@
 
 
 
+
+
+
+
     /** What Settings shows about the Full key (never the key itself). */
     function fullKeyView() {
         const st = get(K.fullKeyState, null) || {};
         const ml = pageGet(K.moneyLog, null);
-        return { has: Boolean(getKey(K.fullKey)), ok: Boolean(st.ok && !st.dead), error: st.error || null, logAt: ml ? ml.at : null, logLines: ml && ml.log ? ml.log.length : 0 };
+        return { has: Boolean(getKey(K.fullKey)), ok: Boolean(st.ok && !st.dead), error: st.error || null, logAt: ml ? ml.at : null, logLines: ml && ml.lines ? ml.lines.length : 0 };
     }
 
     /** How long fetched prices count as fresh. */
@@ -21743,6 +24693,33 @@
         return ki.factionId || null;
     }
 
+    /** Your faction's own war that War mode shows now (null for a faction typed in, or no war). */
+    function warEnemyNow() {
+        if (war.manual) return null;
+        const fid = warFid();
+        return war.enemies.find((x) => x.id === fid) || null;
+    }
+
+    /**
+     * War mode by itself (round 8, the owner's pick A): a war that has begun and was not seen before is noted (its key,
+     * when it was seen, no answer yet), and the Torn Eye tab opens on War: at a new war, and on a page load that has not
+     * picked a view yet. A view you pick stays.
+     */
+    function warModeCheck(now = Date.now()) {
+        const enemy = warEnemyNow();
+        const next = warAskNext(get(WAR_ASK_KEY, null), enemy, now);
+        if (next.fresh) set(WAR_ASK_KEY, next.rec);
+        if (page.app && warBegun(enemy, Math.floor(now / 1000)) && (next.fresh || page.app.ui.eyeMode === undefined)) page.app.ui.eyeMode = 'war';
+        return next.fresh;
+    }
+
+    /** This war's record (the answer to the termed-war question), or null when War mode shows no war of your own. */
+    function warAskNow() {
+        const enemy = warEnemyNow();
+        const kept = get(WAR_ASK_KEY, null);
+        return enemy && kept && kept.key === warKeyOf(enemy) ? { ...kept, kind: enemy.kind, start: enemy.start } : null;
+    }
+
     async function pollOwnWars(force = false) {
         if (war.warsLoading || !isVisible() || isPaused() || !getKey(K.apiKey) || get(K.apiKeyDead, false)) return;
         const mine = myFactionId();
@@ -21760,6 +24737,7 @@
             war.warsLoading = false;
             war.warsAt = Date.now();
         }
+        warModeCheck();
         if (page.app) page.app.render(true);
     }
 
@@ -21795,6 +24773,45 @@
     function warName(fid) {
         const e = war.enemies.find((x) => x.id === fid);
         return e && e.name ? e.name : null;
+    }
+
+    /** The enemy's chain is read this often while the War view shows or chain mode is on (one small call). */
+    const ENEMY_CHAIN_POLL_MS = 30 * 1000;
+
+    const enemyChain = { fid: null, raw: null, at: 0, loading: false };
+
+    /**
+     * The chain counter's other side (round 8): the enemy faction's chain, read while the War view shows or chain mode is
+     * on, and left in shared storage for Torn's own pages (they ask nothing for a war). Yours comes with your bars.
+     */
+    async function pollEnemyChain() {
+        const fid = warFid();
+        const viewing = page.app && page.app.tab === 'eye' && (page.app.ui.eyeMode || 'targets') === 'war';
+        const chaining = Boolean(pi.model && pi.model.ready && pi.model.stacking);
+        if (!fid || enemyChain.loading || !(viewing || chaining) || !isVisible() || isPaused() || !getKey(K.apiKey) || get(K.apiKeyDead, false)) return;
+        if (enemyChain.fid === fid && Date.now() - enemyChain.at < ENEMY_CHAIN_POLL_MS) return;
+        enemyChain.loading = true;
+        try {
+            const c = await fetchFactionChain(tornClient(), fid);
+            const at = Date.now();
+            enemyChain.raw = chainFromApi(c, at);
+            enemyChain.fid = fid;
+            if (enemyChain.raw) set(EYE_CHAIN_KEY, { ...enemyChain.raw, fid, name: warName(fid) || (war.membersFid === fid ? war.name : null) || null });
+        } catch {
+            // Asked again in 30 s; the counter says "Not read yet" once the last read is old.
+        } finally {
+            enemyChain.loading = false;
+            enemyChain.at = Date.now();
+        }
+        if (page.app && page.app.tab === 'eye') page.app.render(true);
+    }
+
+    /** Both chains for the Torn Eye tab's chain mode card: yours from your bars, theirs from the last read (null: none). */
+    function chainsNow(now = Date.now()) {
+        const m = pi.model;
+        const fid = warFid();
+        const theirs = fid && enemyChain.fid === fid ? sharedChain(enemyChain.raw, now) : null;
+        return { mine: m && m.ready && m.state ? m.state.chain || null : null, enemy: fid ? { fid, name: warName(fid), raw: theirs } : null };
     }
 
     /** The watch list as stored, read once per draw (a list's 300 stars each asked for a copy of it). */
@@ -21940,6 +24957,32 @@
         set(WAR_BANDS_KEY, table);
     }
 
+    /*
+     * The Next button on Torn's attack page (round 8, the owner's pick A): the list the Torn Eye tab shows (Targets in
+     * its order and filters, or the war list) is handed over in shared storage as a small table, the first 40 rows. It is
+     * written when it changes, at most every 5 s, and again after 10 minutes so its age stays true.
+     */
+    const nextShare = { sig: '', at: 0, timer: null, table: null };
+    const NEXT_SHARE_GAP_MS = 5000;
+    const NEXT_SHARE_REWRITE_MS = 10 * 60 * 1000;
+
+    function shareNext(mode, rows) {
+        // The newest list always replaces the one waiting to be written (a sort undone inside the 5 s must not be written).
+        nextShare.table = nextTable(mode, rows, Date.now());
+        const same = () => nextTableSig(nextShare.table) === nextShare.sig && Date.now() - nextShare.at < NEXT_SHARE_REWRITE_MS;
+        if (nextShare.timer || same()) return;
+        const write = () => {
+            nextShare.timer = null;
+            if (same()) return;
+            nextShare.sig = nextTableSig(nextShare.table);
+            nextShare.at = Date.now();
+            set(EYE_NEXT_KEY, { ...nextShare.table, at: nextShare.at });
+        };
+        const wait = NEXT_SHARE_GAP_MS - (Date.now() - nextShare.at);
+        if (wait <= 0) write();
+        else nextShare.timer = setTimeout(write, wait);
+    }
+
     /** Settings the report carries: the switches and limits, never a key, a faction or a player id. */
     const REPORT_SETTINGS = ['timeFormat', 'pill', 'gymMarks', 'marketMarks', 'eyeChips', 'motion', 'budget', 'horizonDays', 'buyWindow', 'w3b', 'warReserve', 'boosterCapH', 'npcShops', 'npcShopsOff'];
 
@@ -21983,6 +25026,8 @@
             player,
             saved: pi.saved,
             moneyFields: (pageGet(K.moneyLog, null) || {}).fields || [],
+            // Your books in names and counts (never an amount).
+            ledger: ledgerShape((booksReport() || {}).ledger || null),
             statsHistory: archived(K.statsHistory, {}) || {},
             learn: { samples: ((archived('calibration', null) || {}).samples) || [], gymLog: ((pageGet(K.gymLog, null) || {}).lines) || [], fights: joinFights(pageGet(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], archived(K.eyePredictions, []) || []), learned: get(K.learned, null) },
             state: {
@@ -21997,6 +25042,31 @@
             },
             env: { userAgent: nav.userAgent || '', screen: typeof window !== 'undefined' && window.screen ? window.screen.width + 'x' + window.screen.height : '', cores: nav.hardwareConcurrency || null, memoryGB: nav.deviceMemory || null, pageHeapMB: mem },
         };
+    }
+
+    /**
+     * The daily recalibration (round 8; the accountant: "recalibrate once per day, at Torn's reset; keep the button").
+     * Your books are read first (the money log, Full key), so the day's cash is what the plan runs on. A failure is
+     * said on the plan card and tried again half an hour later; the manual button always works.
+     */
+    function autoRecalibrate(now = Date.now()) {
+        const s = get(K.userState, null);
+        const m = pi.model;
+        const d = autoRecalibrateDue({ planNow: planNowStored(), settings: getSettings(), last: get(K.autoRecal, null), stateAt: s ? s.at : null, busy: Boolean(pi.planBusy), stacking: Boolean(m && m.stacking), overdose: Boolean(m && m.overdose), now });
+        if (!d.due) return null;
+        const day = tornDayStart(now);
+        set(K.autoRecal, { day, at: now, ok: null });
+        return refreshMoneyLog({ force: true })
+            .catch(() => null)
+            .then(() => recalibratePlan({ auto: true }))
+            .then(
+                (saved) => set(K.autoRecal, { day, at: Date.now(), ok: Boolean(saved) }),
+                (e) => {
+                    set(K.autoRecal, { day, at: Date.now(), ok: false, error: String((e && e.message) || e) });
+                    logError('The daily recalibration', e);
+                },
+            )
+            .then(() => page.app && page.app.render(true));
     }
 
     /** A Create plan or Recalibrate click: the page shows it working, then the new plan (or why it couldn't). */
@@ -22020,6 +25090,7 @@
         const S = STRATEGIES[plan.strategy] || STRATEGIES.steady;
         return {
             model: pi.model,
+            version: PI_BUILD_VERSION,
             paused: isPaused(),
             settings,
             plan,
@@ -22039,7 +25110,7 @@
             keyProblem: keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: statics.keyInfo || null }),
             planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
             fullKey: fullKeyView(),
-            sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (pageGet(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), readLines(pageGet(K.planLine, null)).map((l) => l.at).join(','), JSON.stringify(get(K.stacking, null))].join('|'),
+            sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (pageGet(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), readLines(pageGet(K.planLine, null)).map((l) => l.at).join(','), JSON.stringify(get(K.stacking, null)), JSON.stringify(get(K.overdose, null))].join('|'),
             setSettings: (p) => {
                 setSettings(p);
                 refresh();
@@ -22047,13 +25118,21 @@
             },
             setPlan: (p) => {
                 const { strategy, strategyPicked, ...rest } = p;
-                // Another of the saved plans: followed at once, nothing worked out again (Progress's line follows it). The
-                // recommended one means the saved path (it switches plans on its dates).
+                // Another of the saved plans: followed at once, nothing worked out again (Progress's line follows it). A plan
+                // saved without a path (before round 6): its recommended one is the saved plan itself. With a path
+                // (round 8), every single plan is followed the whole way, the best of them too; `followPath` goes back.
                 const rec = pi.saved && pi.saved.rec ? pi.saved.rec.recommended : null;
-                if (strategy !== undefined && strategy === rec) followPath();
+                const hasPath = Boolean(pi.saved && pi.saved.year && pi.saved.year.segments && pi.saved.year.segments.length);
+                if (strategy !== undefined && strategy === rec && !hasPath) followPath();
                 else if (strategy !== undefined && (strategy !== ((pi.model && pi.model.strategy) || getPlan().strategy) || !getPlan().strategyPicked)) followStrategy(strategy);
                 // Build, goal, the Plan rule, special refills: kept for the next Create plan or Recalibrate (a click).
                 if (Object.keys(rest).length) setPlan({ ...getPlan(), ...rest });
+                refresh();
+                page.app.render(true);
+            },
+            // Back to the saved path (round 8: "Use the path").
+            followPath: () => {
+                followPath();
                 refresh();
                 page.app.render(true);
             },
@@ -22062,7 +25141,7 @@
             recalibratePlan: () => runPlan(() => recalibratePlan()),
             // The Plan card's Cancel while a plan is being worked out: nothing is saved, the old plan stays.
             cancelPlan: () => cancelPlan(),
-            // Home's "I'm stacking" (a chain) and Resume, which re-plans at once like Re-plan (round 7).
+            // Home's "I'm stacking" (a chain) and Resume, which recalibrates at once like Recalibrate (round 7).
             startStacking: () => {
                 page.app.ui.homeReplan = false;
                 startStacking();
@@ -22071,6 +25150,11 @@
             resumeStacking: () => {
                 page.app.ui.homeReplan = true;
                 return runPlan(() => resumeTraining());
+            },
+            // Home's "Rehab done · recalibrate" (an overdose): the steps come back and the plan is recalibrated, like Resume.
+            endOverdose: () => {
+                page.app.ui.homeReplan = true;
+                return runPlan(() => overdoseDone());
             },
             wantPrices: (ids, slim = []) => {
                 if (isVisible()) setTimeout(() => loadPrices(ids, slim).catch(() => {}), 0);
@@ -22139,13 +25223,34 @@
                 cancel: cancelLogin,
                 setupUrl: WORKER_SETUP_URL,
             },
+            // The Ledger tab: your books, and a read of the money log now (it is read by itself every 6 hours).
+            // The plan's own recalibration, once a day: its last try (the plan card says when, or why it failed).
+            autoRecal: get(K.autoRecal, null),
+            books: () => booksReport(),
+            readBooks: () => {
+                page.app.ui.ledgerReading = true;
+                page.app.ui.ledgerError = null;
+                page.app.render(true);
+                return refreshMoneyLog({ force: true })
+                    .then(() => refresh())
+                    .catch((error) => {
+                        page.app.ui.ledgerError = String((error && error.message) || error);
+                        logError('Reading your money log', error);
+                    })
+                    .then(() => {
+                        page.app.ui.ledgerReading = false;
+                        page.app.render(true);
+                    });
+            },
             dev: {
-                data: () => ({ samples: ((archived('calibration', null) || {}).samples) || [], gymLog: ((pageGet(K.gymLog, null) || {}).lines) || [], fights: joinFights(pageGet(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], archived(K.eyePredictions, []) || []), learned: get(K.learned, null), version: PI_BUILD_VERSION }),
+                data: () => ({ samples: ((archived('calibration', null) || {}).samples) || [], gymLog: ((pageGet(K.gymLog, null) || {}).lines) || [], fights: joinFights(pageGet(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], archived(K.eyePredictions, []) || []), learned: get(K.learned, null), ledger: ledgerShape((booksReport() || {}).ledger || null), version: PI_BUILD_VERSION }),
                 unlocked: () => Boolean(get(K.devUnlocked, false)),
                 setUnlocked: (v) => (v ? set(K.devUnlocked, true) : del(K.devUnlocked)),
                 log: () => pageGet(K.learnLog, []) || [],
                 // The money log by type with its field names (round 7, C.0), and when it was read.
                 moneyFields: () => ({ at: (pageGet(K.moneyLog, null) || {}).at || null, list: (pageGet(K.moneyLog, null) || {}).fields || [] }),
+                // Your books (round 7, R7.5): the ledger by account, the one-offs, what is not sorted, the reconciliation.
+                books: () => booksReport(),
                 sizes: () => Object.fromEntries(['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions, K.prices, K.priceHistory, K.statsHistory].map((k) => [k, JSON.stringify(get(k, null) || '').length])),
             },
             eye: {
@@ -22161,6 +25266,12 @@
                 sources: () => ({ fights: ((get('myAttacks', null) || {}).list || []).length, ffsFree: page.ffs ? page.ffs.stats().remaining : 60, gear: page.eye.gear }),
                 view: (id, extra, o) => eyeView(id, extra, o),
                 attacks: () => (get('myAttacks', null) || {}).list || [],
+                /** The list a draw shows, in its order (Targets or War): handed to Torn's attack page for its Next button. */
+                shown: shareNext,
+                /** The chain counter's two sides (chain mode): {mine, enemy: {fid, name, raw}|null}. */
+                chains: () => chainsNow(),
+                /** Who you hit lately (your attacks and the attack pages you opened): Map id → {kind, at, result}. */
+                hits: () => ownHits((getShared('myAttacks', null) || {}).list || [], getShared(K.eyePredictions, []) || [], Date.now()),
                 statuses: {
                     /** The rows on screen and every listed row, in order (each draw of Targets). */
                     show: showStatuses,
@@ -22179,7 +25290,14 @@
                 war: {
                     state: () => {
                         const fid = warFid();
-                        return { fid, manual: war.manual, name: warName(fid), enemies: war.enemies, myFaction: war.myFaction === undefined ? myFactionId() : war.myFaction, warsLoading: war.warsLoading, members: war.membersFid === fid ? war.members : [], early: war.membersFid === fid ? war.early : new Set(), loading: war.loading, error: war.error };
+                        return { fid, manual: war.manual, name: warName(fid), enemies: war.enemies, myFaction: war.myFaction === undefined ? myFactionId() : war.myFaction, warsLoading: war.warsLoading, members: war.membersFid === fid ? war.members : [], early: war.membersFid === fid ? war.early : new Set(), loading: war.loading, error: war.error, ask: warAskNow() };
+                    },
+                    /** The answer to "Termed war / med-out deal?" for this war: true, false, or null to be asked again. */
+                    termed: (v) => {
+                        const kept = warAskNow();
+                        if (!kept) return;
+                        set(WAR_ASK_KEY, { key: kept.key, autoAt: kept.autoAt, termed: v === true || v === false ? v : null });
+                        page.app.render(true);
                     },
                     /** Another faction by id (kept until "Back to our war"). */
                     watch: (fid) => {
@@ -22193,6 +25311,7 @@
                     pick: (fid) => {
                         war.pick = fid;
                         war.at = 0;
+                        warModeCheck();
                         pollWarTab();
                         page.app.render(true);
                     },
@@ -22200,6 +25319,7 @@
                         war.manual = null;
                         war.at = 0;
                         setSettings({ warFaction: null });
+                        warModeCheck();
                         pollWarTab();
                         page.app.render(true);
                     },
@@ -22258,6 +25378,11 @@
             if (open && !eyeOpen) {
                 const kept = storedTargets();
                 if (kept.length) wantPlayers(kept.map((x) => x.playerId));
+                // At war by the last read of your faction's wars (a recent one): the tab opens on War (round 8). An older
+                // read waits for the one this opening starts.
+                const was = page.app.ui.eyeMode;
+                if (Date.now() - (Number((get('eyeWarAuto', null) || {}).at) || 0) < 3 * OWN_WARS_POLL_MS) warModeCheck();
+                if (page.app.ui.eyeMode !== was) page.app.render(true);
             }
             eyeOpen = open;
         };
@@ -22310,6 +25435,7 @@
             dropHitTargets();
             pollOwnWars().catch(() => {});
             pollWarTab().catch(() => {});
+            pollEnemyChain().catch(() => {});
             // The Watched view reads its players every 60 s while it shows (the war list just read costs nothing).
             if (page.app.ui.eyeMode === 'watched') pollWatch({ members: war.members }).catch(() => {});
             syncEye();
@@ -22329,6 +25455,10 @@
         };
         setTimeout(moneyLog, 5000);
         setInterval(moneyLog, 10 * 60 * 1000);
+        // The plan recalibrates by itself once a Torn day (round 8), from this page, where the whole plan is kept: at
+        // Torn's reset when it is open (a tab you are not looking at too), else the first time it is opened that day.
+        setTimeout(autoRecalibrate, 15000);
+        setInterval(autoRecalibrate, 60 * 1000);
         page.app.render(true);
         return page.app;
     }
@@ -22349,6 +25479,10 @@
      * edge only when it's time to act (chalk) or the page says so (green, red,
      * amber); folded it is one tag. On the attack page it folds to one line
      * under Torn Eye's fight card and never covers it.
+     *
+     * Round 8 (the owner's picks 1D and B, mockups/round8/steps-panel.html): one
+     * ring leaves the header's plate while there is an action to do now, and a
+     * step's actions are a small rail (done ticked, the one to do now marked).
      */
 
 
@@ -22385,9 +25519,16 @@
     .head:focus-visible { outline: 2px solid #efebe2; outline-offset: -2px; }
     .head .cd { font-weight: 700; font-size: 15px; color: #efebe2; font-variant-numeric: tabular-nums; flex: none; }
     .head .ti { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #fff; }
-    .plate { width: 18px; height: 18px; border-radius: 50%; background: #efebe2; display: grid; place-items: center; box-shadow: inset 0 0 0 3.5px #efebe2, inset 0 0 0 5px #15171a; flex: none; }
+    .plate { position: relative; width: 18px; height: 18px; border-radius: 50%; background: #efebe2; display: grid; place-items: center; box-shadow: inset 0 0 0 3.5px #efebe2, inset 0 0 0 5px #15171a; flex: none; }
     .plate i { width: 4px; height: 4px; border-radius: 50%; background: #15171a; }
     .wrap.paused .plate { background: #e8a33d; box-shadow: none; color: #15171a; font: 700 12px 'Segoe UI', system-ui, sans-serif; }
+    /* Round 8 (the owner's picks 1D and B): one ring leaves the plate while there is an action to do now; it is the panel's
+       one ring, so it shows when the panel is folded too. Opacity and transform only. Under the PC's "reduce motion" and
+       with Settings › Animations off (.still) nothing moves: the ring stays drawn around the plate. */
+    .plate.ring::after { content: ''; position: absolute; inset: 0; border-radius: 50%; border: 1.5px solid #efebe2; opacity: 0; animation: pi-ring-in 2s ease-out infinite; }
+    @keyframes pi-ring-in { 0% { transform: scale(1); opacity: .8; } 70%, 100% { transform: scale(1.45); opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) { .plate.ring::after { animation: none; opacity: .55; transform: scale(1.3); } }
+    .wrap.still .plate.ring::after { animation: none; opacity: .55; transform: scale(1.3); }
     .col, .app { flex: none; width: 26px; height: 26px; padding: 0; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #c5cad0; font: 700 14px/24px 'Segoe UI', system-ui, sans-serif; cursor: pointer; }
     .col:hover, .app:hover { border-color: #3a4046; }
     .col:focus-visible, .app:focus-visible { outline: 2px solid #efebe2; outline-offset: 1px; }
@@ -22401,21 +25542,31 @@
     .meter { height: 6px; border-radius: 3px; background: #2a2e33; overflow: hidden; }
     .meter i { display: block; height: 100%; border-radius: 3px; background: #3fbf5a; }
     .later { font-size: 12px; color: #9aa1a8; font-variant-numeric: tabular-nums; }
-    .check { display: flex; gap: 8px; align-items: center; font-size: 12px; color: #c5cad0; }
-    .check i { width: 14px; height: 14px; border-radius: 3px; border: 1.5px solid #6c737a; display: inline-grid; place-items: center; font-style: normal; font-size: 10px; flex: none; }
-    .check.done { color: #9aa1a8; }
-    .check.done i { background: #3fbf5a; border-color: #3fbf5a; color: #101214; }
-    .check.next { color: #fff; font-weight: 700; }
-    .check.next i { border-color: var(--b); }
+    /* A step's actions in order, as a small rail (round 8, pick B): done ones ticked, the one to do now white with a full point. */
+    .prail { display: flex; flex-direction: column; }
+    .prail .pr1 { position: relative; display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 8px; align-items: center; padding: 3px 0; font-size: 12px; color: #c5cad0; }
+    .prail .pr1::before { content: ''; position: absolute; left: 6px; top: 0; bottom: 0; width: 2px; background: #3a4046; }
+    .prail .pr1:first-child::before { top: 50%; }
+    .prail .pr1:last-child::before { bottom: 50%; }
+    .prail .pr1:only-child::before { display: none; }
+    .prail .pn { position: relative; z-index: 1; width: 14px; height: 14px; display: grid; place-items: center; background: #101214; border-radius: 50%; }
+    .prail .pd { width: 8px; height: 8px; border-radius: 50%; border: 2px solid #6c737a; background: #101214; }
+    .prail .now .pd { border-color: #efebe2; background: #efebe2; }
+    .prail .pr1.done { color: #7d848b; }
+    .prail .pr1.now { color: #fff; font-weight: 700; font-size: 13px; }
+    .prail svg.tick { display: block; width: 12px; height: 12px; }
     .acts { display: flex; flex-wrap: wrap; gap: 8px; }
     .cta { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; height: 34px; padding: 0 12px; border-radius: 6px; border: 0; background: #efebe2; color: #15171a; font: 700 13px/1 'Segoe UI', system-ui, sans-serif; white-space: nowrap; cursor: pointer; text-decoration: none; }
     .cta.web { flex: 0 1 auto; background: transparent; color: #e3e5e8; border: 1px solid #3a4046; font-weight: 600; }
     .cta.web:hover { border-color: #939aa1; }
+    .cta.fill { background: #3fbf5a; color: #101214; }
+    .cta.fill:disabled { background: #24282c; color: #6c737a; border: 1px solid #3a4046; cursor: default; }
+    .note { font-size: 12px; color: #c5cad0; }
     .cta:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
     .warn { color: #e8a33d; font-size: 12px; font-weight: 700; }
     /* Sized to the free space beside Torn's page (fitTier): narrower with smaller type, then one tag, then the smallest. */
     .wrap.fit-narrow .body { padding: 8px 10px 10px; gap: 6px; }
-    .wrap.fit-narrow .sub, .wrap.fit-narrow .later, .wrap.fit-narrow .check, .wrap.fit-narrow .row2 { font-size: 11px; }
+    .wrap.fit-narrow .sub, .wrap.fit-narrow .later, .wrap.fit-narrow .prail .pr1, .wrap.fit-narrow .row2 { font-size: 11px; }
     .wrap.fit-compact .head, .wrap.fit-mini .head { gap: 5px; padding: 0 2px 0 6px; }
     .wrap.fit-compact .head .cd, .wrap.fit-mini .head .cd { font-size: 13px; }
     .wrap.fit-compact .body { padding: 6px 8px 8px; gap: 5px; }
@@ -22494,10 +25645,12 @@
      * Where the panel may live. `page` is Torn's page (sidebar + content) as
      * {left, right}; null when it can't be measured.
      * @returns {{side: 'left'|'right'|'corner', from: number, to: number, width: number, tier, font, step, folded}[]}
-     *   each margin that holds at least one tag, the best size first (the left one on a tie, so NPC Arbitrage keeps
-     *   the right), else one 'corner' spot for the smallest tag
+     *   each margin that holds at least the smallest tag, the best size first (the left one on a tie, so NPC Arbitrage
+     *   keeps the right), else one 'corner' spot for the smallest tag
+     *   Round 8: a margin was taken only from 100 px (the one-tag panel), so between 84 and 100 px the smallest tag went
+     *   to the window's corner, over Torn's header, although it fits beside Torn's page (1,192 to 1,222 px wide).
      */
-    function spots(viewW, page, want = PANEL_W, min = FIT_COMPACT_W) {
+    function spots(viewW, page, want = PANEL_W, min = MINI_W) {
         const out = [];
         if (page && Number.isFinite(page.left) && Number.isFinite(page.right)) {
             for (const m of [{ side: 'left', from: EDGE, to: page.left - GAP }, { side: 'right', from: page.right + GAP, to: viewW - EDGE }]) {
@@ -22585,9 +25738,17 @@
          * @param {function} [o.dockTo] - () => Element|null: dock folded under it (Torn Eye's fight card on the attack page)
          * @param {function} [o.dockIfShared] - () => Element|null: dock under it only when it sits in the panel's margin (the profile card)
          * @param {function} [o.avoidColumn] - () => {left, right}|null: a column it never shares (Torn Eye's list tags)
+         * @param {function} [o.onFill] - the gym page's Fill N (types into Torn's reps box)
+         * @param {function} [o.ride] - (spot: {x, y, width}|null) => px: a card that rides on top of the panel (Torn Eye's
+         *   chain counter) is told where the panel would sit and answers the height to leave for it; null: the panel is
+         *   folded under a card, off, or in the corner
          */
-        constructor({ onOpen, loadPos, savePos, loadCollapsed, saveCollapsed, pageRect, avoidRect = () => null, dockTo = () => null, dockIfShared = () => null, avoidColumn = () => null }) {
+        constructor({ onOpen, loadPos, savePos, loadCollapsed, saveCollapsed, pageRect, avoidRect = () => null, dockTo = () => null, dockIfShared = () => null, avoidColumn = () => null, onFill = () => {}, ride = null }) {
             this.onOpen = onOpen;
+            this.ride = ride;
+            this.lift = 0;
+            this.rideSpot = null;
+            this.onFill = onFill;
             this.loadPos = loadPos;
             this.savePos = savePos;
             this.loadCollapsed = loadCollapsed;
@@ -22722,7 +25883,10 @@
         place() {
             if (!this.wrap) return;
             this.wrap.style.display = this.off ? 'none' : 'flex';
-            if (this.off) return;
+            if (this.off) {
+                this.rideAt(null);
+                return;
+            }
             this.wrap.style.visibility = '';
             const card = this.dockCard();
             const r = card && card.getBoundingClientRect ? card.getBoundingClientRect() : null;
@@ -22731,6 +25895,7 @@
             const d = r && r.width > 0 && r.height > 0 ? dockUnder(r, window.innerWidth, window.innerHeight, 36, DOCK_GAP, this.pageRect()) : null;
             if (d) {
                 this.docked = { key: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height), window.innerWidth, window.innerHeight].join(',') };
+                this.rideAt(null);
                 if (!was) this.showFolded();
                 this.wrap.style.left = d.x + 'px';
                 this.wrap.style.top = d.y + 'px';
@@ -22752,16 +25917,26 @@
             this.apply(p);
         }
 
+        /** Tell the card that rides on the panel where the panel would sit; the height it takes is kept (`lift`). */
+        rideAt(spot) {
+            this.rideSpot = spot;
+            this.lift = this.ride ? Math.max(0, Number(this.ride(spot)) || 0) : 0;
+            return this.lift;
+        }
+
         apply(p) {
+            // The chain counter rides on top (round 8): it takes the panel's place and the panel starts under it.
+            const lift = this.rideAt(p.spot.side === 'corner' ? null : { x: p.x, y: p.y, width: p.spot.width });
+            const y = p.y + (lift ? lift + DOCK_GAP : 0);
             this.wrap.style.left = p.x + 'px';
-            this.wrap.style.top = p.y + 'px';
+            this.wrap.style.top = y + 'px';
             this.wrap.style.setProperty('--w', p.spot.width + 'px');
             this.setFit(p.spot.width);
             // The body scrolls inside the window, and stops above NPC Arbitrage if that panel is below it.
             let bottom = window.innerHeight - 12;
             const a = this.avoidRect();
-            if (a && a.width && a.height && a.left < p.x + p.spot.width && a.right > p.x && a.top > p.y + 36) bottom = Math.min(bottom, a.top - 8);
-            this.body.style.maxHeight = Math.max(60, bottom - p.y - 40) + 'px';
+            if (a && a.width && a.height && a.left < p.x + p.spot.width && a.right > p.x && a.top > y + 36) bottom = Math.min(bottom, a.top - 8);
+            this.body.style.maxHeight = Math.max(60, bottom - y - 40) + 'px';
         }
 
         bindDrag() {
@@ -22770,7 +25945,8 @@
                 if (e.button !== 0 || this.docked) return;
                 if (e.target.closest && e.target.closest('button, a, input')) return;
                 const r = this.wrap.getBoundingClientRect();
-                start = { x: e.clientX, y: e.clientY, left: r.left, top: r.top, moved: false, list: this.spotList() };
+                // The panel's own place: without the room it leaves for the chain counter riding on it.
+                start = { x: e.clientX, y: e.clientY, left: r.left, top: r.top - (this.lift ? this.lift + DOCK_GAP : 0), moved: false, list: this.spotList() };
                 this.head.setPointerCapture(e.pointerId);
             });
             this.head.addEventListener('pointermove', (e) => {
@@ -22796,16 +25972,23 @@
 
         /**
          * @param {object} v - {off, paused, tone, label, cdAt, pillText, pillNow, cardStep, cardSub, warn, checklist, energy:{current,max},
-         *   later:[string], action:{text, href}|null, seen:{count, where, lastAt, resumesAt}}
+         *   later:[string], action:{text, href}|null, seen:{count, where, lastAt, resumesAt}, notes:[string],
+         *   fill:{text, disabled, title}|null}
+         *   notes: the gym page's lines that were the strip over Torn's boxes (where to switch, the energy kept, the parts)
+         *   fill: the gym page's Fill N (green; greyed while it waits), beside "Pumping Iron ↗"
          *   tone: the edge's colour (chalk: time to act; green, red, amber); none: a plain border
          *   paused: Torn Trading runs (a warning sign instead of the plate, an amber card)
          *   action: the one button (a link to a Torn page, e.g. "Open the gym"); none: "Open Pumping Iron"
+         *   ring: there is an action to do now (the plate's one ring; never while paused); still: Settings › Animations
+         *   is off (the ring is drawn, not moving)
+         *   checklist: the step's actions in order [{text, done, next}], as a small rail (next: the one to do now)
          */
         update(v) {
             const wasOff = this.off;
             this.off = Boolean(v.off);
             if (this.off) {
                 this.wrap.style.display = 'none';
+                if (!wasOff) this.rideAt(null);
                 return;
             }
             const now = Date.now();
@@ -22814,17 +25997,22 @@
             this.wrap.classList.toggle('toned', Boolean(tone));
             this.wrap.setAttribute('data-tone', tone || '');
             this.wrap.classList.toggle('paused', Boolean(v.paused));
+            this.wrap.classList.toggle('still', Boolean(v.still));
+            const ring = Boolean(v.ring) && !v.paused;
+            this.wrap.setAttribute('data-ring', ring ? '1' : '');
             const cdText = v.pillNow || (v.cdAt ? countdown(v.cdAt - now) : '');
             this.headInfo.textContent = v.pillText || 'Pumping Iron';
             // Also a small ↗ in the bar (the folded panel has only the bar).
             const link = v.action && v.action.href;
             const app = link ? h('button', { class: 'app open', type: 'button', title: 'Open Pumping Iron', 'aria-label': 'Open Pumping Iron', onclick: () => this.onOpen(), text: '↗' }) : null;
-            fill(this.head, [v.paused ? h('span', { class: 'plate', text: '!', 'aria-label': 'Paused' }) : h('span', { class: 'plate' }, [h('i')]), cdText ? h('span', { class: 'cd', 'data-cd': v.cdAt && !v.pillNow ? String(v.cdAt) : null, text: cdText }) : null, this.headInfo, app, this.colBtn]);
+            fill(this.head, [v.paused ? h('span', { class: 'plate', text: '!', 'aria-label': 'Paused' }) : h('span', { class: 'plate' + (ring ? ' ring' : '') }, [h('i')]), cdText ? h('span', { class: 'cd', 'data-cd': v.cdAt && !v.pillNow ? String(v.cdAt) : null, text: cdText }) : null, this.headInfo, app, this.colBtn]);
             this.head.title = v.pillText || '';
             const kids = [];
             if (v.label) kids.push(h('span', { class: 'lbl', style: tone ? '--lb:' + TONES[tone] : null, text: v.label }));
             if (v.cardStep) kids.push(h('span', { class: 'step', text: v.cardStep }));
             if (v.cardSub) kids.push(h('span', { class: 'sub', text: v.cardSub }));
+            if (v.checklist && v.checklist.length) kids.push(h('div', { class: 'prail' }, v.checklist.map((c) => h('div', { class: 'pr1' + (c.done ? ' done' : c.next ? ' now' : '') }, [h('span', { class: 'pn' }, [c.done ? tickMark() : h('span', { class: 'pd' })]), h('span', { text: c.text })]))));
+            if (v.notes) for (const n of v.notes) kids.push(h('span', { class: 'note', text: n }));
             if (v.warn) kids.push(h('span', { class: 'warn', text: v.warn }));
             if (v.seen) {
                 const s = v.seen;
@@ -22836,14 +26024,16 @@
                 }
                 if (s.lastAt) kids.push(h('div', { class: 'row2' }, [h('span', { class: 'k', text: 'Last seen' }), h('span', { 'data-ago': String(s.lastAt), text: agoWords(now - s.lastAt) })]));
             }
-            if (v.checklist && v.checklist.length) for (const c of v.checklist) kids.push(h('div', { class: 'check' + (c.done ? ' done' : '') + (c.next ? ' next' : '') }, [h('i', { text: c.done ? '✓' : '' }), h('span', { text: c.text })]));
             if (v.energy) {
                 kids.push(h('div', { class: 'row2' }, [h('span', { class: 'k', text: 'Energy' }), h('span', { text: fmtNum(v.energy.current) + ' / ' + fmtNum(v.energy.max) })]));
                 kids.push(h('div', { class: 'meter' }, [h('i', { style: 'width:' + Math.min(100, (100 * v.energy.current) / Math.max(1, v.energy.max)) + '%' })]));
             }
             if (v.later && v.later.length) kids.push(h('div', { class: 'later', text: 'then ' + v.later.join(' · ') }));
             // The webpage is always one click away (the owner): beside the Torn page's button, or the only button.
-            kids.push(h('div', { class: 'acts' }, link ? [h('a', { class: 'cta go', href: v.action.href, text: v.action.text }), h('button', { class: 'cta web open', type: 'button', title: 'Open Pumping Iron', onclick: () => this.onOpen(), text: 'Pumping Iron ↗' })] : [h('button', { class: 'cta open', type: 'button', onclick: () => this.onOpen(), text: 'Open Pumping Iron' })]));
+            const web = h('button', { class: 'cta web open', type: 'button', title: 'Open Pumping Iron', onclick: () => this.onOpen(), text: 'Pumping Iron ↗' });
+            const fillBtn = v.fill ? h('button', { class: 'cta fill', type: 'button', title: v.fill.title || null, disabled: Boolean(v.fill.disabled), onclick: (e) => { e.preventDefault(); this.onFill(); }, text: v.fill.text }) : null;
+            const acts = link ? [fillBtn, h('a', { class: 'cta go', href: v.action.href, text: v.action.text }), web] : fillBtn ? [fillBtn, web] : [h('button', { class: 'cta open', type: 'button', onclick: () => this.onOpen(), text: 'Open Pumping Iron' })];
+            kids.push(h('div', { class: 'acts' }, acts));
             fill(this.body, kids);
             if (wasOff || !this.placed) {
                 this.placed = true;
@@ -22858,6 +26048,11 @@
             for (const el of this.shadow.querySelectorAll('[data-cd]')) el.textContent = countdown(Number(el.getAttribute('data-cd')) - now);
             for (const el of this.shadow.querySelectorAll('[data-ago]')) el.textContent = agoWords(now - Number(el.getAttribute('data-ago')));
             if (this.off || !this.wrap) return;
+            // The chain counter came, went or changed its height: the panel is placed again under it.
+            if (!this.docked && this.ride && (Math.max(0, Number(this.ride(this.rideSpot)) || 0)) !== this.lift) {
+                this.place();
+                return;
+            }
             // Torn Eye's list tags took (or left) a column: out of it (one attribute read, no layout).
             const col = this.docked ? null : this.avoidColumn ? this.avoidColumn() : null;
             if (!this.docked && (col ? col.left + ',' + col.right : '') !== (this.colKey || '')) {
@@ -22876,6 +26071,299 @@
 
     function fmtNum(n) {
         return String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    }
+
+    /* ===== src/ui/marks/marks.js ===== */
+    /*
+     * Marks on Torn's own pages (DESIGN §5; round 7's one look, overlays.html), as an OVERLAY (the owner, 2026-10-03):
+     * nothing of ours goes into Torn's page. No element is inserted into Torn's DOM and no class, style or attribute is
+     * put on Torn's elements, so Torn's widths, heights and rows stay exactly as they are without the script. Everything
+     * is drawn on our own layer (#pi-marks-layer, appended to <body>, position absolute in page coordinates), placed from
+     * the rects of Torn's elements and placed again on resize, scroll and Torn's changes (once a frame at most).
+     *
+     * What is drawn: a thin ring over a box (+3 px) and a small pill straddling its top border. Green to train (the one
+     * thing that glows), a red pulse to eat first, dashed grey to wait (the wrong gym, no energy yet), amber to warn,
+     * chalk "take this" on markets. The gym you're in: a steady ring (green right, red wrong); the gym to go to pulses
+     * green. The words the old strip said, and Fill N, are in the panel (overlay.js). Nothing takes the pointer.
+     */
+
+
+
+    const MARK_CSS = `
+    #pi-marks-layer { position: absolute; left: 0; top: 0; width: 0; height: 0; overflow: visible; z-index: 9989; pointer-events: none; }
+    #pi-marks-layer > * { position: absolute; pointer-events: none; box-sizing: border-box; margin: 0; }
+    .pi-mark, .pi-mark * { box-sizing: border-box; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
+    .pi-c-green { --b: #3fbf5a; } .pi-c-red { --b: #ff6b5e; } .pi-c-amber { --b: #e8a33d; } .pi-c-chalk { --b: #efebe2; } .pi-c-grey { --b: #6c737a; } .pi-c-plain { --b: #6c737a; }
+    .pi-ring { border: 2px solid var(--b, #efebe2); border-radius: 6px; background: transparent; }
+    .pi-ring.pi-dashed { border-style: dashed; }
+    .pi-ring.pi-glow { box-shadow: 0 0 0 3px color-mix(in srgb, var(--b) 14%, transparent), 0 0 16px color-mix(in srgb, var(--b) 24%, transparent); }
+    .pi-pulse::after { content: ''; position: absolute; inset: -2px; border-radius: 7px; box-shadow: 0 0 0 2px color-mix(in srgb, var(--b) 80%, transparent), 0 0 22px color-mix(in srgb, var(--b) 80%, transparent); opacity: 0; animation: pi-pulse 1.4s ease-in-out infinite; pointer-events: none; }
+    .pi-pulse.pi-still::after { animation: none; opacity: .7; }
+    @keyframes pi-pulse { 50% { opacity: 1; } }
+    @media (prefers-reduced-motion: reduce) { .pi-pulse::after { animation: none; opacity: .7; } }
+    .pi-pill { display: flex; align-items: center; gap: 5px; width: max-content; height: 20px; padding: 0 8px 0 6px; border-radius: 5px; font: 700 11px/1 'Segoe UI', system-ui, -apple-system, sans-serif; letter-spacing: .4px; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: 0 1px 4px rgba(0,0,0,.45); }
+    .pi-pill > span { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    .pi-pill::before { content: ''; width: 9px; height: 9px; border-radius: 50%; flex: none; box-shadow: inset 0 0 0 2px currentColor; }
+    .pi-pill.pi-solid { background: var(--b); color: #101214; border: 0; }
+    .pi-pill.pi-dark { background: #101214; color: #c5cad0; border: 1px solid #3a4046; text-transform: none; letter-spacing: 0; font-weight: 600; }
+    .pi-pill.pi-dark.pi-c-grey { border-color: #6c737a; color: #d6d9dc; }
+    `;
+
+    /** Our page CSS, once per page (torn.com: no outside fonts). */
+    function ensureMarkCss(doc = document) {
+        if (doc.getElementById('pi-mark-css')) return;
+        const st = doc.createElement('style');
+        st.id = 'pi-mark-css';
+        st.textContent = MARK_CSS;
+        (doc.head || doc.documentElement).appendChild(st);
+    }
+
+    /* ---------------------------------------------------------- placement math */
+
+    /** Space between a box and its ring. */
+    const RING_PAD = 3;
+    /** A pill on a listing sits this far in from the row's left edge (the old label's spot). */
+    const PILL_INSET = 10;
+    /** Kept from the window's edges (so nothing of ours makes the page scroll sideways). */
+    const VIEW_EDGE = 2;
+
+    /**
+     * The ring over a box: its rect grown by `pad`, in our layer's coordinates, kept inside the window's width.
+     * @param {{left, top, width, height}} r - the box (viewport)
+     * @param {{x, y}} o - our layer's (0, 0) on screen
+     * @param {number} [pad]
+     * @param {number} [viewW] - the window's width without its scrollbar
+     * @returns {{left, top, width, height}}
+     */
+    function ringRect(r, o, pad = RING_PAD, viewW = Infinity) {
+        const l = Math.max(0, r.left - pad);
+        const rt = Math.min(viewW, r.left + r.width + pad);
+        return { left: Math.round(l - o.x), top: Math.round(r.top - pad - o.y), width: Math.max(0, Math.round(rt - l)), height: Math.max(0, Math.round(r.height + 2 * pad)) };
+    }
+
+    /**
+     * A pill straddling a box's top border (its middle on the ring's top edge): centred, or `inset` px in from the left.
+     * Never wider than the box (less 4 px each side), never past the window's edges.
+     * @param {{left, top, width, height}} r - the box (viewport)
+     * @param {{x, y}} o - our layer's (0, 0) on screen
+     * @param {number} w - the pill's natural width
+     * @param {number} ht - its height
+     * @returns {{left, top, maxWidth}}
+     */
+    function pillSpot(r, o, w, ht, { pad = RING_PAD, align = 'center', inset = PILL_INSET, viewW = Infinity } = {}) {
+        const maxWidth = Math.max(24, Math.min(r.width - 8, viewW - 2 * VIEW_EDGE));
+        const ww = Math.min(w, maxWidth);
+        let x = align === 'left' ? r.left + Math.min(inset, Math.max(4, r.width - ww - 4)) : r.left + (r.width - ww) / 2;
+        x = Math.min(Math.max(x, VIEW_EDGE), viewW - VIEW_EDGE - ww);
+        return { left: Math.round(x - o.x), top: Math.round(r.top - pad - ht / 2 - o.y), maxWidth: Math.round(maxWidth) };
+    }
+
+    /* ---------------------------------------------------------- our layer */
+
+    const ml = { items: [], queued: false };
+
+    /** Our layer for the marks (made on first use, on <body>). */
+    function marksLayer(doc = document) {
+        let el = doc.getElementById('pi-marks-layer');
+        if (!el) {
+            el = h('div', { id: 'pi-marks-layer', class: 'pi-mark', 'aria-hidden': 'true' });
+            (doc.body || doc.documentElement).appendChild(el);
+        }
+        return el;
+    }
+
+    /** Remove every mark we drew (nothing of ours is ever inside Torn's page, so this is only our layer). */
+    function clearMarks(doc = document) {
+        ml.items = [];
+        const layer = doc.getElementById('pi-marks-layer');
+        if (layer) fill(layer, []);
+    }
+
+    /** Marks drawn now. */
+    function marksCount() {
+        return ml.items.length;
+    }
+
+    /** A box we marked is gone from Torn's page (React replaced it): the marks are drawn again. */
+    function marksLost() {
+        return ml.items.some((it) => !it.target.isConnected);
+    }
+
+    function addRing(target, cls, { pad = RING_PAD, title = null, data = {} } = {}) {
+        const el = h('div', { class: 'pi-ring ' + cls, title, ...data });
+        marksLayer().appendChild(el);
+        ml.items.push({ el, target, kind: 'ring', pad });
+        return el;
+    }
+
+    function addPill(target, cls, text, { title = null, align = 'center', pad = RING_PAD, data = {} } = {}) {
+        const el = h('div', { class: 'pi-pill ' + cls, title: title || text, ...data }, [h('span', { text })]);
+        marksLayer().appendChild(el);
+        ml.items.push({ el, target, kind: 'pill', pad, align });
+        return el;
+    }
+
+    /** Place every mark over its box now (all rects read first, then our styles written: one layout). */
+    function placeMarks(doc = document) {
+        if (!ml.items.length) return;
+        const layer = doc.getElementById('pi-marks-layer');
+        if (!layer) return;
+        const lr = layer.getBoundingClientRect();
+        const o = { x: lr.left, y: lr.top };
+        const viewW = (doc.documentElement && doc.documentElement.clientWidth) || window.innerWidth;
+        // A pill hidden last time has no width to read: shown again first (rare: its box came back).
+        for (const it of ml.items) if (it.kind === 'pill' && it.el.style.display === 'none' && it.target.isConnected) it.el.style.display = '';
+        const reads = ml.items.map((it) => {
+            const r = it.target.isConnected ? it.target.getBoundingClientRect() : null;
+            return { r: r && r.width > 0 && r.height > 0 ? r : null, w: it.kind === 'pill' ? it.el.scrollWidth : 0, ht: it.kind === 'pill' ? it.el.offsetHeight || 20 : 0 };
+        });
+        ml.items.forEach((it, i) => {
+            const { r, w, ht } = reads[i];
+            const s = it.el.style;
+            if (!r) {
+                s.display = 'none';
+                return;
+            }
+            s.display = '';
+            if (it.kind === 'ring') {
+                const b = ringRect(r, o, it.pad, viewW);
+                s.left = b.left + 'px';
+                s.top = b.top + 'px';
+                s.width = b.width + 'px';
+                s.height = b.height + 'px';
+            } else {
+                const p = pillSpot(r, o, w, ht, { pad: it.pad, align: it.align, viewW });
+                s.left = p.left + 'px';
+                s.top = p.top + 'px';
+                s.maxWidth = p.maxWidth + 'px';
+            }
+        });
+    }
+
+    /** Place the marks at the next frame (resize, scroll, Torn's page changing): once a frame at most. */
+    function scheduleMarks() {
+        if (ml.queued || !ml.items.length) return;
+        ml.queued = true;
+        const run = () => {
+            ml.queued = false;
+            placeMarks();
+        };
+        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+        else setTimeout(run, 16);
+    }
+
+    /* ---------------------------------------------------------- gym page */
+
+    /** "Train this · 27 trains · about +1,234" → "Train this · 27 trains": the pill's short words (the rest on hover). */
+    function shortTab(tab) {
+        return String(tab || '').split(' · ').slice(0, 2).join(' · ');
+    }
+
+    /**
+     * Fill N in the panel, from planGymPage's per-stat words: the stat, how many to type, the number shown, and whether
+     * it waits (the wrong gym, the boosters still to take, no energy for one train yet). null: nothing to fill.
+     * @returns {{stat, n, shown, disabled, title}|null}
+     */
+    function gymFill(plan) {
+        if (!plan || !plan.perStat) return null;
+        for (const [stat, p] of Object.entries(plan.perStat)) {
+            if (!p || (p.kind !== 'train' && p.kind !== 'wait')) continue;
+            const wait = p.kind === 'wait';
+            const n = p.fill !== undefined ? p.fill : p.trains;
+            const shown = p.fillN !== undefined && (p.hold || wait) ? p.fillN : n;
+            const disabled = Boolean(wait || p.hold || p.noEnergy || !(n > 0));
+            const title = wait ? 'Switch gyms first' : p.noEnergy ? String(p.tab || '').split(' · then ')[0] : p.hold ? 'Take the boosters and the drug first' : 'Types ' + n + ' into Torn’s box (you press TRAIN)';
+            return { stat, n, shown, disabled, title };
+        }
+        return null;
+    }
+
+    /**
+     * The words the strip over the stat boxes used to say that the panel's own card doesn't (they now live in the panel):
+     * where you are and where to switch, which group of gyms to open, the energy kept, the session's parts, the box's
+     * own line (energy and what's left).
+     * @param {object} plan - planGymPage()
+     * @param {{hint?: string|null}} [o] - "Open the heavyweight gyms to find it" when the gym to go to isn't shown
+     * @returns {string[]}
+     */
+    function gymNotes(plan, { hint = null } = {}) {
+        const st = plan && plan.state;
+        if (!st || st.kind === 'overdose' || st.kind === 'stacking' || st.kind === 'away') return [];
+        const out = [];
+        const cur = plan.current;
+        const p = cur && plan.perStat ? plan.perStat[cur.stat] : null;
+        if (p && p.kind === 'train' && !p.hold && p.sub) out.push(p.sub.replace(/ · about [+−-]?[\d,]+/, ''));
+        if (st.kind === 'wrong' && plan.switchHint) out.push(plan.switchHint.charAt(0).toUpperCase() + plan.switchHint.slice(1));
+        if (hint) out.push(hint);
+        if (st.kind === 'kept' && plan.line) out.push([plan.line.head, plan.line.text].filter(Boolean).join(' · '));
+        // The next gym and how far it is ("Force Training in 7,300 E, DEX 6.4 there").
+        if ((st.kind === 'right' || st.kind === 'done' || st.kind === 'idle') && plan.line && plan.line.src) out.push('Next gym: ' + plan.line.src);
+        const parts = plan.parts || [];
+        if (parts.length > 1 || parts.some((x) => x.state === 'done')) {
+            out.push(parts.map((x) => (x.state === 'done' ? '✓ ' : '') + x.gymName + ': ' + String(x.stat).toUpperCase() + ' × ' + x.trains + (x.state === 'current' && x.done > 0 ? ' (' + x.left + ' left)' : '')).join(' → '));
+        }
+        return out;
+    }
+
+    /**
+     * Draw the gym page's marks from planGymPage() output, on our layer.
+     * @param {object} plan - planGymPage(model, page)
+     * @param {object[]} boxes - readStatBoxes(root)
+     * @param {{id, el}[]} [buttons] - readGymButtons(root): the gym you're in and the gym to go to
+     * @param {{motion:boolean}} [opts] - motion false (Settings › Animations off): the pulse is held still
+     * @returns {{nextGymShown: boolean}} false: the gym to go to isn't on the page (Torn shows one group of gyms at a time)
+     */
+    function drawGymMarks(plan, boxes, buttons = [], { motion = true } = {}) {
+        clearMarks();
+        const still = motion === false ? ' pi-still' : '';
+        let nextGymShown = true;
+        // The gym you're in: a steady ring, green when right, red when wrong (no glow).
+        if (plan.hereGym) {
+            const b = buttons.find((x) => x.id === plan.hereGym.id);
+            if (b && b.el) addRing(b.el, plan.hereGym.wrong ? 'pi-c-red' : 'pi-c-green', { pad: 2, title: plan.hereGym.label, data: { 'data-pi-gym': plan.hereGym.wrong ? 'wrong' : 'right', 'data-pi-gym-id': String(b.id) } });
+        }
+        // The gym to go to: green, and it pulses (the only pulse for gyms). The user switches; we never do.
+        if (plan.nextGym) {
+            const b = buttons.find((x) => x.id === plan.nextGym.id);
+            if (b && b.el) addRing(b.el, 'pi-c-green pi-pulse' + still, { pad: 2, title: plan.nextGym.label, data: { 'data-pi-gym': 'go', 'data-pi-gym-id': String(b.id) } });
+            else nextGymShown = false;
+        }
+        for (const box of boxes) {
+            const p = plan.perStat[box.stat];
+            if (!p || p.kind === 'off') continue;
+            const data = { 'data-pi-stat': box.stat };
+            if (p.kind === 'train' || p.kind === 'wait') {
+                const wait = p.kind === 'wait' || p.noEnergy;
+                const eat = !wait && p.mark === 'eat';
+                const tone = wait ? 'pi-c-grey' : eat ? 'pi-c-red' : 'pi-c-green';
+                // Steady green to train (the one thing that glows), a red pulse until the boosters are in, dashed grey
+                // in the wrong gym or with no energy for one train yet.
+                addRing(box.li, tone + (wait ? ' pi-dashed' : eat ? ' pi-pulse' + still : ' pi-glow'), { data: { ...data, 'data-pi-kind': p.noEnergy ? 'noenergy' : p.kind === 'wait' ? 'wait' : eat ? 'eat' : 'train' } });
+                const full = [p.tab, p.kind === 'wait' ? 'Switch gyms first' : p.hold ? p.text : null, p.sub, p.warn].filter(Boolean).join(' · ');
+                // Short enough for the box (the owner: "TAKE THE XANAX FIRST · TH…" was clipped): what comes first only;
+                // the rest ("then DEX × 25") is in the panel and on hover.
+                const words = eat ? 'Eat first' : p.warn && !wait ? p.warn.split('. ')[0] : p.noEnergy ? String(p.tab || '').split(' · then ')[0] : shortTab(p.tab);
+                const pillCls = wait ? 'pi-dark pi-c-grey' : 'pi-solid ' + (p.warn ? 'pi-c-amber' : tone);
+                addPill(box.li, pillCls, words, { title: full, data });
+            } else if (p.tag) {
+                // Never dims or covers Torn's boxes (round 6): a small dark pill on its top border, the full words on hover.
+                addPill(box.li, 'pi-dark', p.tag, { title: p.text, data });
+            }
+        }
+        placeMarks();
+        return { nextGymShown };
+    }
+
+    /* ---------------------------------------------------------- markets */
+
+    /**
+     * Mark one listing (items, bazaar cards, market rows, points lots): a chalk ring over its rect and its pill
+     * ("TAKE 3 · $2,479,500") on its top edge. `glow`: the one thing that glows on the page (the first listing to take).
+     */
+    function markListing(el, label, { glow = false } = {}) {
+        if (!el) return;
+        addRing(el, 'pi-c-chalk' + (glow ? ' pi-glow' : ''), { pad: 2 });
+        addPill(el, 'pi-solid pi-c-chalk', label, { align: 'left', pad: 2, data: { 'data-pi-listing': '1' } });
     }
 
     /* ===== src/sources/dom/gym.js ===== */
@@ -23021,204 +26509,6 @@
         return true;
     }
 
-    /* ===== src/ui/marks/marks.js ===== */
-    /*
-     * Marks on Torn's own pages (DESIGN §5; round 7's one look, overlays.html):
-     * an opaque near-black tag with our plate mark, a 5 px coloured edge, a 1 px
-     * border and, on the one thing to do now, a soft glow in its colour (green
-     * to train, red wrong or not yet, amber paused or overdosed, chalk "take
-     * this"). At most one thing glows on a page. On the gym page: the strip (one
-     * line before the stat boxes), the stat to train outlined with its tab, the
-     * gym you're in (steady green or red), the gym to go to (the only pulse for
-     * gyms), and Fill N, which types into Torn's reps box on your click. Our
-     * things never take the pointer except our own buttons, never sit on Torn's
-     * content, and carry the class `pi-mark` so they go at once.
-     */
-
-
-
-
-    const MARK_CSS = `
-    .pi-mark, .pi-mark * { box-sizing: border-box; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
-    .pi-c-green { --b: #3fbf5a; } .pi-c-red { --b: #ff6b5e; } .pi-c-amber { --b: #e8a33d; } .pi-c-chalk { --b: #efebe2; } .pi-c-grey { --b: #6c737a; } .pi-c-plain { --b: #6c737a; }
-    .pi-tag { display: flex; align-items: center; gap: 10px; min-height: 32px; padding: 0 12px 0 0; border-radius: 6px; background: #101214; border: 1px solid color-mix(in srgb, var(--b, #efebe2) 55%, transparent); box-shadow: 0 2px 8px rgba(0,0,0,.4); color: #f2f3f5; font-size: 13px; line-height: 1.35; overflow: hidden; }
-    .pi-tag > .pi-edge { align-self: stretch; width: 5px; flex: none; background: var(--b, #efebe2); }
-    .pi-glow { box-shadow: 0 0 0 3px color-mix(in srgb, var(--b) 14%, transparent), 0 0 16px color-mix(in srgb, var(--b) 24%, transparent), 0 2px 8px rgba(0,0,0,.4) !important; }
-    .pi-plate { width: 16px; height: 16px; border-radius: 50%; background: #efebe2; display: inline-grid; place-items: center; box-shadow: inset 0 0 0 3px #efebe2, inset 0 0 0 4.5px #15171a; flex: none; }
-    .pi-plate i { width: 4px; height: 4px; border-radius: 50%; background: #15171a; }
-    .pi-strip { flex-wrap: wrap; row-gap: 2px; padding-top: 5px; padding-bottom: 5px; margin: 0 0 10px; }
-    .pi-strip b { color: #fff; font-weight: 700; }
-    .pi-strip .pi-sep { width: 1px; align-self: stretch; margin: 2px 0; background: #2f3439; flex: none; }
-    .pi-strip .pi-src { color: #9aa1a8; font-size: 11px; }
-    .pi-strip .pi-hint { color: #e8a33d; font-weight: 700; }
-    .pi-strip .pi-part { color: #939aa1; white-space: nowrap; }
-    .pi-strip .pi-part.pi-cur { color: #fff; font-weight: 700; }
-    .pi-strip .pi-part.pi-done { color: #9bdc8a; }
-    .pi-strip .pi-arrow { color: #6c737a; }
-    .pi-strip a.pi-link { color: #101214; background: var(--b); border-radius: 5px; padding: 2px 10px; font-weight: 700; font-size: 12px; text-decoration: none; white-space: nowrap; }
-    .pi-strip a.pi-link:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
-    .pi-rel { position: relative; }
-    .pi-statmark { position: absolute; inset: -3px; border: 2px solid var(--b); border-radius: 6px; pointer-events: none; z-index: 1; }
-    .pi-statmark.pi-dashed { border-style: dashed; }
-    .pi-tab { height: 22px; padding: 0 9px; border-radius: 4px; background: var(--b); color: #101214; font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex: none; }
-    .pi-tab::before { content: ''; width: 10px; height: 10px; border-radius: 50%; box-shadow: inset 0 0 0 2px #101214; flex: none; }
-    .pi-pulse::after { content: ''; position: absolute; inset: -2px; border-radius: 7px; box-shadow: 0 0 0 2px color-mix(in srgb, var(--b) 80%, transparent), 0 0 22px color-mix(in srgb, var(--b) 80%, transparent); opacity: 0; animation: pi-pulse 1.4s ease-in-out infinite; pointer-events: none; }
-    .pi-pulse.pi-still::after { animation: none; opacity: .7; }
-    @keyframes pi-pulse { 50% { opacity: 1; } }
-    @media (prefers-reduced-motion: reduce) { .pi-pulse::after { animation: none; opacity: .7; } }
-    .pi-gymmark { outline: 2px solid var(--b) !important; outline-offset: 1px; position: relative; }
-    .pi-ring { position: absolute; inset: -2px; border-radius: 6px; pointer-events: none; }
-    .pi-panel { min-height: 32px; margin: 6px 0; font-size: 12px; }
-    .pi-panel b { color: #fff; font-size: 13px; }
-    .pi-panel .pi-sub { color: #c5cad0; }
-    .pi-fill { white-space: nowrap; height: 24px; padding: 0 12px; border-radius: 5px; border: 1px solid #3fbf5a; background: #3fbf5a; color: #101214; font: 700 12px 'Segoe UI', system-ui, sans-serif; cursor: pointer; margin-left: auto; flex: none; }
-    .pi-fill:disabled { background: #24282c; color: #6c737a; border-color: #3a4046; cursor: default; }
-    .pi-fill:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
-    .pi-warn { --b: #e8a33d; }
-    .pi-warn b { color: #ffe3b3; }
-    .pi-corner { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; margin: 4px 0; border-radius: 4px; background: #101214; border: 1px solid #3a4046; color: #c5cad0; font-size: 11px; white-space: nowrap; }
-    .pi-outlined { box-shadow: inset 0 0 0 2px #efebe2 !important; position: relative; }
-    .pi-outlined.pi-glow { box-shadow: inset 0 0 0 2px #efebe2, 0 0 0 3px rgba(239,235,226,.15), 0 0 16px rgba(239,235,226,.22) !important; }
-    .pi-label { position: absolute; top: -11px; left: 10px; height: 20px; padding: 0 8px 0 6px; border-radius: 5px; background: #efebe2; color: #15171a; font: 700 11px 'Segoe UI', system-ui, sans-serif; letter-spacing: .4px; text-transform: uppercase; pointer-events: none; z-index: 2; white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; }
-    .pi-label::before { content: ''; width: 9px; height: 9px; border-radius: 50%; box-shadow: inset 0 0 0 2px #15171a; flex: none; }
-    `;
-
-    /** Our page CSS, once per page (torn.com: no outside fonts). */
-    function ensureMarkCss(doc = document) {
-        if (doc.getElementById('pi-mark-css')) return;
-        const st = doc.createElement('style');
-        st.id = 'pi-mark-css';
-        st.textContent = MARK_CSS;
-        (doc.head || doc.documentElement).appendChild(st);
-    }
-
-    /** The classes we put on Torn's own elements (taken off with our marks). */
-    const ON_TORN = ['pi-on', 'pi-wait', 'pi-rel', 'pi-outlined', 'pi-dim', 'pi-glow', 'pi-gymmark', 'pi-c-green', 'pi-c-red', 'pi-c-grey', 'pi-c-chalk', 'pi-c-amber'];
-
-    /** Remove every mark we drew inside `scope`. */
-    function clearMarks(scope = document) {
-        for (const el of scope.querySelectorAll('.pi-mark')) el.remove();
-        for (const el of scope.querySelectorAll('.pi-on, .pi-wait, .pi-rel, .pi-outlined, .pi-dim, .pi-gymmark')) el.classList.remove(...ON_TORN);
-        for (const el of scope.querySelectorAll('[data-pi-gym]')) el.removeAttribute('data-pi-gym');
-    }
-
-    function plate() {
-        return h('span', { class: 'pi-plate' }, [h('i')]);
-    }
-
-    const TONE = { green: 'pi-c-green', red: 'pi-c-red', amber: 'pi-c-amber', chalk: 'pi-c-chalk', plain: 'pi-c-plain' };
-
-    /**
-     * Draw the gym page marks from planGymPage() output.
-     * @param {Element} root - #gymroot
-     * @param {object} plan - planGymPage(model, page)
-     * @param {object[]} boxes - readStatBoxes(root)
-     * @param {function} rereadBox - (stat) => the box as it is now (React may have replaced the input)
-     * @param {{id, el}[]} [buttons] - readGymButtons(root): the gym you're in and the gym to go to
-     * @param {{motion:boolean}} [opts] - motion false (Settings › Animations off): the pulse is held still
-     */
-    function drawGymMarks(root, plan, boxes, rereadBox, buttons = [], { motion = true } = {}) {
-        clearMarks(root);
-        const list = root.querySelector('ul[class*="properties___"]');
-        if (!list) return;
-        const line = plan.line || { tone: 'plain', head: plan.strip[0] || '', text: '', src: null };
-        const kind = plan.state ? plan.state.kind : 'idle';
-        const still = motion === false ? ' pi-still' : '';
-        const sep = () => h('span', { class: 'pi-sep' });
-        // The one thing that glows: the stat to train (right, ready), the stat to eat for (pulse), the gym to go to
-        // (pulse), or the strip itself when it is all there is (an overdose, stacking for a chain).
-        const stripGlows = kind === 'overdose' || kind === 'stacking';
-        const strip = h('div', { class: 'pi-mark pi-tag pi-strip ' + (TONE[line.tone] || TONE.plain) + (stripGlows ? ' pi-glow' : ''), 'data-pi-state': kind }, [h('span', { class: 'pi-edge' }), plate(), h('b', { text: line.head })]);
-        if (line.text) {
-            strip.appendChild(sep());
-            strip.appendChild(h('span', { class: 'pi-words', text: line.text }));
-        }
-        // A session in more than one part (or one already ticked): the parts, the current one bright.
-        if (plan.parts && (plan.parts.length > 1 || plan.parts.some((p) => p.state === 'done')) && kind !== 'overdose' && kind !== 'stacking') {
-            strip.appendChild(sep());
-            plan.parts.forEach((p, i) => {
-                if (i) strip.appendChild(h('span', { class: 'pi-arrow', text: '→' }));
-                const words = p.gymName + ': ' + p.stat.toUpperCase() + ' × ' + p.trains + (p.state === 'current' && p.done > 0 ? ' (' + p.left + ' left)' : '');
-                strip.appendChild(h('span', { class: 'pi-part' + (p.state === 'done' ? ' pi-done' : p.state === 'current' ? ' pi-cur' : ''), text: (p.state === 'done' ? '✓ ' : '') + words }));
-            });
-        }
-        if (line.src) {
-            strip.appendChild(sep());
-            strip.appendChild(h('span', { class: 'pi-src', text: line.src }));
-        }
-        if (line.link) strip.appendChild(h('a', { class: 'pi-link', href: line.link.href, text: line.link.text }));
-        list.parentNode.insertBefore(strip, list);
-
-        // The gym you're in: a steady outline, green when right, red when wrong (no glow).
-        if (plan.hereGym) {
-            const b = buttons.find((x) => x.id === plan.hereGym.id);
-            if (b && b.el) {
-                b.el.classList.add('pi-gymmark', plan.hereGym.wrong ? 'pi-c-red' : 'pi-c-green');
-                b.el.setAttribute('data-pi-gym', plan.hereGym.wrong ? 'wrong' : 'right');
-            }
-        }
-        // The gym to go to: green, and it pulses (the only pulse for gyms). The user switches; we never do.
-        if (plan.nextGym) {
-            const b = buttons.find((x) => x.id === plan.nextGym.id);
-            if (b && b.el) {
-                b.el.classList.add('pi-gymmark', 'pi-c-green');
-                b.el.setAttribute('data-pi-gym', 'go');
-                b.el.appendChild(h('span', { class: 'pi-mark pi-ring pi-pulse' + still, title: plan.nextGym.label, 'aria-hidden': 'true' }));
-            } else {
-                // Its button isn't on the page (Torn shows one group of gyms at a time): the strip says which group to open.
-                strip.appendChild(h('span', { class: 'pi-hint', text: 'open ' + plan.nextGym.group.replace(/^a /, 'the ') + 's to find it' }));
-            }
-        }
-
-        for (const box of boxes) {
-            const p = plan.perStat[box.stat];
-            if (!p || p.kind === 'off') continue;
-            if (p.kind === 'train' || p.kind === 'wait') {
-                const wait = p.kind === 'wait';
-                const tone = wait ? 'pi-c-grey' : p.mark === 'eat' ? 'pi-c-red' : 'pi-c-green';
-                box.li.classList.add(wait ? 'pi-wait' : 'pi-on', 'pi-rel');
-                // The mark: steady green to train, a red pulse until the boosters are in, dashed grey in the wrong gym.
-                const markCls = 'pi-mark pi-statmark ' + tone + (wait ? ' pi-dashed' : p.mark === 'eat' ? ' pi-pulse' + still : ' pi-glow');
-                // The outline is a border just outside the box (pointer-events none); its tab sits in our own row inside
-                // the box, never floating over Torn's controls (the owner: nothing of ours covers Torn's page).
-                box.li.appendChild(h('span', { class: markCls, 'aria-hidden': 'true' }));
-                const n = p.fill !== undefined ? p.fill : p.trains;
-                const shown = p.fillN !== undefined && (p.hold || wait) ? p.fillN : n;
-                const fill = h('button', {
-                    class: 'pi-fill',
-                    type: 'button',
-                    text: 'Fill ' + shown,
-                    title: wait ? 'Switch gyms first' : p.hold ? 'Take the boosters and the drug first' : null,
-                    disabled: wait || p.hold || n <= 0,
-                    onclick: (e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        const now = rereadBox(box.stat) || box;
-                        fillTrains(now.input, n);
-                    },
-                });
-                const row = p.warn
-                    ? h('div', { class: 'pi-mark pi-tag pi-panel pi-warn' }, [h('span', { class: 'pi-edge' }), h('span', {}, [h('b', { text: p.warn.split('. ')[0] + '.' }), ' ' + p.warn.split('. ').slice(1).join('. ')]), fill])
-                    : h('div', { class: 'pi-mark pi-tag pi-panel ' + tone }, [h('span', { class: 'pi-edge' }), h('span', { class: 'pi-tab', text: p.tab }), wait || p.hold ? h('b', { text: wait ? 'Switch gyms first' : p.text }) : null, p.sub ? h('span', { class: 'pi-sub', text: wait || p.hold ? p.sub : p.sub.replace(/ · about [+−-]?[\d,]+/, '') }) : null, fill]);
-                box.content.insertBefore(row, box.content.firstChild);
-            } else if (p.tag) {
-                // Never dims or covers Torn's boxes (round 6): a small dark tag on its own line, the full words on hover.
-                box.content.insertBefore(h('div', { class: 'pi-mark pi-corner', title: p.text, text: p.tag }), box.content.firstChild);
-            }
-        }
-    }
-
-    /**
-     * Outline one element with its chalk tab (items, bazaar cards, market rows, points lots). `glow`: the one thing
-     * that glows on the page (the first listing to take).
-     */
-    function outline(el, label, { glow = false } = {}) {
-        if (!el) return;
-        el.classList.add('pi-outlined');
-        if (glow) el.classList.add('pi-glow');
-        el.appendChild(h('span', { class: 'pi-mark pi-label', text: label }));
-    }
-
     /* ===== src/sources/dom/market.js ===== */
     /*
      * Reading the items page, bazaars, the Item Market and the points market
@@ -23287,515 +26577,6 @@
             out.push({ listingId: id, price: pageMoney(cell('.cost-each')), qty: pageMoney(cell('.points')), el: li });
         }
         return out;
-    }
-
-    /* ===== src/torn-page.js ===== */
-    /*
-     * On torn.com: the overlay pill and the marks on the page being viewed.
-     * Reads only the page the user opened; types into Torn's reps box only on
-     * a Fill click; never clicks Torn's buttons; nothing from a hidden tab.
-     */
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    const tp = { overlay: null, model: null, observer: null, gymSig: '', lastGymPlan: null };
-
-    /** Torn's page (its sidebar and content column) as {left, right}; a centred 976 px guess if it can't be measured. */
-    function pageRect() {
-        const parts = [document.querySelector('.content-wrapper'), document.getElementById('sidebarroot'), document.getElementById('sidebar')].filter(Boolean);
-        const rects = parts.map((el) => el.getBoundingClientRect()).filter((r) => r.width > 0 && r.height > 0);
-        if (rects.length) return { left: Math.min(...rects.map((r) => r.left)), right: Math.max(...rects.map((r) => r.right)) };
-        const w = Math.min(window.innerWidth, 976);
-        return { left: (window.innerWidth - w) / 2, right: (window.innerWidth + w) / 2 };
-    }
-
-    /** The trading script's NPC Arbitrage panel, if it is on this page (read only: its open shadow root). */
-    function tradingRect() {
-        const host = document.getElementById('ttv2-host');
-        const panel = host && host.shadowRoot && host.shadowRoot.querySelector('.ttv2-panel');
-        return panel ? panel.getBoundingClientRect() : null;
-    }
-
-    /** The column Torn Eye's list tags use ({left, right} on screen), from its layer's data-pi-col; null: none. */
-    function eyeColumn() {
-        const layer = document.getElementById('pi-eye-layer');
-        const v = layer && layer.getAttribute('data-pi-col');
-        const [left, right] = v ? v.split(',').map(Number) : [];
-        return Number.isFinite(left) && Number.isFinite(right) ? { left, right } : null;
-    }
-
-    /* ---------------------------------------------------------------- pill */
-
-    /** Why there's no state yet (key refused, too limited, Torn not answering), or null. */
-    function currentProblem() {
-        return keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: (get(K.userStatic, {}) || {}).keyInfo || null });
-    }
-
-    /** The bars as Torn's sidebar shows them now (they move before our next read), else the model's. */
-    function liveReads(m, now = Date.now()) {
-        const happy = readHappyBar() || (m && m.strip && m.strip.happy ? { current: m.strip.happy.current, max: m.strip.happy.max } : null);
-        const energy = readEnergyBar() || (m && m.strip ? m.strip.energy : null);
-        return { happy, energy, ...agedCooldowns(m, now) };
-    }
-
-    /** GM key: an overdose seen on the bars ({at, until}), so every tab stops its jump marks. */
-    const OVERDOSE_KEY = 'overdose';
-
-    /**
-     * An overdose seen on the bars (gympage.js nextOverdose: the bars at 0 with the overdose's long cooldown, or a fall
-     * training can't explain), kept while fresh readings still look like it and until the drug cooldown it started is over.
-     */
-    function overdoseOf(m, reads = liveReads(m), now = Date.now()) {
-        if (!m || !m.ready) return null;
-        const prev = get(OVERDOSE_KEY, null);
-        const next = nextOverdose(prev, reads, now, tp.barsSeen);
-        tp.barsSeen = nextBarsSeen(tp.barsSeen, reads, now);
-        if (JSON.stringify(next) !== JSON.stringify(prev)) set(OVERDOSE_KEY, next);
-        return next;
-    }
-
-    /** The step's one action on Torn: the page it is done on (none when you are on it). */
-    function stepAction(step, page, boost = null) {
-        if (!step) return null;
-        const items = (step.items || []).filter((it) => it.qty > 0);
-        const trains = Boolean(step.parts && step.parts.length);
-        if (boost) return boost.ready ? (page === PAGE_GYM ? null : { text: 'Open the gym', href: gymUrl() }) : page === PAGE_ITEMS ? null : { text: 'Open Items', href: itemsUrl() };
-        if (items.some((it) => it.id === POINTS)) return page === PAGE_POINTS ? null : { text: 'Open Points', href: pointsUrl() };
-        if (items.length) return page === PAGE_ITEMS ? null : { text: 'Open Items', href: itemsUrl() };
-        if (trains && page !== PAGE_GYM) return { text: 'Open the gym', href: gymUrl() };
-        return null;
-    }
-
-    function overlayView(m, page) {
-        const s = getSettings();
-        const relevant = [PAGE_GYM, PAGE_ITEMS, PAGE_BAZAAR, PAGE_ITEM_MARKET, PAGE_POINTS].includes(page);
-        if (!s.pill && !relevant) return { off: true };
-        if (!m || !m.ready) {
-            const hasKey = Boolean(getKey(K.apiKey));
-            const p = currentProblem();
-            if (p) return { pillText: p.short, cardStep: p.title, cardSub: p.text, warn: p.kind === 'retry' ? null : 'Open Pumping Iron › Settings' };
-            return hasKey ? { pillText: 'Reading your state…', cardStep: 'Asking Torn for your bars, stats and gym.' } : { pillText: 'Open to set up', cardStep: 'Add your Torn key in Pumping Iron’s Settings.' };
-        }
-        const now = Date.now();
-        const next = m.next;
-        const later = m.steps.slice(1, 3).map((x) => tornClock(x.at) + ' ' + x.label.split(' · ')[0] + (trainsText(x.trains) ? ', ' + trainsText(x.trains) : ''));
-        const energy = readEnergyBar() || m.strip.energy;
-        // Stacking energy for a chain (Home's "I'm stacking"): no training steps, the energy is kept.
-        if (m.stacking) {
-            return { tone: 'amber', label: 'Stacking', pillText: 'Stacking for a chain · training paused', cardStep: 'Stacking for a chain', cardSub: 'Training paused · energy now ' + fmtInt(energy.current) + ' / ' + fmtInt(energy.max) + ', kept', energy, later: [] };
-        }
-        const reads = liveReads(m);
-        if (overdoseOf(m, reads, now)) {
-            return { tone: 'amber', label: 'Overdosed', pillText: 'Overdosed · fly to Switzerland', cardStep: 'Fly to Switzerland', cardSub: 'Rehab there: about $' + fmtInt(REHAB_COST) + ' a session. The plan is worked out again after rehab.', later: [], action: { text: 'Open Travel', href: TRAVEL_URL } };
-        }
-        const v = { energy, later };
-        // On the gym page the bar follows the walk-through. Round 7: once the session is done and the next step is still
-        // ahead, it moves on to that step and its countdown (it stayed on "Now · Session done").
-        const gp = page === PAGE_GYM ? tp.lastGymPlan : null;
-        const sessionOver = gp && gp.done && next && next.at > now;
-        if (gp && gp.pill && !sessionOver) {
-            v.pillNow = 'Now';
-            v.pillText = gp.pill;
-        }
-        // A jump or a daily boost due now: its checklist, ticked from the bars (every Torn page).
-        const boost = next && isBoostStep(next) && next.at <= now + DUE_SLACK_MS ? boostProgress(next, { ...reads, happyTrained: boostHappyTrained(get(K.gymSession, null), next, m.pc && m.pc.perks ? m.pc.perks.happyLossMult : 1, now) }) : null;
-        if (next) {
-            const due = next.at <= now;
-            if (!v.pillText) {
-                if (due) {
-                    v.pillNow = 'Now';
-                    v.pillText = next.kind === 'natural' ? 'Train ' + trainsText(next.trains) : next.label.split(' · ')[0];
-                } else {
-                    v.cdAt = next.at;
-                    v.pillText = next.label.split(' · ')[0];
-                }
-            } else if (!due) v.cdAt = next.at;
-            // A chalk edge only when it's time to act.
-            v.tone = due || boost ? 'chalk' : null;
-            v.label = due || boost ? 'Now' : 'Next';
-            v.cardStep = (sessionOver ? 'Session done. Next: ' : '') + stepWords(next);
-            v.cardSub = next.gain ? 'about +' + fmtInt(next.gain) + (next.energy ? ' · ' + fmtInt(next.energy) + ' energy' : '') : null;
-            if (next.strict && next.warnAt !== null && now >= next.warnAt) v.warn = 'Strict: ' + (next.note || 'on the tick');
-            v.action = stepAction(next, page, boost);
-            if (boost) {
-                v.checklist = boost.list;
-                v.tone = boost.ready ? 'green' : 'red';
-                v.label = (boost.jump ? 'Jump' : 'Boost') + (boost.ready ? ' · now' : boost.deadline ? ' · finish before ' + tornClock(boost.deadline) : '');
-            }
-        } else {
-            v.pillText = 'Done for today';
-            v.cardStep = 'Nothing left today';
-            v.label = 'Today';
-        }
-        // The gym page's own states (overlays.html §6): the right gym, the wrong one, eat first, ready.
-        const panel = gp && !sessionOver ? gymPanel(gp) : null;
-        if (panel) {
-            Object.assign(v, { tone: panel.tone, label: panel.title, cardStep: panel.step, cardSub: panel.sub, checklist: panel.checklist, action: panel.action });
-            v.warn = null;
-        }
-        return v;
-    }
-
-    /**
-     * The panel while Torn Trading runs: an amber card that says where it is still seen and when it was last seen (round 7:
-     * it said "starts again by itself within a minute", which isn't so while a tab opened before Torn Trading was turned
-     * off still runs it), then the plan's next steps.
-     */
-    function pausedView(m, seen = tradingWhere()) {
-        const steps = m && m.ready ? m.steps.slice(0, 2).map((x) => x.label.split(' · ')[0] + ' at ' + tornClock(x.at)) : [];
-        return {
-            paused: true,
-            tone: 'amber',
-            label: 'Paused · Torn Trading is on',
-            pillText: 'Paused · Torn Trading is on',
-            cardStep: '',
-            seen,
-            later: steps.length ? [steps.join(' · ')] : [],
-        };
-    }
-
-    /** Everything we drew on Torn's page, gone (paused). */
-    function clearAll() {
-        const root = gymRoot();
-        if (root) clearMarks(root);
-        clearMarks(document.querySelector('.content-wrapper') || document);
-        tp.lastGymPlan = null;
-    }
-
-    /* ----------------------------------------------------------- gym marks */
-
-    function drawGym(m) {
-        if (isPaused()) return;
-        const root = gymRoot();
-        if (!root || gymLoading(root)) return;
-        const buttons = readGymButtons(root);
-        const sum = gymListSummary(buttons);
-        // What the gym page tells us that the API doesn't: unlocked gyms and progress to the next.
-        if (sum.unlocked.length) {
-            const prev = get(K.unlocked, null);
-            const next = [...new Set(sum.unlocked)].sort((a, b) => a - b);
-            if (JSON.stringify(prev) !== JSON.stringify(next)) {
-                set(K.unlocked, next);
-                pi.modelAt = 0;
-            }
-        }
-        if (sum.inProgress && sum.inProgress.percent !== null) {
-            const need = unlockEnergyAfter(sum.inProgress.id - 1, m && m.pc ? m.pc.perks.gymExpMult : 1) || 0;
-            const gp = { nextId: sum.inProgress.id, energy: Math.round((need * sum.inProgress.percent) / 100), at: Date.now() };
-            const prev = get(K.gymProgress, null);
-            if (!prev || prev.nextId !== gp.nextId || prev.energy !== gp.energy) {
-                set(K.gymProgress, gp);
-                pi.modelAt = 0;
-            }
-        }
-        if (!m || !m.ready || !getSettings().gymMarks) {
-            clearMarks(root);
-            // Marks off: the panel's pill stops showing the gym plan too.
-            tp.lastGymPlan = null;
-            return;
-        }
-        const boxes = readStatBoxes(root);
-        // The walk-through: Torn's own boxes and energy bar move the moment a train lands (the model can be 30 s old).
-        const now = Date.now();
-        const reading = pageReading(m, boxes, readEnergyBar());
-        const prev = get(K.gymSession, null);
-        const session = nextSession(prev, m, reading, now, { table: m.pc.table, perks: m.pc.perks.mult });
-        if (JSON.stringify(session) !== JSON.stringify(prev)) set(K.gymSession, session);
-        // Round 7: the gym page's states come from the same reads (the sidebar's happy and energy, the model's cooldowns).
-        const reads = liveReads(m);
-        const plan = planGymPage(m, { selectedId: sum.selectedId || m.state.gymId, boxes, reading, reads, overdose: overdoseOf(m, reads, now) }, session, now);
-        tp.lastGymPlan = plan;
-        drawGymMarks(root, plan, boxes, (stat) => readStatBoxes(gymRoot()).find((b) => b.stat === stat), buttons, { motion: getSettings().motion !== false });
-        // Our own drawing is not Torn changing the page: those records are dropped, and what Torn shows now is remembered.
-        if (tp.observer) tp.observer.takeRecords();
-        tp.gymSig = gymPageSig(root);
-    }
-
-    /** What Torn's gym page shows that the marks depend on: the stat boxes, the gym selected, the energy bar. */
-    function gymPageSig(root) {
-        const boxes = readStatBoxes(root).map((b) => b.stat + ':' + b.value + ':' + (b.locked ? 1 : 0)).join(',');
-        const sel = gymListSummary(readGymButtons(root)).selectedId;
-        // Our marks' count too: Torn re-rendering a box (a message, same value) wipes its panel without changing a value.
-        return [boxes, sel, JSON.stringify(readEnergyBar()), JSON.stringify(readHappyBar()), gymLoading(root) ? 1 : 0, root.querySelectorAll('.pi-mark').length].join('|');
-    }
-
-    function watchGym() {
-        const root = gymRoot();
-        if (!root) return;
-        // Torn may replace the gym root: watch the new one.
-        if (tp.observer && tp.observedRoot === root) return;
-        if (tp.observer) tp.observer.disconnect();
-        tp.observedRoot = root;
-        let timer = null;
-        // Redraw only when Torn's own values change (a train, another gym, the energy bar, our marks wiped by a re-render),
-        // never on any mutation: other scripts (TornTools) and Torn's timers change the page all the time, and two
-        // scripts redrawing on each other's changes could loop.
-        tp.observer = new MutationObserver((muts) => {
-            if (isPaused()) return;
-            // Our own marks changing is not Torn re-rendering.
-            if (muts.every((mu) => [...mu.addedNodes, ...mu.removedNodes].every((n) => n.nodeType === 1 && n.classList && n.classList.contains('pi-mark')))) return;
-            clearTimeout(timer);
-            timer = setTimeout(() => {
-                const r = gymRoot();
-                if (r && gymPageSig(r) === tp.gymSig) return;
-                drawGym(tp.model);
-                // The panel's pill follows the walk-through at once (a train, another gym), not at the next model.
-                if (tp.showView) tp.showView(tp.model);
-            }, 150);
-        });
-        tp.observer.observe(root, { childList: true, subtree: true });
-    }
-
-    /* ------------------------------------------------ the sidebar's bars */
-
-    /**
-     * Round 7 (D.4): the panel moved to the next step only at the next 30 s read. Torn's own sidebar shows an action the
-     * moment it happens (energy drops on a train, jumps on a Xanax or refill; happy moves on a booster): when it does,
-     * the state is read about two seconds after the last change (runtime readSoon). Read-only: two numbers are looked
-     * at, nothing on Torn's page is touched. Regeneration ticks alone ask for nothing.
-     */
-    function watchBars() {
-        if (tp.barsTimer) return;
-        const look = () => ({ energy: readEnergyBar(), happy: readHappyBar() });
-        let last = look();
-        let observed = null;
-        let seen = 0;
-        const check = () => {
-            if (isPaused() || !isVisible()) return;
-            const now = look();
-            // The last reading with something in the bars: an overdose is a fall from it that training can't explain.
-            tp.barsSeen = nextBarsSeen(tp.barsSeen, now, Date.now());
-            if (barsActed(last, now)) readSoon();
-            last = now;
-        };
-        const attach = () => {
-            const node = document.getElementById('sidebarroot') || (document.getElementById('barEnergy') || {}).parentNode || null;
-            if (!node || node === observed) return;
-            if (tp.barsObserver) tp.barsObserver.disconnect();
-            observed = node;
-            tp.barsObserver = new MutationObserver(() => {
-                // Torn's sidebar ticks its own timers every second: look at most every 300 ms.
-                const t = Date.now();
-                if (t - seen < 300) return;
-                seen = t;
-                check();
-            });
-            tp.barsObserver.observe(node, { childList: true, subtree: true, characterData: true });
-        };
-        attach();
-        // Torn may replace the sidebar (page changes without a load): find it again, and look once in case a change was skipped.
-        tp.barsTimer = setInterval(() => {
-            attach();
-            check();
-        }, 5000);
-    }
-
-    /* -------------------------------------------------- items and markets */
-
-    function drawItems(m) {
-        clearMarks(document.querySelector('.content-wrapper') || document);
-        // Stacking for a chain: no step to buy for until Resume (the panel says so).
-        if (!m || !m.ready || m.stacking || !getSettings().marketMarks) return;
-        const idx = m.steps.findIndex((s) => (s.items || []).some((it) => it.id !== POINTS));
-        if (idx < 0) return;
-        const step = m.steps[idx];
-        const n = m.done.length + idx + 1;
-        // At most one thing glows on a page: the first one marked.
-        let glow = true;
-        for (const it of step.items) {
-            for (const row of readItemRows().filter((r) => r.itemId === Number(it.id))) {
-                outline(row.el, 'Step ' + n + ' of today · ' + step.label.split(' · ')[0], { glow });
-                glow = false;
-            }
-        }
-    }
-
-    /** The Buy list's chosen listings (same window as the Buy tab). */
-    function chosenFills(m) {
-        const s = getSettings();
-        const statics = get(K.userStatic, {}) || {};
-        const prices = getPrices();
-        const needs = needList(needsForWindow(m, m.compare, { ...getPlan(), strategy: m.strategy || getPlan().strategy }, s.buyWindow || 'three', m.planDays || s.horizonDays), statics.inventory || {});
-        // The same list as the Buy tab: its type ticks, and a city shop you ticked joins the listings.
-        const show = shownTypes(s, [...new Set(needs.map((n) => typeOf(n.id)))]);
-        const ic = itemContext(statics, s, m.now);
-        const out = [];
-        // Today's city-shop allowance, shared by every item bought there.
-        let left = ic.cityLeft;
-        for (const n of needs) {
-            if (!(n.buy > 0) || !show.has(typeOf(n.id))) continue;
-            const p = prices[n.id] || {};
-            const shop = ic.npc[n.id] ? npcListing(ic.npc[n.id], n.buy, left) : null;
-            const listings = (Array.isArray(p.listings) ? p.listings : []).concat(shop ? [shop] : []);
-            if (!listings.length) continue;
-            const fill = fillCheapest(listings, n.buy, n.id);
-            if (left !== null) left = Math.max(0, left - fill.rows.filter((r) => r.source === 'npc').reduce((a, r) => a + r.qty, 0));
-            out.push({ id: n.id, fill });
-        }
-        return out;
-    }
-
-    function drawMarket(m, page) {
-        clearMarks(document.querySelector('.content-wrapper') || document);
-        if (!m || !m.ready || !getSettings().marketMarks) return;
-        // On a market page, the Buy list's prices are refreshed (at most every 5 minutes) so the outline is current.
-        const s = getSettings();
-        const want = needList(needsForWindow(m, m.compare, { ...getPlan(), strategy: m.strategy || getPlan().strategy }, s.buyWindow || 'three', m.planDays || s.horizonDays), (get(K.userStatic, {}) || {}).inventory || {}).filter((n) => n.buy > 0).map((n) => n.id);
-        if (want.length) loadPrices(want).catch(() => {});
-        const fills = chosenFills(m);
-        const label = (r) => 'Take ' + fmtInt(r.qty) + ' · $' + fmtInt(r.subtotal);
-        // The chosen listing with its chalk tab ("TAKE 3 · $2,479,500"); at most one thing glows on a page: the first.
-        let glow = true;
-        const mark = (el, text) => {
-            outline(el, text, { glow });
-            glow = false;
-        };
-        if (page === PAGE_BAZAAR) {
-            const owner = bazaarOwnerId(location.href);
-            const cards = readBazaarCards();
-            for (const f of fills) for (const r of f.fill.rows) if (r.source === SOURCE_BAZAAR && r.sellerId === owner) {
-                const card = cards.find((c) => c.itemId === Number(f.id) && c.price === r.price);
-                if (card) mark(card.el, label(r));
-            }
-        } else if (page === PAGE_ITEM_MARKET) {
-            const item = Number(itemMarketItemOf(location.href));
-            const rows = readItemMarketRows();
-            for (const f of fills) if (Number(f.id) === item) for (const r of f.fill.rows) if (r.source === SOURCE_ITEM_MARKET) {
-                const row = rows.find((x) => x.price === r.price);
-                if (row) mark(row.el, label(r));
-            }
-        } else if (page === PAGE_POINTS) {
-            const rows = readPointsRows();
-            for (const f of fills) if (f.id === POINTS) for (const r of f.fill.rows) if (r.source === SOURCE_POINTS) {
-                const row = rows.find((x) => (r.listingId && x.listingId === r.listingId) || x.price === r.price);
-                if (row) mark(row.el, label(r));
-            }
-        }
-    }
-
-    /* ------------------------------------------------------------- wiring */
-
-    /** How many rows the page shows now: lists load after the page does. */
-    function pageRowsCount(p) {
-        if (p === PAGE_ITEMS) return readItemRows().length;
-        if (p === PAGE_BAZAAR) return readBazaarCards().length;
-        if (p === PAGE_ITEM_MARKET) return readItemMarketRows().length;
-        if (p === PAGE_POINTS) return readPointsRows().length;
-        return 0;
-    }
-
-    /** What this Torn page is about, for the API lanes: Torn Eye pages or market pages go first while open. */
-    function tornPageFocus(href = location.href) {
-        const p = detectPage(href);
-        if (p === PAGE_PROFILE || p === PAGE_FACTION || p === PAGE_ATTACK) return { focus: 'eye', war: p === PAGE_FACTION && Boolean(document.getElementById('faction_war_list_id')) };
-        if (p === PAGE_ITEMS || p === PAGE_BAZAAR || p === PAGE_ITEM_MARKET || p === PAGE_POINTS) return { focus: 'prices', war: false };
-        return { focus: null, war: false };
-    }
-
-    function bootTornPage() {
-        ensureMarkCss();
-        pi.focusOf = () => tornPageFocus();
-        beatFocus();
-        tp.overlay = new Overlay({
-            // A key problem opens straight on Settings, where the key is replaced.
-            onOpen: () => gmOpenTab(APP_PAGE_URL + (currentProblem() && !(tp.model && tp.model.ready) ? '#settings' : '')),
-            loadPos: () => get(K.overlayPos, null),
-            savePos: (p) => set(K.overlayPos, p),
-            loadCollapsed: () => Boolean(get(K.overlayCollapsed, false)),
-            saveCollapsed: (v) => set(K.overlayCollapsed, v),
-            pageRect,
-            avoidRect: tradingRect,
-            // The attack page: folded to one line under Torn Eye's fight card, never on top of it (round 7).
-            dockTo: () => (detectPage(location.href) === PAGE_ATTACK ? document.getElementById('pi-eyecard') : null),
-            // A profile's Torn Eye card that had to take the panel's margin: the panel folds under it instead of covering it.
-            dockIfShared: () => document.getElementById('pi-eyecard'),
-            // Torn Eye's tags on faction and war lists (eye-page.js notes their column on its layer): never the same margin.
-            avoidColumn: eyeColumn,
-        });
-        tp.overlay.mount();
-        gmMenu('Reset overlay position', () => {
-            set(K.overlayPos, null);
-            set(K.overlayCollapsed, false);
-            tp.overlay.setCollapsed(false, false);
-        });
-        let lastSig = '';
-        let lastView = '';
-        tp.showView = (m) => {
-            const view = overlayView(m, detectPage(location.href));
-            const vs = JSON.stringify(view);
-            if (vs !== lastView) {
-                lastView = vs;
-                tp.overlay.update(view);
-            }
-        };
-        // The paused card follows where Torn Trading is still seen (another tab reloaded or closed) without a new model.
-        const showPaused = (m) => {
-            const pv = pausedView(m);
-            const s = JSON.stringify(pv);
-            if (s !== lastView) {
-                lastView = s;
-                tp.overlay.update(pv);
-            }
-        };
-        onModel((m) => {
-            tp.model = m;
-            if (!isVisible()) return;
-            // Taking turns with Torn Trading: nothing on Torn's page, only the panel with a warning sign.
-            if (isPaused()) {
-                if (lastSig !== 'paused') {
-                    lastSig = 'paused';
-                    clearAll();
-                }
-                showPaused(m);
-                return;
-            }
-            const p = detectPage(location.href);
-            // The saved plan (made, recalibrated or another picked on the webpage) redraws the marks too.
-            const planSig = m && m.ready && m.saved ? m.saved.createdAt + ':' + (m.saved.recalibratedAt || 0) : '';
-            // What you hold is read after the first draw (the slow data): the marks take it off, so it redraws them.
-            const heldSig = JSON.stringify((get(K.userStatic, {}) || {}).inventory || {});
-            // Stacking for a chain, or an overdose seen on the bars: the gym page's marks change at once.
-            const stateSig = JSON.stringify([(m && m.stacking) || null, overdoseOf(m)]);
-            const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), JSON.stringify(getPlan()), planSig, heldSig, stateSig, Object.values(getPrices()).map((x) => x.at).join(), pageRowsCount(p)].join('|');
-            if (sig !== lastSig) {
-                lastSig = sig;
-                if (p === PAGE_GYM) {
-                    watchGym();
-                    drawGym(m);
-                } else if (p === PAGE_ITEMS) drawItems(m);
-                else if (p === PAGE_BAZAAR || p === PAGE_ITEM_MARKET || p === PAGE_POINTS) drawMarket(m, p);
-            }
-            tp.showView(m);
-        });
-        setInterval(() => {
-            tp.overlay.tick();
-            if (isVisible() && isPaused()) showPaused(tp.model);
-        }, 1000);
-        watchBars();
-        // Torn's pages change the hash without a load (Item Market search, items tabs).
-        window.addEventListener('hashchange', () => {
-            lastSig = '';
-        });
     }
 
     /* ===== src/platform/page-hook.js ===== */
@@ -23926,6 +26707,20 @@
         return m ? Number(m[1]) : null;
     }
 
+    /**
+     * Your faction's chain as Torn's sidebar shows it: the count over the next bonus ("247/250") and the timer ("03:42")
+     * [check live: the selectors follow the energy bar's, #barChain or the bar classed chain]. Read only: two texts are
+     * looked at. null when the page shows no chain bar.
+     * @returns {{value: string, time: string}|null}
+     */
+    function readChainBar(doc = document) {
+        const bar = doc.getElementById('barChain') || doc.querySelector('[class*="bar___"][class*="chain"]') || doc.querySelector('[class*="chain-bar___"]');
+        const v = bar && bar.querySelector('[class*="bar-value___"]');
+        if (!v) return null;
+        const t = bar.querySelector('[class*="bar-timeleft___"]');
+        return { value: String(v.textContent || '').trim(), time: t ? String(t.textContent || '').trim() : '' };
+    }
+
     /** The player the mini-profile popup is showing. */
     function miniProfileId(doc = document) {
         const root = doc.getElementById('profile-mini-root');
@@ -23953,6 +26748,9 @@
      * Never the words FF or fair fight. FFScouter is credited wherever its
      * numbers show. Segoe UI / system-ui only (Torn's page can't load fonts).
      */
+
+
+
 
 
 
@@ -23989,8 +26787,8 @@
     .pi-eye.pi-sum .pi-edge { align-self: stretch; margin: -4px 0; }
     .pi-eye.pi-sum b { color: #fff; font-weight: 700; }
     .pi-eye.pi-edgebar { width: 4px; border-radius: 2px; background: var(--b); pointer-events: none; }
-    .pi-eye.pi-mini-line { display: block; width: 100%; max-width: 100%; margin: 8px 0 0; clear: both; }
-    .pi-eye.pi-mini-line .pi-tag { width: 100%; }
+    .pi-eye.pi-mini-line { display: block; margin: 0; }
+    #pi-eye-layer .pi-mini-line .pi-tag { width: 100%; }
     .pi-eye.pi-card { background: #101214; border: 1px solid color-mix(in srgb, var(--b) 45%, #3a4046); border-radius: 10px; box-shadow: 0 8px 26px rgba(0,0,0,.6); overflow: hidden; }
     .pi-eye.pi-card.pi-glow { box-shadow: 0 0 0 3px color-mix(in srgb, var(--b) 14%, transparent), 0 0 18px color-mix(in srgb, var(--b) 22%, transparent), 0 8px 26px rgba(0,0,0,.6); }
     .pi-card .pi-ribbon { height: 4px; background: var(--b); }
@@ -24020,7 +26818,54 @@
     .pi-card.pi-small .pi-stack b { font-size: 15px; }
     .pi-card.pi-small .pi-stack { column-gap: 6px; }
     .pi-eye.pi-card.pi-fixed { position: fixed; z-index: 9991; overflow: hidden auto; }
-    .pi-warlist { display: flex !important; flex-direction: column; }
+    .pi-eye .pi-st { font-size: 12px; font-weight: 600; white-space: nowrap; }
+    .pi-eye .pi-st.pi-ok { color: #9bdc8a; }
+    .pi-eye .pi-st.pi-wait { color: #e8a33d; }
+    .pi-eye .pi-st.pi-away { color: #9aa1a8; }
+    .pi-eye.pi-tag.pi-out .pi-band, .pi-eye.pi-tag.pi-out .pi-fig { opacity: .55; }
+    .pi-eye.pi-short .pi-st { font-size: 11px; }
+    .pi-chain .pi-top .pi-lbl { font-size: 11px; font-weight: 700; letter-spacing: .06em; color: #9aa1a8; text-transform: uppercase; }
+    .pi-chain .pi-top .pi-src { margin-left: auto; white-space: nowrap; }
+    .pi-chain .pi-cside { padding: 8px 14px 10px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: 10px; row-gap: 2px; align-items: baseline; }
+    .pi-chain .pi-cside + .pi-cside { border-top: 1px solid #262a2e; }
+    .pi-chain .pi-cwho { grid-column: 1 / 3; color: #9aa1a8; font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pi-chain .pi-ctime { font-size: 16px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
+    .pi-chain .pi-low { color: #e8a33d; }
+    .pi-chain .pi-cn { font-size: 24px; font-weight: 700; color: #fff; line-height: 1.1; font-variant-numeric: tabular-nums; }
+    .pi-chain .pi-cbonus { grid-column: 2 / 4; color: #c9cdd2; font-size: 12px; }
+    .pi-chain .pi-cbonus b { color: #fff; font-weight: 700; }
+    .pi-chain .pi-ctm { grid-column: 1 / -1; height: 4px; border-radius: 2px; background: #2a2e33; margin-top: 6px; overflow: hidden; }
+    .pi-chain .pi-ctm i { display: block; height: 100%; background: #efebe2; }
+    .pi-chain .pi-cside[data-pi-chain="on"] .pi-low ~ .pi-ctm i { background: #e8a33d; }
+    .pi-eye.pi-chainlines { position: fixed; z-index: 9991; display: flex; flex-direction: column; gap: 4px; }
+    .pi-chainlines .pi-tag { width: 100%; min-width: 0; }
+    .pi-chainlines .pi-fig { white-space: normal; padding: 3px 0; min-width: 0; }
+    .pi-chainlines .pi-fig b.pi-low { color: #e8a33d; }
+    .pi-card .pi-nextbox { display: flex; flex-direction: column; gap: 5px; padding-bottom: 10px; border-bottom: 1px solid #262a2e; }
+    .pi-card a.pi-nextb { display: flex; align-items: center; justify-content: center; gap: 8px; height: 34px; border-radius: 6px; background: #efebe2; color: #15171a; font-size: 13px; font-weight: 700; text-decoration: none; cursor: pointer; --b: #efebe2; }
+    .pi-card a.pi-nextb:hover { text-decoration: none; filter: brightness(1.06); }
+    .pi-card a.pi-nextb:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+    .pi-card a.pi-nextb.pi-alt { background: #1c1f22; color: #fff; border: 1px solid #3a4046; }
+    .pi-card a.pi-nextb.pi-glow { box-shadow: 0 0 0 3px color-mix(in srgb, #efebe2 14%, transparent), 0 0 16px color-mix(in srgb, #efebe2 24%, transparent); }
+    .pi-card .pi-kbd { display: inline-block; min-width: 18px; height: 18px; padding: 0 4px; border-radius: 4px; border: 1px solid currentColor; font-size: 11px; font-weight: 700; line-height: 16px; text-align: center; opacity: .75; }
+    .pi-card .pi-nextwho { font-size: 12px; color: #c9cdd2; }
+    .pi-card .pi-nextwho b { color: #fff; font-weight: 700; }
+    .pi-card.pi-small .pi-nextbox { padding-bottom: 6px; }
+    .pi-card.pi-small a.pi-nextb { height: 26px; font-size: 12px; gap: 5px; }
+    .pi-card .pi-gear { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid #262a2e; }
+    .pi-card .pi-gh { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    .pi-card .pi-gh b { color: #fff; font-size: 13px; font-weight: 700; }
+    .pi-card .pi-gh span { color: #9aa1a8; font-size: 11px; white-space: nowrap; }
+    .pi-card .pi-gt { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; }
+    .pi-card .pi-gt > span { padding: 4px 0 4px 8px; border-top: 1px solid #1f2327; text-align: right; font-size: 13px; color: #fff; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .pi-card .pi-gt > .pi-gn { text-align: left; padding-left: 0; white-space: normal; }
+    .pi-card .pi-gt > .pi-gth { color: #9aa1a8; font-size: 11px; font-weight: 400; padding-top: 0; padding-bottom: 2px; border-top: 0; }
+    .pi-card .pi-gt > .pi-gth:first-child { text-align: left; padding-left: 0; }
+    .pi-card .pi-gt small { display: block; color: #9aa1a8; font-size: 11px; font-weight: 400; }
+    .pi-card .pi-nogear { color: #c9cdd2; font-size: 13px; }
+    .pi-card .pi-nogear b { color: #fff; font-weight: 700; }
+    .pi-card.pi-mid .pi-nogear, .pi-card.pi-mid .pi-gh b { font-size: 11px; }
+
     .pi-eye .pi-watch { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
     .pi-eye .pi-watch button, .pi-eye .pi-watch select, .pi-eye .pi-watch input { height: 24px; border-radius: 5px; border: 1px solid color-mix(in srgb, #efebe2 45%, transparent); background: #1c1f22; color: #fff; font: 700 11px ${EYE_FONT}; padding: 0 9px; cursor: pointer; margin: 0; }
     .pi-eye .pi-watch input { cursor: text; width: 120px; font-weight: 400; }
@@ -24196,16 +27041,47 @@
         return [h('span', { class: 'pi-fig' }, [h('b', { text: fs[0].text })]), h('span', { class: 'pi-fig' }, [h('b', { text: fs[1].text }), ' HP']), h('span', { class: 'pi-fig' }, [h('b', { text: fs[2].text })])];
     }
 
+    /** How long until they are out, on a war row's tag: "12m", "1h 17m". */
+    function eyeHm(s) {
+        const m = Math.max(0, Math.ceil(Number(s) / 60));
+        return m >= 60 ? Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm' : m + 'm';
+    }
+
+    /**
+     * Where a war row is, in a word: Okay, Out early, Hospital 12m, Abroad, Traveling, Jail (green, amber, grey).
+     * `short`: the narrower tag's words; `bare`: the narrowest tag (a hospital row is its clock alone).
+     */
+    function eyeWhere(state, { outInS = null, outAt = null, short = false, bare = false } = {}) {
+        if (state === 'okay') return h('span', { class: 'pi-st pi-ok', text: 'Okay' });
+        if (state === 'early') return h('span', { class: 'pi-st pi-ok', text: short ? 'Early' : 'Out early' });
+        if (state === 'hospital') {
+            const clock = Number.isFinite(outInS) ? h('span', { 'data-pi-out-at': Number.isFinite(outAt) ? String(outAt) : null, 'data-pi-out-fmt': 'hm', text: eyeHm(outInS) }) : null;
+            return h('span', { class: 'pi-st pi-wait' }, clock && bare ? [clock] : [short ? 'Hosp' : 'Hospital', clock ? ' ' : null, clock]);
+        }
+        return h('span', { class: 'pi-st pi-away', text: state === 'traveling' ? (short ? 'Flying' : 'Traveling') : state === 'abroad' ? 'Abroad' : state === 'jail' ? 'Jail' : String(state) });
+    }
+
     /**
      * A list row's tag. `state` is the row's: ready rows show the numbers; a row in hospital (dimmed) when it is out.
+     * `where` (a war row, round 8): the band, HP kept, then where they are; the other numbers are in its hover card.
      * @param {object} v - eyeView()
      * @param {object} o - {mode, state: 'okay'|'early'|'hospital'|'traveling'|'abroad'|'jail', outInS, outAt, landText, glow}
      *   outAt: when they are out (epoch seconds): the "out in" clock is then moved on by eyeTickOut, not by a redraw
      */
-    function eyeRowTag(v, { mode = 'full', state = 'okay', outInS = null, outAt = null, landText = null, glow = false } = {}) {
+    function eyeRowTag(v, { mode = 'full', state = 'okay', outInS = null, outAt = null, landText = null, glow = false, where = false } = {}) {
         const ready = state === 'okay' || state === 'early';
         const kids = [h('span', { class: 'pi-edge' })];
         if (mode === 'full') kids.push(h('span', { class: 'pi-band', text: eyeBandWord(v.band) }));
+        if (where) {
+            // A war row (round 8, the owner's pick B): the band, HP kept, then where they are. Narrower: the edge carries
+            // the band; the narrowest says HP kept for a ready row and where the others are.
+            const keep = eyeFigures(v)[1].text;
+            const st = eyeWhere(state, { outInS, outAt, short: mode !== 'full', bare: mode === 'tiny' });
+            if (mode !== 'tiny' || ready) kids.push(h('span', { class: 'pi-fig' }, [h('b', { text: keep }), mode === 'short' ? null : ' HP']));
+            if (mode !== 'tiny' || !ready) kids.push(st);
+            const cls = 'pi-mark pi-eye pi-tag pi-rowtag' + (mode !== 'full' ? ' pi-short' : '') + (ready ? '' : ' pi-out') + (glow && ready ? ' pi-glow' : '');
+            return h('div', { class: cls, style: '--b:' + eyeBandColor(v.band), 'data-pi-player': String(v.id || ''), 'data-pi-hover': '1', title: eyeSourceTitle(v), tabindex: '0', role: 'button', 'aria-label': eyeBandWord(v.band) + ' · HP kept ' + keep + ' · ' + st.textContent + ' · ' + eyeFigures(v).filter((x) => x.k !== 'keep').map((x) => x.label + ' ' + x.text).join(' · ') }, kids);
+        }
         if (ready) {
             kids.push(...eyeFigSpans(v, mode));
             if (state === 'early' && mode !== 'tiny') kids.push(h('span', { class: 'pi-src', text: 'out early' }));
@@ -24234,7 +27110,18 @@
         const hosp = rows.filter((r) => r.state === 'hospital');
         const outs = hosp.filter((r) => r.until > nowS).map((r) => r.until - nowS);
         const nextOutS = outs.length ? Math.min(...outs) : null;
-        return { ready, early: rows.filter((r) => r.state === 'early').length, hospital: hosp.length, nextOutS, nextOutAt: nextOutS === null ? null : nowS + nextOutS, traveling: rows.filter((r) => r.state === 'traveling').length };
+        const traveling = rows.filter((r) => r.state === 'traveling').length;
+        // away: flying or standing abroad (the war summary's "2 away").
+        return { ready, early: rows.filter((r) => r.state === 'early').length, hospital: hosp.length, nextOutS, nextOutAt: nextOutS === null ? null : nowS + nextOutS, traveling, away: traveling + rows.filter((r) => r.state === 'abroad').length };
+    }
+
+    /** The war list's summary in words (round 8, his pick B): "4 ready · next out in 12m · 2 away". */
+    function eyeWarSummaryText(s) {
+        const parts = [s.ready + ' ready' + (s.early ? ' (' + s.early + ' out early)' : '')];
+        if (s.nextOutS !== null && s.nextOutS !== undefined) parts.push('next out in ' + eyeHm(s.nextOutS));
+        else if (s.hospital) parts.push(s.hospital + ' in hospital');
+        parts.push((s.away || 0) + ' away');
+        return parts.join(' · ');
     }
 
     /** "2 ready · 1 out in 1:17 · 0 traveling". */
@@ -24247,10 +27134,15 @@
     }
 
     /** The summary tag on top of a list. `note` (where the numbers come from) goes in its title. */
-    function eyeSummaryTag(s, { note = '', fromFfs = false, short = false } = {}) {
+    function eyeSummaryTag(s, { note = '', fromFfs = false, short = false, war = false } = {}) {
         const words = [];
-        eyeSummaryText(s).split(' · ').forEach((p, i) => {
+        (war ? eyeWarSummaryText(s) : eyeSummaryText(s)).split(' · ').forEach((p, i) => {
             if (i) words.push(' · ');
+            // The war list's "next out in 12m": its clock moves on by eyeTickOut too.
+            if (war && /^next out in /.test(p)) {
+                words.push(h('span', {}, ['next out in ', h('b', { 'data-pi-out-at': Number.isFinite(s.nextOutAt) ? String(s.nextOutAt) : null, 'data-pi-out-fmt': 'hm', text: p.replace(/^next out in /, '') })]));
+                return;
+            }
             const m = p.match(/^(\d+)(.*)$/);
             // "1 out in 1:17": its clock moves on by eyeTickOut (no redraw every second).
             const out = m && Number.isFinite(s.nextOutAt) && /^ out in /.test(m[2]);
@@ -24265,7 +27157,8 @@
         if (!root || !root.querySelectorAll) return 0;
         let n = 0;
         for (const el of root.querySelectorAll('[data-pi-out-at]')) {
-            const text = eyeHmm(Math.max(0, Number(el.getAttribute('data-pi-out-at')) - nowS));
+            const left = Math.max(0, Number(el.getAttribute('data-pi-out-at')) - nowS);
+            const text = el.getAttribute('data-pi-out-fmt') === 'hm' ? eyeHm(left) : eyeHmm(left);
             if (el.textContent !== text) {
                 el.textContent = text;
                 n++;
@@ -24421,17 +27314,88 @@
         return el;
     }
 
+    /** "seen just now", "seen 40 min ago", "seen 5 h ago", "seen 12 d ago". */
+    function eyeSeenText(seenAt, now = Date.now()) {
+        const s = Math.max(0, now - (Number(seenAt) || 0));
+        if (s < 2 * 60000) return 'seen just now';
+        if (s < 3600000) return 'seen ' + Math.round(s / 60000) + ' min ago';
+        if (s < 86400000) return 'seen ' + Math.round(s / 3600000) + ' h ago';
+        return 'seen ' + Math.round(s / 86400000) + ' d ago';
+    }
+
     /**
-     * The attack page's fight card: band, the three numbers, turns and the gear note, HP kept per likely build. The
-     * training panel docks under it (#pi-eyecard), so its foot is left free.
+     * "What they were wearing" on the fight card (round 8, mockups/round8/torn-eye.html §5, the owner's pick B): every
+     * piece with its own numbers, weapons then armour, and what the fight counts of it; before their gear was ever read,
+     * "Not seen yet · attack once to read it". The narrower card says it in one line.
+     * @param {object} v - eyeView() (gear: {items, text, seenAt}|null)
+     * @param {object} o - {shown: Torn shows their gear in this fight}
+     */
+    function eyeGearBlock(v, mode = 'full', { shown = false, now = Date.now() } = {}) {
+        const g = v && v.gear && (v.gear.items || []).length ? v.gear : null;
+        const head = (meta) => h('div', { class: 'pi-gh' }, [h('b', { text: 'What they were wearing' }), meta ? h('span', { text: meta }) : null]);
+        if (!g) {
+            // Torn shows their side and nothing is on it: said as it is, not as "not seen".
+            const none = shown ? [h('div', { class: 'pi-nogear', text: 'Nothing equipped in this fight.' })] : [h('div', { class: 'pi-nogear' }, [h('b', { text: 'Not seen yet' }), ' · attack once to read it']), h('div', { class: 'pi-src', text: 'Torn shows it when the fight starts. It is saved for next time.' })];
+            return h('div', { class: 'pi-gear', 'data-pi-gear': 'none' }, [head(null), ...none]);
+        }
+        const seen = eyeSeenText(g.seenAt, now);
+        if (mode !== 'full') return h('div', { class: 'pi-gear', 'data-pi-gear': 'seen' }, [head(seen), h('div', { class: 'pi-nogear', text: g.text || 'gear' })]);
+        const rows = gearRows(g.items);
+        const one = (n) => (n === null ? '' : (Math.round(n * 10) / 10).toFixed(1));
+        const name = (r) => h('span', { class: 'pi-gn' }, [r.name || 'Item', r.sub ? h('small', { text: r.sub }) : null]);
+        const kids = [head(seen)];
+        if (rows.weapons.length) {
+            kids.push(h('div', { class: 'pi-gt', 'data-pi-gt': 'weapons' }, [h('span', { class: 'pi-gth', text: 'Weapons' }), h('span', { class: 'pi-gth', text: 'Dmg' }), h('span', { class: 'pi-gth', text: 'Acc' }), ...rows.weapons.flatMap((r) => [name(r), h('span', { text: one(r.dmg) }), h('span', { text: one(r.acc) })])]));
+        }
+        if (rows.armour.length) {
+            kids.push(h('div', { class: 'pi-gt', 'data-pi-gt': 'armour' }, [h('span', { class: 'pi-gth', text: 'Armour' }), h('span', { class: 'pi-gth' }), h('span', { class: 'pi-gth', text: 'Armour' }), ...rows.armour.flatMap((r) => [name(r), h('span'), h('span', { text: one(r.armour) })])]));
+        }
+        const counted = gearCountedText(g.items);
+        if (counted) kids.push(h('div', { class: 'pi-src', text: counted }));
+        return h('div', { class: 'pi-gear', 'data-pi-gear': 'seen' }, kids);
+    }
+
+    /**
+     * The Next button (round 8, mockups/round8/torn-eye.html §4, the owner's pick A): the first row of the fight card. It
+     * opens the attack page of the next player in your Torn Eye list, in the list's own order, skipping who is not ready
+     * (key N); you still press Torn's Start fight. In war mode it walks the war list ("Next enemy"). Nobody left ready, or
+     * no list handed over yet: a plain button to the Torn Eye list. Once the fight is over it is the one thing that glows.
+     * @param {object} n - {list, mode, next: {id, name, level, band, respect, keep}|null, skipped, href, listHref, over}
+     *   (core/eye/targets.js nextTarget(), with the links)
+     */
+    function eyeNextBox(n, mode = 'full') {
+        const kbd = () => h('span', { class: 'pi-kbd', 'aria-hidden': 'true', text: 'N' });
+        if (!n.next) {
+            const words = n.list ? 'No one else on your list is ready right now.' : 'Your Torn Eye list is not here yet: open it once.';
+            return h('div', { class: 'pi-nextbox', 'data-pi-next': n.list ? 'none' : 'nolist' }, [h('a', { class: 'pi-nextb pi-alt', href: n.listHref, target: '_blank', rel: 'noopener', text: mode === 'small' ? 'Torn Eye' : 'Open the Torn Eye list' }), mode === 'small' ? null : h('span', { class: 'pi-nextwho', text: words })]);
+        }
+        const x = n.next;
+        const label = mode === 'small' ? 'Next' : n.mode === 'war' ? 'Next enemy' : 'Next target';
+        const who = [h('b', { text: x.name || String(x.id) }), x.level ? ' [' + x.level + ']' : '', ' · ', h('span', { style: 'color:' + eyeBandColor(x.band), text: eyeBandWord(x.band) })];
+        if (x.respect) who.push(' · ' + Number(x.respect).toFixed(2));
+        if (x.keep !== null && x.keep !== undefined) who.push(' · ' + x.keep + '% HP');
+        const skips = skippedText(n.skipped);
+        return h('div', { class: 'pi-nextbox', 'data-pi-next': String(x.id) }, [
+            h('a', { class: 'pi-nextb' + (n.over ? ' pi-glow' : ''), href: n.href, title: 'Opens their attack page (key N). You still press Start fight.', 'aria-label': label + ': ' + (x.name || x.id) + ' (key N)' }, [label + ' ', kbd()]),
+            mode === 'small' ? null : h('span', { class: 'pi-nextwho' }, who),
+            mode === 'small' || !skips ? null : h('span', { class: 'pi-src', text: skips }),
+        ]);
+    }
+
+    /**
+     * The attack page's fight card: the Next button, band, the three numbers, turns, what they were wearing, HP kept per
+     * likely build. The training panel docks under it (#pi-eyecard), so its foot is left free.
      * @param {object|null} v - eyeView()
      * @param {'full'|'mid'|'small'} mode
-     * @param {object} s - {gearVisible, gearSaved, watch: {watching, tag, full, toggle}}
+     * @param {object} s - {gearVisible, gearSaved, watch: {watching, tag, full, toggle}, next: eyeNextBox()'s n}
      */
     function eyeFightCard(v, mode, s = {}) {
         const { el, bd } = eyeCardShell(v, mode, { who: eyeWhoText(v, mode), hover: mode === 'small' });
         el.id = 'pi-eyecard';
-        el.classList.add('pi-glow', 'pi-fixed');
+        // At most one thing glows: the card, until the fight is over; then the Next button.
+        el.classList.add('pi-fixed');
+        if (!(s.next && s.next.over && s.next.next)) el.classList.add('pi-glow');
+        if (s.next) bd.appendChild(eyeNextBox(s.next, mode));
         const watchBtn = () => (s.watch ? watchControl({ watching: s.watch.watching, tag: null, full: s.watch.full }, { toggle: s.watch.toggle }) : null);
         if (!v) {
             if (mode !== 'small') {
@@ -24444,11 +27408,8 @@
         bd.appendChild(eyeNumbers(v, mode));
         if (mode === 'small') return el;
         const f = v.forecast;
-        const gear = s.gearSaved ? 'their gear is saved for next time' : s.gearVisible ? '' : 'their gear shows once the fight starts';
-        const turns = f && f.turns ? 'About ' + f.turns + ' turns' : '';
-        const line = [turns, turns ? gear : gear.charAt(0).toUpperCase() + gear.slice(1)].filter(Boolean).join(' · ');
-        if (line) bd.appendChild(h('div', { class: s.gearSaved ? 'pi-good' : 'pi-muted', text: line }));
-        if (v.gear) bd.appendChild(h('div', { class: 'pi-muted', text: 'Last seen: ' + (v.gear.text || 'gear') + ' · ' + Math.max(0, Math.round((Date.now() - v.gear.seenAt) / 86400000)) + ' d ago' }));
+        if (f && f.turns) bd.appendChild(h('div', { class: 'pi-muted', text: 'About ' + f.turns + ' turns' }));
+        bd.appendChild(eyeGearBlock(v, mode, { shown: Boolean(s.gearVisible) }));
         if (v.withGear && mode === 'full') bd.appendChild(h('div', { class: 'pi-warnline', text: 'With their gear: win ' + Math.round(v.withGear.pWin * 100) + '% · HP kept ~' + Math.round((v.withGear.keep || 0) * 100) + '%' }));
         const p = v.plain || f;
         if (mode === 'full' && p && p.perBuild && !p.exact) {
@@ -24465,7 +27426,93 @@
         return el;
     }
 
-    /** The mini-profile's last line: one tag inside the popup's width. */
+    /* ------------------------------------------------------------ the chain counter */
+
+    /** Under this width the counter is two thin lines (the panel's own narrow size). */
+    const EYE_CHAIN_LINES_W = 180;
+
+    function eyeChainSide({ who, side, hint = '' }) {
+        const timed = side.state === 'on' || side.state === 'cooldown';
+        const bonus = side.state === 'on' && side.next ? [h('b', { text: String(side.next.hits) }), chainBonusText(side).replace(/^\d+/, '')] : [chainBonusText(side) + (side.state === 'unknown' && hint ? ' · ' + hint : '')];
+        return h('div', { class: 'pi-cside', 'data-pi-chain': side.state }, [
+            h('span', { class: 'pi-cwho', text: who }),
+            h('span', { class: 'pi-ctime' + (side.low ? ' pi-low' : ''), 'data-pi-chain-until': timed ? String(side.until) : null, text: timed ? chainClock(side.leftS) : '—' }),
+            h('span', { class: 'pi-cn', text: side.count === null ? '—' : side.count.toLocaleString('en-US') }),
+            h('span', { class: 'pi-cbonus' }, bonus),
+            h('div', { class: 'pi-ctm' }, [h('i', { style: 'width:' + side.pct + '%' })]),
+        ]);
+    }
+
+    function eyeChainLine({ short, side }, first) {
+        const kids = [short + ' '];
+        if (side.state === 'unknown') kids.push('· not read');
+        else {
+            kids.push(h('b', { text: side.count.toLocaleString('en-US') }));
+            if (side.state === 'off') kids.push(' · no chain');
+            else {
+                kids.push(side.state === 'cooldown' ? ' · cooldown ' : ' · ', h('b', { class: side.low ? 'pi-low' : null, 'data-pi-chain-until': String(side.until), text: chainClock(side.leftS) }));
+                if (side.next) kids.push(h('span', { class: 'pi-cto', text: ' · ' + side.next.hits + ' to ' + side.next.at.toLocaleString('en-US') }));
+            }
+        }
+        return h('div', { class: 'pi-eye pi-tag pi-cline', style: '--b:' + (side.low ? '#e8a33d' : '#efebe2'), 'data-pi-chain': side.state }, [h('span', { class: 'pi-edge' }), first ? eyeMk() : null, h('span', { class: 'pi-fig' }, kids)]);
+    }
+
+    /**
+     * The chain counter (round 8, mockups/round8/torn-eye.html §1, the owner's pick B): its own card above the training
+     * panel. Per chain: whose it is, the time left on the 5:00 timer (amber under a minute), the count and the hits to the
+     * next bonus. `lines` (a narrow margin, the attack page): one thin line a chain. A chain nothing was read about says
+     * so; the clocks move on by eyeChainTick.
+     * @param {{who: string, short: string, side: object, hint?: string}[]} sides - core/eye/chain.js chainSide(), yours first
+     */
+    function eyeChainCard(sides, { lines = false } = {}) {
+        if (lines) return h('div', { id: 'pi-chaincard', class: 'pi-mark pi-eye pi-chain pi-chainlines', 'data-pi-form': 'lines' }, sides.map((x, i) => eyeChainLine(x, i === 0)));
+        const top = h('div', { class: 'pi-top' }, [eyeMk(), h('span', { class: 'pi-lbl', text: sides.length > 1 ? 'Chains' : 'Chain' }), h('span', { class: 'pi-src', text: 'time left of ' + chainClock(CHAIN_TIMER_S) })]);
+        return h('div', { id: 'pi-chaincard', class: 'pi-mark pi-eye pi-card pi-chain pi-fixed', style: '--b:#efebe2', 'data-pi-form': 'card' }, [h('div', { class: 'pi-ribbon' }), top, ...sides.map(eyeChainSide)]);
+    }
+
+    /**
+     * Move the counter's clocks and timer bars on (once a second). Returns how many chains ran out since the last draw:
+     * the caller draws the counter again then (a chain that broke, a cooldown that ended).
+     */
+    function eyeChainTick(root, now = Date.now()) {
+        if (!root || !root.querySelectorAll) return 0;
+        let over = 0;
+        for (const el of root.querySelectorAll('[data-pi-chain-until]')) {
+            const left = Math.ceil((Number(el.getAttribute('data-pi-chain-until')) - now) / 1000);
+            if (left <= 0) over++;
+            const text = chainClock(left);
+            if (el.textContent !== text) el.textContent = text;
+            const box = el.closest ? el.closest('[data-pi-chain]') : null;
+            if (!box || box.getAttribute('data-pi-chain') !== 'on') continue;
+            const low = left < CHAIN_LOW_S;
+            el.classList.toggle('pi-low', low);
+            const bar = box.querySelector('.pi-ctm i');
+            if (bar) bar.style.width = Math.max(0, Math.min(100, Math.round((100 * left) / CHAIN_TIMER_S))) + '%';
+            if (box.classList.contains('pi-cline')) box.style.setProperty('--b', low ? '#e8a33d' : '#efebe2');
+        }
+        return over;
+    }
+
+    /** Space between Torn's mini-profile popup and our tag under it. */
+    const MINI_GAP = 4;
+
+    /**
+     * Where the mini-profile's tag goes (screen coordinates): just under Torn's popup, as wide as it, inside the window;
+     * above the popup when the window has no room below it. Never over the popup itself.
+     * @param {{left, top, right, bottom, width, height}} p - the popup's rect
+     * @param {number} ht - the tag's height
+     * @returns {{x:number, y:number, width:number, side:'below'|'above'}}
+     */
+    function eyeMiniSpot(p, ht, viewW, viewH, gap = MINI_GAP) {
+        const width = Math.round(Math.max(0, Math.min(p.width, viewW - 4)));
+        const x = Math.round(Math.min(Math.max(2, p.left), viewW - 2 - width));
+        const below = p.bottom + gap;
+        const above = p.top - gap - ht;
+        if (below + ht > viewH - 2 && above >= 2) return { x, y: Math.round(above), width, side: 'above' };
+        return { x, y: Math.round(below), width, side: 'below' };
+    }
+
+    /** The mini-profile's tag (placed on our layer under the popup: eyeMiniSpot). */
     function eyeMiniLine(v, { id = null, glow = false } = {}) {
         const band = v ? v.band : 'none';
         const kids = [h('span', { class: 'pi-edge' }), eyeMk(), h('span', { class: 'pi-band', text: eyeBandWord(band) })];
@@ -24595,13 +27642,15 @@
      *     profile's title (full, narrower or smallest by the room there; the
      *     left-hand space when the right one is too narrow); never a line on
      *     Torn's page;
-     *   - the mini-profile popup: one tag as its last line;
-     *   - faction and ranked-war lists: Torn's rows untouched; a band edge on our
-     *     own layer and a tag per row in the free space, level with the row, and
-     *     a summary tag on top (war rows are still shown in our order with CSS);
+     *   - the mini-profile popup: one tag on our layer just under it (above it
+     *     when the window has no room below), never inside or over it;
+     *   - faction and ranked-war lists: Torn's rows untouched and in Torn's own
+     *     order; a band edge on our own layer and a tag per row in the free space,
+     *     level with the row, and a summary tag on top (our order lives there);
      *   - the attack page: the fight card (#pi-eyecard) beside the fight, and the
      *     read-only attackData reader that saves their gear.
-     * Re-placed when the window is resized or Torn's page moves.
+     * Re-placed when the window is resized or Torn's page moves. Nothing of ours
+     * goes into Torn's page: no element, class or style on Torn's own elements.
      */
 
 
@@ -24619,7 +27668,10 @@
 
 
 
-    const ep = { extras: new Map(), war: { prev: null, early: new Map() }, drawn: { war: null, faction: null }, attack: { gearVisible: false, gearSaved: false }, drawing: false, sig: {}, lists: {}, layoutSig: '' };
+
+
+
+    const ep = { extras: new Map(), war: { prev: null, early: new Map() }, drawn: { war: null, faction: null }, attack: { gearVisible: false, gearSaved: false }, drawing: false, sig: {}, lists: {}, layoutSig: '', chain: { sig: '', spot: null } };
 
     function view(id) {
         const x = ep.extras.get(id) || {};
@@ -24657,9 +27709,16 @@
         return r.width > 0 && r.height > 0 ? r : null;
     }
 
-    /** Where list tags go now (eyeRowSpot, clear of the panel). */
+    /** The chain counter on screen (null when hidden): with no panel to ride on it holds a margin of its own. */
+    function eyeChainRect() {
+        const el = document.getElementById('pi-chaincard');
+        const r = el ? el.getBoundingClientRect() : null;
+        return r && r.width > 0 && r.height > 0 ? r : null;
+    }
+
+    /** Where list tags go now (eyeRowSpot, clear of the panel and of the chain counter that sits on it). */
     function eyeListSpot() {
-        return eyeRowSpot(eyeViewW(), eyeTornPage(), eyePanelRect());
+        return eyeRowSpot(eyeViewW(), eyeTornPage(), eyePanelRect() || eyeChainRect());
     }
 
     /** Note the tags' column on our layer (x from, x to, on screen) for the panel to keep out of; none: no tags. */
@@ -24730,15 +27789,44 @@
         card.style.top = Math.round(t.top - o.y) + 'px';
     }
 
+    /** Torn's mini-profile popup (the box we sit under), or null. */
+    function miniPopup() {
+        const root = document.getElementById('profile-mini-root');
+        return root ? root.querySelector('.mini-profile-wrapper') || root.querySelector('.profile-container') || root : null;
+    }
+
+    /** The mini-profile's tag, on our layer (round 7, the owner: never inside Torn's popup). */
     function drawMini() {
         const id = miniProfileId();
-        const root = document.getElementById('profile-mini-root');
-        if (!id || !root) return;
-        for (const el of root.querySelectorAll('.pi-mini-line')) el.remove();
-        // The popup's last line, inside its width.
-        const at = root.querySelector('.mini-profile-wrapper') || root.querySelector('.profile-container') || root;
+        const part = eyeLayerPart('mini');
+        if (!id || !miniPopup()) {
+            fill(part, []);
+            return;
+        }
         // At most one thing glows on a page: the mini-profile only when nothing else does.
-        at.appendChild(eyeMiniLine(view(id), { id, glow: !document.querySelector('.pi-eye.pi-glow') }));
+        const glow = !document.querySelector('#pi-eye-layer [data-pi-part]:not([data-pi-part="mini"]) .pi-glow, #pi-eyecard.pi-glow');
+        fill(part, [eyeMiniLine(view(id), { id, glow })]);
+        placeMini();
+    }
+
+    /** Just under the popup, as wide as it, inside the window (above it when there's no room below). */
+    function placeMini() {
+        const layer = document.getElementById('pi-eye-layer');
+        const line = layer && layer.querySelector('[data-pi-part="mini"] .pi-mini-line');
+        if (!line) return;
+        const pop = miniPopup();
+        const r = pop ? pop.getBoundingClientRect() : null;
+        if (!r || !(r.width > 0) || !(r.height > 0) || !miniProfileId()) {
+            line.style.display = 'none';
+            return;
+        }
+        line.style.display = '';
+        const o = eyeOrigin();
+        line.style.width = Math.round(Math.min(r.width, eyeViewW() - 4)) + 'px';
+        const s = eyeMiniSpot(r, line.offsetHeight || 28, eyeViewW(), window.innerHeight);
+        line.style.width = s.width + 'px';
+        line.style.left = Math.round(s.x - o.x) + 'px';
+        line.style.top = Math.round(s.y - o.y) + 'px';
     }
 
     /* ------------------------------------------------------ faction + war */
@@ -24769,10 +27857,11 @@
             const on = ready && !glowed;
             if (on) glowed = true;
             const edge = eyeEdgeBar(v.band, !ready);
-            const tag = spot.mode === 'none' ? null : eyeRowTag(v, { mode: spot.mode, state: s.state, outInS: s.until > nowS ? s.until - nowS : null, outAt: s.until > nowS ? s.until : null, glow: on });
+            // A war row (round 8, his pick B): the band, HP kept, then where they are; a faction row keeps the three numbers.
+            const tag = spot.mode === 'none' ? null : eyeRowTag(v, { mode: spot.mode, state: s.state, outInS: s.until > nowS ? s.until - nowS : null, outAt: s.until > nowS ? s.until : null, glow: on, where: name === 'war' });
             items.push({ row: r.el, edge, tag });
         }
-        const summary = spot.mode === 'none' ? null : eyeSummaryTag(eyeSummary(rows, nowS), { note, fromFfs, short: spot.mode !== 'full' });
+        const summary = spot.mode === 'none' ? null : eyeSummaryTag(eyeSummary(rows, nowS), { note, fromFfs, short: spot.mode !== 'full', war: name === 'war' });
         const kids = [summary, ...items.map((i) => i.edge), ...items.map((i) => i.tag)].filter(Boolean);
         fill(part, kids);
         ep.lists[name] = { items, summary, spotMode: spot.mode, first: rows.length ? byId.get(rows[0].id) : null, rowsEl: [...byId.values()].map((r) => r.el) };
@@ -24834,7 +27923,6 @@
             delete ep.lists.war;
             return false;
         }
-        const list = rows[0].el.parentNode;
         // What the row itself shows goes into the fight (round 7: a war row's level was never passed on, so a player
         // with an estimate but no profile read was fought with a level 1's life and came out Stomp).
         for (const r of rows) ep.extras.set(r.id, { ...(ep.extras.get(r.id) || {}), level: r.level, name: r.name });
@@ -24850,16 +27938,12 @@
                 respect[m.id] = v.respect || 0;
             }
         }
+        // Our order (ready first) picks the row that glows and fills the summary; Torn's list keeps its own order and look
+        // (round 7, the owner: we never change Torn's layout).
         const sorted = sortWar(members, { bands, respect, early: new Set(early.keys()), nowS });
         ep.drawing = true;
         try {
             const byId = new Map(rows.map((r) => [r.id, r]));
-            // Shown in our order with CSS (flex order); Torn's rows stay where React put them, unchanged.
-            list.classList.add('pi-warlist');
-            sorted.forEach((s, i) => {
-                const r = byId.get(s.id);
-                if (r && r.el.style.order !== String(i)) r.el.style.order = String(i);
-            });
             // Torn's pages read nothing for the war (owner, round 6): what this page shows; the live read is on the Torn Eye tab.
             return eyeDrawList('war', sorted, byId, nowS, { glow: true, note: 'Torn Eye · from this page · live war mode on Pumping Iron’s Torn Eye tab' });
         } finally {
@@ -24882,7 +27966,129 @@
         eyeDrawList('faction', list, new Map(rows.map((r) => [r.id, r])), nowS, { glow, note: 'Torn Eye · from what is already known (nothing is asked on this page)' });
     }
 
+    /* ------------------------------------------------------ the chain counter */
+
+    /** Where the counter sits when no panel carries it: this far from the window's top (the panel's own default). */
+    const EYE_CHAIN_TOP = 80;
+
+    /** Is Torn's ranked-war list on this page (one look, no rows read)? */
+    function eyeOnWarPage() {
+        return detectPage(location.href) === PAGE_FACTION && Boolean(document.querySelector('#faction_war_list_id ul.members-list > li.enemy'));
+    }
+
+    /**
+     * The chains the counter shows now, yours first; null when it has no place here. It shows on Torn's war page, and on
+     * every Torn page while chain mode is on (the owner, session 9: "in chain mode we are stacking, wire in the chain
+     * counters"). Yours: Torn's own sidebar bar (it moves with every hit), else the bars as last read. Theirs: what the
+     * Torn Eye tab's read of their chain left in shared storage (Torn's pages ask nothing for a war); none: "Not read yet".
+     */
+    function eyeChainSides(now = Date.now()) {
+        const m = pi.model;
+        const warPage = eyeOnWarPage();
+        if (!warPage && !(m && m.ready && m.stacking)) return null;
+        const bar = readChainBar();
+        const read = m && m.ready && m.state ? m.state.chain : null;
+        const mine = bar ? chainFromBar(bar.value, bar.time, now) : read && now - read.at < CHAIN_FRESH_MS ? read : null;
+        const sides = [{ who: 'Your faction', short: 'You', side: chainSide(mine, now) }];
+        const rec = sharedChain(get(EYE_CHAIN_KEY, null), now);
+        const fid = warPage ? enemyFactionId() : null;
+        const theirs = rec && (!fid || Number(rec.fid) === fid) ? rec : null;
+        if (warPage || theirs) sides.push({ who: (theirs && theirs.name) || 'Enemy faction', short: 'Them', side: chainSide(theirs, now), hint: 'open War on the Torn Eye tab' });
+        return sides;
+    }
+
+    /** Where the counter goes ({x, y, width} on screen), or null: on the panel when it carries it, else a margin of its own. */
+    function eyeChainSpot() {
+        const p = detectPage(location.href);
+        const own = eyeCardSpot(eyeViewW(), eyeTornPage());
+        // The attack page: over the fight card (drawAttack places it); a profile: the card there has that margin.
+        if (p === PAGE_ATTACK) return own.mode === 'none' ? null : { x: own.x, y: 0, width: own.width, lines: true };
+        if (ep.chain.spot) return ep.chain.spot;
+        if (p === PAGE_PROFILE || own.mode === 'none') return null;
+        return { x: own.x, y: EYE_CHAIN_TOP, width: own.width };
+    }
+
+    /**
+     * Draw the counter (once a second while it shows): rebuilt only when what it says changed, else its clocks move on.
+     * @returns {boolean} whether it came or went (the attack page's fight card then moves)
+     */
+    function drawChain(now = Date.now()) {
+        const old = document.getElementById('pi-chaincard');
+        const sides = isPaused() || !getSettings().eyeChips ? null : eyeChainSides(now);
+        const spot = sides ? eyeChainSpot() : null;
+        if (!sides || !spot) {
+            if (old) old.remove();
+            ep.chain.sig = '';
+            return Boolean(old);
+        }
+        const lines = Boolean(spot.lines) || spot.width < EYE_CHAIN_LINES_W;
+        const sig = JSON.stringify([lines, sides.map((x) => [x.who, x.side.state, x.side.count, x.side.next])]);
+        let el = old;
+        if (!el || ep.chain.sig !== sig) {
+            ep.chain.sig = sig;
+            el = eyeChainCard(sides, { lines });
+            // The new one stays where the old one was (the attack page places it with the fight card).
+            if (old) {
+                el.style.cssText = old.style.cssText;
+                old.replaceWith(el);
+            } else (document.body || document.documentElement).appendChild(el);
+        } else {
+            // The same words: only when each chain ends moved (a hit sets the timer back to 5:00).
+            const ends = el.querySelectorAll('[data-pi-chain-until]');
+            const timed = sides.filter((x) => x.side.state === 'on' || x.side.state === 'cooldown');
+            if (ends.length === timed.length) timed.forEach((x, i) => ends[i].setAttribute('data-pi-chain-until', String(x.side.until)));
+        }
+        eyeChainTick(el, now);
+        if (detectPage(location.href) !== PAGE_ATTACK) {
+            el.style.left = Math.round(spot.x) + 'px';
+            el.style.top = Math.round(spot.y) + 'px';
+            el.style.width = Math.round(spot.width) + 'px';
+        }
+        return !old;
+    }
+
+    /**
+     * The training panel says where it would sit ({x, y, width} on screen; null when it is folded under a card, off or
+     * in the window's corner): the counter takes that place and the panel starts under it (the owner's pick B: "its own
+     * card at the top of the free space; the training panel sits under it").
+     * @returns {number} the height the panel leaves for it (0: no counter there)
+     */
+    function eyeRideChain(spot) {
+        const was = ep.chain.spot;
+        ep.chain.spot = spot && spot.width > 0 ? { x: spot.x, y: spot.y, width: spot.width } : null;
+        if (!document.getElementById('pi-chaincard') && !ep.chain.spot) return 0;
+        if (JSON.stringify(was) !== JSON.stringify(ep.chain.spot)) drawChain();
+        const el = document.getElementById('pi-chaincard');
+        return el && ep.chain.spot && detectPage(location.href) !== PAGE_ATTACK ? el.offsetHeight : 0;
+    }
+
     /* ------------------------------------------------------------- attack */
+
+    /** The room left under the fight card for the training panel's line docked there (its 36 px and the gap). */
+    const EYE_DOCK_ROOM = 44;
+
+    /**
+     * The Next button's target from where you are (round 8, his pick A): the next ready player of the list the Torn Eye
+     * tab last showed (Targets in its order and filters, or the war list), handed over in shared storage; the attack pages
+     * you opened in the last ten minutes are passed over. No request: Torn's pages ask about the player attacked only.
+     */
+    function eyeNextNow(id, now = Date.now()) {
+        const opened = new Set((get(K.eyePredictions, []) || []).filter((p) => p && now - p.at < ATTACK_OPENED_MS && Number(p.def) !== Number(id)).map((p) => Number(p.def)));
+        const n = nextTarget(get(EYE_NEXT_KEY, null), id, { now, opened });
+        return { ...n, href: n.next ? attackUrl(n.next.id) : null, listHref: APP_PAGE_URL + '#eye', over: Boolean(ep.attack.over) };
+    }
+
+    /** Key N on the attack page: the Next button's page (never while typing, never with a modifier key). */
+    function eyeNextKey(e) {
+        if (e.defaultPrevented || e.ctrlKey || e.altKey || e.metaKey || e.repeat || !(e.key === 'n' || e.key === 'N')) return;
+        const t = e.target;
+        if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(String(t.tagName || '')))) return;
+        if (isPaused() || !getSettings().eyeChips || detectPage(location.href) !== PAGE_ATTACK) return;
+        const a = document.querySelector('#pi-eyecard a.pi-nextb:not(.pi-alt)');
+        if (!a || !a.getAttribute('href')) return;
+        e.preventDefault();
+        location.assign(a.getAttribute('href'));
+    }
 
     function drawAttack() {
         const id = Number(attackTargetOf(location.href));
@@ -24895,7 +28101,7 @@
             ep.sig.attack = '';
         } else {
             const ws = watchState(id);
-            const next = eyeFightCard(v, spot.mode, { ...ep.attack, watch: { ...ws, full: getWatch().list.length >= WATCH_MAX && !ws.watching, toggle: () => toggleFor(id) } });
+            const next = eyeFightCard(v, spot.mode, { ...ep.attack, next: eyeNextNow(id), watch: { ...ws, full: getWatch().list.length >= WATCH_MAX && !ws.watching, toggle: () => toggleFor(id) } });
             let card = old;
             if (!card || ep.sig.attack !== next.outerHTML) {
                 ep.sig.attack = next.outerHTML;
@@ -24908,10 +28114,19 @@
             const r = root ? root.getBoundingClientRect() : null;
             card.style.width = spot.width + 'px';
             card.style.left = Math.round(spot.x) + 'px';
-            const top = Math.round(r && r.height ? Math.max(8, r.top) : 80);
+            let top = Math.round(r && r.height ? Math.max(8, r.top) : 80);
+            // Chain mode: the counter's two lines sit over the card, the card starts under them.
+            const chain = document.getElementById('pi-chaincard');
+            if (chain) {
+                chain.style.left = Math.round(spot.x) + 'px';
+                chain.style.top = top + 'px';
+                chain.style.width = spot.width + 'px';
+                top += Math.round(chain.offsetHeight) + 8;
+            }
             card.style.top = top + 'px';
-            // Never taller than the window (it scrolls inside instead).
-            card.style.maxHeight = Math.max(80, window.innerHeight - top - 8) + 'px';
+            // Never taller than the window, less the training panel's one line under it (round 8: with their gear listed
+            // the card filled the window and pushed that line off it); it scrolls inside instead.
+            card.style.maxHeight = Math.max(80, window.innerHeight - top - 8 - EYE_DOCK_ROOM) + 'px';
         }
         // What Torn Eye said before this fight: the fight learner compares it with how the fight went.
         if (v && v.forecast && Number.isFinite(v.forecast.pWin)) {
@@ -24927,6 +28142,8 @@
         if (!d || !d.defenderId) return;
         ep.extras.set(d.defenderId, { ...(ep.extras.get(d.defenderId) || {}), level: d.level, life: d.maxLife, name: d.defenderName });
         ep.attack.gearVisible = d.visible;
+        // The fight is over: the Next button is the one thing that glows now.
+        ep.attack.over = Boolean(d.over);
         if (d.visible && d.items.length) {
             ep.attack.gearSaved = true;
             saveGear(d.defenderId, d.items);
@@ -24937,15 +28154,11 @@
     /* ------------------------------------------------------------- wiring */
 
     function eyeClearAll() {
-        for (const el of document.querySelectorAll('#pi-eye-layer, #pi-eyecard, .pi-mini-line')) el.remove();
+        for (const el of document.querySelectorAll('#pi-eye-layer, #pi-eyecard, #pi-chaincard')) el.remove();
+        ep.chain.sig = '';
         ep.sig = {};
         ep.lists = {};
         ep.drawn = { war: null, faction: null };
-        // Torn's war rows back in their own order.
-        for (const list of document.querySelectorAll('.pi-warlist')) {
-            list.classList.remove('pi-warlist');
-            for (const li of list.children) li.style.order = '';
-        }
     }
 
     function drawAll() {
@@ -24959,6 +28172,8 @@
         // Faction and war lists (and the mini-profile) show what is already stored: read it once, from this site's own
         // IndexedDB, when one of them first shows. No request; the draw runs again when it is in.
         if (!eyeReady() && (p === PAGE_FACTION || miniProfileId())) loadEyeCache().catch(() => {});
+        // The chain counter first: the list tags keep out of its margin, the attack page's card starts under it.
+        drawChain();
         if (p === PAGE_PROFILE) drawProfile();
         if (p === PAGE_FACTION) {
             const glowed = document.getElementById('faction_war_list_id') ? drawWar() : false;
@@ -24985,6 +28200,7 @@
             return;
         }
         for (const name of Object.keys(ep.lists)) eyePlaceList(name);
+        placeMini();
         ep.layoutSig = eyeLayoutSig();
     }
 
@@ -25011,12 +28227,17 @@
         ensureMarkCss();
         ensureEyeCss();
         // The hover card: in the free space, and on faction and war pages clear of the panel like the tags beside it.
-        bindCard(document, (id) => view(id), () => eyeCardSpot(eyeViewW(), eyeTornPage(), detectPage(location.href) === PAGE_FACTION ? eyePanelRect() : null));
+        bindCard(document, (id) => view(id), () => eyeCardSpot(eyeViewW(), eyeTornPage(), detectPage(location.href) === PAGE_FACTION ? eyePanelRect() || eyeChainRect() : null));
         const p = detectPage(location.href);
         if (p === PAGE_ATTACK) {
             // unsafeWindow is the page's own window in Tampermonkey; the harness has only window.
             const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
             installAttackHook(pageWin, onAttackData);
+            document.addEventListener('keydown', eyeNextKey);
+            // The Torn Eye tab handed over a new list (a status read, another order): the Next button follows.
+            gmOnChange(EYE_NEXT_KEY, () => {
+                if (!isPaused() && getSettings().eyeChips && isVisible() && detectPage(location.href) === PAGE_ATTACK) drawAttack();
+            });
         }
         // Owner (round 6): on Torn's pages Torn Eye asks only about the player you're viewing (their profile) or
         // attacking. Faction and war lists, mini-profiles and the watch list show what is already known; the list sweeps,
@@ -25042,7 +28263,23 @@
             lastSig = '';
             drawAll();
         });
-        // A resized window re-places everything (once per frame).
+        // A resized window re-places everything (once per frame); a scroll moves only the mini-profile's tag (Torn's popup
+        // may be fixed on screen while ours is in page coordinates).
+        let miniQueued = false;
+        document.addEventListener(
+            'scroll',
+            () => {
+                if (miniQueued || !document.querySelector('#pi-eye-layer [data-pi-part="mini"] .pi-mini-line')) return;
+                miniQueued = true;
+                const run = () => {
+                    miniQueued = false;
+                    placeMini();
+                };
+                if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+                else setTimeout(run, 16);
+            },
+            { capture: true, passive: true },
+        );
         let resizeQueued = false;
         window.addEventListener('resize', () => {
             if (resizeQueued) return;
@@ -25060,6 +28297,8 @@
         setInterval(() => {
             if (!isVisible() || isPaused() || !getSettings().eyeChips) return;
             const pg = detectPage(location.href);
+            // The chain counter (any Torn page in chain mode, the war page always): its clocks, and Torn's bar read again.
+            if (drawChain() && pg === PAGE_ATTACK) drawAttack();
             if (pg !== PAGE_FACTION && pg !== PAGE_PROFILE && pg !== PAGE_ATTACK) return;
             if (pg === PAGE_FACTION) {
                 // Round 7 review: the status text carries Torn's hospital clock, so a signature of it changed every second
@@ -25086,10 +28325,17 @@
             const root = document.getElementById('profile-mini-root');
             if (root && root !== watchedRoot) {
                 watchedRoot = root;
-                new MutationObserver(onMini).observe(root, { childList: true, subtree: true });
+                // Its content and where Torn puts it (the popup moves and hides by its style or class).
+                new MutationObserver(onMini).observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
             }
             const id = miniProfileId();
-            const shown = document.querySelector('#profile-mini-root .pi-mini-line');
+            const shown = document.querySelector('#pi-eye-layer [data-pi-part="mini"] .pi-mini-line');
+            // The popup closed or moved: our tag follows it (or hides), nothing redrawn.
+            if (shown && (!id || shown.getAttribute('data-pi-player') === String(id))) {
+                if (!id) fill(eyeLayerPart('mini'), []);
+                else placeMini();
+                return;
+            }
             if (id && (!shown || shown.getAttribute('data-pi-player') !== String(id)) && !(ep.miniAt && ep.miniId === id && Date.now() - ep.miniAt < 500)) {
                 ep.miniId = id;
                 ep.miniAt = Date.now();
@@ -25103,6 +28349,577 @@
         };
         new MutationObserver(onMini).observe(document.body, { childList: true });
         onMini();
+    }
+
+    /* ===== src/torn-page.js ===== */
+    /*
+     * On torn.com: the overlay pill and the marks on the page being viewed.
+     * Reads only the page the user opened; types into Torn's reps box only on
+     * a Fill click; never clicks Torn's buttons; nothing from a hidden tab.
+     */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    const tp = { overlay: null, model: null, observer: null, gymSig: '', lastGymPlan: null };
+
+    /** Torn's page (its sidebar and content column) as {left, right}; a centred 976 px guess if it can't be measured. */
+    function pageRect() {
+        const parts = [document.querySelector('.content-wrapper'), document.getElementById('sidebarroot'), document.getElementById('sidebar')].filter(Boolean);
+        const rects = parts.map((el) => el.getBoundingClientRect()).filter((r) => r.width > 0 && r.height > 0);
+        if (rects.length) return { left: Math.min(...rects.map((r) => r.left)), right: Math.max(...rects.map((r) => r.right)) };
+        const w = Math.min(window.innerWidth, 976);
+        return { left: (window.innerWidth - w) / 2, right: (window.innerWidth + w) / 2 };
+    }
+
+    /** The trading script's NPC Arbitrage panel, if it is on this page (read only: its open shadow root). */
+    function tradingRect() {
+        const host = document.getElementById('ttv2-host');
+        const panel = host && host.shadowRoot && host.shadowRoot.querySelector('.ttv2-panel');
+        return panel ? panel.getBoundingClientRect() : null;
+    }
+
+    /** The column Torn Eye's list tags use ({left, right} on screen), from its layer's data-pi-col; null: none. */
+    function eyeColumn() {
+        const layer = document.getElementById('pi-eye-layer');
+        const v = layer && layer.getAttribute('data-pi-col');
+        const [left, right] = v ? v.split(',').map(Number) : [];
+        return Number.isFinite(left) && Number.isFinite(right) ? { left, right } : null;
+    }
+
+    /* ---------------------------------------------------------------- pill */
+
+    /** Why there's no state yet (key refused, too limited, Torn not answering), or null. */
+    function currentProblem() {
+        return keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: (get(K.userStatic, {}) || {}).keyInfo || null });
+    }
+
+    /** The bars as Torn's sidebar shows them now (they move before our next read), else the model's. */
+    function liveReads(m, now = Date.now()) {
+        const happy = readHappyBar() || (m && m.strip && m.strip.happy ? { current: m.strip.happy.current, max: m.strip.happy.max } : null);
+        const energy = readEnergyBar() || (m && m.strip ? m.strip.energy : null);
+        return { happy, energy, ...agedCooldowns(m, now) };
+    }
+
+    /**
+     * An overdose seen on the bars (gympage.js nextOverdose: the bars at 0 with the overdose's long cooldown, or a fall
+     * training can't explain), kept while fresh readings still look like it and until the drug cooldown it started is over.
+     * The one stored state (runtime.js overdoseSeen, GM key K.overdose): here it is checked against Torn's sidebar, which
+     * moves before our next read; the webpage and the bot's sync follow the same key.
+     */
+    function overdoseOf(m, reads = liveReads(m), now = Date.now()) {
+        if (!m || !m.ready) return null;
+        const od = overdoseSeen(reads, now, tp.barsSeen);
+        tp.barsSeen = nextBarsSeen(tp.barsSeen, reads, now);
+        return od;
+    }
+
+    /** The step's one action on Torn: the page it is done on (none when you are on it). */
+    function stepAction(step, page, boost = null) {
+        if (!step) return null;
+        const items = (step.items || []).filter((it) => it.qty > 0);
+        const trains = Boolean(step.parts && step.parts.length);
+        if (boost) return boost.ready ? (page === PAGE_GYM ? null : { text: 'Open the gym', href: gymUrl() }) : page === PAGE_ITEMS ? null : { text: 'Open Items', href: itemsUrl() };
+        if (items.some((it) => it.id === POINTS)) return page === PAGE_POINTS ? null : { text: 'Open Points', href: pointsUrl() };
+        if (items.length) return page === PAGE_ITEMS ? null : { text: 'Open Items', href: itemsUrl() };
+        if (trains && page !== PAGE_GYM) return { text: 'Open the gym', href: gymUrl() };
+        return null;
+    }
+
+    function overlayView(m, page) {
+        const s = getSettings();
+        const relevant = [PAGE_GYM, PAGE_ITEMS, PAGE_BAZAAR, PAGE_ITEM_MARKET, PAGE_POINTS].includes(page);
+        if (!s.pill && !relevant) return { off: true };
+        if (!m || !m.ready) {
+            const hasKey = Boolean(getKey(K.apiKey));
+            const p = currentProblem();
+            if (p) return { pillText: p.short, cardStep: p.title, cardSub: p.text, warn: p.kind === 'retry' ? null : 'Open Pumping Iron › Settings' };
+            return hasKey ? { pillText: 'Reading your state…', cardStep: 'Asking Torn for your bars, stats and gym.' } : { pillText: 'Open to set up', cardStep: 'Add your Torn key in Pumping Iron’s Settings.' };
+        }
+        const now = Date.now();
+        const reads = liveReads(m);
+        // The next step by the bars Torn's page shows now: a train whose energy is already spent is not offered again
+        // while our read of your state is still the one from before it.
+        const live = liveNextStep(m.steps, reads, now);
+        const next = live.next;
+        const later = live.rest.slice(0, 2).map((x) => tornClock(x.at) + ' ' + x.label.split(' · ')[0] + (trainsText(x.trains) ? ', ' + trainsText(x.trains) : ''));
+        const energy = readEnergyBar() || m.strip.energy;
+        // Stacking energy for a chain (Home's "I'm stacking"): no training steps, the energy is kept.
+        if (m.stacking) {
+            return { tone: 'amber', label: 'Stacking', pillText: 'Stacking for a chain · training paused', cardStep: 'Stacking for a chain', cardSub: 'Training paused · energy now ' + fmtInt(energy.current) + ' / ' + fmtInt(energy.max) + ', kept', energy, later: [] };
+        }
+        if (overdoseOf(m, reads, now)) {
+            // Flying to Switzerland is the one thing to do: the plate rings.
+            return { tone: 'amber', ring: true, label: OVERDOSE_WORDS.title, pillText: OVERDOSE_WORDS.pill, cardStep: OVERDOSE_WORDS.step, cardSub: OVERDOSE_WORDS.sub, later: [], action: { text: 'Open Travel', href: TRAVEL_URL } };
+        }
+        // Flying or abroad (Torn's travel answer): the gym is closed; the panel says when you are back, never "Train".
+        if (m.away) {
+            const w = awayWords(m.away);
+            return { tone: 'amber', label: w.title, pillText: w.pill, cdAt: m.away.flying && m.away.until > now ? m.away.until : null, cardStep: w.step, cardSub: w.sub, energy, later };
+        }
+        const v = { energy, later };
+        // On the gym page the bar follows the walk-through. Round 7: once the session is done and the next step is still
+        // ahead, it moves on to that step and its countdown (it stayed on "Now · Session done").
+        const gp = page === PAGE_GYM ? tp.lastGymPlan : null;
+        const sessionOver = Boolean(((gp && gp.done) || live.spent) && next && next.at > now);
+        if (gp && gp.pill && !sessionOver && !live.spent) {
+            v.pillNow = 'Now';
+            v.pillText = gp.pill;
+        }
+        // A jump or a daily boost due now: its checklist, ticked from the bars (every Torn page).
+        const boostReads = { ...reads, happyTrained: next && isBoostStep(next) ? boostHappyTrained(get(K.gymSession, null), next, m.pc && m.pc.perks ? m.pc.perks.happyLossMult : 1, now) : 0 };
+        const boost = next && isBoostStep(next) && next.at <= now + DUE_SLACK_MS ? boostProgress(next, boostReads) : null;
+        if (next) {
+            // Round 8 (the owner's pick B): a step due now is its actions in order, the one of the moment in the bar and in
+            // big type, and the plate rings; a step still ahead is said in words, with its countdown (home.js panelStep).
+            const ps = panelStep(next, { now, boost, sessionOver, reads: boostReads, steps: m.steps });
+            if (!v.pillText) {
+                if (ps.pillNow) v.pillNow = ps.pillNow;
+                if (ps.cdAt) v.cdAt = ps.cdAt;
+                v.pillText = ps.pillText;
+            } else if (next.at > now) v.cdAt = next.at;
+            Object.assign(v, { tone: ps.tone, ring: ps.ring, label: ps.label, cardStep: ps.cardStep, cardSub: ps.cardSub });
+            if (ps.checklist) v.checklist = ps.checklist;
+            if (next.strict && next.warnAt !== null && now >= next.warnAt) v.warn = 'Strict: ' + (next.note || 'on the tick');
+            // The one button follows the action of the moment; with nothing due it is the webpage's alone.
+            v.action = ps.acting ? stepAction(next, page, boost) : null;
+        } else {
+            v.pillText = 'Done for today';
+            v.cardStep = 'Nothing left today';
+            v.label = 'Today';
+        }
+        // The gym page's own states (overlays.html §6): the right gym, the wrong one, eat first, ready.
+        const panel = gp && !sessionOver && !live.spent ? gymPanel(gp) : null;
+        if (panel) {
+            Object.assign(v, { tone: panel.tone, label: panel.title, cardStep: panel.step, cardSub: panel.sub, checklist: panel.checklist, action: panel.action });
+            // The specialist stop ("Stop at 18 trains …"): it was the box's own line, now the panel's warning.
+            const ps = gp.current && gp.perStat ? gp.perStat[gp.current.stat] : null;
+            v.warn = ps && ps.warn ? ps.warn : null;
+            // Something to do here now (train, switch gyms, eat first): the plate rings. "Take the Xanax first" rings only
+            // once that Xanax is due (the step's own ring, above).
+            v.ring = gp.state.kind === 'right' && ps && ps.noEnergy ? Boolean(v.ring) : ['right', 'wrong', 'eat', 'ready', 'overdose'].includes(gp.state.kind);
+        }
+        // Round 7 (the owner): nothing of ours inside Torn's page. The strip's words (where to switch, the group of gyms to
+        // open, the energy kept, the session's parts) and Fill N are the panel's now.
+        if (gp && !sessionOver && !live.spent) {
+            const notes = gymNotes(gp, { hint: tp.gymHint || null });
+            if (notes.length) v.notes = notes;
+            const f = gymFill(gp);
+            if (f) v.fill = { text: 'Fill ' + f.shown, disabled: f.disabled, title: f.title };
+        }
+        return v;
+    }
+
+    /**
+     * The attack page (round 8, mockups/round8/torn-eye.html §4): Torn Eye's fight card has a Next button there, so the
+     * panel's line under it reads "Training: DEX × 17 · after this fight" and never "Next": on that page "Next" means
+     * one thing, the next target.
+     */
+    function attackPanelView(v, page) {
+        if (page !== PAGE_ATTACK || !v || v.off || v.paused) return v;
+        const out = { ...v };
+        if (/^Train /.test(String(v.pillText || ''))) {
+            out.pillText = 'Training: ' + String(v.pillText).slice(6) + (v.pillNow ? ' · after this fight' : '');
+            delete out.pillNow;
+        }
+        if (v.label === 'Next') out.label = 'Training';
+        if (v.cardStep) out.cardStep = String(v.cardStep).replace('Session done. Next: ', 'Session done. Then: ');
+        return out;
+    }
+
+    /**
+     * The panel while Torn Trading runs: an amber card that says where it is still seen and when it was last seen (round 7:
+     * it said "starts again by itself within a minute", which isn't so while a tab opened before Torn Trading was turned
+     * off still runs it), then the plan's next steps.
+     */
+    function pausedView(m, seen = tradingWhere()) {
+        const steps = m && m.ready ? m.steps.slice(0, 2).map((x) => x.label.split(' · ')[0] + ' at ' + tornClock(x.at)) : [];
+        return {
+            paused: true,
+            tone: 'amber',
+            label: 'Paused · Torn Trading is on',
+            pillText: 'Paused · Torn Trading is on',
+            cardStep: '',
+            seen,
+            later: steps.length ? [steps.join(' · ')] : [],
+        };
+    }
+
+    /** Everything we drew on Torn's page, gone (paused). */
+    function clearAll() {
+        clearMarks();
+        tp.lastGymPlan = null;
+        tp.fill = null;
+    }
+
+    /** The panel's Fill N: types the number into Torn's reps box as it is now (React may have replaced it). Never TRAIN. */
+    function fillNow() {
+        const f = tp.fill;
+        if (!f || f.disabled || isPaused()) return;
+        const box = readStatBoxes(gymRoot()).find((b) => b.stat === f.stat);
+        if (box) fillTrains(box.input, f.n);
+    }
+
+    /* ----------------------------------------------------------- gym marks */
+
+    function drawGym(m) {
+        if (isPaused()) return;
+        const root = gymRoot();
+        if (!root || gymLoading(root)) return;
+        const buttons = readGymButtons(root);
+        const sum = gymListSummary(buttons);
+        // What the gym page tells us that the API doesn't: unlocked gyms and progress to the next.
+        if (sum.unlocked.length) {
+            const prev = get(K.unlocked, null);
+            const next = [...new Set(sum.unlocked)].sort((a, b) => a - b);
+            if (JSON.stringify(prev) !== JSON.stringify(next)) {
+                set(K.unlocked, next);
+                pi.modelAt = 0;
+            }
+        }
+        if (sum.inProgress && sum.inProgress.percent !== null) {
+            const need = unlockEnergyAfter(sum.inProgress.id - 1, m && m.pc ? m.pc.perks.gymExpMult : 1) || 0;
+            const gp = { nextId: sum.inProgress.id, energy: Math.round((need * sum.inProgress.percent) / 100), at: Date.now() };
+            const prev = get(K.gymProgress, null);
+            if (!prev || prev.nextId !== gp.nextId || prev.energy !== gp.energy) {
+                set(K.gymProgress, gp);
+                pi.modelAt = 0;
+            }
+        }
+        if (!m || !m.ready || !getSettings().gymMarks) {
+            clearMarks();
+            // Marks off: the panel's pill stops showing the gym plan too.
+            tp.lastGymPlan = null;
+            tp.fill = null;
+            return;
+        }
+        const boxes = readStatBoxes(root);
+        // The walk-through: Torn's own boxes and energy bar move the moment a train lands (the model can be 30 s old).
+        const now = Date.now();
+        const reading = pageReading(m, boxes, readEnergyBar());
+        const prev = get(K.gymSession, null);
+        const session = nextSession(prev, m, reading, now, { table: m.pc.table, perks: m.pc.perks.mult });
+        if (JSON.stringify(session) !== JSON.stringify(prev)) set(K.gymSession, session);
+        // Round 7: the gym page's states come from the same reads (the sidebar's happy and energy, the model's cooldowns).
+        const reads = liveReads(m);
+        const plan = planGymPage(m, { selectedId: sum.selectedId || m.state.gymId, boxes, reading, reads, overdose: overdoseOf(m, reads, now) }, session, now);
+        tp.lastGymPlan = plan;
+        const f = gymFill(plan);
+        tp.fill = f ? { stat: f.stat, n: f.n, disabled: f.disabled } : null;
+        // On our own layer, over Torn's boxes (nothing goes into Torn's page).
+        const drawn = drawGymMarks(plan, boxes, buttons, { motion: getSettings().motion !== false });
+        // The gym to go to isn't on the page (Torn shows one group of gyms at a time): the panel says which group to open.
+        tp.gymHint = plan.nextGym && !drawn.nextGymShown ? 'Open ' + plan.nextGym.group.replace(/^a /, 'the ') + 's to find it' : null;
+        tp.gymSig = gymPageSig(root);
+    }
+
+    /** What Torn's gym page shows that the marks depend on: the stat boxes, the gym selected, the energy bar. */
+    function gymPageSig(root) {
+        const boxes = readStatBoxes(root).map((b) => b.stat + ':' + b.value + ':' + (b.locked ? 1 : 0)).join(',');
+        const sel = gymListSummary(readGymButtons(root)).selectedId;
+        // A box we marked replaced by Torn (a re-render with the same value): drawn again over the new one.
+        return [boxes, sel, JSON.stringify(readEnergyBar()), JSON.stringify(readHappyBar()), gymLoading(root) ? 1 : 0, marksLost() ? 1 : 0].join('|');
+    }
+
+    function watchGym() {
+        const root = gymRoot();
+        if (!root) return;
+        // Torn may replace the gym root: watch the new one.
+        if (tp.observer && tp.observedRoot === root) return;
+        if (tp.observer) tp.observer.disconnect();
+        tp.observedRoot = root;
+        let timer = null;
+        // Redraw only when Torn's own values change (a train, another gym, the energy bar, our marks wiped by a re-render),
+        // never on any mutation: other scripts (TornTools) and Torn's timers change the page all the time, and two
+        // scripts redrawing on each other's changes could loop.
+        tp.observer = new MutationObserver(() => {
+            if (isPaused()) return;
+            // Torn's page moved (a message, a box re-rendered): our rings follow at the next frame. Nothing of ours is
+            // inside #gymroot, so every change seen here is Torn's (or another script's).
+            scheduleMarks();
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+                const r = gymRoot();
+                if (r && gymPageSig(r) === tp.gymSig) return;
+                drawGym(tp.model);
+                // The panel's pill follows the walk-through at once (a train, another gym), not at the next model.
+                if (tp.showView) tp.showView(tp.model);
+            }, 150);
+        });
+        tp.observer.observe(root, { childList: true, subtree: true });
+    }
+
+    /* ------------------------------------------------ the sidebar's bars */
+
+    /**
+     * Round 7 (D.4): the panel moved to the next step only at the next 30 s read. Torn's own sidebar shows an action the
+     * moment it happens (energy drops on a train, jumps on a Xanax or refill; happy moves on a booster): when it does,
+     * the state is read about two seconds after the last change (runtime readSoon). Read-only: two numbers are looked
+     * at, nothing on Torn's page is touched. Regeneration ticks alone ask for nothing.
+     */
+    function watchBars() {
+        if (tp.barsTimer) return;
+        const look = () => ({ energy: readEnergyBar(), happy: readHappyBar() });
+        let last = look();
+        let observed = null;
+        let seen = 0;
+        const check = () => {
+            if (isPaused() || !isVisible()) return;
+            const now = look();
+            // The last reading with something in the bars: an overdose is a fall from it that training can't explain.
+            tp.barsSeen = nextBarsSeen(tp.barsSeen, now, Date.now());
+            if (barsActed(last, now)) readSoon();
+            last = now;
+        };
+        const attach = () => {
+            const node = document.getElementById('sidebarroot') || (document.getElementById('barEnergy') || {}).parentNode || null;
+            if (!node || node === observed) return;
+            if (tp.barsObserver) tp.barsObserver.disconnect();
+            observed = node;
+            tp.barsObserver = new MutationObserver(() => {
+                // Torn's sidebar ticks its own timers every second: look at most every 300 ms.
+                const t = Date.now();
+                if (t - seen < 300) return;
+                seen = t;
+                check();
+            });
+            tp.barsObserver.observe(node, { childList: true, subtree: true, characterData: true });
+        };
+        attach();
+        // Torn may replace the sidebar (page changes without a load): find it again, and look once in case a change was skipped.
+        tp.barsTimer = setInterval(() => {
+            attach();
+            check();
+        }, 5000);
+    }
+
+    /* -------------------------------------------------- items and markets */
+
+    function drawItems(m) {
+        clearMarks();
+        // Stacking for a chain: no step to buy for until Resume (the panel says so).
+        if (!m || !m.ready || m.stacking || !getSettings().marketMarks) return;
+        const idx = m.steps.findIndex((s) => (s.items || []).some((it) => it.id !== POINTS));
+        if (idx < 0) return;
+        const step = m.steps[idx];
+        const n = m.done.length + idx + 1;
+        // At most one thing glows on a page: the first one marked.
+        let glow = true;
+        for (const it of step.items) {
+            for (const row of readItemRows().filter((r) => r.itemId === Number(it.id))) {
+                markListing(row.el, 'Step ' + n + ' of today · ' + step.label.split(' · ')[0], { glow });
+                glow = false;
+            }
+        }
+        placeMarks();
+    }
+
+    /** The Buy list's chosen listings (same window as the Buy tab). */
+    function chosenFills(m) {
+        const s = getSettings();
+        const statics = get(K.userStatic, {}) || {};
+        const prices = getPrices();
+        const needs = needList(needsForWindow(m, m.compare, { ...getPlan(), strategy: m.strategy || getPlan().strategy }, s.buyWindow || 'three', m.planDays || s.horizonDays), statics.inventory || {});
+        // The same list as the Buy tab: its type ticks, and a city shop you ticked joins the listings.
+        const show = shownTypes(s, [...new Set(needs.map((n) => typeOf(n.id)))]);
+        const ic = itemContext(statics, s, m.now);
+        const out = [];
+        // Today's city-shop allowance, shared by every item bought there.
+        let left = ic.cityLeft;
+        for (const n of needs) {
+            if (!(n.buy > 0) || !show.has(typeOf(n.id))) continue;
+            const p = prices[n.id] || {};
+            const shop = ic.npc[n.id] ? npcListing(ic.npc[n.id], n.buy, left) : null;
+            const listings = (Array.isArray(p.listings) ? p.listings : []).concat(shop ? [shop] : []);
+            if (!listings.length) continue;
+            const fill = fillCheapest(listings, n.buy, n.id);
+            if (left !== null) left = Math.max(0, left - fill.rows.filter((r) => r.source === 'npc').reduce((a, r) => a + r.qty, 0));
+            out.push({ id: n.id, fill });
+        }
+        return out;
+    }
+
+    function drawMarket(m, page) {
+        clearMarks();
+        if (!m || !m.ready || !getSettings().marketMarks) return;
+        // On a market page, the Buy list's prices are refreshed (at most every 5 minutes) so the outline is current.
+        const s = getSettings();
+        const want = needList(needsForWindow(m, m.compare, { ...getPlan(), strategy: m.strategy || getPlan().strategy }, s.buyWindow || 'three', m.planDays || s.horizonDays), (get(K.userStatic, {}) || {}).inventory || {}).filter((n) => n.buy > 0).map((n) => n.id);
+        if (want.length) loadPrices(want).catch(() => {});
+        const fills = chosenFills(m);
+        const label = (r) => 'Take ' + fmtInt(r.qty) + ' · $' + fmtInt(r.subtotal);
+        // The chosen listing with its chalk tab ("TAKE 3 · $2,479,500"); at most one thing glows on a page: the first.
+        let glow = true;
+        const mark = (el, text) => {
+            markListing(el, text, { glow });
+            glow = false;
+        };
+        if (page === PAGE_BAZAAR) {
+            const owner = bazaarOwnerId(location.href);
+            const cards = readBazaarCards();
+            for (const f of fills) for (const r of f.fill.rows) if (r.source === SOURCE_BAZAAR && r.sellerId === owner) {
+                const card = cards.find((c) => c.itemId === Number(f.id) && c.price === r.price);
+                if (card) mark(card.el, label(r));
+            }
+        } else if (page === PAGE_ITEM_MARKET) {
+            const item = Number(itemMarketItemOf(location.href));
+            const rows = readItemMarketRows();
+            for (const f of fills) if (Number(f.id) === item) for (const r of f.fill.rows) if (r.source === SOURCE_ITEM_MARKET) {
+                const row = rows.find((x) => x.price === r.price);
+                if (row) mark(row.el, label(r));
+            }
+        } else if (page === PAGE_POINTS) {
+            const rows = readPointsRows();
+            for (const f of fills) if (f.id === POINTS) for (const r of f.fill.rows) if (r.source === SOURCE_POINTS) {
+                const row = rows.find((x) => (r.listingId && x.listingId === r.listingId) || x.price === r.price);
+                if (row) mark(row.el, label(r));
+            }
+        }
+        placeMarks();
+    }
+
+    /* ------------------------------------------------------------- wiring */
+
+    /** How many rows the page shows now: lists load after the page does. */
+    function pageRowsCount(p) {
+        if (p === PAGE_ITEMS) return readItemRows().length;
+        if (p === PAGE_BAZAAR) return readBazaarCards().length;
+        if (p === PAGE_ITEM_MARKET) return readItemMarketRows().length;
+        if (p === PAGE_POINTS) return readPointsRows().length;
+        return 0;
+    }
+
+    /** What this Torn page is about, for the API lanes: Torn Eye pages or market pages go first while open. */
+    function tornPageFocus(href = location.href) {
+        const p = detectPage(href);
+        if (p === PAGE_PROFILE || p === PAGE_FACTION || p === PAGE_ATTACK) return { focus: 'eye', war: p === PAGE_FACTION && Boolean(document.getElementById('faction_war_list_id')) };
+        if (p === PAGE_ITEMS || p === PAGE_BAZAAR || p === PAGE_ITEM_MARKET || p === PAGE_POINTS) return { focus: 'prices', war: false };
+        return { focus: null, war: false };
+    }
+
+    function bootTornPage() {
+        ensureMarkCss();
+        pi.focusOf = () => tornPageFocus();
+        beatFocus();
+        tp.overlay = new Overlay({
+            // A key problem opens straight on Settings, where the key is replaced.
+            onOpen: () => gmOpenTab(APP_PAGE_URL + (currentProblem() && !(tp.model && tp.model.ready) ? '#settings' : '')),
+            loadPos: () => get(K.overlayPos, null),
+            savePos: (p) => set(K.overlayPos, p),
+            loadCollapsed: () => Boolean(get(K.overlayCollapsed, false)),
+            saveCollapsed: (v) => set(K.overlayCollapsed, v),
+            pageRect,
+            avoidRect: tradingRect,
+            // The attack page: folded to one line under Torn Eye's fight card, never on top of it (round 7).
+            dockTo: () => (detectPage(location.href) === PAGE_ATTACK ? document.getElementById('pi-eyecard') : null),
+            // A profile's Torn Eye card that had to take the panel's margin: the panel folds under it instead of covering it.
+            dockIfShared: () => document.getElementById('pi-eyecard'),
+            // Torn Eye's tags on faction and war lists (eye-page.js notes their column on its layer): never the same margin.
+            avoidColumn: eyeColumn,
+            // Fill N on the gym page: types into Torn's reps box on your click (never TRAIN).
+            onFill: fillNow,
+            // Torn Eye's chain counter rides on top of the panel (round 8): the panel starts under it.
+            ride: eyeRideChain,
+        });
+        tp.overlay.mount();
+        gmMenu('Reset overlay position', () => {
+            set(K.overlayPos, null);
+            set(K.overlayCollapsed, false);
+            tp.overlay.setCollapsed(false, false);
+        });
+        let lastSig = '';
+        let lastView = '';
+        tp.showView = (m) => {
+            const view = attackPanelView(overlayView(m, detectPage(location.href)), detectPage(location.href));
+            // Settings › Animations off: the plate's ring is drawn, not moving.
+            if (!view.off) view.still = getSettings().motion === false;
+            const vs = JSON.stringify(view);
+            if (vs !== lastView) {
+                lastView = vs;
+                tp.overlay.update(view);
+            }
+        };
+        // The paused card follows where Torn Trading is still seen (another tab reloaded or closed) without a new model.
+        const showPaused = (m) => {
+            const pv = pausedView(m);
+            const s = JSON.stringify(pv);
+            if (s !== lastView) {
+                lastView = s;
+                tp.overlay.update(pv);
+            }
+        };
+        onModel((m) => {
+            tp.model = m;
+            if (!isVisible()) return;
+            // Taking turns with Torn Trading: nothing on Torn's page, only the panel with a warning sign.
+            if (isPaused()) {
+                if (lastSig !== 'paused') {
+                    lastSig = 'paused';
+                    clearAll();
+                }
+                showPaused(m);
+                return;
+            }
+            const p = detectPage(location.href);
+            // The saved plan (made, recalibrated or another picked on the webpage) redraws the marks too.
+            const planSig = m && m.ready && m.saved ? m.saved.createdAt + ':' + (m.saved.recalibratedAt || 0) : '';
+            // What you hold is read after the first draw (the slow data): the marks take it off, so it redraws them.
+            const heldSig = JSON.stringify((get(K.userStatic, {}) || {}).inventory || {});
+            // Stacking for a chain, or an overdose seen on the bars: the gym page's marks change at once.
+            const stateSig = JSON.stringify([(m && m.stacking) || null, overdoseOf(m), (m && m.away) || null]);
+            const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), JSON.stringify(getPlan()), planSig, heldSig, stateSig, Object.values(getPrices()).map((x) => x.at).join(), pageRowsCount(p)].join('|');
+            if (sig !== lastSig) {
+                lastSig = sig;
+                if (p === PAGE_GYM) {
+                    watchGym();
+                    drawGym(m);
+                } else if (p === PAGE_ITEMS) drawItems(m);
+                else if (p === PAGE_BAZAAR || p === PAGE_ITEM_MARKET || p === PAGE_POINTS) drawMarket(m, p);
+            }
+            tp.showView(m);
+        });
+        setInterval(() => {
+            tp.overlay.tick();
+            if (isVisible() && isPaused()) showPaused(tp.model);
+            // Our marks follow Torn's page (lists that load or grow, images): once a second they are placed again, and a
+            // listing Torn replaced is marked again on the new one (nothing of ours is inside Torn's page to notice it).
+            if (isVisible() && !isPaused() && marksCount()) {
+                const p = detectPage(location.href);
+                if (marksLost()) {
+                    if (p === PAGE_ITEMS) drawItems(tp.model);
+                    else if (p === PAGE_BAZAAR || p === PAGE_ITEM_MARKET || p === PAGE_POINTS) drawMarket(tp.model, p);
+                    else scheduleMarks();
+                } else scheduleMarks();
+            }
+        }, 1000);
+        // A resized window, or a scroll inside one of Torn's boxes: the marks are placed again (once a frame at most).
+        window.addEventListener('resize', scheduleMarks);
+        document.addEventListener('scroll', scheduleMarks, { capture: true, passive: true });
+        watchBars();
+        // Torn's pages change the hash without a load (Item Market search, items tabs).
+        window.addEventListener('hashchange', () => {
+            lastSig = '';
+        });
     }
 
     /* ===== src/main.js ===== */
@@ -25153,6 +28970,9 @@
         setWhere(where === 'app' ? 'app' : 'torn');
         // The problem log (Settings › Report a problem): script errors of ours, and on the webpage its own freezes.
         startProblemLog({ where: where === 'app' ? 'app' : 'torn' });
+        // The report says which build was running and when the webpage was opened (bug hunt A.7); Torn's pages, opened
+        // many times a minute, do not write one.
+        if (where === 'app') logNote('Pumping Iron ' + PI_BUILD_VERSION + ' opened');
         if (where === 'app') bootAppPage();
         else {
             bootTornPage();

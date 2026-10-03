@@ -1,6 +1,6 @@
 /*
  * Round 7, Home's "Stacking for a chain" (the owner's pick in mockups/round7/home.html): the flag kept in GM for
- * every tab, the model's `m.stacking = {since}`, Home in both states, Resume re-planning at once (Re-plan's run),
+ * every tab, the model's `m.stacking = {since}`, Home in both states, Resume recalibrating at once (Recalibrate's run),
  * and the bot's plan saying `chain` with no steps.
  */
 import test from 'node:test';
@@ -80,7 +80,7 @@ test('the flag: kept in GM across tabs and reloads, since the first press; Resum
     assert.deepEqual(get(K.stacking), { since: T0 }, 'stored as {since} under its own GM key (every tab gets its change event)');
     assert.equal(K.stacking, 'stackingChain');
     assert.deepEqual(setStacking(true, T0 + 60e3), { since: T0 }, 'a second press keeps when it began');
-    assert.deepEqual(getStacking(), { since: T0 });
+    assert.deepEqual(getStacking(T0 + 60e3), { since: T0 });
     set(K.stacking, { since: 'x' });
     assert.equal(getStacking(), null, 'a damaged value reads as off');
     setStacking(true, T0);
@@ -119,7 +119,10 @@ test('Home, training: the pane starts with "Training · Stacking energy for a ch
     click(btn);
     assert.deepEqual(calls, ['start']);
     assert.doesNotMatch(text(out.main), /Stacking for a chain/);
-    assert.equal(out.main[0].all((n) => n.tagName === 'table').length, 1, "today's steps are listed");
+    // Round 8 (the owner's pick B): today's steps are one rail, not a table.
+    const rail = out.main[0].all((n) => n.attrs.class === 'rail');
+    assert.equal(rail.length, 1, "today's steps are listed");
+    assert.ok(rail[0].children.length > 1, 'the step of the moment and the later ones');
 });
 
 test('Home, stacking: Today says what waits (real energy numbers) instead of the steps; the card shows Resume', () => {
@@ -134,6 +137,8 @@ test('Home, stacking: Today says what waits (real energy numbers) instead of the
     assert.match(t, /No Discord pings about energy or training/);
     assert.match(t, /Energy now 1,000 \/ 150, kept for the chain/);
     assert.equal(lead.all((n) => n.tagName === 'table').length, 0, 'no step table');
+    assert.equal(lead.all((n) => n.attrs.class === 'rail')[0].children.length, 1, 'the rail holds the stacking box alone, no step');
+    assert.equal(lead.all((n) => /\bring\b/.test(n.attrs.class || '')).length, 0, 'nothing rings: there is nothing to do');
     assert.doesNotMatch(t, /Open the gym|then train|NOW/, 'no training step anywhere in Today');
     assert.doesNotMatch(text(out.main), /Next 48 h/, 'no look-ahead of training steps');
     assert.doesNotMatch(text(out.main), /today every train goes to/);
@@ -143,7 +148,7 @@ test('Home, stacking: Today says what waits (real energy numbers) instead of the
     const resume = card.all((n) => n.tagName === 'button')[0];
     assert.equal(resume.textContent, 'Resume');
     click(resume);
-    click(lead.all((n) => n.tagName === 'button' && n.textContent === 'Resume and re-plan')[0]);
+    click(lead.all((n) => n.tagName === 'button' && n.textContent === 'Resume and recalibrate')[0]);
     assert.deepEqual(calls, ['resume', 'resume']);
     // A stack begun yesterday says its day.
     assert.match(chainCard(model({ since: T0 - 20 * 3600e3 }), ctxFor()).textContent, /Stacking since Mon 14:48/);
@@ -163,17 +168,17 @@ test('Home, stacking: heads-up lines that ask you to train or use energy are hel
     assert.doesNotMatch(heads({ since: late - 60e3 }), /Refill unused/);
 });
 
-test('Home: Re-plan running after Resume shows the Plan card\'s bar with its light sweep', () => {
+test('Home: Recalibrate running after Resume shows the Plan card\'s bar with its light sweep', () => {
     const m = { ...model(null), planBusy: { recalibrate: true, at: T0, done: 0.3, words: 'Comparing plans' } };
     const out = renderHome(m, ctxFor());
     const run = out.main[0].all((n) => n.attrs.class === 'planrun')[0];
     assert.ok(run, 'the .planrun bar (styles.js: the 2A sweep, still with Settings › Animations off)');
     assert.equal(run.all((n) => n.attrs['data-plan-bar'])[0].attrs.style, 'width:30%');
-    assert.equal(run.all((n) => n.attrs.role === 'progressbar')[0].attrs['aria-label'], 'Re-planning');
+    assert.equal(run.all((n) => n.attrs.role === 'progressbar')[0].attrs['aria-label'], 'Recalibrating');
     assert.ok(out.pane[0].all((n) => n.tagName === 'button')[0].attrs.disabled !== undefined, "I'm stacking waits for the run");
 });
 
-test('Resume clears the flag and re-plans at once (the Re-plan run); with no plan to re-plan, the steps just come back', async () => {
+test('Resume clears the flag and recalibrates at once (the Recalibrate run); with no plan to recalibrate, the steps just come back', async () => {
     set(K.userState, { api: API, at: Date.now() });
     set(K.plan, PLAN);
     for (const k of [K.planNow, 'savedPlanFull', K.planLine]) set(k, null);
@@ -181,18 +186,18 @@ test('Resume clears the flag and re-plans at once (the Re-plan run); with no pla
     pi.planBusy = null;
     setWhere('app');
     startStacking();
-    assert.equal(await resumeTraining(), null, 'no saved plan: nothing to re-plan');
+    assert.equal(await resumeTraining(), null, 'no saved plan: nothing to recalibrate');
     assert.equal(getStacking(), null);
-    // A saved plan: Resume starts the same run as Re-plan (recalibrate), right away.
+    // A saved plan: Resume starts the same run as Recalibrate (recalibrate), right away.
     const pause = () => Promise.resolve();
     await createPlan({ months: 1, pause });
     startStacking();
     const p = resumeTraining({ pause });
     assert.equal(getStacking(), null, 'off before the run starts');
-    assert.ok(pi.planBusy && pi.planBusy.recalibrate === true, 'the Re-plan run is under way at once');
+    assert.ok(pi.planBusy && pi.planBusy.recalibrate === true, 'the Recalibrate run is under way at once');
     assert.equal(currentModel().planBusy.recalibrate, true, 'the model says so (Home draws the bar)');
     const saved = await p;
-    assert.ok(saved && saved.recalibratedAt, 'the plan was re-planned');
+    assert.ok(saved && saved.recalibratedAt, 'the plan was recalibrated');
     assert.equal(currentModel().stacking, null);
 });
 
@@ -203,4 +208,16 @@ test('the bot\'s plan: chain {since} in seconds and no steps while stacking; the
     assert.equal(off.chain, undefined);
     assert.equal(off.chain, undefined);
     assert.ok(off.steps.length > 0);
+});
+
+test('round 8 · chain mode ends by itself after three days: a forgotten flag no longer keeps the steps, the pings and the daily recalibration off', async () => {
+    const { STACKING_MAX_MS } = await import('../src/platform/store.js');
+    setStacking(false);
+    const since = setStacking(true, T0).since;
+    assert.equal(since, T0);
+    assert.deepEqual(getStacking(T0 + STACKING_MAX_MS - 1), { since: T0 });
+    assert.equal(getStacking(T0 + STACKING_MAX_MS), null);
+    // Pressing "I'm stacking" again after it ran out starts a new one from now.
+    assert.equal(setStacking(true, Date.now() + 10).since > T0, true);
+    setStacking(false);
 });

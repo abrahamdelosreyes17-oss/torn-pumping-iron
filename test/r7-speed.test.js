@@ -130,7 +130,7 @@ test('with the page’s own breaks: the plan is saved and shown first, the what-
     assert.equal(full.extras, 'done');
     assert.equal(full.rev, first.rev, 'the same plan, with the what-ifs added');
     assert.ok(pi.saved.gymWorth.length >= 1 && pi.saved.whatIf);
-    // Re-plan, cancelled at the first progress report: nothing saved, the old plan stays, no error to show.
+    // Recalibrate, cancelled at the first progress report: nothing saved, the old plan stays, no error to show.
     setNow(T0 + 3600e3);
     const before = JSON.stringify(get(K.planNow, null));
     let n = 0;

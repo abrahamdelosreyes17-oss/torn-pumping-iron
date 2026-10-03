@@ -38,6 +38,18 @@ export const MID_BOOST_SHARE = 0.25;
 export const MID_BOOST_MIN = 300;
 
 /**
+ * How far above its maximum happy must be for the boosters to count as eaten: the share of the boost above, at
+ * least MID_BOOST_MIN, but never more than half the boost itself. A small candy boost (Candy Kisses x 4 = +200)
+ * never reached the 300 floor: the gym page stayed on "eat first" and the day plan planned the candy a second time.
+ * Half of it is still more than a Xanax's +75 for any boost over 150. One rule for the day plan and the gym page.
+ */
+export function boostEatenOver(boostHappy) {
+    const b = Math.max(0, Number(boostHappy) || 0);
+    const over = Math.max(MID_BOOST_MIN, MID_BOOST_SHARE * b);
+    return b > 0 ? Math.min(over, b / 2) : over;
+}
+
+/**
  * A boost or jump as its actions in order (round 7, D.1), each with what proves it done from Torn's bars:
  * the boosters (the booster cooldown goes up, happy goes above the maximum), job points, the drug (the drug
  * cooldown goes up), the trains (energy goes down), the refill and its trains. `now` is the action of the moment.
@@ -301,10 +313,16 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     const candyId = ctx.candyId && ITEMS[ctx.candyId] ? ctx.candyId : CANDY_KISSES;
     const candyQty = () => ctx.candyCount || boostersThatFit(candyId, capH, 0, cdMult);
     // A candy boost of `qty`, from what you hold first: the happy, the items, the words and the note.
-    const candyBoost = (qty) => {
+    // Fewer than planned: the note says the cooldown at that time against the cap, and what one candy adds (the owner,
+    // 2026-10-03: "Candy × 22" while his booster cooldown read 13h 05m, and the note didn't say why 22).
+    const candyBoost = (qty, at = now) => {
         const f = fillPool(qty, candyId);
         const planned = candyQty();
-        const notes = [heldWords(f), qty < planned ? 'the booster cooldown has room for ' + qty + ' of ' + planned : null, tierWords(candyId) || null].filter(Boolean);
+        // Rounded up, so the words' own arithmetic gives the same count (13h 00m 20s reads 13h 01m: 22, not 23).
+        const leftMin = Math.ceil(Math.max(0, boosterAt - at) / MIN);
+        const eachMin = Math.round(boosterHours(candyId, cdMult) * 60);
+        const room = qty < planned ? 'booster cooldown ' + Math.floor(leftMin / 60) + 'h ' + String(leftMin % 60).padStart(2, '0') + 'm of ' + capH + 'h: room for ' + qty + ' of ' + planned + ' (' + eachMin + ' min each)' : null;
+        const notes = [heldWords(f), room, tierWords(candyId) || null].filter(Boolean);
         return { f, happy: f.value * candyMult, items: f.alloc.map((a) => ({ id: a.id, qty: a.qty })), words: fillWords(f, candyId), note: notes.join(' · ') };
     };
     // Job points banked where the player works: happy specials spent in the boosted session.
@@ -344,6 +362,15 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         if (s === 'chocoJump' || s === 'dailyChoco' || s === 'candyXanax') return candy;
         return (ctx.edvdCount || 5) * ITEMS[EDVD].happy * (ctx.adultNovelties10 || s === 'edvdJumpAN' ? 2 : 1);
     };
+    // The same boosters by name, for a step found under way (round 8: once eaten they keep their name, "EDVD × 5",
+    // where the list said "Boosters"). A jump waits for room for its whole load, so the count is the plan's; a daily
+    // candy boost can be smaller (the room under the cooldown that day), so it has the name alone.
+    const boostName = () => {
+        if (isConsole) return 'Game Console + ' + itemName(candyId) + ' × ' + candyQty();
+        if (s === 'chocoJump') return itemName(candyId) + ' × ' + candyQty();
+        if (s === 'dailyChoco' || s === 'candyXanax') return itemName(candyId);
+        return 'EDVD × ' + (ctx.edvdCount || (s === 'happy99k' ? boostersThatFit(EDVD, capH) : 5));
+    };
     let midDone = false;
 
     // A new Torn day: its refill (today's, if unused, goes in before midnight), Xanax count, boost and share.
@@ -370,7 +397,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     // train; all before the next quarter tick, which resets the happy. Before, the plan was worked out again from the
     // bars as if nothing had started: after 5 EDVD it said the jump was in 30 hours (the booster cooldown it had just
     // filled), and after the day's candy it planned a plain Xanax and a second candy boost.
-    if (boostPlan && H >= happyMax + Math.max(MID_BOOST_MIN, MID_BOOST_SHARE * boostHappy())) {
+    if (boostPlan && H >= happyMax + boostEatenOver(boostHappy())) {
         const tick = nextQuarterTick(now);
         const keep = Math.max(0, Math.min(E, ctx.keepEnergy || 0));
         const drugName = s === 'candyXanax' ? 'Xanax' : 'Ecstasy';
@@ -391,7 +418,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         if (canTrain || refillLeft) {
             const label = takes ? (s === 'candyXanax' ? 'Xanax #' + xanN++ : 'Ecstasy') + (drugSoon ? ' at ' + clockOf(at) : ' now') + ', then train it all' : 'Train it all now';
             const note = (takes ? 'The boosters are in' : 'Your happy is boosted') + ': finish before the ' + clockOf(tick) + ' tick, when the happy resets';
-            const acts = boostActions({ eat: 'the boosters', eaten: true, drug: drugName, drugDone: !takes, refill: refillLeft });
+            const acts = boostActions({ eat: boostName(), eaten: true, drug: drugName, drugDone: !takes, refill: refillLeft });
             if (canTrain) train(at, isJump ? 'jump' : 'boost', label, takes ? [{ id: s === 'candyXanax' ? XANAX : ECSTASY, qty: 1 }] : [], { strict: true, warnAt: now, tick, deadline: tick, mid: true, actions: acts.list, actionNow: acts.now, note });
             if (refillLeft) {
                 refill(at + MIN, canTrain ? {} : { strict: true, warnAt: now, tick, deadline: tick, mid: true, note });
@@ -488,7 +515,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
                 const uses = Math.min(CONSOLE_USES, Math.floor(E / CONSOLE_ENERGY_EACH));
                 const each = CONSOLE_HAPPY_EACH * (s === 'consoleJumpToy' || ctx.toyShop5 ? 2 : 1);
                 E -= uses * CONSOLE_ENERGY_EACH;
-                const c = candyBoost(qty);
+                const c = candyBoost(qty, at);
                 H += uses * each + c.happy;
                 items = [{ id: CONSOLE_ITEM, qty: 0, uses }, ...c.items];
                 if (!ctx.consoleOwned) items.push({ id: CONSOLE_ITEM, qty: 1 });
@@ -496,7 +523,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
                 note += '; the Xanax cooldown must be clear for the Ecstasy' + (ctx.consoleOwned ? '' : '; buy a Game Console first');
                 if (c.note) note += '; ' + c.note;
             } else if (s === 'chocoJump') {
-                const c = candyBoost(qty);
+                const c = candyBoost(qty, at);
                 H += c.happy;
                 items = c.items;
                 label = c.words + ' + Ecstasy, then train it all';
@@ -543,7 +570,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             rollDay(at);
             advance(at);
             const qty = Math.min(candyQty(), fitsAt(candyId, at));
-            const c = qty > 0 ? candyBoost(qty) : { happy: 0, items: [], words: '', note: candyRoomWords() };
+            const c = qty > 0 ? candyBoost(qty, at) : { happy: 0, items: [], words: '', note: candyRoomWords() };
             const jp = jobPoints();
             H = Math.min(HAPPY_CAP, (H + c.happy + jp.happy) * ITEMS[ECSTASY].happyMult);
             if (qty > 0) addBooster(candyId, qty, at);
@@ -618,7 +645,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
                 E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
                 H += ITEMS[XANAX].happy;
                 const qty = Math.min(candyQty(), fits);
-                const c = candyBoost(qty);
+                const c = candyBoost(qty, at);
                 const jp = jobPoints();
                 H = Math.min(HAPPY_CAP, H + c.happy + jp.happy);
                 addBooster(candyId, qty, at);

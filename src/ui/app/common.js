@@ -8,6 +8,7 @@ import { STAT_LABEL } from '../../core/gain.js';
 import { countdown, tornClock } from '../../core/bars.js';
 import { fmtInt, fmtSigned } from '../../core/format.js';
 import { itemName } from '../../core/items.js';
+import { OVERDOSE_WORDS } from '../../core/gympage.js';
 
 export const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 export const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -66,12 +67,14 @@ export function statusStrip(m, settings) {
         stCell('Energy', s.energy.current + ' / ' + s.energy.max, null, (100 * s.energy.current) / Math.max(1, s.energy.max), 'var(--chalk)', s.energy.fullAt ? 'Full at ' + clock(s.energy.fullAt, settings) : 'Full'),
         stCell('Happy', fmtInt(s.happy.current), null, (100 * Math.min(s.happy.current, s.happy.max)) / Math.max(1, s.happy.max), 'var(--good)', 'Max ' + fmtInt(s.happy.max) + (s.happy.property ? ' · ' + s.happy.property : '')),
         (() => {
-            const c = stCell('Drug', drugTxt, s.drug.left > 0 ? 'warn' : 'good', drugPct, 'var(--warn)', 'Xanax ' + Math.min(s.drug.xanaxDone + 1, Math.max(1, s.drug.xanaxPlanned)) + ' of ' + Math.max(1, s.drug.xanaxPlanned) + ' today');
+            // Overdosed (m.overdose, the one stored state): the cell says so instead of "Xanax 2 of 3 today".
+            const c = stCell('Drug', drugTxt, s.drug.left > 0 ? 'warn' : 'good', drugPct, 'var(--warn)', m.overdose ? OVERDOSE_WORDS.pill : 'Xanax ' + Math.min(s.drug.xanaxDone + 1, Math.max(1, s.drug.xanaxPlanned)) + ' of ' + Math.max(1, s.drug.xanaxPlanned) + ' today');
+            if (m.overdose) c.setAttribute('data-overdose', 'on');
             if (s.drug.left > 0) c.querySelector('b').setAttribute('data-cd', String(now + s.drug.left));
             return c;
         })(),
         withBooster ? stCell('Booster', boosterTxt, s.booster.left > 0 ? null : 'good', s.booster.capH ? (100 * Math.min(s.booster.left, s.booster.capH * 3600e3)) / (s.booster.capH * 3600e3) : 0, 'var(--chalk)', boosterWords(s.booster, now)) : null,
-        stCell('Refill', s.refill.free ? 'Unused' : 'Used', null, s.refill.free ? 0 : 100, 'var(--chalk)', s.refill.free ? (s.refill.plannedAt ? 'Planned ' + clock(s.refill.plannedAt, settings) : s.refill.stacking ? 'No use while stacked' : 'Use before 00:00') : 'Next at 00:00 Torn time'),
+        stCell('Refill', s.refill.free ? 'Unused' : 'Used', null, s.refill.free ? 0 : 100, 'var(--chalk)', s.refill.free ? (m.overdose ? 'After rehab' : m.stacking ? 'Kept for the chain' : s.refill.plannedAt ? 'Planned ' + clock(s.refill.plannedAt, settings) : s.refill.stacking ? 'No use while stacked' : 'Use before 00:00') : 'Next at 00:00 Torn time'),
     ]);
 }
 

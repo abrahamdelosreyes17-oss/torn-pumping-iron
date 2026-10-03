@@ -20,9 +20,14 @@
  *   &who=owner    the owner's account (Hank's build: 360M STR, Gym 3000, 1,000 energy)
  *   &build=hank   save this build in the plan
  *   &energy=275   the friend's energy now (default 20)
+ *   &fly=43       the friend is flying home, 43 minutes left (Torn's travel answer; &fly=out: on the way to Switzerland)
+ *   &happy=0      the friend's happy now (default 5100; with &energy=0&drug=86400: an overdose)
  *   &win=week     the Buy window (today, three, week)
  *   &hidden=1     the tab reports itself hidden (nothing may be asked)
  *   &trading=MS   a stand-in Torn Trading panel (#ttv2-host) appears after MS ms: Pumping Iron pauses
+ *   &war=1        your faction is in a ranked war with the fixture faction 7777 (&war=new: it began two minutes ago)
+ *   &chain=247/250/222   your faction's chain: count / next bonus / seconds left (your bars, and Torn's sidebar bar)
+ *   &echain=96/100/48    the fixture faction 7777's chain (what /faction/7777/chain answers)
  *   &ffs=1        save an FFScouter key (canned estimates for the fixture players)
  *   &gm=tm        Tampermonkey-like storage (perf check): the store handed over at start, a copy on every read,
  *                 every write sent to the other open tabs (BroadcastChannel); counts in window.__tm
@@ -108,9 +113,10 @@ const CANNED = {
     gym: { id: 27, name: 'Gym 3000' },
   }) : ({
     bars: { energy: { current: Number(Q.get('energy') || 20), maximum: 150, increment: 5, interval: 600, tick_time: 120, full_time: 15600 },
-            happy: { current: 5100, maximum: 5025, increment: 5, interval: 900, tick_time: 300, full_time: 0 },
+            happy: { current: Q.has('happy') ? Number(Q.get('happy')) : 5100, maximum: 5025, increment: 5, interval: 900, tick_time: 300, full_time: 0 },
             nerve: { current: 40, maximum: 60, increment: 1, interval: 300, tick_time: 12, full_time: 6012 },
             life: { current: 7500, maximum: 7500, increment: 450, interval: 300, tick_time: 90, full_time: 0 }, chain: null },
+    travel: Q.has('fly') ? { destination: Q.get('fly') === 'out' ? 'Switzerland' : 'Torn', method: 'Airstrip', departed_at: Math.floor(now / 1000) - 3600, arrival_at: Math.floor(now / 1000) + (Number(Q.get('fly')) || 110) * 60, time_left: (Number(Q.get('fly')) || 110) * 60 } : { destination: 'Torn', method: null, departed_at: null, arrival_at: null, time_left: 0 },
     cooldowns: { drug, medical: 0, booster: 0 },
     refills: { energy: false, nerve: false, token: false, special_count: 0 },
     battlestats: { strength: { value: 118400, modifier: 0, modifiers: [] }, defense: { value: 96200, modifier: 0, modifiers: [] },
@@ -153,6 +159,19 @@ CANNED['/v2/faction/7777/members'] = () => ({ members: [
   { id: 777002, name: 'Mira_Vex', level: 61, status: { state: 'Hospital', until: NOW_S + 252, description: 'In hospital' } },
 ] });
 CANNED['/v2/user/attacks'] = () => ({ attacks: [] });
+// &chain=247/250/222: your faction's chain (count / next bonus / seconds left on the timer), in your bars and, on a
+// Torn page, in a stand-in sidebar chain bar (#barChain). &echain=96/100/48: the fixture faction 7777's chain.
+const chainOf = (q) => { const [current, max, timeout] = String(q).split('/').map(Number); return { id: 1, current, max, timeout, modifier: 1, cooldown: 0, start: NOW_S - 3600, end: NOW_S + timeout }; };
+if (Q.get('chain')) {
+  const plainUser = CANNED['/v2/user'];
+  CANNED['/v2/user'] = () => { const b = plainUser(); b.bars.chain = chainOf(Q.get('chain')); return b; };
+}
+if (Q.get('echain')) CANNED['/v2/faction/7777/chain'] = () => ({ chain: chainOf(Q.get('echain')) });
+// &war=1: your faction (9001) is in a ranked war with the fixture faction 7777 since 36 minutes (&war=new: since 2).
+if (Q.get('war')) {
+  CANNED['/v2/key/info'] = () => ({ info: { access: { level: 3, type: 'Limited Access' }, user: { id: 2345678, faction_id: 9001 }, selections: {} } });
+  CANNED['/v2/faction/9001/wars'] = () => ({ pacts: [], wars: { ranked: { war_id: 25000, start: NOW_S - (Q.get('war') === 'new' ? 120 : 36 * 60), end: null, target: 6000, winner: null, factions: [{ id: 9001, name: 'Iron Lungs', score: 1200, chain: 247 }, { id: 7777, name: 'Rival Syndicate', score: 980, chain: 96 }] }, raids: [], territory: [] } });
+}
 // Auto mode: networth a month ago, a week ago and now ($2.4B a month: $80M a day), the money log's categories and lines.
 CANNED['/v2/user/personalstats'] = (u) => {
   if (!(u.searchParams.get('stat') || '').includes('networth')) return { personalstats: [] };
@@ -166,7 +185,12 @@ const GYM_LOG = [
   { id: 'g2', timestamp: NOW_S - 3 * 3600 + 40, details: { id: 5303, title: 'Gym train dexterity', category: 'Gym' }, data: { trains: 12, energy_used: 120, dexterity_before: '82000.00', dexterity_after: 82700.4, dexterity_increased: 700.4, happy_used: 60, gym: 18 }, params: {} },
   { id: 'g1', timestamp: NOW_S - 3 * 3600, details: { id: 5303, title: 'Gym train dexterity', category: 'Gym' }, data: { trains: 3, energy_used: 30, dexterity_before: '81830.10', dexterity_after: 82000, dexterity_increased: 169.9, happy_used: 15, gym: 18 }, params: {} },
 ];
-CANNED['/v2/user/log'] = (u) => ({ log: u.searchParams.get('cat') === '17' ? [{ id: 'a', timestamp: NOW_S - 2 * 86400, details: { id: 1225, title: 'Bazaar sell', category: 'Bazaars' }, data: { money: 150e6 }, params: {} }] : (u.searchParams.get('log') || '').includes('5303') ? GYM_LOG : [] });
+// The money log (Full key; round 7, R7.5): "Money incoming" holds $4M of pay a day and one $2B gift (a one-off, never
+// income); "Money outgoing" the upkeep and a bank investment (put away, not spending). Real field names, made-up values.
+const payLine = (i) => ({ id: 'pay' + i, timestamp: NOW_S - i * 86400 - 3600, details: { id: 6221, title: 'Company employee pay', category: 'Company' }, data: { pay: 4e6, job_points: 1, working_stats_received: '1,2,3', company: 1 }, params: {} });
+const MONEY_IN = [...Array.from({ length: 30 }, (_, i) => payLine(i)), { id: 'gift', timestamp: NOW_S - 9 * 86400, details: { id: 4810, title: 'Money receive', category: 'Money sending' }, data: { sender: 1, anonymous: 0, money: 2e9, message: '' }, params: {} }];
+const MONEY_OUT = [{ id: 'up', timestamp: NOW_S - 5 * 86400, details: { id: 5920, title: 'Property upkeep', category: 'Property' }, data: { upkeep_paid: 6e6, upkeep_due: 0, ownership: null, property: 13, property_id: 1 }, params: {} }, { id: 'bank', timestamp: NOW_S - 9 * 86400 + 60, details: { id: 5450, title: 'Bank invest', category: 'Bank' }, data: { amount: 2e9, worth: 2.09e9, duration: 7776000, percent: 4.5 }, params: {} }];
+CANNED['/v2/user/log'] = (u) => ({ log: u.searchParams.get('cat') === '17' ? MONEY_IN : u.searchParams.get('cat') === '14' ? MONEY_OUT : (u.searchParams.get('log') || '').includes('5303') ? GYM_LOG : [] });
 CANNED['/v2/user/equipment'] = () => ({ equipment: [{ type: 'Weapon', sub_type: 'Primary', name: 'Minigun', stats: { damage: 71.2, accuracy: 51 }, bonuses: [] }], clothing: [] });
 const profileOf = (id) => ({ profile: { id: Number(id), name: 'P' + id, level: 60, rank: 'Supreme Hitman', life: { current: 7300, maximum: 7300 }, status: { state: 'Okay', description: 'Okay' } } });
 
@@ -199,7 +223,18 @@ if (Q.get('fixture')) {
   x.send();
   document.write(x.responseText);
   // Torn's sidebar energy bar shows the same energy as the canned API answer (the gym walk-through reads it).
-  document.write('<script>(function () { var v = document.querySelector(\'#barEnergy [class*="bar-value___"]\'); if (v) v.textContent = "' + (OWNER ? 1000 : Number(Q.get('energy') || 20)) + '/150"; })();<\/script>');
+  // &bar=N: the bar shows N while the API still answers &energy (a train just done, our read not yet).
+  document.write('<script>(function () { var v = document.querySelector(\'#barEnergy [class*="bar-value___"]\'); if (v) v.textContent = "' + (Q.has('bar') ? Number(Q.get('bar')) : OWNER ? 1000 : Number(Q.get('energy') || 20)) + '/150"; })();<\/script>');
+  // &happy=N: the sidebar's happy bar shows it too (an overdose is seen on both bars at 0).
+  if (Q.has('happy')) document.write('<script>(function () { var v = document.querySelector(\'#barHappy [class*="bar-value___"]\'); if (v) v.textContent = "' + Number(Q.get('happy')) + '/5025"; })();<\/script>');
+}
+// Torn's sidebar chain bar (hidden: only its two texts are read), ticking like Torn's own.
+if (Q.get('chain') && Q.get('pi') !== 'app') {
+  const [c, mx, left] = Q.get('chain').split('/').map(Number);
+  const mmss = (s) => String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+  document.write('<a id="barChain" class="bar___Bv5Ho chain-bar___vjdPL" hidden><p class="bar-name___cHBD8">Chain:</p><p class="bar-value___uxnah">' + c + '/' + mx + '</p><p class="bar-timeleft___B9RGV">' + mmss(left) + '</p></a>');
+  const t0 = Date.now();
+  setInterval(() => { const t = document.querySelector('#barChain [class*="bar-timeleft___"]'); if (t && !window.__chainHold) t.textContent = mmss(Math.max(0, left - Math.round((Date.now() - t0) / 1000))); }, 1000);
 }
 if (Q.get('trading')) setTimeout(() => { const d = document.createElement('div'); d.id = 'ttv2-host'; d.style.cssText = 'position:fixed;right:16px;bottom:16px;width:300px;height:300px;background:#2e2e2e'; document.body.appendChild(d); }, Number(Q.get('trading')) || 0);
 window.onerror = (m) => { document.getElementById('out').textContent = 'BOOT ERROR: ' + m; };

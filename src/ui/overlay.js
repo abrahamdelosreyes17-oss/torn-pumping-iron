@@ -13,9 +13,13 @@
  * edge only when it's time to act (chalk) or the page says so (green, red,
  * amber); folded it is one tag. On the attack page it folds to one line
  * under Torn Eye's fight card and never covers it.
+ *
+ * Round 8 (the owner's picks 1D and B, mockups/round8/steps-panel.html): one
+ * ring leaves the header's plate while there is an action to do now, and a
+ * step's actions are a small rail (done ticked, the one to do now marked).
  */
 
-import { h, fill } from './dom.js';
+import { h, fill, tickMark } from './dom.js';
 import { countdown } from '../core/bars.js';
 
 /** Its usual width, and the least a margin must have to hold it. */
@@ -49,9 +53,16 @@ export const OVERLAY_CSS = `
 .head:focus-visible { outline: 2px solid #efebe2; outline-offset: -2px; }
 .head .cd { font-weight: 700; font-size: 15px; color: #efebe2; font-variant-numeric: tabular-nums; flex: none; }
 .head .ti { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #fff; }
-.plate { width: 18px; height: 18px; border-radius: 50%; background: #efebe2; display: grid; place-items: center; box-shadow: inset 0 0 0 3.5px #efebe2, inset 0 0 0 5px #15171a; flex: none; }
+.plate { position: relative; width: 18px; height: 18px; border-radius: 50%; background: #efebe2; display: grid; place-items: center; box-shadow: inset 0 0 0 3.5px #efebe2, inset 0 0 0 5px #15171a; flex: none; }
 .plate i { width: 4px; height: 4px; border-radius: 50%; background: #15171a; }
 .wrap.paused .plate { background: #e8a33d; box-shadow: none; color: #15171a; font: 700 12px 'Segoe UI', system-ui, sans-serif; }
+/* Round 8 (the owner's picks 1D and B): one ring leaves the plate while there is an action to do now; it is the panel's
+   one ring, so it shows when the panel is folded too. Opacity and transform only. Under the PC's "reduce motion" and
+   with Settings › Animations off (.still) nothing moves: the ring stays drawn around the plate. */
+.plate.ring::after { content: ''; position: absolute; inset: 0; border-radius: 50%; border: 1.5px solid #efebe2; opacity: 0; animation: pi-ring-in 2s ease-out infinite; }
+@keyframes pi-ring-in { 0% { transform: scale(1); opacity: .8; } 70%, 100% { transform: scale(1.45); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .plate.ring::after { animation: none; opacity: .55; transform: scale(1.3); } }
+.wrap.still .plate.ring::after { animation: none; opacity: .55; transform: scale(1.3); }
 .col, .app { flex: none; width: 26px; height: 26px; padding: 0; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #c5cad0; font: 700 14px/24px 'Segoe UI', system-ui, sans-serif; cursor: pointer; }
 .col:hover, .app:hover { border-color: #3a4046; }
 .col:focus-visible, .app:focus-visible { outline: 2px solid #efebe2; outline-offset: 1px; }
@@ -65,21 +76,31 @@ export const OVERLAY_CSS = `
 .meter { height: 6px; border-radius: 3px; background: #2a2e33; overflow: hidden; }
 .meter i { display: block; height: 100%; border-radius: 3px; background: #3fbf5a; }
 .later { font-size: 12px; color: #9aa1a8; font-variant-numeric: tabular-nums; }
-.check { display: flex; gap: 8px; align-items: center; font-size: 12px; color: #c5cad0; }
-.check i { width: 14px; height: 14px; border-radius: 3px; border: 1.5px solid #6c737a; display: inline-grid; place-items: center; font-style: normal; font-size: 10px; flex: none; }
-.check.done { color: #9aa1a8; }
-.check.done i { background: #3fbf5a; border-color: #3fbf5a; color: #101214; }
-.check.next { color: #fff; font-weight: 700; }
-.check.next i { border-color: var(--b); }
+/* A step's actions in order, as a small rail (round 8, pick B): done ones ticked, the one to do now white with a full point. */
+.prail { display: flex; flex-direction: column; }
+.prail .pr1 { position: relative; display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 8px; align-items: center; padding: 3px 0; font-size: 12px; color: #c5cad0; }
+.prail .pr1::before { content: ''; position: absolute; left: 6px; top: 0; bottom: 0; width: 2px; background: #3a4046; }
+.prail .pr1:first-child::before { top: 50%; }
+.prail .pr1:last-child::before { bottom: 50%; }
+.prail .pr1:only-child::before { display: none; }
+.prail .pn { position: relative; z-index: 1; width: 14px; height: 14px; display: grid; place-items: center; background: #101214; border-radius: 50%; }
+.prail .pd { width: 8px; height: 8px; border-radius: 50%; border: 2px solid #6c737a; background: #101214; }
+.prail .now .pd { border-color: #efebe2; background: #efebe2; }
+.prail .pr1.done { color: #7d848b; }
+.prail .pr1.now { color: #fff; font-weight: 700; font-size: 13px; }
+.prail svg.tick { display: block; width: 12px; height: 12px; }
 .acts { display: flex; flex-wrap: wrap; gap: 8px; }
 .cta { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; height: 34px; padding: 0 12px; border-radius: 6px; border: 0; background: #efebe2; color: #15171a; font: 700 13px/1 'Segoe UI', system-ui, sans-serif; white-space: nowrap; cursor: pointer; text-decoration: none; }
 .cta.web { flex: 0 1 auto; background: transparent; color: #e3e5e8; border: 1px solid #3a4046; font-weight: 600; }
 .cta.web:hover { border-color: #939aa1; }
+.cta.fill { background: #3fbf5a; color: #101214; }
+.cta.fill:disabled { background: #24282c; color: #6c737a; border: 1px solid #3a4046; cursor: default; }
+.note { font-size: 12px; color: #c5cad0; }
 .cta:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .warn { color: #e8a33d; font-size: 12px; font-weight: 700; }
 /* Sized to the free space beside Torn's page (fitTier): narrower with smaller type, then one tag, then the smallest. */
 .wrap.fit-narrow .body { padding: 8px 10px 10px; gap: 6px; }
-.wrap.fit-narrow .sub, .wrap.fit-narrow .later, .wrap.fit-narrow .check, .wrap.fit-narrow .row2 { font-size: 11px; }
+.wrap.fit-narrow .sub, .wrap.fit-narrow .later, .wrap.fit-narrow .prail .pr1, .wrap.fit-narrow .row2 { font-size: 11px; }
 .wrap.fit-compact .head, .wrap.fit-mini .head { gap: 5px; padding: 0 2px 0 6px; }
 .wrap.fit-compact .head .cd, .wrap.fit-mini .head .cd { font-size: 13px; }
 .wrap.fit-compact .body { padding: 6px 8px 8px; gap: 5px; }
@@ -158,10 +179,12 @@ export function fitTier(width) {
  * Where the panel may live. `page` is Torn's page (sidebar + content) as
  * {left, right}; null when it can't be measured.
  * @returns {{side: 'left'|'right'|'corner', from: number, to: number, width: number, tier, font, step, folded}[]}
- *   each margin that holds at least one tag, the best size first (the left one on a tie, so NPC Arbitrage keeps
- *   the right), else one 'corner' spot for the smallest tag
+ *   each margin that holds at least the smallest tag, the best size first (the left one on a tie, so NPC Arbitrage
+ *   keeps the right), else one 'corner' spot for the smallest tag
+ *   Round 8: a margin was taken only from 100 px (the one-tag panel), so between 84 and 100 px the smallest tag went
+ *   to the window's corner, over Torn's header, although it fits beside Torn's page (1,192 to 1,222 px wide).
  */
-export function spots(viewW, page, want = PANEL_W, min = FIT_COMPACT_W) {
+export function spots(viewW, page, want = PANEL_W, min = MINI_W) {
     const out = [];
     if (page && Number.isFinite(page.left) && Number.isFinite(page.right)) {
         for (const m of [{ side: 'left', from: EDGE, to: page.left - GAP }, { side: 'right', from: page.right + GAP, to: viewW - EDGE }]) {
@@ -249,9 +272,17 @@ export class Overlay {
      * @param {function} [o.dockTo] - () => Element|null: dock folded under it (Torn Eye's fight card on the attack page)
      * @param {function} [o.dockIfShared] - () => Element|null: dock under it only when it sits in the panel's margin (the profile card)
      * @param {function} [o.avoidColumn] - () => {left, right}|null: a column it never shares (Torn Eye's list tags)
+     * @param {function} [o.onFill] - the gym page's Fill N (types into Torn's reps box)
+     * @param {function} [o.ride] - (spot: {x, y, width}|null) => px: a card that rides on top of the panel (Torn Eye's
+     *   chain counter) is told where the panel would sit and answers the height to leave for it; null: the panel is
+     *   folded under a card, off, or in the corner
      */
-    constructor({ onOpen, loadPos, savePos, loadCollapsed, saveCollapsed, pageRect, avoidRect = () => null, dockTo = () => null, dockIfShared = () => null, avoidColumn = () => null }) {
+    constructor({ onOpen, loadPos, savePos, loadCollapsed, saveCollapsed, pageRect, avoidRect = () => null, dockTo = () => null, dockIfShared = () => null, avoidColumn = () => null, onFill = () => {}, ride = null }) {
         this.onOpen = onOpen;
+        this.ride = ride;
+        this.lift = 0;
+        this.rideSpot = null;
+        this.onFill = onFill;
         this.loadPos = loadPos;
         this.savePos = savePos;
         this.loadCollapsed = loadCollapsed;
@@ -386,7 +417,10 @@ export class Overlay {
     place() {
         if (!this.wrap) return;
         this.wrap.style.display = this.off ? 'none' : 'flex';
-        if (this.off) return;
+        if (this.off) {
+            this.rideAt(null);
+            return;
+        }
         this.wrap.style.visibility = '';
         const card = this.dockCard();
         const r = card && card.getBoundingClientRect ? card.getBoundingClientRect() : null;
@@ -395,6 +429,7 @@ export class Overlay {
         const d = r && r.width > 0 && r.height > 0 ? dockUnder(r, window.innerWidth, window.innerHeight, 36, DOCK_GAP, this.pageRect()) : null;
         if (d) {
             this.docked = { key: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height), window.innerWidth, window.innerHeight].join(',') };
+            this.rideAt(null);
             if (!was) this.showFolded();
             this.wrap.style.left = d.x + 'px';
             this.wrap.style.top = d.y + 'px';
@@ -416,16 +451,26 @@ export class Overlay {
         this.apply(p);
     }
 
+    /** Tell the card that rides on the panel where the panel would sit; the height it takes is kept (`lift`). */
+    rideAt(spot) {
+        this.rideSpot = spot;
+        this.lift = this.ride ? Math.max(0, Number(this.ride(spot)) || 0) : 0;
+        return this.lift;
+    }
+
     apply(p) {
+        // The chain counter rides on top (round 8): it takes the panel's place and the panel starts under it.
+        const lift = this.rideAt(p.spot.side === 'corner' ? null : { x: p.x, y: p.y, width: p.spot.width });
+        const y = p.y + (lift ? lift + DOCK_GAP : 0);
         this.wrap.style.left = p.x + 'px';
-        this.wrap.style.top = p.y + 'px';
+        this.wrap.style.top = y + 'px';
         this.wrap.style.setProperty('--w', p.spot.width + 'px');
         this.setFit(p.spot.width);
         // The body scrolls inside the window, and stops above NPC Arbitrage if that panel is below it.
         let bottom = window.innerHeight - 12;
         const a = this.avoidRect();
-        if (a && a.width && a.height && a.left < p.x + p.spot.width && a.right > p.x && a.top > p.y + 36) bottom = Math.min(bottom, a.top - 8);
-        this.body.style.maxHeight = Math.max(60, bottom - p.y - 40) + 'px';
+        if (a && a.width && a.height && a.left < p.x + p.spot.width && a.right > p.x && a.top > y + 36) bottom = Math.min(bottom, a.top - 8);
+        this.body.style.maxHeight = Math.max(60, bottom - y - 40) + 'px';
     }
 
     bindDrag() {
@@ -434,7 +479,8 @@ export class Overlay {
             if (e.button !== 0 || this.docked) return;
             if (e.target.closest && e.target.closest('button, a, input')) return;
             const r = this.wrap.getBoundingClientRect();
-            start = { x: e.clientX, y: e.clientY, left: r.left, top: r.top, moved: false, list: this.spotList() };
+            // The panel's own place: without the room it leaves for the chain counter riding on it.
+            start = { x: e.clientX, y: e.clientY, left: r.left, top: r.top - (this.lift ? this.lift + DOCK_GAP : 0), moved: false, list: this.spotList() };
             this.head.setPointerCapture(e.pointerId);
         });
         this.head.addEventListener('pointermove', (e) => {
@@ -460,16 +506,23 @@ export class Overlay {
 
     /**
      * @param {object} v - {off, paused, tone, label, cdAt, pillText, pillNow, cardStep, cardSub, warn, checklist, energy:{current,max},
-     *   later:[string], action:{text, href}|null, seen:{count, where, lastAt, resumesAt}}
+     *   later:[string], action:{text, href}|null, seen:{count, where, lastAt, resumesAt}, notes:[string],
+     *   fill:{text, disabled, title}|null}
+     *   notes: the gym page's lines that were the strip over Torn's boxes (where to switch, the energy kept, the parts)
+     *   fill: the gym page's Fill N (green; greyed while it waits), beside "Pumping Iron ↗"
      *   tone: the edge's colour (chalk: time to act; green, red, amber); none: a plain border
      *   paused: Torn Trading runs (a warning sign instead of the plate, an amber card)
      *   action: the one button (a link to a Torn page, e.g. "Open the gym"); none: "Open Pumping Iron"
+     *   ring: there is an action to do now (the plate's one ring; never while paused); still: Settings › Animations
+     *   is off (the ring is drawn, not moving)
+     *   checklist: the step's actions in order [{text, done, next}], as a small rail (next: the one to do now)
      */
     update(v) {
         const wasOff = this.off;
         this.off = Boolean(v.off);
         if (this.off) {
             this.wrap.style.display = 'none';
+            if (!wasOff) this.rideAt(null);
             return;
         }
         const now = Date.now();
@@ -478,17 +531,22 @@ export class Overlay {
         this.wrap.classList.toggle('toned', Boolean(tone));
         this.wrap.setAttribute('data-tone', tone || '');
         this.wrap.classList.toggle('paused', Boolean(v.paused));
+        this.wrap.classList.toggle('still', Boolean(v.still));
+        const ring = Boolean(v.ring) && !v.paused;
+        this.wrap.setAttribute('data-ring', ring ? '1' : '');
         const cdText = v.pillNow || (v.cdAt ? countdown(v.cdAt - now) : '');
         this.headInfo.textContent = v.pillText || 'Pumping Iron';
         // Also a small ↗ in the bar (the folded panel has only the bar).
         const link = v.action && v.action.href;
         const app = link ? h('button', { class: 'app open', type: 'button', title: 'Open Pumping Iron', 'aria-label': 'Open Pumping Iron', onclick: () => this.onOpen(), text: '↗' }) : null;
-        fill(this.head, [v.paused ? h('span', { class: 'plate', text: '!', 'aria-label': 'Paused' }) : h('span', { class: 'plate' }, [h('i')]), cdText ? h('span', { class: 'cd', 'data-cd': v.cdAt && !v.pillNow ? String(v.cdAt) : null, text: cdText }) : null, this.headInfo, app, this.colBtn]);
+        fill(this.head, [v.paused ? h('span', { class: 'plate', text: '!', 'aria-label': 'Paused' }) : h('span', { class: 'plate' + (ring ? ' ring' : '') }, [h('i')]), cdText ? h('span', { class: 'cd', 'data-cd': v.cdAt && !v.pillNow ? String(v.cdAt) : null, text: cdText }) : null, this.headInfo, app, this.colBtn]);
         this.head.title = v.pillText || '';
         const kids = [];
         if (v.label) kids.push(h('span', { class: 'lbl', style: tone ? '--lb:' + TONES[tone] : null, text: v.label }));
         if (v.cardStep) kids.push(h('span', { class: 'step', text: v.cardStep }));
         if (v.cardSub) kids.push(h('span', { class: 'sub', text: v.cardSub }));
+        if (v.checklist && v.checklist.length) kids.push(h('div', { class: 'prail' }, v.checklist.map((c) => h('div', { class: 'pr1' + (c.done ? ' done' : c.next ? ' now' : '') }, [h('span', { class: 'pn' }, [c.done ? tickMark() : h('span', { class: 'pd' })]), h('span', { text: c.text })]))));
+        if (v.notes) for (const n of v.notes) kids.push(h('span', { class: 'note', text: n }));
         if (v.warn) kids.push(h('span', { class: 'warn', text: v.warn }));
         if (v.seen) {
             const s = v.seen;
@@ -500,14 +558,16 @@ export class Overlay {
             }
             if (s.lastAt) kids.push(h('div', { class: 'row2' }, [h('span', { class: 'k', text: 'Last seen' }), h('span', { 'data-ago': String(s.lastAt), text: agoWords(now - s.lastAt) })]));
         }
-        if (v.checklist && v.checklist.length) for (const c of v.checklist) kids.push(h('div', { class: 'check' + (c.done ? ' done' : '') + (c.next ? ' next' : '') }, [h('i', { text: c.done ? '✓' : '' }), h('span', { text: c.text })]));
         if (v.energy) {
             kids.push(h('div', { class: 'row2' }, [h('span', { class: 'k', text: 'Energy' }), h('span', { text: fmtNum(v.energy.current) + ' / ' + fmtNum(v.energy.max) })]));
             kids.push(h('div', { class: 'meter' }, [h('i', { style: 'width:' + Math.min(100, (100 * v.energy.current) / Math.max(1, v.energy.max)) + '%' })]));
         }
         if (v.later && v.later.length) kids.push(h('div', { class: 'later', text: 'then ' + v.later.join(' · ') }));
         // The webpage is always one click away (the owner): beside the Torn page's button, or the only button.
-        kids.push(h('div', { class: 'acts' }, link ? [h('a', { class: 'cta go', href: v.action.href, text: v.action.text }), h('button', { class: 'cta web open', type: 'button', title: 'Open Pumping Iron', onclick: () => this.onOpen(), text: 'Pumping Iron ↗' })] : [h('button', { class: 'cta open', type: 'button', onclick: () => this.onOpen(), text: 'Open Pumping Iron' })]));
+        const web = h('button', { class: 'cta web open', type: 'button', title: 'Open Pumping Iron', onclick: () => this.onOpen(), text: 'Pumping Iron ↗' });
+        const fillBtn = v.fill ? h('button', { class: 'cta fill', type: 'button', title: v.fill.title || null, disabled: Boolean(v.fill.disabled), onclick: (e) => { e.preventDefault(); this.onFill(); }, text: v.fill.text }) : null;
+        const acts = link ? [fillBtn, h('a', { class: 'cta go', href: v.action.href, text: v.action.text }), web] : fillBtn ? [fillBtn, web] : [h('button', { class: 'cta open', type: 'button', onclick: () => this.onOpen(), text: 'Open Pumping Iron' })];
+        kids.push(h('div', { class: 'acts' }, acts));
         fill(this.body, kids);
         if (wasOff || !this.placed) {
             this.placed = true;
@@ -522,6 +582,11 @@ export class Overlay {
         for (const el of this.shadow.querySelectorAll('[data-cd]')) el.textContent = countdown(Number(el.getAttribute('data-cd')) - now);
         for (const el of this.shadow.querySelectorAll('[data-ago]')) el.textContent = agoWords(now - Number(el.getAttribute('data-ago')));
         if (this.off || !this.wrap) return;
+        // The chain counter came, went or changed its height: the panel is placed again under it.
+        if (!this.docked && this.ride && (Math.max(0, Number(this.ride(this.rideSpot)) || 0)) !== this.lift) {
+            this.place();
+            return;
+        }
         // Torn Eye's list tags took (or left) a column: out of it (one attribute read, no layout).
         const col = this.docked ? null : this.avoidColumn ? this.avoidColumn() : null;
         if (!this.docked && (col ? col.left + ',' + col.right : '') !== (this.colKey || '')) {

@@ -2,7 +2,7 @@
  * The problem log (round 7; the pattern is Torn Trading's core/errlog.js).
  * Every tab adds what went wrong (a script error, a read that failed, a
  * plan that couldn't be worked out) and what you did just before (Create
- * plan, Re-plan, a plan picked), plus how long each plan took. Kept 7 days,
+ * plan, Recalibrate, a plan picked), plus how long each plan took. Kept 7 days,
  * LOG_MAX lines at most. Settings › Report a problem puts it in the zip, so
  * a bug is found from what happened, not by guessing. No key (masked before
  * it is stored), no player id or name. Pure.

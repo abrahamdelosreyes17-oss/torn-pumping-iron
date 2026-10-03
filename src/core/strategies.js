@@ -12,6 +12,7 @@ import { STATS, STAT_LABEL, gainPerTrain, HAPPY_CAP, ENERGY_CAP, HAPPY_LOSS_PER_
 import { XANAX, ECSTASY, EDVD, FHC, CANDY_KISSES, POINTS, REFILL_POINTS, XANAX_CD_MIN, ECSTASY_CD_MIN, ITEMS, boostersThatFit, boosterHours, BOOSTER_CAP_H, GAME_CONSOLE } from './items.js';
 import { candyWords, fillFromPool, takeFromHeld } from './candy.js';
 import { pickStat } from './builds.js';
+import { rehabOf } from './rehab.js';
 
 export const STRATEGY_IDS = ['steady', 'dailyChoco', 'chocoJump', 'edvdJump', 'happy99k', 'blissSteady', 'steadyBoost', 'steadyMax', 'candyXanax', 'consoleJump', 'consoleJumpToy', 'edvdJumpAN', 'steadyLite'];
 
@@ -177,6 +178,7 @@ export const TICK_OFFSET_MIN = 5;
  *   those days the gain lands (three minutes a day: a quarter, half and three quarters of the day's gain reached), so a jump
  *   reads as a step and steady training as a slope; `statLine` is each stat's own line ({step (days), days, str: [],
  *   spd, def, dex}: the gain by the end of every `step` days, the last entry at `days`).
+ *   `costDaily`: what the plan pays on each of those days (not a running total; it adds up to `cost`).
  * Refills (points or special) set energy to the maximum, never above it: anything over is wasted (O2, owner).
  */
 export function simulateStrategy(id, o) {
@@ -294,6 +296,18 @@ export function* simulateSteps(id, o) {
     }
     const consoleHappy = CONSOLE_HAPPY_EACH * (id === 'consoleJumpToy' || o.toyShop5 ? 2 : 1);
     const daily = [];
+    // What each of those days costs (the cash check, cashflow.js): a jump buys in lumps, steady training evenly.
+    const costDaily = [];
+    let costSeen = 0;
+    // The drugs taken on each of those days (rehab and overdoses are priced on the plan's own days, core/rehab.js).
+    const xanDaily = [];
+    const ecsDaily = [];
+    const closeCost = () => {
+        costDaily.push(Math.round(cost - costSeen));
+        costSeen += costDaily[costDaily.length - 1];
+        xanDaily.push((used[XANAX] || 0) - xanDaily.reduce((a, v) => a + v, 0));
+        ecsDaily.push((used[ECSTASY] || 0) - ecsDaily.reduce((a, v) => a + v, 0));
+    };
     const start = totalOf(S);
     const trace = typeof o.trace === 'function' ? o.trace : null;
     let curT = 0;
@@ -513,6 +527,7 @@ export function* simulateSteps(id, o) {
         if (day !== lastDay) {
             lastDay = day;
             daily.push(Math.round(totalOf(S) - start));
+            closeCost();
             closeDay();
             if (day % statStep === 0) statMark();
         }
@@ -669,6 +684,7 @@ export function* simulateSteps(id, o) {
         }
     }
     daily.push(Math.round(totalOf(S) - start));
+    closeCost();
     if (gainSum !== gainSeen) {
         const lastT = Math.ceil(endMin / STEP_MIN) * STEP_MIN - STEP_MIN;
         dayMarks.push(lastT - dayStartT(dayOf(lastT)), gainSum - dayBase);
@@ -678,7 +694,21 @@ export function* simulateSteps(id, o) {
     const perStat = {};
     for (const k of STATS) perStat[k] = Math.round(S[k] - o.stats[k]);
     // `dayMin`: the plan line (planline.js) reads `daily`, `quart` and `statLine` on this day grid.
-    const out = { id, gained: Math.round(totalOf(S) - start), perStat, cost: Math.round(cost), energyTrained: trainedE, daily, used, quart, statLine, dayMin };
+    const out = { id, gained: Math.round(totalOf(S) - start), perStat, cost: Math.round(cost), energyTrained: trainedE, daily, costDaily, used, quart, statLine, dayMin };
+    // Where the run ends (round 8): the bars and cooldowns a stretch that follows it starts from (core/year.js).
+    out.end = { energy: E, happy: H, drugCdMin: Math.max(0, drugFree - endMin), boosterCdMin: Math.max(0, boosterFree - endMin) };
+    // Engine rule (round 8, docs/REHAB-PLAN.md §3): a plan’s cost has a rehab part (the sessions that pay off what the
+    // nights do not fade) and an overdose part (its expected addiction, as sessions), on the days the drugs are
+    // taken. With `o.rehab` (core/rehab.js rehabParams) only.
+    if (o.rehab) {
+        const rh = rehabOf({ xanDaily, ecsDaily, gainDaily: daily.map((v, i) => v - (i ? daily[i - 1] : 0)) }, o.rehab);
+        out.costDaily = costDaily.map((v, i) => Math.round(v + (rh.costDaily[i] || 0)));
+        out.cost = out.costDaily.reduce((a, v) => a + v, 0);
+        out.costParts = { rehab: Math.round(rh.rehab), overdose: Math.round(rh.overdose), rough: Boolean(o.rehab.rough) };
+        // The training an overdose is expected to stop is said, never taken off the plan's line: the line is what
+        // following the plan gives, and a player who follows it must read 100% (review 4.4).
+        if (rh.lost > 0) out.overdoseLost = Math.round(rh.lost);
+    }
     if (unlocked.length) out.unlocked = unlocked;
     return out;
 }

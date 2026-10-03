@@ -15,7 +15,7 @@
  *
  * Cases: gym, plain, profile, plan, startup (default: these five), friend, noscript (Torn's page alone).
  * startup (round 7): opening the webpage on what an earlier visit left, then a click on its Torn Eye tab, at 1× and 4×.
- * plan (round 7): Create plan and Re-plan for 12 months on the webpage, at 1× and at 4× whatever CPU says.
+ * plan (round 7): Create plan and Recalibrate for 12 months on the webpage, at 1× and at 4× whatever CPU says.
  * CPU=1 runs without the slowdown. PERF_OUT=<file> appends each result as a JSON line.
  * Exits 1 when a target is missed (REPORT_ONLY=1: always 0).
  */
@@ -378,7 +378,7 @@ async function planPage() {
     return { ctx, p, errors, cdp: await ctx.newCDPSession(p) };
 }
 
-/** One Create plan or Re-plan: until the plan shows, until the what-ifs are in, and the freezes over the whole of it. */
+/** One Create plan or Recalibrate: until the plan shows, until the what-ifs are in, and the freezes over the whole of it. */
 function timePlan(p, fn, arg) {
     return p.evaluate(
         async ({ fn, arg }) => {
@@ -554,7 +554,7 @@ for (const name of wanted) {
         const line = (r) => `${r.wallMs} ms until the plan shows · ${r.allMs} ms with the what-ifs · frozen ${r.frozenMs} ms in ${r.freezes}, longest ${r.worstMs} ms${r.error ? ' · ERROR ' + r.error : ''}`;
         for (const r of planRow.runs) {
             console.log(`  ${r.cpu}× Create plan: ${line(r.create)}`);
-            console.log(`  ${r.cpu}× Re-plan:     ${line(r.replan)}`);
+            console.log(`  ${r.cpu}× Recalibrate:     ${line(r.replan)}`);
         }
         console.log(`  memory alive: idle ${planRow.idleMB} MB · peak ${planRow.liveMB} MB`);
         continue;
@@ -607,7 +607,7 @@ if (planRow) {
     };
     for (const r of planRow.runs) {
         const t = PLAN_TARGETS[r.cpu];
-        for (const [label, x] of [['Create plan', r.create], ['Re-plan', r.replan]]) {
+        for (const [label, x] of [['Create plan', r.create], ['Recalibrate', r.replan]]) {
             check(x.wallMs <= t.wallMs, `${r.cpu}× ${label} ${x.wallMs} ms (target ≤ ${t.wallMs})`);
             check(x.worstMs <= t.worstMs, `${r.cpu}× ${label} longest freeze ${x.worstMs} ms (target ≤ ${t.worstMs})`);
         }

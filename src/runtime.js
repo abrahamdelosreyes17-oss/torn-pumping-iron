@@ -15,8 +15,12 @@ import { normalizeState, tornDayStart } from './core/bars.js';
 import { buildModel, compareSteps, simInputs, compareStrategiesAsync, blissWhatIfSteps, companyWhatIfSteps, playerContext, buildOf, isDrugEntry, specialLeft, heldBoosters, steadyCostPerDay, openByOf, gymWorthSteps } from './core/model.js';
 import { recommend, pickWarning, PICK_BY } from './core/recommend.js';
 import { targetShares } from './core/plan.js';
-import { INCOME_MIN_DAYS, budgetOf, incomeFrom, autoState, effectivePickBy, incomeBreakdown } from './core/auto.js';
+import { INCOME_MIN_DAYS, budgetOf, incomeFrom, autoState, effectivePickBy } from './core/auto.js';
+import { ledgerOf } from './core/ledger.js';
+import { ITEMS } from './core/items.js';
+import { cashflowOf, budgetOffer, reconcile, withCash, stockBlocks } from './core/cashflow.js';
 import { incomeFloor } from './core/income-floor.js';
+import { investmentIdeas } from './core/invest.js';
 import { eventsBetween } from './core/events.js';
 import { yearSteps, segEvents, unlockHook, segmentsOf } from './core/year.js';
 import { planWindow, scheduleAt, daysLeft, planProgress, snapshotOf, makeSavedPlan, planNowOf, usablePlanNow, SAVED_PLAN_V } from './core/saved-plan.js';
@@ -31,6 +35,7 @@ import { parsePerks } from './core/perks.js';
 import { joinFights, runLearning, learnedModel } from './core/learndata.js';
 import { applyGymModel } from './core/learn.js';
 import { logAction, logError, logNote, notePlanRun } from './problem-log.js';
+import { nextOverdose, nextBarsSeen, overdoseOn } from './core/gympage.js';
 import { makeLine, addLine } from './core/planline.js';
 import { makePause, runSliced, PlanCancelled } from './core/slices.js';
 import { STRATEGIES } from './core/strategies.js';
@@ -163,13 +168,72 @@ export function hasFullKey() {
     return Boolean(getKey(K.fullKey)) && st.ok === true && !st.dead;
 }
 
+/** Your stocks held for benefit blocks, priced (the passive-income read, every 6 hours); null until a price is read. */
+const blocksOf = (statics) => (statics.passive ? stockBlocks(statics.passive.userStocks, statics.passive.tornStocks) : null);
+
+/** Your habit: what the gym really cost a day over the last 30 Torn days (receipts: what was used, priced); null under 3 days of them. */
+function habitNow(now = Date.now()) {
+    const rc = archived(K.receipts, null);
+    const today = tornDayStart(now);
+    const sum = rc ? summarizeReceipts(rc, today - 29 * 86400e3, today, { prices: getPrices(), priceHistory: archived(K.priceHistory, null) }) : null;
+    return sum && sum.days >= INCOME_MIN_DAYS ? sum.cost / sum.days : null;
+}
+
 /**
- * Income (Auto, "Plan from my income"): from the money log (Full key) or the
- * networth history, plus what the gym plan spent meanwhile. Read when a plan
- * is made or recalibrated, and on the webpage to show it.
- * @param {function} steadyPerDay - the steady plan's cost a day, while receipts cover under 3 days (it doesn't depend on the budget)
+ * Your books (round 7, R7.5): the stored money log as a ledger, its statements, and the budget offer for a plan of
+ * `days`. Null until the log is read in its new form. Worked out once per log read, cash figure and length.
  */
-function autoFor(plan, settings, statics, steadyPerDay) {
+export function booksFor({ settings, statics, habitPerDay, days, now = Date.now() }) {
+    const ml = pageGet(K.moneyLog, null);
+    if (!ml || ml.v !== 2 || !Array.isArray(ml.lines) || !ml.lines.length) return null;
+    const inv = statics.inventory || {};
+    const liquid = Number.isFinite(inv.cash) ? inv.cash : null;
+    const cb = statics.passive && statics.passive.cityBank;
+    const overrides = settings.oneOffs || {};
+    const sig = [ml.at, ml.lines.length, liquid, Math.round(habitPerDay || 0), Math.round(days), cb ? cb.until : 0, settings.keepAside || 0, settings.budgetPick || '', JSON.stringify(overrides)].join('|');
+    if (pi.booksMemo && pi.booksMemo.sig === sig) return pi.booksMemo.books;
+    const ledger = ledgerOf(ml.lines, { from: ml.from, to: ml.at, isGymItem: (id) => Boolean(ITEMS[id]), overrides });
+    const flow = cashflowOf({ ledger, liquid, bank: cb && cb.amount > 0 ? { amount: cb.amount, profit: cb.profit, until: cb.until ? cb.until * 1000 : null } : null, blocks: blocksOf(statics), habitPerDay, now });
+    const books = { ...budgetOffer({ flow, days, keepAside: settings.keepAside || 0, now, pick: settings.budgetPick || null }), flow, ledger, at: ml.at };
+    pi.booksMemo = { sig, books };
+    return books;
+}
+
+/**
+ * Your books to look at (Settings › Developer; the Ledger tab): the ledger over the days the log covers, its
+ * statements, and the reconciliation over the days both the log and Torn's networth history cover (opening liquid +
+ * in − out = closing liquid). Null until the money log is read.
+ */
+export function booksReport(now = Date.now()) {
+    const ml = pageGet(K.moneyLog, null);
+    if (!ml || ml.v !== 2 || !Array.isArray(ml.lines)) return null;
+    const statics = getShared(K.userStatic, {}) || {};
+    const settings = getSettings();
+    const inv = statics.inventory || {};
+    const cb = statics.passive && statics.passive.cityBank;
+    const isGymItem = (id) => Boolean(ITEMS[id]);
+    const overrides = settings.oneOffs || {};
+    const ledger = ledgerOf(ml.lines, { from: ml.from, to: ml.at, isGymItem, overrides });
+    const flow = cashflowOf({ ledger, liquid: Number.isFinite(inv.cash) ? inv.cash : null, bank: cb && cb.amount > 0 ? { amount: cb.amount, profit: cb.profit, until: cb.until ? cb.until * 1000 : null } : null, blocks: blocksOf(statics), habitPerDay: habitNow(now), now });
+    // Liquid money at two moments (personal stats at past dates, the main key): the oldest one the log reaches back to, and the newest.
+    const snaps = (statics.income || []).filter((s) => s && Number.isFinite(s.at) && Number.isFinite(s.cash)).sort((a, b) => a.at - b.at);
+    const close = snaps[snaps.length - 1] || null;
+    const open = snaps.find((s) => s.at >= ml.from) || null;
+    const span = open && close && close.at > open.at ? { from: open.at, to: Math.min(close.at, ml.at) } : null;
+    const recon = span ? reconcile({ ledger: ledgerOf(ml.lines, { ...span, isGymItem, overrides }), opening: open.cash, closing: close.cash }) : null;
+    // Investments that would grow recurring income (the accountant's ask): benefit blocks and the bank, against free cash.
+    const pv = statics.passive || {};
+    const ideas = investmentIdeas({ moneyStocks: pv.moneyStocks || [], userStocks: pv.userStocks || [], bank: cb && cb.amount > 0 ? { amount: cb.amount, profit: cb.profit, duration: cb.duration } : null, freeCash: flow.have.free });
+    return { at: ml.at, from: ml.from, days: ledger.days, lines: ml.lines.length, ledger, flow, recon, reconSpan: span, ideas, now };
+}
+
+/**
+ * The money a plan may spend (Auto): from your books (the money log, Full key), or the networth history until the
+ * log is read. Read when a plan is made or recalibrated, and on the webpage to show it.
+ * @param {function} steadyPerDay - the steady plan's cost a day, while receipts cover under 3 days (it doesn't depend on the budget)
+ * @param {number} [days] - the plan's length (the cash check runs over it)
+ */
+function autoFor(plan, settings, statics, steadyPerDay, days = null) {
     // What the gym really cost over the same days (receipts), added back: it left your networth and shows in the log's "out".
     // Never the plan's own projected cost, which would feed the budget back into itself.
     const now = Date.now();
@@ -179,14 +243,17 @@ function autoFor(plan, settings, statics, steadyPerDay) {
     const sum = rc ? summarizeReceipts(rc, today - 29 * 86400e3, today, { prices: getPrices(), priceHistory: archived(K.priceHistory, null) }) : null;
     const spentPerDay = sum && sum.days >= INCOME_MIN_DAYS ? sum.cost / sum.days : plan.pickBy === 'auto' && hasFullKey() ? steadyPerDay() : 0;
     const income = incomeFrom(statics.income || [], { spentPerDay });
-    const ml = pageGet(K.moneyLog, null);
-    // The income that is certain (bank, dividends, rent), read with the main key: the floor under the rest.
+    // The income that is certain (bank, dividends, rent), read with the main key: the floor until the books are read.
     const pv = statics.passive || null;
     const floor = pv ? incomeFloor({ ...pv, meId: statics.keyInfo && statics.keyInfo.userId, now }) : null;
-    const breakdown = ml && ml.log ? incomeBreakdown(ml.log, ml.at || Date.now(), ml.days || null, floor) : null;
-    const auto = autoState({ plan, settings, hasFullKey: hasFullKey(), income, log: breakdown, spentPerDay, floor });
-    auto.breakdown = breakdown;
+    // Your habit: what the gym really cost a day (receipts), once they cover enough days.
+    const books = hasFullKey() ? booksFor({ settings, statics, habitPerDay: sum && sum.days >= INCOME_MIN_DAYS ? sum.cost / sum.days : null, days: days || settings.horizonDays || 30, now }) : null;
+    const auto = autoState({ plan, settings, hasFullKey: hasFullKey(), income, books, floor });
+    // The lines behind "comes in", biggest first (the Plan page lists them).
+    auto.breakdown = books ? { days: books.flow.days, lines: books.flow.comesIn.map((l) => ({ title: l.title, dir: l.perDay >= 0 ? 'in' : 'out', n: l.n, perDay: Math.abs(l.perDay) })) } : null;
     auto.income = income;
+    // Your books whatever the Plan rule: every plan's cash check runs on them (createPlan).
+    auto.offer = books;
     return auto;
 }
 
@@ -249,10 +316,10 @@ export function cancelPlan() {
 const RUN_SHARE = { compare: 0.4, path: 0.45, band: 0.15 };
 
 /**
- * Create plan (1, 3, 6 or 12 months) or Re-plan, on a click only: every plan
+ * Create plan (1, 3, 6 or 12 months) or Recalibrate, on a click only: every plan
  * is worked out over the plan's days from what's true now (stats, income,
  * prices, gyms), the best one is recommended, and the whole thing is saved
- * with what it saw. Re-plan keeps the plan's start and end and re-plans only
+ * with what it saw. Recalibrate keeps the plan's start and end and recalibrates only
  * the days left.
  *
  * Round 7 (R7.3b): worked out in slices of about 30 ms with breaks that are
@@ -264,9 +331,9 @@ const RUN_SHARE = { compare: 0.4, path: 0.45, band: 0.15 };
  *   what-ifs are waited for
  * @returns {Promise<object|null>} the saved plan (null: cancelled)
  */
-export async function createPlan({ months = 1, recalibrate = false, pause: pauseIn = null } = {}) {
+export async function createPlan({ months = 1, recalibrate = false, auto: byItself = false, pause: pauseIn = null } = {}) {
     if (pi.planBusy) return pi.planBusy.promise;
-    const busy = { recalibrate, months, at: Date.now(), promise: null, part: 'start', done: 0, words: 'Reading what is true now', cancel: false };
+    const busy = { recalibrate, auto: byItself, months, at: Date.now(), promise: null, part: 'start', done: 0, words: 'Reading what is true now', cancel: false };
     const cancelled = () => busy.cancel === true;
     // Breaks for the page: a message to ourselves, not a timer (a hidden tab's timers run once a second at best:
     // 3 seconds of work took minutes), and only once 30 ms of work is done since the last one.
@@ -297,7 +364,7 @@ export async function createPlan({ months = 1, recalibrate = false, pause: pause
         const state = s && s.api ? normalizeState(s.api, s.at) : null;
         if (!state) throw new Error('Waiting for the first read of your stats.');
         const prev = recalibrate ? await loadSavedPlan() : null;
-        if (recalibrate && !(prev && prev.v === SAVED_PLAN_V)) throw new Error('No plan to re-plan yet: create one first.');
+        if (recalibrate && !(prev && prev.v === SAVED_PLAN_V)) throw new Error('No plan to recalibrate yet: create one first.');
         if (recalibrate && planProgress(prev, now).ended) throw new Error('Your plan has ended: create a new one.');
         const plan = getPlan();
         const settings = getSettings();
@@ -310,7 +377,7 @@ export async function createPlan({ months = 1, recalibrate = false, pause: pause
         const prices = getPrices();
         const special = specialLeft(plan, state);
         // Money a day: Auto from your income (Full key), "Max gains" none, else the budget you set, per day.
-        const auto = autoFor(plan, settings, statics, () => steadyCostPerDay({ state, pc, shares, settings: { ...settings, horizonDays: 30 }, prices, special, statics }));
+        const auto = autoFor(plan, settings, statics, () => steadyCostPerDay({ state, pc, shares, settings: { ...settings, horizonDays: 30 }, prices, special, statics }), win.days);
         const perDay = plan.pickBy === 'max' ? Infinity : auto.ready ? auto.budgetPerDay : budgetOf(settings) / (settings.horizonDays || 30);
         const runSettings = { ...settings, horizonDays: win.days, budget: Number.isFinite(perDay) ? perDay * win.days : Infinity };
         const pickBy = effectivePickBy(PICK_BY[plan.pickBy] ? plan.pickBy : 'most', auto);
@@ -328,17 +395,19 @@ export async function createPlan({ months = 1, recalibrate = false, pause: pause
         // The comparison: each plan over the whole length (its id is yielded as it starts).
         const names = [];
         const nPlans = 8;
-        const compare = await runSliced(compareSteps({ ...args, events: segEvents(events, { from, to: win.end }), unlock: hook }), pause, (v) => {
+        const compared = await runSliced(compareSteps({ ...args, events: segEvents(events, { from, to: win.end }), unlock: hook }), pause, (v) => {
             if (typeof v !== 'string') return;
             names.push(v);
             tell('compare', (RUN_SHARE.compare * (names.length - 0.5)) / Math.max(nPlans, names.length), 'Comparing plans: ' + ((STRATEGIES_NAME(v) || v).toLowerCase()) + ' (' + names.length + ')');
         });
+        // The cash check on the days each plan really pays (a jump buys in lumps); the cost of every day is not kept.
+        const compare = Object.fromEntries(Object.entries(compared).map(([id, r]) => [id, withCash(r, auto.offer)]));
         // Round 7: a gym to unlock never outranks stats. Every plan says when it opens the gym; an "open it by" date
         // leaves out the plans that miss it, then the Plan rule picks as usual.
         const openBy = openByOf(plan, pc, from, win.days);
         const budget = budgetOf(runSettings);
         const rec = recommend(compare, { budget, bliss: pc.perks.bliss, pickBy, openBy });
-        // The path: the best plan again every 30 days and for each event, from the stats projected for that day.
+        // The path: the best plan again every 10 days and for each event, from the stats projected for that day.
         const nSegs = Math.max(1, segmentsOf(from, win.end, events).length);
         let seg = 0;
         let band = 0;
@@ -352,10 +421,11 @@ export async function createPlan({ months = 1, recalibrate = false, pause: pause
                 tell('band', RUN_SHARE.compare + RUN_SHARE.path + (RUN_SHARE.band * band) / (2 * nSegs), 'The range of the plan (a little better, a little worse)');
             }
         });
+        year.result = withCash(year.result, auto.offer);
         tell('save', 1, 'Saving your plan');
         const snapshot = snapshotOf({ state, pc, statics, plan, prices: livePrices(prices), income: auto.ready ? { perDay: auto.perDay, source: auto.source, days: auto.days, certain: auto.floor ? { perDay: auto.floor.perDay, bank: auto.floor.bank, dividends: auto.floor.dividends, rent: auto.floor.rent } : null } : null, budgetPerDay: Number.isFinite(perDay) ? perDay : null, held: heldBoosters(statics.inventory), now });
         // The what-ifs come after the plan is saved and shown (`extras: 'pending'` until they are in).
-        const saved = makeSavedPlan({ compare, rec, snapshot, start: win.start, end: win.end, months: win.months, days: win.days, budget, whatIf: null, jobWhatIf: [], prev, year, gymWorth: [], extras: 'pending', now });
+        const saved = makeSavedPlan({ compare, rec, snapshot, start: win.start, end: win.end, months: win.months, days: win.days, budget, whatIf: null, jobWhatIf: [], prev, year, gymWorth: [], extras: 'pending', auto: byItself, now });
         const best = compare[rec.recommended];
         const warn = {};
         for (const [id, r] of Object.entries(compare)) if (r && best && id !== rec.recommended) warn[id] = pickWarning(best, r, { bliss: pc.perks.bliss, days: win.days }).warn;
@@ -368,8 +438,8 @@ export async function createPlan({ months = 1, recalibrate = false, pause: pause
         const keep = recalibrate && cur.strategyPicked && compare[cur.strategy];
         const strategy = keep ? cur.strategy : year.segments.length ? year.segments[0].strategy : rec.recommended;
         setPlan({ ...cur, strategy, strategyPicked: Boolean(keep), createdAt: now });
-        recordPlanLine(saved, keep ? strategy : 'path', now, recalibrate ? 'replan' : 'create');
-        extrasCtx = { args, compare, rec, bliss: pc.perks.bliss, gymArgs: { ...args, events: segEvents(events, { from, to: win.end }) }, hookFor };
+        recordPlanLine(saved, keep ? strategy : 'path', now, recalibrate ? (byItself ? 'auto' : 'replan') : 'create');
+        extrasCtx = { args, compare, rec, offer: auto.offer, bliss: pc.perks.bliss, gymArgs: { ...args, events: segEvents(events, { from, to: win.end }) }, hookFor };
         return saved;
     })();
     busy.promise = run;
@@ -388,7 +458,7 @@ export async function createPlan({ months = 1, recalibrate = false, pause: pause
     };
     const doc = typeof document !== 'undefined' && typeof document.addEventListener === 'function' ? document : null;
     if (doc) doc.addEventListener('visibilitychange', onVis);
-    logAction(recalibrate ? 'Re-plan pressed' : 'Create plan pressed (' + months + (months === 1 ? ' month)' : ' months)'));
+    logAction(recalibrate ? (byItself ? 'Recalibrating by itself (once a day)' : 'Recalibrate pressed') : 'Create plan pressed (' + months + (months === 1 ? ' month)' : ' months)'));
     const done = (ok, error, saved) => {
         if (doc) doc.removeEventListener('visibilitychange', onVis);
         if (hidAt !== null) hiddenMs += Date.now() - hidAt;
@@ -430,8 +500,9 @@ async function planExtras(saved, ctx, pauseIn = null) {
         // Is each gym the recommended plan opens worth its fee: the plan with and without it.
         const gymWorth = await runSliced(gymWorthSteps(ctx.compare[ctx.rec.recommended], ctx.gymArgs, ctx.hookFor), pause);
         // Ignorance Is Bliss, what if: only while the book isn't active (active, the real plans already use it).
-        const whatIf = ctx.bliss ? null : await runSliced(blissWhatIfSteps(ctx.args), pause);
-        const jobWhatIf = await runSliced(companyWhatIfSteps({ ...ctx.args, compare: ctx.compare, recommended: ctx.rec.recommended }), pause);
+        const whatIfRuns = ctx.bliss ? null : await runSliced(blissWhatIfSteps(ctx.args), pause);
+        const whatIf = whatIfRuns ? Object.fromEntries(Object.entries(whatIfRuns).map(([id, r]) => [id, withCash(r, ctx.offer)])) : null;
+        const jobWhatIf = (await runSliced(companyWhatIfSteps({ ...ctx.args, compare: ctx.compare, recommended: ctx.rec.recommended }), pause)).map((w) => ({ ...w, result: withCash(w.result, ctx.offer) }));
         if (!alive()) return null;
         const next = { ...pi.saved, gymWorth, whatIf, jobWhatIf, extras: 'done', extrasAt: Date.now() };
         await saveSavedPlan(next);
@@ -456,7 +527,7 @@ function STRATEGIES_NAME(id) {
     return STRATEGIES[id] ? STRATEGIES[id].short : null;
 }
 
-/** Recalibrate (a click): the plan's end stays, the days left are re-planned from what's true now. */
+/** Recalibrate (a click): the plan's end stays, the days left are recalibrated from what's true now. */
 export function recalibratePlan(o = {}) {
     return createPlan({ ...o, recalibrate: true });
 }
@@ -474,13 +545,56 @@ export function startStacking(now = Date.now()) {
 }
 
 /**
- * Resume (round 7): stacking ends and the plan is re-planned at once from your bars, the same run as Re-plan (its
- * light sweep included). No saved plan to re-plan (none yet, or it has ended): today's steps simply come back.
- * @returns {Promise<object|null>} the re-planned saved plan, or null
+ * Resume (round 7): stacking ends and the plan is recalibrated at once from your bars, the same run as Recalibrate (its
+ * light sweep included). No saved plan to recalibrate (none yet, or it has ended): today's steps simply come back.
+ * @returns {Promise<object|null>} the recalibrated saved plan, or null
  */
 export function resumeTraining(o = {}) {
     setStacking(false);
     logAction('Resume pressed (stacking ends)');
+    refresh();
+    const pn = planNowStored();
+    if (!pn || planProgress(pn, Date.now()).ended) return Promise.resolve(null);
+    return recalibratePlan(o);
+}
+
+/**
+ * The overdose, one state for every surface (the owner, 2026-10-03: Torn's panel said "Overdosed", Home still said
+ * "Train DEX × 6"). Seen on your bars (core/gympage.js nextOverdose) and stored in GM: Torn's pages check it against
+ * the sidebar's bars, the webpage against Torn's API answer, and the model carries it as `m.overdose`. Home, the
+ * strip, the panel and the bot's sync hold the training steps back while it is on.
+ * @param {object} reads - {happy:{current}, energy:{current}, drugLeft: ms}
+ * @param {number} now
+ * @param {object|null} [before] - nextBarsSeen's last reading with something in the bars
+ * @returns {{at:number, until:number}|null} the overdose while it is on
+ */
+export function overdoseSeen(reads, now = Date.now(), before = null) {
+    const prev = get(K.overdose, null);
+    const next = nextOverdose(prev, reads, now, before);
+    if (JSON.stringify(next) !== JSON.stringify(prev)) set(K.overdose, next);
+    return overdoseOn(next, now) ? next : null;
+}
+
+/** The same from Torn's API answer (the webpage has no sidebar to read). */
+function overdoseFromState(state, now) {
+    const prev = get(K.overdose, null);
+    // A read from before it was seen (Torn's page saw it on the bars first) says nothing about it.
+    if (prev && state.at < (prev.at || 0)) return overdoseOn(prev, now) ? prev : null;
+    const reads = { happy: state.happy ? { current: state.happy.current } : null, energy: state.energy ? { current: state.energy.current } : null, drugLeft: Math.max(0, (state.drugCd || 0) * 1000 - Math.max(0, now - state.at)) };
+    const od = overdoseSeen(reads, now, pi.barsSeen || null);
+    pi.barsSeen = nextBarsSeen(pi.barsSeen || null, reads, state.at);
+    return od;
+}
+
+/**
+ * Home's "Rehab done · recalibrate": the overdose is over for you (kept as ended until its cooldown has run out, so the
+ * same bars aren't read as a new one), and the plan is recalibrated at once from your bars, like Resume.
+ * @returns {Promise<object|null>} the recalibrated saved plan, or null
+ */
+export function overdoseDone(o = {}) {
+    const od = get(K.overdose, null);
+    if (od) set(K.overdose, { ...od, ended: Date.now() });
+    logAction('Rehab done pressed (the overdose is over)');
     refresh();
     const pn = planNowStored();
     if (!pn || planProgress(pn, Date.now()).ended) return Promise.resolve(null);
@@ -553,9 +667,9 @@ export function currentModel(now = Date.now()) {
         planSettings = { ...settings, horizonDays: pn.days, budget: pn.budget === null ? Infinity : pn.budget };
     }
     // Income (Plan's "Plan from my income"): read on the webpage only, where a plan is made.
-    const auto = app ? autoFor(plan, settings, statics, () => (pn && pn.slim.steady ? pn.slim.steady.cost / pn.days : 0)) : null;
+    const auto = app ? autoFor(plan, settings, statics, () => (pn && pn.slim.steady ? pn.slim.steady.cost / pn.days : 0), pn ? pn.days : null) : null;
     const planInfo = pn ? { start: pn.start, end: pn.end, months: pn.months, days: pn.days, from: pn.from, createdAt: pn.createdAt, recalibratedAt: pn.recalibratedAt, progress: planProgress(pn, now), whole: Boolean(saved) } : null;
-    const m = buildModel({ state, statics, plan: followed, onPath: Boolean(seg && seg.strategy), settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: (app ? archived(K.statsHistory, {}) : get(K.statsHistory, {})) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), stacking: getStacking(), now });
+    const m = buildModel({ state, statics, plan: followed, onPath: Boolean(seg && seg.strategy), settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: (app ? archived(K.statsHistory, {}) : get(K.statsHistory, {})) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), stacking: getStacking(), overdose: overdoseFromState(state, now), now });
     if (m.ready) {
         m.strategy = followed.strategy;
         m.planBusy = pi.planBusy ? { recalibrate: pi.planBusy.recalibrate, months: pi.planBusy.months, at: pi.planBusy.at, done: pi.planBusy.done, words: pi.planBusy.words } : null;
@@ -591,10 +705,10 @@ function recordDayTotals(m) {
 
 /**
  * The plan's line (core/planline.js; Progress, the Plan card, Home): a new
- * line from this moment, from your stats now. Create plan and Re-plan start
+ * line from this moment, from your stats now. Create plan and Recalibrate start
  * the saved plan's own run; a pick (or back to the saved plan) follows that
  * plan's saved run from where it stands today. The lines before it stay
- * (round 7: a pick no longer re-bases the line, Re-plan no longer wipes it).
+ * (round 7: a pick no longer re-bases the line, Recalibrate no longer wipes it).
  * @param {string} why - 'create' | 'replan' | 'pick' | 'path'
  */
 function recordPlanLine(saved, strategy, now, why) {
@@ -780,6 +894,8 @@ export function startFeed() {
     gmOnChange(K.skipped, refresh);
     // "I'm stacking" or Resume in another tab: this one follows at once (Torn's pages too).
     gmOnChange(K.stacking, refresh);
+    // An overdose seen (or ended) in another tab: this one follows at once.
+    gmOnChange(K.overdose, refresh);
     gmOnChange(K.settings, refresh);
     gmOnChange(K.stateError, refresh);
     gmOnChange(K.apiKeyDead, refresh);

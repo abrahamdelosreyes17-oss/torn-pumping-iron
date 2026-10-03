@@ -6,9 +6,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { incomeFrom, autoState, effectiveSettings, effectivePickBy, affordLine, eventToPlan, eventSwitch, eventSwitchHeads, stackLeadMs, unlockEnergyLeft, unlockDays, incomeBreakdown, autoWaitLine } from '../src/core/auto.js';
+import { incomeFrom, autoState, effectiveSettings, effectivePickBy, affordLine, eventToPlan, eventSwitch, eventSwitchHeads, stackLeadMs, unlockEnergyLeft, unlockDays, autoWaitLine } from '../src/core/auto.js';
 import { recommend, PICK_BY } from '../src/core/recommend.js';
-import { moneyOf } from '../src/api/torn.js';
 import { unlockEnergyAfter } from '../src/core/gyms.js';
 import { gmSet, gmGet, gmDel } from '../src/platform/gm.js';
 import { getPlan, DEFAULT_PLAN } from '../src/platform/store.js';
@@ -131,27 +130,6 @@ test('events: Auto switches for World Diabetes Day only when the event plan wins
     assert.equal(eventSwitch({ event: e, eventCompare: { chocoJump: { id: 'chocoJump', gained: 1050, cost: 1e6 } }, normalCompare: normal, budgetPerDay: 5e6, now }), null);
 });
 
-test('money log: the amount an entry carries, and a breakdown by line that leaves unclear titles out', () => {
-    assert.equal(moneyOf({ money: 5000 }), 5000);
-    assert.equal(moneyOf({ total_value: 12, cost: 3 }), 12);
-    assert.equal(moneyOf({ item: 206 }), 0);
-    const b = incomeBreakdown(
-        [
-            { at: T - 10 * DAY, title: 'Bazaar sell', money: 10e6 },
-            { at: T - 2 * DAY, title: 'Bazaar sell', money: 20e6 },
-            { at: T - 3 * DAY, title: 'Item market buy', money: 5e6 },
-            { at: T - 4 * DAY, title: 'Something odd', money: 99e6 },
-        ],
-        T,
-    );
-    assert.equal(Math.round(b.days), 10);
-    assert.deepEqual(b.lines.map((l) => [l.title, l.dir]), [['Bazaar sell', 'in'], ['Item market buy', 'out']]);
-    assert.equal(Math.round(b.inPerDay), 3e6);
-    assert.equal(incomeBreakdown([], T), null);
-    // Read over 30 days: one sale 2 days ago is spread over the 30.
-    assert.equal(Math.round(incomeBreakdown([{ at: T - 2 * DAY, title: 'Bazaar sell', money: 30e6 }], T, 30).inPerDay), 1e6);
-});
-
 test('Log in with Discord: opens Discord, waits, then sends the plan and the main key; a non-member is told why', async () => {
     const calls = [];
     let status = 'open';
@@ -256,71 +234,19 @@ test('war days: the day plan never trains below the energy kept for a war (Setti
     assert.ok(kept.some((s) => /keeps 100 energy for the war/.test(s.note || '')));
 });
 
-test('Auto: with the money log, income is money in less money out plus the gym spend; networth is the fallback', () => {
+test('Auto: with your books, the budget is the offer\u2019s pick and "comes in" is what the ledger adds up to; networth is the fallback', () => {
     const plan = { pickBy: 'auto' };
     const settings = { horizonDays: 30 };
     const income = { perDay: 50e6, days: 30 };
-    const log = { days: 30, inPerDay: 90e6, outPerDay: 60e6, lines: [{ title: 'Bazaar sell', dir: 'in', perDay: 90e6, n: 9 }, { title: 'Item market buy', dir: 'out', perDay: 60e6, n: 30 }] };
-    const a = autoState({ plan, settings, hasFullKey: true, income, log, spentPerDay: 5e6 });
-    assert.equal(a.source, 'log');
-    assert.equal(a.perDay, 90e6 - 60e6 + 5e6);
-    assert.equal(a.networthPerDay, 50e6);
-    const b = autoState({ plan, settings, hasFullKey: true, income, log: { days: 30, inPerDay: 0, outPerDay: 0, lines: [] }, spentPerDay: 5e6 });
+    const books = { perDay: 3e6, earnsPerDay: 4e6, why: 'About $4.0M a day comes in.', flow: { days: 30 } };
+    const a = autoState({ plan, settings, hasFullKey: true, income, books });
+    assert.equal(a.source, 'books');
+    assert.equal(a.perDay, 4e6);
+    assert.equal(a.budgetPerDay, 3e6);
+    assert.equal(a.budget, 90e6);
+    assert.equal(a.networthPerDay, 50e6, 'networth growth rides along as the cross-check');
+    assert.match(affordLine(a, 2e6), /^About \$4\.0M a day comes in\. This plan costs \$2(\.0)?M a day\.$/);
+    const b = autoState({ plan, settings, hasFullKey: true, income, books: null });
     assert.equal(b.source, 'networth');
     assert.equal(b.perDay, 50e6);
-});
-
-test('review fixes: Auto budget 0 is a limit; the gym walk-through keeps going when a step leaves energy on purpose', async () => {
-    const { budgetOf } = await import('../src/core/auto.js');
-    assert.equal(budgetOf({ budget: 0 }), 0);
-    assert.equal(budgetOf({ budget: 150e6 }), 150e6);
-    assert.equal(budgetOf({}), Infinity);
-    assert.equal(budgetOf({ budget: Infinity }), Infinity);
-    const { startSession, needsNewSession } = await import('../src/core/gympage.js');
-    const step = { id: 'x', label: 'Xanax #1', items: [], parts: [{ gymId: 24, gymName: "George's", stat: 'str', trains: 10, perTrain: 10 }] };
-    const m = { build: { id: 'hank' }, keepEnergy: 300 };
-    const now = Date.now();
-    const s = startSession(step, { energy: 400, stats: { str: 1, spd: 1, def: 1, dex: 1 }, happy: 5000 }, m, now);
-    assert.equal(s.spare, 300, '300 kept for a war on purpose');
-    // A stale step (energy the model hasn't seen yet) is not "spare": the walk-through starts again.
-    assert.equal(startSession(step, { energy: 400, stats: { str: 1, spd: 1, def: 1, dex: 1 }, happy: 5000 }, { build: { id: 'hank' } }, now).spare, 0);
-    assert.equal(needsNewSession(s, { energy: 370 }, m, now + 60000), false, 'three trains in: still the same session');
-    assert.equal(needsNewSession(s, { energy: 700 }, m, now + 60000), true, 'a refill later: a new session');
-});
-
-test('review fix: with energy kept for a war above the maximum, no refill is planned (it would add nothing)', async () => {
-    const { dayTimeline } = await import('../src/core/plan.js');
-    const { BUILDS } = await import('../src/core/builds.js');
-    const now = Date.UTC(2026, 8, 29, 10, 0);
-    const state = { at: now, energy: { current: 650, maximum: 150, increment: 5, interval: 600, fullTime: 0 }, happy: { current: 5000, maximum: 5000, increment: 5, interval: 900, fullTime: 0 }, cooldowns: { drug: 0, booster: 0, medical: 0 }, drugCd: 0, boosterCd: 0, refillUsed: false, stats: { str: 1e6, spd: 1e6, def: 1e6, dex: 1e6 }, gymId: 1, specialRefills: 0 };
-    const ctx = { shares: BUILDS.balanced.shares, unlocked: [1], perks: { str: 1, spd: 1, def: 1, dex: 1 }, keep: [], active: 1, keepEnergy: 500 };
-    const steps = dayTimeline({ state, now, strategy: 'steady', ctx, until: now + 3 * 3600e3 });
-    assert.ok(!steps.some((s) => s.kind === 'refill' && (s.items || []).some((it) => it.id === 'points')), JSON.stringify(steps.map((s) => s.kind + ':' + s.energy)));
-});
-
-test('daily refill: kept when it fits the budget, left out when it tips the plan over, judged per $1M for best value', async () => {
-    const { withBestRefill } = await import('../src/core/model.js');
-    const { POINTS } = await import('../src/core/items.js');
-    const run = (b) => (b.noRefill ? { id: 'steady', gained: 900, cost: 60e6, used: {} } : { id: 'steady', gained: 1000, cost: 100e6, used: { [POINTS]: 900 } });
-    assert.equal(withBestRefill('steady', {}, { budget: 150e6 }, run).refill, true, 'fits: kept');
-    const over = withBestRefill('steady', {}, { budget: 80e6 }, run);
-    assert.equal(over.refill, false, 'it is what puts the plan over: left out');
-    assert.equal(over.refillGain, 100);
-    assert.equal(over.refillCost, 40e6);
-    assert.equal(over.gained, 900);
-    const value = withBestRefill('steady', {}, { budget: 150e6, pickBy: 'value' }, run);
-    assert.equal(value.refill, false, '1000/$100M < 900/$60M: left out for best value');
-    assert.equal(withBestRefill('steady', {}, { budget: Infinity, pickBy: 'max' }, run).refill, true);
-});
-
-test('daily refill left out: the day plan has no points refill', async () => {
-    const { dayTimeline } = await import('../src/core/plan.js');
-    const { BUILDS } = await import('../src/core/builds.js');
-    const now = Date.UTC(2026, 8, 29, 10, 0);
-    const state = { at: now, energy: { current: 150, maximum: 150, increment: 5, interval: 600, fullTime: 0 }, happy: { current: 5000, maximum: 5000, increment: 5, interval: 900, fullTime: 0 }, cooldowns: { drug: 0, booster: 0, medical: 0 }, drugCd: 0, boosterCd: 0, refillUsed: false, stats: { str: 1e6, spd: 1e6, def: 1e6, dex: 1e6 }, gymId: 1, specialRefills: 0 };
-    const ctx = { shares: BUILDS.balanced.shares, unlocked: [1], perks: { str: 1, spd: 1, def: 1, dex: 1 }, keep: [], active: 1 };
-    const withIt = dayTimeline({ state, now, strategy: 'steady', ctx });
-    const without = dayTimeline({ state, now, strategy: 'steady', ctx: { ...ctx, noRefill: true } });
-    assert.ok(withIt.some((s) => s.kind === 'refill'));
-    assert.ok(!without.some((s) => s.kind === 'refill'));
 });

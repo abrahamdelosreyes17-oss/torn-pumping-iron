@@ -46,7 +46,7 @@ export const TOS_TS = [
 
 /** Auto mode's Full key: only in this browser, only for your log (money and gym trains). */
 export const TOS_FULL = [
-    ['Data storage', 'Only locally, in this browser: the key, a summary of your money log (titles, amounts, times; 30 days) and your gym trains from the log (stat, trains, energy, gym, gain; up to 120 days)'],
+    ['Data storage', 'Only locally, in this browser: the key, your money log’s lines as Torn gives them (type, amounts, times, the other player’s id; 30 days) and your gym trains from the log (stat, trains, energy, gym, gain; up to 120 days)'],
     ['Data sharing', 'Nobody. Never sent to the Pumping Iron service, FFScouter, TornStats or TornW3B'],
     ['Purpose of use', 'Personal gain: Auto mode sizes your gym plan to your income; Progress shows the trains you did while Pumping Iron wasn’t open (e.g. on your phone)'],
     ['Key storage & sharing', 'Stored locally / Not shared'],

@@ -43,16 +43,20 @@ const STATE_RANK = { early: 0, okay: 1, hospital: 2, traveling: 3, abroad: 4, ja
  * @param {object} o - {bands: {id: band}, respect: {id: number}, keep: {id: 0..1}, win: {id: 0..1}, early: Set, nowS}
  * @returns {object[]} rows {m, id, state, band, respect, until}
  */
-export function sortWar(members, { bands = {}, respect = {}, keep = {}, win = {}, early = new Set(), nowS = 0 } = {}) {
+export function sortWar(members, { bands = {}, respect = {}, keep = {}, win = {}, early = new Set(), nowS = 0, termed = false } = {}) {
     const rows = (members || []).map((m) => {
         const id = Number(m.id);
         const state = early.has(id) ? 'early' : memberState(m);
         return { m, id, state, band: bands[id] || 'none', respect: respect[id] || 0, keep: keep[id] || 0, win: win[id] || 0, until: Number(m.status && m.status.until) || 0 };
     });
+    // A termed war (round 8): they med out, so a hospital row keeps its place by band and respect among the ready
+    // ones; the hospital clock does not move it.
+    const up = (r) => r.state === 'okay' || r.state === 'early' || (termed && r.state === 'hospital');
+    const rank = (r) => (termed && up(r) ? STATE_RANK.okay : STATE_RANK[r.state]);
     rows.sort((a, b) => {
-        const s = STATE_RANK[a.state] - STATE_RANK[b.state];
+        const s = rank(a) - rank(b);
         if (s) return s;
-        if (a.state === 'okay' || a.state === 'early') {
+        if (up(a)) {
             const bd = BAND_ORDER.indexOf(a.band) - BAND_ORDER.indexOf(b.band);
             if (bd) return bd;
             // Compared as the row shows them (respect to 2 decimals, HP kept and win in whole percents): unrounded,
@@ -287,6 +291,43 @@ export function warBandOf(table, id, now = Date.now()) {
     if (band === 'none') return null;
     return { band, win: Number.isFinite(e[1]) ? e[1] : null, keep: Number.isFinite(e[2]) ? e[2] : null, at: Number(table.at) };
 }
+
+/* ------------------------------------------------ round 8: war mode by itself, and the termed-war question */
+
+/** What names a war: its kind and Torn's war id (the enemy's id when Torn gives none). */
+export function warKeyOf(enemy) {
+    return enemy && Number(enemy.id) > 0 ? enemy.kind + ':' + (enemy.warId || 'f' + enemy.id) : null;
+}
+
+/** Has this war begun (a ranked war is listed before it starts)? No start time: it has. */
+export function warBegun(enemy, nowS = Math.floor(Date.now() / 1000)) {
+    return Boolean(enemy) && !(Number(enemy.start) > nowS);
+}
+
+/**
+ * War mode by itself (mockups/round8/torn-eye.html §3, the owner's pick A): what is kept per war, {key, autoAt,
+ * termed}. A war that has begun and is not the one kept is new: the Torn Eye tab opens on War once (`fresh`) and
+ * "Termed war / med-out deal?" is asked again (termed: null until answered).
+ * @param {object|null} kept - the record of the last war seen
+ * @param {object|null} enemy - enemiesFromWars()[n], the war being shown
+ * @returns {{rec: object|null, fresh: boolean}}
+ */
+export function warAskNext(kept, enemy, now = Date.now()) {
+    const key = warBegun(enemy, Math.floor(now / 1000)) ? warKeyOf(enemy) : null;
+    if (!key) return { rec: kept || null, fresh: false };
+    if (kept && kept.key === key) return { rec: kept, fresh: false };
+    return { rec: { key, autoAt: now, termed: null }, fresh: true };
+}
+
+/** What the answer sets on the War list's ticks: a real war hides hospital rows, a termed one keeps them. */
+export function termedFilters(termed) {
+    if (termed === true) return { warHideHosp: false, warHideTravel: true };
+    if (termed === false) return { warHideHosp: true, warHideTravel: true };
+    return null;
+}
+
+/** The answer in one line, under the War list's title. */
+export const TERMED_WORDS = { no: 'Real war · hospital rows hidden', yes: 'Termed war · hospital rows stay in the list' };
 
 /** The status cell as one line: "Hospital · out 14:32 TCT (3:10)", "→ Mexico, lands ~15:05 (est.)". */
 export function statusText(parts, { now = Date.now(), clockFn, tct = true, countdownFn } = {}) {

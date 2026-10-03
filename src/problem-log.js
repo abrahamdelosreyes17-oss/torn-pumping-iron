@@ -74,14 +74,14 @@ export function clearProblemLog() {
 }
 
 /**
- * A Create plan or Re-plan that finished (or failed): how long it took, how
+ * A Create plan or Recalibrate that finished (or failed): how long it took, how
  * much of that with the tab not in front, kept with the last few.
  * @param {object} run - {at, kind: 'create'|'replan', months, days, ms, hiddenMs, ok, error, cancelled}
  */
 export function notePlanRun(run) {
     const list = [...(gmGet(K.planRuns, null) || []), run].slice(-PLAN_RUNS_KEPT);
     gmSet(K.planRuns, list);
-    const words = (run.kind === 'replan' ? 'Re-plan' : 'Create plan') + ' ' + (run.months || '?') + (run.months === 1 ? ' month' : ' months') + ' (' + (run.days || '?') + ' days)';
+    const words = (run.kind === 'replan' ? 'Recalibrate' : 'Create plan') + ' ' + (run.months || '?') + (run.months === 1 ? ' month' : ' months') + ' (' + (run.days || '?') + ' days)';
     const time = (run.ms / 1000).toFixed(1) + ' s' + (run.hiddenMs > 0 ? ', ' + (run.hiddenMs / 1000).toFixed(1) + ' s of it with the tab not in front' : '');
     if (run.ok) logNote(words + ' took ' + time);
     else if (run.cancelled) logNote(words + ' cancelled after ' + time);

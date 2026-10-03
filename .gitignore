@@ -10,3 +10,6 @@ reference/
 # Build output; the released copy lives at torn-pumping-iron.user.js
 dist/
 worker/.wrangler/
+
+# The handoff notes: never pushed (the owner, 2026-10-03: "no handoffs go to repo").
+HANDOFF.md

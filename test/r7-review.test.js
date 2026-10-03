@@ -18,7 +18,9 @@ import { targetShares } from '../src/core/plan.js';
 import { ITEMS } from '../src/core/items.js';
 import { bestCandy } from '../src/core/candy.js';
 import { incomeFloor } from '../src/core/income-floor.js';
-import { incomeBreakdown, autoState, incomeFrom } from '../src/core/auto.js';
+import { autoState, incomeFrom } from '../src/core/auto.js';
+import { ledgerOf } from '../src/core/ledger.js';
+import { cashflowOf, budgetOffer } from '../src/core/cashflow.js';
 import { parsePerks } from '../src/core/perks.js';
 import { pi, refresh, createPlan, followStrategy, recalibratePlan } from '../src/runtime.js';
 import { K, get, getPlan, getSettings, getPrices } from '../src/platform/store.js';
@@ -171,7 +173,7 @@ test('review 2.3 · the second jump is the same in the simulator and the day pla
     assert.equal(j.energy, jumps[1].E0, 'energy in the second jump: day plan ' + j.energy + ', simulator ' + jumps[1].E0);
 });
 
-test('review 2.5 · all nine energy drinks are known', TODO('R7.4'), () => {
+test('review 2.5 · all nine energy drinks are known', () => {
     const cans = Object.values(ITEMS).filter((it) => it.category === 'Energy Drink');
     assert.equal(cans.length, 9, cans.map((c) => c.name).join(', '));
 });
@@ -211,15 +213,25 @@ test('review 2.3 · a stack day: no "Refill unused" heads-up while Xanax are sta
 
 /* ----------------------------------------------------------------- 3. money */
 
-test('review 3.1 · a $2B gift banked for 3 months is not income: the budget stays near the real pay ($0.5M a day)', TODO('R7.5'), () => {
+test('review 3.1 · a $2B gift banked for 3 months is not income: the budget stays near the real pay ($0.5M a day)', () => {
     const now = Date.parse('2026-10-02T12:00:00Z');
     const cityBank = { amount: 2e9, profit: 90e6, duration: 90, until: Math.floor((now + 80 * DAY) / 1000) };
     const floor = incomeFloor({ cityBank, now });
-    const log = [{ at: now - 10 * DAY, title: 'Money receive', money: 2e9 }, { at: now - 10 * DAY, title: 'Bank invest', money: 2e9 }, ...Array.from({ length: 30 }, (_, i) => ({ at: now - i * DAY, title: 'Company pay', money: 500e3 }))];
-    const bd = incomeBreakdown(log, now, 30, floor);
+    // The same month as Torn logs it: the gift (Money receive), the investment (Bank invest), the pay every day.
+    const lines = [
+        { id: 'gift', type: 4810, title: 'Money receive', at: now - 10 * DAY, data: { money: 2e9 } },
+        { id: 'bank', type: 5450, title: 'Bank invest', at: now - 10 * DAY + 60e3, data: { amount: 2e9, worth: 2.09e9, duration: 7776000 } },
+        ...Array.from({ length: 30 }, (_, i) => ({ id: 'pay' + i, type: 6221, title: 'Company employee pay', at: now - i * DAY - 3600e3, data: { pay: 500e3 } })),
+    ];
+    const ledger = ledgerOf(lines, { from: now - 30 * DAY, to: now });
+    const flow = cashflowOf({ ledger, liquid: 20e6, bank: { amount: 2e9, profit: 90e6, until: cityBank.until * 1000 }, habitPerDay: null });
+    const books = { ...budgetOffer({ flow, days: 30, now }), flow };
     const snaps = [{ at: now - 30 * DAY, networth: 300e6 }, { at: now, networth: 2.32e9 }];
-    const a = autoState({ plan: { pickBy: 'auto' }, settings: { horizonDays: 30 }, hasFullKey: true, income: incomeFrom(snaps), log: bd, floor });
+    const a = autoState({ plan: { pickBy: 'auto' }, settings: { horizonDays: 30 }, hasFullKey: true, income: incomeFrom(snaps), books, floor });
+    assert.equal(a.source, 'books');
     assert.ok(a.budgetPerDay < 2e6, 'the budget is $' + Math.round(a.budgetPerDay / 1e5) / 10 + 'M a day');
+    assert.equal(Math.round(a.budgetPerDay), 500e3, 'the pay, and nothing of the gift or of the bank\u2019s profit before it is paid');
+    assert.deepEqual(flow.oneOffs.map((e) => e.id), ['gift']);
 });
 
 /* ------------------------------------------------------- 4. Progress */
@@ -317,7 +329,7 @@ test('review 4.5 · Progress: "+X gained" at the end of day 1 is what was really
     assert.ok(Math.abs(r.said - r.gained) <= 0.02 * r.gained, 'the header says ' + r.said + ', the player gained +' + Math.round(r.gained));
 });
 
-test('review 4.6 · Progress: a pick starts a new line from today and the old one stays; Re-plan keeps the chart; 30 days and All show the history', async () => {
+test('review 4.6 · Progress: a pick starts a new line from today and the old one stays; Recalibrate keeps the chart; 30 days and All show the history', async () => {
     const f = await follower('steady', 12);
     const t = f.day0 + 4 * DAY + 12 * HOUR;
     const before = f.at(t);
@@ -329,14 +341,14 @@ test('review 4.6 · Progress: a pick starts a new line from today and the old on
     assert.equal(r.lines.length, 3, 'the earlier plan is still on the chart, the new one beside it, and you');
     assert.equal(r.lines[r.lines.length - 1], 5, 'your five days are all still there');
     assert.match(r.head, /followed since 5 Oct/);
-    // Re-plan: the chart is not wiped.
+    // Recalibrate: the chart is not wiped.
     followStrategy('steady');
     await recalibratePlan({ pause: noPause });
     r = f.at(t + 2 * MIN, 30);
-    assert.equal(r.lines[r.lines.length - 1], 5, 'Re-plan keeps your history on the chart');
+    assert.equal(r.lines[r.lines.length - 1], 5, 'Recalibrate keeps your history on the chart');
     const lines = readLines(get(K.planLine, null));
-    // The line from the first moment of the plan (the pick of the follower, made the instant the plan was), the two picks, the Re-plan.
-    assert.deepEqual(lines.map((l) => l.why), ['pick', 'pick', 'replan'], 'the pick back to steady and the Re-plan were the same instant: one line');
+    // The line from the first moment of the plan (the pick of the follower, made the instant the plan was), the two picks, the Recalibrate.
+    assert.deepEqual(lines.map((l) => l.why), ['pick', 'pick', 'replan'], 'the pick back to steady and the Recalibrate were the same instant: one line');
     assert.equal(lines[0].at, f.start, 'the first line is still kept');
     assert.deepEqual(lines.map((l) => l.strategy), ['steady', 'edvdJump', 'steady']);
 });
@@ -396,7 +408,15 @@ test('round 7 · a gym to unlock: Create plan still picks by the rule, says when
     assert.equal(saved.rec.recommended, 'edvdJump');
     const fhc = saved.rec.alternatives.find((a) => a.id === 'steadyMax');
     assert.ok(saved.rec.facts.opens > fhc.opens, 'the pick opens it on day ' + saved.rec.facts.opens + ', Steady + FHC max on day ' + fhc.opens);
-    assert.ok(saved.year.segments.every((s) => s.strategy === 'edvdJump'), 'the path follows the pick, not the gym');
+    // The path follows the rule, not the gym: the same plans, stretch by stretch, as with no gym to unlock at all.
+    const withGoal = saved.year.segments.map((s) => s.strategy);
+    setNow(T0);
+    setup(friend, { plan: { pickBy: 'max', pickByPicked: true } });
+    const plain = await createPlan({ months: 1, pause: noPause });
+    assert.deepEqual(withGoal, plain.year.segments.map((s) => s.strategy), 'the path follows the pick, not the gym');
+    setNow(T0);
+    setup(friend, { plan: { pickBy: 'max', pickByPicked: true, goal: goal(null) } });
+    saved = await createPlan({ months: 1, pause: noPause });
     // What the gyms it opens are worth: the plan with and without each.
     assert.deepEqual(saved.gymWorth.map((g) => g.gymId), [13, 14]);
     for (const g of saved.gymWorth) assert.ok(g.gain > 0 && g.fee > 0 && g.day > 0, g.name + ': +' + g.gain + ' for $' + g.fee + ' on day ' + g.day);

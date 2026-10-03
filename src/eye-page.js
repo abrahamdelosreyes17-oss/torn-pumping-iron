@@ -4,31 +4,36 @@
  *     profile's title (full, narrower or smallest by the room there; the
  *     left-hand space when the right one is too narrow); never a line on
  *     Torn's page;
- *   - the mini-profile popup: one tag as its last line;
- *   - faction and ranked-war lists: Torn's rows untouched; a band edge on our
- *     own layer and a tag per row in the free space, level with the row, and
- *     a summary tag on top (war rows are still shown in our order with CSS);
+ *   - the mini-profile popup: one tag on our layer just under it (above it
+ *     when the window has no room below), never inside or over it;
+ *   - faction and ranked-war lists: Torn's rows untouched and in Torn's own
+ *     order; a band edge on our own layer and a tag per row in the free space,
+ *     level with the row, and a summary tag on top (our order lives there);
  *   - the attack page: the fight card (#pi-eyecard) beside the fight, and the
  *     read-only attackData reader that saves their gear.
- * Re-placed when the window is resized or Torn's page moves.
+ * Re-placed when the window is resized or Torn's page moves. Nothing of ours
+ * goes into Torn's page: no element, class or style on Torn's own elements.
  */
 
 import { K, get, set, getSettings } from './platform/store.js';
 import { addPrediction } from './core/learndata.js';
-import { onModel, isVisible } from './runtime.js';
+import { pi, onModel, isVisible } from './runtime.js';
 import { isPaused, onPauseChange } from './turns.js';
 import { installAttackHook } from './platform/page-hook.js';
-import { wantPlayers, eyeView, sharedView, eyeReady, loadEyeCache, onEye, saveGear, getWatch, toggleWatch, setWatchTag } from './eye-service.js';
+import { gmOnChange } from './platform/gm.js';
+import { wantPlayers, eyeView, sharedView, eyeReady, loadEyeCache, onEye, saveGear, getWatch, toggleWatch, setWatchTag, EYE_CHAIN_KEY, EYE_NEXT_KEY } from './eye-service.js';
 import { WATCH_MAX } from './core/eye/watch.js';
 import { parseAttackData } from './core/eye/gear.js';
 import { sortWar, memberState } from './core/eye/war.js';
-import { profileLevel, profileAnchor, readFactionRows, readWarRows, miniProfileId, attackRoot } from './sources/dom/eye.js';
-import { ensureEyeCss, bindCard, eyeCardSpot, eyeRowSpot, eyeProfileCard, eyeFightCard, eyeMiniLine, eyeRowTag, eyeEdgeBar, eyeSummary, eyeSummaryTag, eyeStatusSeconds, eyeShown, eyeLayer, eyeLayerPart, eyeClearPart, eyeTickOut, eyeNextEarly, eyeRowsSig, eyeUntilMoved } from './ui/eye/eye-ui.js';
+import { chainFromBar, chainSide, sharedChain, CHAIN_FRESH_MS } from './core/eye/chain.js';
+import { nextTarget, ATTACK_OPENED_MS } from './core/eye/targets.js';
+import { profileLevel, profileAnchor, readFactionRows, readWarRows, miniProfileId, attackRoot, readChainBar, enemyFactionId } from './sources/dom/eye.js';
+import { ensureEyeCss, bindCard, eyeCardSpot, eyeRowSpot, eyeProfileCard, eyeFightCard, eyeMiniLine, eyeMiniSpot, eyeRowTag, eyeEdgeBar, eyeSummary, eyeSummaryTag, eyeStatusSeconds, eyeShown, eyeLayer, eyeLayerPart, eyeClearPart, eyeTickOut, eyeNextEarly, eyeRowsSig, eyeUntilMoved, eyeChainCard, eyeChainTick, EYE_CHAIN_LINES_W } from './ui/eye/eye-ui.js';
 import { ensureMarkCss } from './ui/marks/marks.js';
 import { fill } from './ui/dom.js';
-import { detectPage, profileIdOf, attackTargetOf, PAGE_PROFILE, PAGE_FACTION, PAGE_ATTACK } from './sources/route.js';
+import { detectPage, profileIdOf, attackTargetOf, attackUrl, APP_PAGE_URL, PAGE_PROFILE, PAGE_FACTION, PAGE_ATTACK } from './sources/route.js';
 
-const ep = { extras: new Map(), war: { prev: null, early: new Map() }, drawn: { war: null, faction: null }, attack: { gearVisible: false, gearSaved: false }, drawing: false, sig: {}, lists: {}, layoutSig: '' };
+const ep = { extras: new Map(), war: { prev: null, early: new Map() }, drawn: { war: null, faction: null }, attack: { gearVisible: false, gearSaved: false }, drawing: false, sig: {}, lists: {}, layoutSig: '', chain: { sig: '', spot: null } };
 
 function view(id) {
     const x = ep.extras.get(id) || {};
@@ -66,9 +71,16 @@ function eyePanelRect() {
     return r.width > 0 && r.height > 0 ? r : null;
 }
 
-/** Where list tags go now (eyeRowSpot, clear of the panel). */
+/** The chain counter on screen (null when hidden): with no panel to ride on it holds a margin of its own. */
+function eyeChainRect() {
+    const el = document.getElementById('pi-chaincard');
+    const r = el ? el.getBoundingClientRect() : null;
+    return r && r.width > 0 && r.height > 0 ? r : null;
+}
+
+/** Where list tags go now (eyeRowSpot, clear of the panel and of the chain counter that sits on it). */
 function eyeListSpot() {
-    return eyeRowSpot(eyeViewW(), eyeTornPage(), eyePanelRect());
+    return eyeRowSpot(eyeViewW(), eyeTornPage(), eyePanelRect() || eyeChainRect());
 }
 
 /** Note the tags' column on our layer (x from, x to, on screen) for the panel to keep out of; none: no tags. */
@@ -139,15 +151,44 @@ function drawProfile() {
     card.style.top = Math.round(t.top - o.y) + 'px';
 }
 
+/** Torn's mini-profile popup (the box we sit under), or null. */
+function miniPopup() {
+    const root = document.getElementById('profile-mini-root');
+    return root ? root.querySelector('.mini-profile-wrapper') || root.querySelector('.profile-container') || root : null;
+}
+
+/** The mini-profile's tag, on our layer (round 7, the owner: never inside Torn's popup). */
 function drawMini() {
     const id = miniProfileId();
-    const root = document.getElementById('profile-mini-root');
-    if (!id || !root) return;
-    for (const el of root.querySelectorAll('.pi-mini-line')) el.remove();
-    // The popup's last line, inside its width.
-    const at = root.querySelector('.mini-profile-wrapper') || root.querySelector('.profile-container') || root;
+    const part = eyeLayerPart('mini');
+    if (!id || !miniPopup()) {
+        fill(part, []);
+        return;
+    }
     // At most one thing glows on a page: the mini-profile only when nothing else does.
-    at.appendChild(eyeMiniLine(view(id), { id, glow: !document.querySelector('.pi-eye.pi-glow') }));
+    const glow = !document.querySelector('#pi-eye-layer [data-pi-part]:not([data-pi-part="mini"]) .pi-glow, #pi-eyecard.pi-glow');
+    fill(part, [eyeMiniLine(view(id), { id, glow })]);
+    placeMini();
+}
+
+/** Just under the popup, as wide as it, inside the window (above it when there's no room below). */
+function placeMini() {
+    const layer = document.getElementById('pi-eye-layer');
+    const line = layer && layer.querySelector('[data-pi-part="mini"] .pi-mini-line');
+    if (!line) return;
+    const pop = miniPopup();
+    const r = pop ? pop.getBoundingClientRect() : null;
+    if (!r || !(r.width > 0) || !(r.height > 0) || !miniProfileId()) {
+        line.style.display = 'none';
+        return;
+    }
+    line.style.display = '';
+    const o = eyeOrigin();
+    line.style.width = Math.round(Math.min(r.width, eyeViewW() - 4)) + 'px';
+    const s = eyeMiniSpot(r, line.offsetHeight || 28, eyeViewW(), window.innerHeight);
+    line.style.width = s.width + 'px';
+    line.style.left = Math.round(s.x - o.x) + 'px';
+    line.style.top = Math.round(s.y - o.y) + 'px';
 }
 
 /* ------------------------------------------------------ faction + war */
@@ -178,10 +219,11 @@ function eyeDrawList(name, rows, byId, nowS, { glow, note }) {
         const on = ready && !glowed;
         if (on) glowed = true;
         const edge = eyeEdgeBar(v.band, !ready);
-        const tag = spot.mode === 'none' ? null : eyeRowTag(v, { mode: spot.mode, state: s.state, outInS: s.until > nowS ? s.until - nowS : null, outAt: s.until > nowS ? s.until : null, glow: on });
+        // A war row (round 8, his pick B): the band, HP kept, then where they are; a faction row keeps the three numbers.
+        const tag = spot.mode === 'none' ? null : eyeRowTag(v, { mode: spot.mode, state: s.state, outInS: s.until > nowS ? s.until - nowS : null, outAt: s.until > nowS ? s.until : null, glow: on, where: name === 'war' });
         items.push({ row: r.el, edge, tag });
     }
-    const summary = spot.mode === 'none' ? null : eyeSummaryTag(eyeSummary(rows, nowS), { note, fromFfs, short: spot.mode !== 'full' });
+    const summary = spot.mode === 'none' ? null : eyeSummaryTag(eyeSummary(rows, nowS), { note, fromFfs, short: spot.mode !== 'full', war: name === 'war' });
     const kids = [summary, ...items.map((i) => i.edge), ...items.map((i) => i.tag)].filter(Boolean);
     fill(part, kids);
     ep.lists[name] = { items, summary, spotMode: spot.mode, first: rows.length ? byId.get(rows[0].id) : null, rowsEl: [...byId.values()].map((r) => r.el) };
@@ -243,7 +285,6 @@ function drawWar() {
         delete ep.lists.war;
         return false;
     }
-    const list = rows[0].el.parentNode;
     // What the row itself shows goes into the fight (round 7: a war row's level was never passed on, so a player
     // with an estimate but no profile read was fought with a level 1's life and came out Stomp).
     for (const r of rows) ep.extras.set(r.id, { ...(ep.extras.get(r.id) || {}), level: r.level, name: r.name });
@@ -259,16 +300,12 @@ function drawWar() {
             respect[m.id] = v.respect || 0;
         }
     }
+    // Our order (ready first) picks the row that glows and fills the summary; Torn's list keeps its own order and look
+    // (round 7, the owner: we never change Torn's layout).
     const sorted = sortWar(members, { bands, respect, early: new Set(early.keys()), nowS });
     ep.drawing = true;
     try {
         const byId = new Map(rows.map((r) => [r.id, r]));
-        // Shown in our order with CSS (flex order); Torn's rows stay where React put them, unchanged.
-        list.classList.add('pi-warlist');
-        sorted.forEach((s, i) => {
-            const r = byId.get(s.id);
-            if (r && r.el.style.order !== String(i)) r.el.style.order = String(i);
-        });
         // Torn's pages read nothing for the war (owner, round 6): what this page shows; the live read is on the Torn Eye tab.
         return eyeDrawList('war', sorted, byId, nowS, { glow: true, note: 'Torn Eye · from this page · live war mode on Pumping Iron’s Torn Eye tab' });
     } finally {
@@ -291,7 +328,129 @@ function drawFaction(glow) {
     eyeDrawList('faction', list, new Map(rows.map((r) => [r.id, r])), nowS, { glow, note: 'Torn Eye · from what is already known (nothing is asked on this page)' });
 }
 
+/* ------------------------------------------------------ the chain counter */
+
+/** Where the counter sits when no panel carries it: this far from the window's top (the panel's own default). */
+const EYE_CHAIN_TOP = 80;
+
+/** Is Torn's ranked-war list on this page (one look, no rows read)? */
+function eyeOnWarPage() {
+    return detectPage(location.href) === PAGE_FACTION && Boolean(document.querySelector('#faction_war_list_id ul.members-list > li.enemy'));
+}
+
+/**
+ * The chains the counter shows now, yours first; null when it has no place here. It shows on Torn's war page, and on
+ * every Torn page while chain mode is on (the owner, session 9: "in chain mode we are stacking, wire in the chain
+ * counters"). Yours: Torn's own sidebar bar (it moves with every hit), else the bars as last read. Theirs: what the
+ * Torn Eye tab's read of their chain left in shared storage (Torn's pages ask nothing for a war); none: "Not read yet".
+ */
+function eyeChainSides(now = Date.now()) {
+    const m = pi.model;
+    const warPage = eyeOnWarPage();
+    if (!warPage && !(m && m.ready && m.stacking)) return null;
+    const bar = readChainBar();
+    const read = m && m.ready && m.state ? m.state.chain : null;
+    const mine = bar ? chainFromBar(bar.value, bar.time, now) : read && now - read.at < CHAIN_FRESH_MS ? read : null;
+    const sides = [{ who: 'Your faction', short: 'You', side: chainSide(mine, now) }];
+    const rec = sharedChain(get(EYE_CHAIN_KEY, null), now);
+    const fid = warPage ? enemyFactionId() : null;
+    const theirs = rec && (!fid || Number(rec.fid) === fid) ? rec : null;
+    if (warPage || theirs) sides.push({ who: (theirs && theirs.name) || 'Enemy faction', short: 'Them', side: chainSide(theirs, now), hint: 'open War on the Torn Eye tab' });
+    return sides;
+}
+
+/** Where the counter goes ({x, y, width} on screen), or null: on the panel when it carries it, else a margin of its own. */
+function eyeChainSpot() {
+    const p = detectPage(location.href);
+    const own = eyeCardSpot(eyeViewW(), eyeTornPage());
+    // The attack page: over the fight card (drawAttack places it); a profile: the card there has that margin.
+    if (p === PAGE_ATTACK) return own.mode === 'none' ? null : { x: own.x, y: 0, width: own.width, lines: true };
+    if (ep.chain.spot) return ep.chain.spot;
+    if (p === PAGE_PROFILE || own.mode === 'none') return null;
+    return { x: own.x, y: EYE_CHAIN_TOP, width: own.width };
+}
+
+/**
+ * Draw the counter (once a second while it shows): rebuilt only when what it says changed, else its clocks move on.
+ * @returns {boolean} whether it came or went (the attack page's fight card then moves)
+ */
+function drawChain(now = Date.now()) {
+    const old = document.getElementById('pi-chaincard');
+    const sides = isPaused() || !getSettings().eyeChips ? null : eyeChainSides(now);
+    const spot = sides ? eyeChainSpot() : null;
+    if (!sides || !spot) {
+        if (old) old.remove();
+        ep.chain.sig = '';
+        return Boolean(old);
+    }
+    const lines = Boolean(spot.lines) || spot.width < EYE_CHAIN_LINES_W;
+    const sig = JSON.stringify([lines, sides.map((x) => [x.who, x.side.state, x.side.count, x.side.next])]);
+    let el = old;
+    if (!el || ep.chain.sig !== sig) {
+        ep.chain.sig = sig;
+        el = eyeChainCard(sides, { lines });
+        // The new one stays where the old one was (the attack page places it with the fight card).
+        if (old) {
+            el.style.cssText = old.style.cssText;
+            old.replaceWith(el);
+        } else (document.body || document.documentElement).appendChild(el);
+    } else {
+        // The same words: only when each chain ends moved (a hit sets the timer back to 5:00).
+        const ends = el.querySelectorAll('[data-pi-chain-until]');
+        const timed = sides.filter((x) => x.side.state === 'on' || x.side.state === 'cooldown');
+        if (ends.length === timed.length) timed.forEach((x, i) => ends[i].setAttribute('data-pi-chain-until', String(x.side.until)));
+    }
+    eyeChainTick(el, now);
+    if (detectPage(location.href) !== PAGE_ATTACK) {
+        el.style.left = Math.round(spot.x) + 'px';
+        el.style.top = Math.round(spot.y) + 'px';
+        el.style.width = Math.round(spot.width) + 'px';
+    }
+    return !old;
+}
+
+/**
+ * The training panel says where it would sit ({x, y, width} on screen; null when it is folded under a card, off or
+ * in the window's corner): the counter takes that place and the panel starts under it (the owner's pick B: "its own
+ * card at the top of the free space; the training panel sits under it").
+ * @returns {number} the height the panel leaves for it (0: no counter there)
+ */
+export function eyeRideChain(spot) {
+    const was = ep.chain.spot;
+    ep.chain.spot = spot && spot.width > 0 ? { x: spot.x, y: spot.y, width: spot.width } : null;
+    if (!document.getElementById('pi-chaincard') && !ep.chain.spot) return 0;
+    if (JSON.stringify(was) !== JSON.stringify(ep.chain.spot)) drawChain();
+    const el = document.getElementById('pi-chaincard');
+    return el && ep.chain.spot && detectPage(location.href) !== PAGE_ATTACK ? el.offsetHeight : 0;
+}
+
 /* ------------------------------------------------------------- attack */
+
+/** The room left under the fight card for the training panel's line docked there (its 36 px and the gap). */
+const EYE_DOCK_ROOM = 44;
+
+/**
+ * The Next button's target from where you are (round 8, his pick A): the next ready player of the list the Torn Eye
+ * tab last showed (Targets in its order and filters, or the war list), handed over in shared storage; the attack pages
+ * you opened in the last ten minutes are passed over. No request: Torn's pages ask about the player attacked only.
+ */
+function eyeNextNow(id, now = Date.now()) {
+    const opened = new Set((get(K.eyePredictions, []) || []).filter((p) => p && now - p.at < ATTACK_OPENED_MS && Number(p.def) !== Number(id)).map((p) => Number(p.def)));
+    const n = nextTarget(get(EYE_NEXT_KEY, null), id, { now, opened });
+    return { ...n, href: n.next ? attackUrl(n.next.id) : null, listHref: APP_PAGE_URL + '#eye', over: Boolean(ep.attack.over) };
+}
+
+/** Key N on the attack page: the Next button's page (never while typing, never with a modifier key). */
+function eyeNextKey(e) {
+    if (e.defaultPrevented || e.ctrlKey || e.altKey || e.metaKey || e.repeat || !(e.key === 'n' || e.key === 'N')) return;
+    const t = e.target;
+    if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(String(t.tagName || '')))) return;
+    if (isPaused() || !getSettings().eyeChips || detectPage(location.href) !== PAGE_ATTACK) return;
+    const a = document.querySelector('#pi-eyecard a.pi-nextb:not(.pi-alt)');
+    if (!a || !a.getAttribute('href')) return;
+    e.preventDefault();
+    location.assign(a.getAttribute('href'));
+}
 
 function drawAttack() {
     const id = Number(attackTargetOf(location.href));
@@ -304,7 +463,7 @@ function drawAttack() {
         ep.sig.attack = '';
     } else {
         const ws = watchState(id);
-        const next = eyeFightCard(v, spot.mode, { ...ep.attack, watch: { ...ws, full: getWatch().list.length >= WATCH_MAX && !ws.watching, toggle: () => toggleFor(id) } });
+        const next = eyeFightCard(v, spot.mode, { ...ep.attack, next: eyeNextNow(id), watch: { ...ws, full: getWatch().list.length >= WATCH_MAX && !ws.watching, toggle: () => toggleFor(id) } });
         let card = old;
         if (!card || ep.sig.attack !== next.outerHTML) {
             ep.sig.attack = next.outerHTML;
@@ -317,10 +476,19 @@ function drawAttack() {
         const r = root ? root.getBoundingClientRect() : null;
         card.style.width = spot.width + 'px';
         card.style.left = Math.round(spot.x) + 'px';
-        const top = Math.round(r && r.height ? Math.max(8, r.top) : 80);
+        let top = Math.round(r && r.height ? Math.max(8, r.top) : 80);
+        // Chain mode: the counter's two lines sit over the card, the card starts under them.
+        const chain = document.getElementById('pi-chaincard');
+        if (chain) {
+            chain.style.left = Math.round(spot.x) + 'px';
+            chain.style.top = top + 'px';
+            chain.style.width = spot.width + 'px';
+            top += Math.round(chain.offsetHeight) + 8;
+        }
         card.style.top = top + 'px';
-        // Never taller than the window (it scrolls inside instead).
-        card.style.maxHeight = Math.max(80, window.innerHeight - top - 8) + 'px';
+        // Never taller than the window, less the training panel's one line under it (round 8: with their gear listed
+        // the card filled the window and pushed that line off it); it scrolls inside instead.
+        card.style.maxHeight = Math.max(80, window.innerHeight - top - 8 - EYE_DOCK_ROOM) + 'px';
     }
     // What Torn Eye said before this fight: the fight learner compares it with how the fight went.
     if (v && v.forecast && Number.isFinite(v.forecast.pWin)) {
@@ -336,6 +504,8 @@ function onAttackData(json) {
     if (!d || !d.defenderId) return;
     ep.extras.set(d.defenderId, { ...(ep.extras.get(d.defenderId) || {}), level: d.level, life: d.maxLife, name: d.defenderName });
     ep.attack.gearVisible = d.visible;
+    // The fight is over: the Next button is the one thing that glows now.
+    ep.attack.over = Boolean(d.over);
     if (d.visible && d.items.length) {
         ep.attack.gearSaved = true;
         saveGear(d.defenderId, d.items);
@@ -346,15 +516,11 @@ function onAttackData(json) {
 /* ------------------------------------------------------------- wiring */
 
 function eyeClearAll() {
-    for (const el of document.querySelectorAll('#pi-eye-layer, #pi-eyecard, .pi-mini-line')) el.remove();
+    for (const el of document.querySelectorAll('#pi-eye-layer, #pi-eyecard, #pi-chaincard')) el.remove();
+    ep.chain.sig = '';
     ep.sig = {};
     ep.lists = {};
     ep.drawn = { war: null, faction: null };
-    // Torn's war rows back in their own order.
-    for (const list of document.querySelectorAll('.pi-warlist')) {
-        list.classList.remove('pi-warlist');
-        for (const li of list.children) li.style.order = '';
-    }
 }
 
 function drawAll() {
@@ -368,6 +534,8 @@ function drawAll() {
     // Faction and war lists (and the mini-profile) show what is already stored: read it once, from this site's own
     // IndexedDB, when one of them first shows. No request; the draw runs again when it is in.
     if (!eyeReady() && (p === PAGE_FACTION || miniProfileId())) loadEyeCache().catch(() => {});
+    // The chain counter first: the list tags keep out of its margin, the attack page's card starts under it.
+    drawChain();
     if (p === PAGE_PROFILE) drawProfile();
     if (p === PAGE_FACTION) {
         const glowed = document.getElementById('faction_war_list_id') ? drawWar() : false;
@@ -394,6 +562,7 @@ function eyePlaceAll() {
         return;
     }
     for (const name of Object.keys(ep.lists)) eyePlaceList(name);
+    placeMini();
     ep.layoutSig = eyeLayoutSig();
 }
 
@@ -420,12 +589,17 @@ export function bootEyePage() {
     ensureMarkCss();
     ensureEyeCss();
     // The hover card: in the free space, and on faction and war pages clear of the panel like the tags beside it.
-    bindCard(document, (id) => view(id), () => eyeCardSpot(eyeViewW(), eyeTornPage(), detectPage(location.href) === PAGE_FACTION ? eyePanelRect() : null));
+    bindCard(document, (id) => view(id), () => eyeCardSpot(eyeViewW(), eyeTornPage(), detectPage(location.href) === PAGE_FACTION ? eyePanelRect() || eyeChainRect() : null));
     const p = detectPage(location.href);
     if (p === PAGE_ATTACK) {
         // unsafeWindow is the page's own window in Tampermonkey; the harness has only window.
         const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
         installAttackHook(pageWin, onAttackData);
+        document.addEventListener('keydown', eyeNextKey);
+        // The Torn Eye tab handed over a new list (a status read, another order): the Next button follows.
+        gmOnChange(EYE_NEXT_KEY, () => {
+            if (!isPaused() && getSettings().eyeChips && isVisible() && detectPage(location.href) === PAGE_ATTACK) drawAttack();
+        });
     }
     // Owner (round 6): on Torn's pages Torn Eye asks only about the player you're viewing (their profile) or
     // attacking. Faction and war lists, mini-profiles and the watch list show what is already known; the list sweeps,
@@ -451,7 +625,23 @@ export function bootEyePage() {
         lastSig = '';
         drawAll();
     });
-    // A resized window re-places everything (once per frame).
+    // A resized window re-places everything (once per frame); a scroll moves only the mini-profile's tag (Torn's popup
+    // may be fixed on screen while ours is in page coordinates).
+    let miniQueued = false;
+    document.addEventListener(
+        'scroll',
+        () => {
+            if (miniQueued || !document.querySelector('#pi-eye-layer [data-pi-part="mini"] .pi-mini-line')) return;
+            miniQueued = true;
+            const run = () => {
+                miniQueued = false;
+                placeMini();
+            };
+            if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+            else setTimeout(run, 16);
+        },
+        { capture: true, passive: true },
+    );
     let resizeQueued = false;
     window.addEventListener('resize', () => {
         if (resizeQueued) return;
@@ -469,6 +659,8 @@ export function bootEyePage() {
     setInterval(() => {
         if (!isVisible() || isPaused() || !getSettings().eyeChips) return;
         const pg = detectPage(location.href);
+        // The chain counter (any Torn page in chain mode, the war page always): its clocks, and Torn's bar read again.
+        if (drawChain() && pg === PAGE_ATTACK) drawAttack();
         if (pg !== PAGE_FACTION && pg !== PAGE_PROFILE && pg !== PAGE_ATTACK) return;
         if (pg === PAGE_FACTION) {
             // Round 7 review: the status text carries Torn's hospital clock, so a signature of it changed every second
@@ -495,10 +687,17 @@ export function bootEyePage() {
         const root = document.getElementById('profile-mini-root');
         if (root && root !== watchedRoot) {
             watchedRoot = root;
-            new MutationObserver(onMini).observe(root, { childList: true, subtree: true });
+            // Its content and where Torn puts it (the popup moves and hides by its style or class).
+            new MutationObserver(onMini).observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
         }
         const id = miniProfileId();
-        const shown = document.querySelector('#profile-mini-root .pi-mini-line');
+        const shown = document.querySelector('#pi-eye-layer [data-pi-part="mini"] .pi-mini-line');
+        // The popup closed or moved: our tag follows it (or hides), nothing redrawn.
+        if (shown && (!id || shown.getAttribute('data-pi-player') === String(id))) {
+            if (!id) fill(eyeLayerPart('mini'), []);
+            else placeMini();
+            return;
+        }
         if (id && (!shown || shown.getAttribute('data-pi-player') !== String(id)) && !(ep.miniAt && ep.miniId === id && Date.now() - ep.miniAt < 500)) {
             ep.miniId = id;
             ep.miniAt = Date.now();

@@ -7,7 +7,7 @@
  * message is only sent when there's room left to record it.
  */
 
-import { dueAlerts, resolvedBy, nextPrev, stackingChain, CHAIN_SKIPPED } from './alerts.js';
+import { dueAlerts, resolvedBy, nextPrev, stackingChain, overdosed, CHAIN_SKIPPED } from './alerts.js';
 import { Q, parse, meterDb, ensureSchema, forgetUser, FORGET, QUERY_BUDGET } from './db.js';
 import { LOGIN_TTL_S } from './login.js';
 import { guard, BudgetError } from './net.js';
@@ -228,7 +228,7 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
     // Muted kinds wait (not recorded: they come if still due when the mute ends).
     fresh = fresh.filter((a) => !muted(st, a.kind, nowS));
     // Stacking for a chain: a snoozed energy or training ping waits too (after Resume it comes if Torn still shows it due).
-    if (stackingChain(plan)) fresh = fresh.filter((a) => !CHAIN_SKIPPED.includes(a.kind));
+    if (stackingChain(plan) || overdosed(plan, nowS)) fresh = fresh.filter((a) => !CHAIN_SKIPPED.includes(a.kind));
     // Quiet hours and caps: strict jump steps still go through. War pings have their own cap.
     const normal = rows.filter((r) => !isWarRow(r));
     const room = Math.min(st.perHour - messagesSince(normal, nowS - 3600), st.perDay - messagesSince(normal, nowS - DAY_S));

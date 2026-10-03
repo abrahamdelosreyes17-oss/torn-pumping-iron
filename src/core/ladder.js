@@ -9,16 +9,24 @@
  */
 
 import { STATS, gainPerTrain, totalOf } from './gain.js';
-import { XANAX, FHC, MUNSTER, RED_COW, TAURINE, CANDY_KISSES, POINTS, REFILL_POINTS, ITEMS, SAMPLE_PRICES, BOOSTER_CAP_H, boostersThatFit } from './items.js';
+import { XANAX, FHC, MUNSTER, RED_COW, TAURINE, SANTA_SHOOTERS, ROCKSTAR_RUDOLPH, X_MASS, GOOSE_JUICE, DAMP_VALLEY, CROCOZADE, CANDY_KISSES, POINTS, REFILL_POINTS, ITEMS, SAMPLE_PRICES, BOOSTER_CAP_H, boostersThatFit } from './items.js';
 import { livePrices } from './market.js';
 import { fmtShort, fmtMoney } from './format.js';
 import { STRATEGIES } from './strategies.js';
 
-/** The cans the ladder compares (the cheapest energy per $ wins). */
-export const CANS = [MUNSTER, RED_COW, TAURINE];
+/** The cans the ladder compares: all nine energy drinks (round 8: there were three). */
+export const CANS = [GOOSE_JUICE, DAMP_VALLEY, CROCOZADE, MUNSTER, SANTA_SHOOTERS, RED_COW, ROCKSTAR_RUDOLPH, TAURINE, X_MASS];
+
+/** The least energy a day cans must add to be planned: what one Can of Munster gives. */
+export const MIN_CAN_ENERGY = 20;
 
 /** Prices when nothing live is known yet (docs, 2026-09-29 TornW3B). */
 export const LADDER_SAMPLE_PRICES = { [MUNSTER]: 1830000, [RED_COW]: 2410000, [TAURINE]: 3990000 };
+/**
+ * The other six, at the same price for an energy as the can of their size above (2024's items list has them within
+ * 1% of it: Santa Shooters against Munster, and so on; the three small ones a little under Munster's price an energy).
+ */
+export const LADDER_SAMPLE_PRICES_MORE = { [SANTA_SHOOTERS]: 1840000, [ROCKSTAR_RUDOLPH]: 2415000, [X_MASS]: 3995000, [GOOSE_JUICE]: 410000, [DAMP_VALLEY]: 840000, [CROCOZADE]: 1270000 };
 
 /** The stat the next train goes to: furthest behind its share. */
 export function nextStat(stats, shares, best) {
@@ -48,7 +56,7 @@ export function statsPerEnergy({ stats, shares, best, happy, perks = {} }) {
 /** The price to count for an item: live (10 units from the cheapest up) or the sample. */
 export function priceFor(id, prices) {
     const live = prices ? livePrices(prices) : {};
-    return live[id] || SAMPLE_PRICES[id] || LADDER_SAMPLE_PRICES[id] || null;
+    return live[id] || SAMPLE_PRICES[id] || LADDER_SAMPLE_PRICES[id] || LADDER_SAMPLE_PRICES_MORE[id] || null;
 }
 
 /** The can with the cheapest energy, with faction/book perks and an event (CaffeineCon ×2). */
@@ -78,10 +86,16 @@ export function boosterChoice({ perDay, maxE, prices, canMult = 1, capH = BOOSTE
         const n = Math.min(Math.floor(capH / ITEMS[FHC].boosterH), Math.floor(perDay / fhcP));
         if (n > 0) out.push({ id: FHC, perDay: n, energy: n * maxE, cost: n * fhcP });
     }
-    const can = bestCan(prices, { canMult });
-    if (can) {
-        const n = Math.min(Math.floor(capH / ITEMS[can.id].boosterH), Math.floor(perDay / can.price));
-        if (n > 0) out.push({ id: can.id, perDay: n, energy: n * can.energy, cost: n * can.price });
+    // Every can is weighed by the energy a day it buys (round 8): each takes 2 hours of the booster cooldown, so the
+    // cheapest energy (a 5-energy can) is not the most energy; the best one before was the only one looked at.
+    for (const id of CANS) {
+        const p = priceFor(id, prices);
+        if (!p) continue;
+        const e = Math.round(ITEMS[id].energy * canMult);
+        const n = Math.min(Math.floor(capH / ITEMS[id].boosterH), Math.floor(perDay / p));
+        // A day's cans under one Munster's worth of energy are not a plan: 5 energy a day for $400k is a line of
+        // steps for a third of a percent (the baseline showed it: "Steady + boosters" with one small can a day).
+        if (n > 0 && n * e >= MIN_CAN_ENERGY) out.push({ id, perDay: n, energy: n * e, cost: n * p });
     }
     out.sort((a, b) => b.energy - a.energy || a.cost - b.cost);
     return out[0] || null;

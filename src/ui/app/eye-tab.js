@@ -14,9 +14,10 @@
 
 import { h, t } from '../dom.js';
 import { BAND_WORDS, BAND_COLORS } from '../../core/eye/bands.js';
-import { sortWar, warSummary, statusParts, activityOf, ACTIVITY_COLORS, ACTIVITY_WORDS, WAR_KIND_WORDS } from '../../core/eye/war.js';
-import { needsRefetch, targetDetails, targetsMessage, hitText, OLD_ESTIMATE_DAYS, TARGET_LOAD, TARGETS_REFRESH_MS, RESERVE_LOW, REFILL_GAP_MS, listTargets, pageOf, pagerItems, rowState, statusOver, statusChecked, statusProgress, statusLine, BAND_CHIPS, PAGE_SIZE } from '../../core/eye/targets.js';
+import { sortWar, warSummary, statusParts, activityOf, ACTIVITY_COLORS, ACTIVITY_WORDS, WAR_KIND_WORDS, termedFilters, TERMED_WORDS } from '../../core/eye/war.js';
+import { needsRefetch, targetDetails, targetsMessage, hitText, OLD_ESTIMATE_DAYS, TARGET_LOAD, TARGETS_REFRESH_MS, RESERVE_LOW, REFILL_GAP_MS, listTargets, pageOf, pagerItems, rowState, statusOver, statusChecked, statusProgress, statusLine, BAND_CHIPS, PAGE_SIZE, SORT_KEYS, sortOf, nextSort, sortTargets, lastHits, lastHitText } from '../../core/eye/targets.js';
 import { WATCH_TAGS, WATCH_MAX, TAG_MAX, headsUps } from '../../core/eye/watch.js';
+import { chainSide, chainBonusText } from '../../core/eye/chain.js';
 import { profileUrl, attackUrl } from '../../sources/route.js';
 import { FFS_SITE_URL } from '../../api/ffscouter.js';
 import { countdown } from '../../core/bars.js';
@@ -209,10 +210,21 @@ function starBtn(ctx, p) {
     });
 }
 
+/**
+ * A column head you can sort by (round 8, the owner's pick A): a click sorts by it, a click again flips it; the way
+ * back to the default order is the bar's order line (targetChips).
+ */
+function sortHead(key, sort, ctx) {
+    const col = SORT_KEYS[key];
+    const on = Boolean(sort) && sort.key === key;
+    return h('button', { type: 'button', class: 'sortb' + (on ? ' on' : '') + (on && sort.dir === -1 ? ' up' : ''), 'data-sort': key, title: 'Sort by ' + col.label, 'aria-label': 'Sort by ' + col.label + (on ? ' (' + col.words[sort.dir === 1 ? 0 : 1] + ')' : ''), onclick: () => { ctx.ui.eyeSort = nextSort(sort, key); ctx.ui.eyePage = 0; ctx.rerender(); } }, [col.label, h('i', { class: 'arr' })]);
+}
+
 /** One page of targets (only these 20 are built). The numbers in the list's order: respect, HP kept, win. */
-function targetsTable(rows, { now, ctx, checking }) {
-    const head = ['Band', 'Player', 'Lvl', 'Respect', 'HP kept', 'Win', 'Status', 'Active', 'From', '', ''];
-    const right = [2, 3, 4, 5, 7];
+function targetsTable(rows, { now, ctx, checking, sort = null, hits = new Map() }) {
+    const head = ['Band', 'Player', 'Lvl', 'Respect', 'HP kept', 'Win', 'Status', 'Active', 'Last hit', 'From', '', ''];
+    const sortBy = { 0: 'band', 2: 'level', 3: 'respect', 4: 'keep', 5: 'win', 6: 'status', 8: 'hit' };
+    const right = [2, 3, 4, 5, 7, 8];
     const open = ctx.ui.eyeOpen;
     const down = (r) => {
         const s = rowState(r, now);
@@ -233,6 +245,8 @@ function targetsTable(rows, { now, ctx, checking }) {
             h('td', { class: 'r', text: r.forecast ? pct(r.forecast.pWin) : '—' }),
             statusCell(r, now, checking),
             h('td', { class: 'r muted', text: ago(r.lastAction, now) }),
+            // When you last attacked them, from your attacks as read (the last 100): none of them, "—".
+            h('td', { class: 'r' + (hits.get(Number(r.id)) ? '' : ' muted'), 'data-col': 'hit', title: hits.get(Number(r.id)) ? null : 'None of your last attacks read was on them.', text: lastHitText(hits.get(Number(r.id)), now) }),
             h('td', { class: 'muted', text: sourceShort(r, now) }),
             h('td', { class: 'r', style: 'width:40px' }, [starBtn(ctx, r)]),
             h('td', { class: 'r' }, [
@@ -251,7 +265,7 @@ function targetsTable(rows, { now, ctx, checking }) {
         return body;
     };
     return h('table', { class: 'tbl num eyelist' }, [
-        h('thead', {}, [h('tr', {}, head.map((x, i) => h('th', { class: [right.includes(i) ? 'r' : '', i === 3 ? 'key' : ''].filter(Boolean).join(' ') || null, style: i === 0 ? 'width:110px' : null, text: x })))]),
+        h('thead', {}, [h('tr', {}, head.map((x, i) => h('th', { class: [right.includes(i) ? 'r' : '', i === 3 && !sort ? 'key' : ''].filter(Boolean).join(' ') || null, style: i === 0 ? 'width:110px' : null, 'aria-sort': sort && sortBy[i] === sort.key ? (sort.dir === 1 ? 'descending' : 'ascending') : null }, sortBy[i] ? [sortHead(sortBy[i], sort, ctx)] : [x])))]),
         h('tbody', {}, rows.flatMap(rowOf)),
     ]);
 }
@@ -269,8 +283,18 @@ function pager(pg, ctx) {
     return h('div', { class: 'eye-pager', role: 'navigation', 'aria-label': 'Pages' }, kids);
 }
 
+/**
+ * The order line at the end of the bar. Sorted by a column (round 8, his pick A) it turns into the way back:
+ * "Sorted by HP kept, most first" and a Default order button.
+ */
+function orderRule(ctx, sort) {
+    if (!sort) return h('span', { class: 'eye-rule', 'data-order': 'default' }, ['Order: ', h('b', { text: 'band' }), ' › ', h('b', { text: 'respect' }), ' › ', h('b', { text: 'HP kept' }), ' › ', h('b', { text: 'win' })]);
+    const col = SORT_KEYS[sort.key];
+    return h('span', { class: 'eye-rule sorted', 'data-order': sort.key }, [h('span', {}, ['Sorted by ', h('b', { text: col.label }), ', ' + col.words[sort.dir === 1 ? 0 : 1]]), h('button', { class: 'btn sm line', type: 'button', 'data-act': 'default-order', onclick: () => { ctx.ui.eyeSort = null; ctx.ui.eyePage = 0; ctx.rerender(); }, text: 'Default order' })]);
+}
+
 /** The band chips and "Ready now" (Targets). */
-function targetChips(ctx, f, list) {
+function targetChips(ctx, f, list, sort = null) {
     const set = (k, v) => {
         ctx.ui.eyeFilters = { ...f, [k]: v };
         ctx.ui.eyePage = 0;
@@ -282,15 +306,28 @@ function targetChips(ctx, f, list) {
         BAND_CHIPS.map((b) => h('button', { type: 'button', class: 'eye-chip', 'aria-pressed': String(f.band === b), onclick: () => set('band', b) }, [b === 'all' ? null : h('i', { style: 'background:' + BAND_COLORS[b] }), CHIP_WORDS[b], h('span', { text: ' ' + list.counts[b] })])),
     );
     const ready = h('button', { type: 'button', class: 'eye-chip', 'data-act': 'ready', 'aria-pressed': String(f.ready), title: 'Hides hospital, abroad, traveling and jail (players you hit leave the list)', onclick: () => set('ready', !f.ready) }, ['Ready now', f.ready && list.hidden ? h('span', { text: ' · ' + list.hidden + ' hidden' }) : null]);
-    return [bands, h('div', { class: 'eye-chips' }, [ready]), h('span', { class: 'eye-rule' }, ['Order: ', h('b', { text: 'band' }), ' › ', h('b', { text: 'respect' }), ' › ', h('b', { text: 'HP kept' }), ' › ', h('b', { text: 'win' })])];
+    return [bands, h('div', { class: 'eye-chips' }, [ready]), orderRule(ctx, sort)];
+}
+
+/**
+ * A hospital row in a termed war (round 8): they med out, so it says when they are due back, or that you just hit
+ * them ("You hit 3m ago · med out due"), not a far-off clock.
+ */
+function termedTd(w, hit, now) {
+    // In a span: the greyed row dims its cells, the clock stays amber (the mockup's look).
+    if (hit && hit.kind === 'hit') return h('td', { 'data-termed': 'hit' }, [h('span', { class: 'cdn', text: 'You hit ' + Math.max(1, Math.round((now - hit.at) / 60000)) + 'm ago · med out due' })]);
+    const until = w.until * 1000;
+    return h('td', { 'data-termed': 'hosp' }, [h('span', { class: 'cdn' }, until > now ? ['Hospital · ', cd(until, now), ' · back soon'] : ['Hospital · back soon'])]);
 }
 
 /** War and Watched rows share one layout: band edge, online dot, status with out-times and landings, win and HP kept. */
-function memberRow(w, { now, ctx, first, extra = [], respect = true }) {
+function memberRow(w, { now, ctx, first, extra = [], respect = true, termed = false, hits = null }) {
     const r = w.view || { band: 'none' };
     const m = w.m;
     const act = activityOf(m, now);
     const attackable = w.state === 'okay' || w.state === 'early';
+    // A termed war: a hospital row keeps its place, greyed, until they are out.
+    const medOut = termed && w.state === 'hospital';
     const cells = [
         edgeTd(r.band || 'none', [bandCell(r.band || 'none')]),
         h('td', {}, [dot(act.kind), h('a', { href: profileUrl(w.id), target: '_blank', rel: 'noopener' }, [h('b', { class: 'w', text: m.name || String(w.id) })])]),
@@ -299,10 +336,10 @@ function memberRow(w, { now, ctx, first, extra = [], respect = true }) {
         h('td', { class: 'r', text: r.forecast && r.forecast.keep !== null ? pct(r.forecast.keep) : '—' }),
     ];
     if (respect) cells.push(h('td', { class: 'r', text: r.respect ? r.respect.toFixed(2) : '—' }));
-    cells.push(statusTd(w.parts, now, ctx.settings), h('td', { class: 'muted', text: act.text }));
+    cells.push(medOut ? termedTd(w, hits ? hits.get(Number(w.id)) : null, now) : statusTd(w.parts, now, ctx.settings), h('td', { class: 'muted', text: act.text }));
     cells.push(...extra);
     cells.push(h('td', { class: 'r' }, [attackable || w.state === 'hospital' ? attackBtn(w.id, first && attackable, r.band === 'low') : null]));
-    return h('tr', { class: w.state === 'fallen' ? 'whatif' : null }, cells);
+    return h('tr', { class: w.state === 'fallen' || medOut ? 'whatif' : null, 'data-state': w.state }, cells);
 }
 
 function memberHead(cols, widths = {}) {
@@ -310,10 +347,10 @@ function memberHead(cols, widths = {}) {
     return h('thead', {}, [h('tr', {}, cols.map((x, i) => h('th', { class: right.has(x) ? 'r' : null, style: i === 0 ? 'width:110px' : widths[x] || null, text: x })))]);
 }
 
-function warTable(rows, { now, ctx }) {
+function warTable(rows, { now, ctx, termed = false, hits = null }) {
     let first = true;
     const body = rows.map((w) => {
-        const tr = memberRow(w, { now, ctx, first, extra: [h('td', { class: 'r', style: 'width:40px' }, [starBtn(ctx, { id: w.id, name: w.m.name, level: w.m.level })])] });
+        const tr = memberRow(w, { now, ctx, first, termed, hits, extra: [h('td', { class: 'r', style: 'width:40px' }, [starBtn(ctx, { id: w.id, name: w.m.name, level: w.m.level })])] });
         if (w.state === 'okay' || w.state === 'early') first = false;
         return tr;
     });
@@ -378,7 +415,7 @@ function watchedTable(rows, { now, ctx }) {
 }
 
 /** Members (war or watched) with their view, state and status parts. */
-function memberRows(members, e, { now, early = new Set(), flights = {}, war = false }) {
+function memberRows(members, e, { now, early = new Set(), flights = {}, war = false, termed = false }) {
     const views = new Map((members || []).map((mm) => [Number(mm.id), e.view(Number(mm.id), { level: mm.level, name: mm.name, life: mm.life || null }, { war })]));
     const bands = {};
     const respect = {};
@@ -393,7 +430,7 @@ function memberRows(members, e, { now, early = new Set(), flights = {}, war = fa
         }
     }
     // Within a band the one order: respect, then HP kept, then win.
-    return sortWar(members || [], { bands, respect, keep, win, early, nowS: Math.floor(now / 1000) }).map((r) => ({ ...r, view: views.get(r.id), parts: statusParts(r.m, { now, seenAt: flights[r.id] ? flights[r.id].at : null, early: r.state === 'early' }) }));
+    return sortWar(members || [], { bands, respect, keep, win, early, nowS: Math.floor(now / 1000), termed }).map((r) => ({ ...r, view: views.get(r.id), parts: statusParts(r.m, { now, seenAt: flights[r.id] ? flights[r.id].at : null, early: r.state === 'early' }) }));
 }
 
 function warControls(ctx, e) {
@@ -428,35 +465,93 @@ function headsUpBlock(list, now, settings) {
     ]);
 }
 
+/**
+ * The chain counter in the chain mode card (round 8: "wire in the chain counters"): per chain the count, the time left
+ * on the 5:00 timer (amber under a minute) and the hits to the next bonus. Yours is read with your bars (about every
+ * 30 s; Torn's own page shows it live), the enemy's every 30 s while you are at war. Nothing read: it says so.
+ * @param {{mine: object|null, enemy: {fid, name, raw}|null}|null} chains - app-page.js chainsNow()
+ */
+export function chainCounter(chains, now = Date.now()) {
+    const sides = [{ who: 'Your faction', side: chainSide(chains ? chains.mine : null, now) }];
+    if (chains && chains.enemy) sides.push({ who: chains.enemy.name || 'Enemy faction', side: chainSide(chains.enemy.raw, now) });
+    return h(
+        'div',
+        { class: 'chainc', 'data-chain-counter': '1' },
+        sides.map(({ who, side }) => {
+            const timed = side.state === 'on' || side.state === 'cooldown';
+            const bonus = side.state === 'on' && side.next ? [h('b', { text: String(side.next.hits) }), chainBonusText(side).replace(/^\d+/, '')] : [chainBonusText(side)];
+            return h('div', { class: 'chainc-side', 'data-chain': side.state }, [
+                h('span', { class: 'who', text: who }),
+                h('span', { class: 'time' + (side.low ? ' low' : '') }, [timed ? cd(side.until, now) : '—']),
+                h('b', { class: 'n', text: side.count === null ? '—' : fmtInt(side.count) }),
+                h('span', { class: 'bonus' }, bonus),
+            ]);
+        }),
+    );
+}
+
+/**
+ * Chain mode (the owner, session 9): a card over "How sure", like war mode. A chain needs your energy, so chain mode
+ * stacks it: no training steps and no pings about energy or training until it is turned off, which recalibrates from
+ * your bars. It is the same one state as Home's "I'm stacking" (`m.stacking`). While it is on it carries the chain
+ * counter.
+ */
+export function chainModeCard(m, ctx) {
+    const st = (m && m.stacking) || null;
+    const busy = Boolean(m && m.planBusy);
+    return h('div', { 'data-chain-mode': st ? 'on' : 'off' }, [
+        sectionHead('Chain mode', meta([st ? 'on since ' + clock(st.since, ctx.settings) + ' · stacking' : 'off']), null, 'h3'),
+        // While it is on, the chain counter (round 8): your chain from your bars, the enemy's when you are at war.
+        st ? chainCounter(ctx.eye && ctx.eye.chains ? ctx.eye.chains() : null, Date.now()) : null,
+        h('p', { class: 'muted', style: 'margin:0 0 10px', text: st ? 'Your energy is kept for the chain: no training steps, and no Discord pings about energy or training. Ending it recalibrates from your bars.' : 'Chaining? Chain mode stacks your energy: no training steps, and no Discord pings about energy or training, until you end it.' }),
+        st
+            ? h('button', { class: 'btn primary', type: 'button', disabled: busy, onclick: () => ctx.resumeStacking && ctx.resumeStacking(), text: 'End chain mode · recalibrate' })
+            : h('button', { class: 'btn', type: 'button', disabled: busy, onclick: () => ctx.startStacking && ctx.startStacking(), text: 'Chain mode' }),
+    ]);
+}
+
 export function renderEye(m, ctx) {
     const e = ctx.eye;
     const now = Date.now();
     const ui = ctx.ui;
     const mode = eyeModeOf(ui);
     // Kept filters of older versions (sort, level range, the seven Show ticks) are ignored.
-    const f = eyeFilters(ui.eyeFilters);
+    let f = eyeFilters(ui.eyeFilters);
+    // War mode by itself (round 8): this war's answer to "Termed war / med-out deal?" sets the ticks, once per answer
+    // on this page (the ticks still work by hand after it).
+    const warNow = mode === 'war' && e.war ? e.war.state() : null;
+    const ask = (warNow && warNow.ask) || null;
+    const termed = ask && (ask.termed === true || ask.termed === false) ? ask.termed : null;
+    if (ask && termed !== null && ui.eyeWarSet !== ask.key + ':' + termed) {
+        ui.eyeWarSet = ask.key + ':' + termed;
+        ui.eyeFilters = { ...f, ...termedFilters(termed) };
+        f = eyeFilters(ui.eyeFilters);
+    }
     const reload = () => e.load({ ...TARGET_LOAD });
     const watch = e.watch ? e.watch.state() : { list: [], states: {}, flights: {}, offers: [] };
     const stored = e.stored ? e.stored() : null;
     const rowsAll = mode === 'targets' ? e.rows() : [];
     const list = mode === 'targets' ? listTargets(rowsAll, { band: f.band, ready: f.ready, now }) : null;
+    // Sorted by a column (round 8): the whole list, before it is cut into pages; null is the default order.
+    const sort = sortOf(ui.eyeSort);
+    const hits = mode === 'targets' ? lastHits(e.attacks ? e.attacks() : []) : new Map();
 
     // Controls
     const modeSeg = h('div', { class: 'seg modes', role: 'group', 'aria-label': 'Mode' }, EYE_MODES.map(([k, label]) => h('button', { type: 'button', 'aria-pressed': String(k === mode), onclick: () => { ui.eyeMode = k; ctx.rerender(); }, text: k === 'watched' && watch.list.length ? label + ' ' + watch.list.length : label })));
     const bar1 = [modeSeg];
     if (mode === 'war' && e.war) bar1.push(...warControls(ctx, e));
     if (mode === 'targets') {
-        bar1.push(...targetChips(ctx, f, list));
-    } else if (mode === 'war') {
-        bar1.push(h('span', { class: 'muted', text: 'attackable now first, then out of hospital soonest' }));
-    } else {
+        bar1.push(...targetChips(ctx, f, list, sort));
+    } else if (mode !== 'war') {
         bar1.push(h('span', { class: 'sep' }), h('span', { class: 'muted', text: watch.list.length + ' of ' + WATCH_MAX + ' · read every 60 s while this is open' }));
     }
     const bar2 =
         mode === 'war'
             ? [
                   t('lab', 'Show'),
-                  h('div', { class: 'ticks', role: 'group', 'aria-label': 'Show' }, EYE_TICKS.map(([k, label]) => h('button', { type: 'button', class: 'tk', 'aria-pressed': String(Boolean(f[k])), onclick: () => { ui.eyeFilters = { ...f, [k]: !f[k] }; ctx.rerender(); } }, [h('i'), label]))),
+                  // The ticks the answer set have a soft ring.
+                  h('div', { class: 'ticks', role: 'group', 'aria-label': 'Show' }, EYE_TICKS.map(([k, label]) => h('button', { type: 'button', class: 'tk' + (termed !== null && k in termedFilters(termed) ? ' set' : ''), 'data-tick': k, 'aria-pressed': String(Boolean(f[k])), onclick: () => { ui.eyeFilters = { ...f, [k]: !f[k] }; ctx.rerender(); } }, [h('i'), label]))),
+                  h('span', { class: 'eye-rule', 'data-war-order': termed === true ? 'termed' : 'ready' }, termed === true ? [h('b', { text: 'Stomp' }), ', then ', h('b', { text: 'respect' }), ' · hospital keeps its place'] : ['ready first, then out of hospital soonest']),
               ]
             : [];
 
@@ -477,11 +572,14 @@ export function renderEye(m, ctx) {
     const heads = headsUps(watch.list, watch.states, watch.flights, now);
 
     if (mode === 'war') {
-        const w = e.war ? e.war.state() : { members: [], enemies: [] };
-        let rows = memberRows(w.members || [], e, { now, early: w.early || new Set(), flights: watch.flights, war: true });
-        rows = rows.filter((r) => !(f.warHideLow && r.band === 'low') && !(f.warHideHosp && r.state === 'hospital') && !(f.warHideTravel && (r.state === 'traveling' || r.state === 'abroad')));
-        const sum = warSummary(rows, Math.floor(now / 1000));
-        const fallen = rows.filter((r) => r.state === 'fallen').length;
+        const w = warNow || { members: [], enemies: [] };
+        const everyone = memberRows(w.members || [], e, { now, early: w.early || new Set(), flights: watch.flights, war: true, termed: termed === true });
+        const away = (r) => r.state === 'traveling' || r.state === 'abroad';
+        const rows = everyone.filter((r) => !(f.warHideLow && r.band === 'low') && !(f.warHideHosp && r.state === 'hospital') && !(f.warHideTravel && away(r)));
+        // The war list as it shows: the attack page's Next button walks it ("Next enemy").
+        if (e.shown && w.fid && (w.members || []).length) e.shown('war', rows);
+        const sum = warSummary(everyone, Math.floor(now / 1000));
+        const fallen = everyone.filter((r) => r.state === 'fallen').length;
         const empty = w.fid
             ? w.loading && !rows.length
                 ? 'Reading the faction…'
@@ -491,16 +589,50 @@ export function renderEye(m, ctx) {
               : w.warsLoading
                 ? 'Looking for your faction’s wars…'
                 : 'Your faction isn’t at war right now. Type a faction’s id to watch it anyway.';
+        // Your faction's own war (round 8): war mode turned itself on, the question once per war, then the answer in a line.
+        const answer = (v) => () => {
+            if (v === null) ui.eyeWarSet = null;
+            e.war.termed(v);
+        };
+        const began = ask && ask.start && Math.abs(ask.autoAt - ask.start * 1000) < 15 * 60000;
+        const autoMeta = ask ? 'War mode turned itself on at ' + clock(ask.autoAt, ctx.settings) + (began ? ', when your faction’s ' + WAR_KIND_WORDS[ask.kind] + ' began' : ': your faction is in a ' + WAR_KIND_WORDS[ask.kind]) : null;
+        const askCard =
+            ask && termed === null
+                ? h('div', { class: 'ask', 'data-war-ask': 'ask' }, [
+                      h('div', {}, [h('b', { text: 'Termed war / med-out deal?' }), h('span', { text: 'You hit, they med out, you hit again. Your answer sets this war’s filters. Asked once per war.' })]),
+                      h('div', { class: 'acts' }, [h('button', { class: 'btn primary', type: 'button', 'data-termed': 'yes', onclick: answer(true), text: 'Yes' }), h('button', { class: 'btn', type: 'button', 'data-termed': 'no', onclick: answer(false), text: 'No' })]),
+                  ])
+                : ask
+                  ? h('div', { class: 'answ', 'data-war-ask': termed ? 'yes' : 'no' }, [h('i'), h('span', { text: TERMED_WORDS[termed ? 'yes' : 'no'] }), h('button', { class: 'lnk', type: 'button', 'data-termed': 'change', onclick: answer(null), text: 'Change' })])
+                  : null;
+        // What the ticks hide right now, said under the list (by your answer, or by your own ticks after it).
+        let hiddenNote = null;
+        if (ask) {
+            const hosp = f.warHideHosp ? everyone.filter((r) => r.state === 'hospital') : [];
+            const gone = f.warHideTravel ? everyone.filter(away) : [];
+            const outs = hosp.map((r) => r.until * 1000).filter((t) => t > now);
+            const parts = [];
+            if (hosp.length) parts.push(h('span', {}, [hosp.length + ' in hospital', ...(outs.length ? [' (next out in ', cd(Math.min(...outs), now), ')'] : [])]));
+            if (gone.length) parts.push(h('span', { text: gone.length + ' away' }));
+            const sets = termed !== null ? termedFilters(termed) : null;
+            const byAnswer = Boolean(sets) && f.warHideHosp === sets.warHideHosp && f.warHideTravel === sets.warHideTravel;
+            const kids = termed === null ? ['Not answered yet: the list is as it is today' + (parts.length || f.warHideLow ? '.' : ', everyone shown.')] : parts.length ? [byAnswer ? 'Hidden by your answer: ' : 'Hidden by your ticks: ', ...parts.flatMap((p, i) => (i ? [' · ', p] : [p])), '.'] : [byAnswer ? 'Nobody is hidden by your answer right now.' : 'Nobody is hidden right now.'];
+            if (termed === true && !f.warHideHosp) kids.push(' Hospital rows stay: they med out.');
+            hiddenNote = h('div', { class: 'note2', 'data-war-hidden': '1' }, kids);
+        }
         main.push(
             h('div', { class: 'lead', 'data-mode': 'war' }, [
-                sectionHead('War' + (w.name ? ' · ' + w.name : ''), meta(['everyone, coloured by how the fight goes for you · attackable now first, then who’s out soonest' + (w.fid ? ' · read every 10 s while open' : '')])),
+                sectionHead('War' + (w.name ? ' · ' + w.name : ''), meta([(autoMeta || 'everyone, coloured by how the fight goes for you · attackable now first, then who’s out soonest') + (w.fid ? ' · read every 10 s while open' : '')])),
+                askCard,
                 w.error && rows.length ? h('div', { class: 'why', style: 'margin-bottom:8px', text: 'Couldn’t read the faction just now: ' + w.error }) : null,
-                rows.length ? warTable(rows, { now, ctx }) : h('p', { class: 'muted', style: 'margin:0', text: empty }),
+                rows.length ? warTable(rows, { now, ctx, termed: termed === true, hits: termed === true && e.hits ? e.hits() : null }) : h('p', { class: 'muted', style: 'margin:0', text: empty }),
+                hiddenNote,
                 h('div', { class: 'note2', text: 'War shows everyone, even under 50% HP kept (red: the colour tells you the risk) and the fallen (greyed, at the bottom). Landing times are estimated from when we first saw them fly and the standard flight time.' }),
             ]),
         );
-        const outs = rows.filter((r) => r.state === 'hospital').slice(0, 5);
-        const lands = rows.filter((r) => r.state === 'traveling' && r.parts.at).sort((a, b) => a.parts.at - b.parts.at).slice(0, 3);
+        // The side pane counts everyone, whatever the ticks hide (a real war hides hospital rows; who is out next stays here).
+        const outs = everyone.filter((r) => r.state === 'hospital').sort((a, b) => (a.until || Infinity) - (b.until || Infinity)).slice(0, 5);
+        const lands = everyone.filter((r) => r.state === 'traveling' && r.parts.at).sort((a, b) => a.parts.at - b.parts.at).slice(0, 3);
         pane.push(
             h('div', {}, [
                 sectionHead('Next out of hospital', null, null, 'h3'),
@@ -510,7 +642,7 @@ export function renderEye(m, ctx) {
                           ...lands.flatMap((r) => [h('dt', { text: '~' + clock(r.parts.at, ctx.settings) }), h('dd', { text: (r.m.name || r.id) + ' lands' })]),
                       ])
                     : h('p', { class: 'muted', style: 'margin:0', text: 'Nobody in hospital.' }),
-                h('div', { class: 'note2', text: sum.attackable + ' attackable now · ' + rows.filter((r) => r.state === 'hospital' && r.until * 1000 - now < 5 * 60000).length + ' out within 5 min · ' + (sum.traveling + rows.filter((r) => r.state === 'abroad').length) + ' traveling or abroad · ' + rows.filter((r) => r.band === 'low').length + ' under 50%' + (fallen ? ' · ' + fallen + ' fallen' : '') }),
+                h('div', { class: 'note2', text: sum.attackable + ' attackable now · ' + everyone.filter((r) => r.state === 'hospital' && r.until * 1000 - now < 5 * 60000).length + ' out within 5 min · ' + everyone.filter(away).length + ' traveling or abroad · ' + everyone.filter((r) => r.band === 'low').length + ' under 50%' + (fallen ? ' · ' + fallen + ' fallen' : '') }),
             ]),
         );
         if (heads.length) pane.push(headsUpBlock(heads, now, ctx.settings));
@@ -549,7 +681,9 @@ export function renderEye(m, ctx) {
         main.push(h('div', { class: 'lead', 'data-mode': 'watched' }, kids));
         pane.push(heads.length ? headsUpBlock(heads, now, ctx.settings) : h('div', {}, [sectionHead('Heads-up', meta(['watched players']), null, 'h3'), h('p', { class: 'muted', style: 'margin:0', text: 'Nothing coming up in the next 3 minutes.' })]));
     } else {
-        const rows = list.rows;
+        const rows = sort ? sortTargets(list.rows, sort, { now, hits }) : list.rows;
+        // The list as it shows, in its order: the attack page's Next button walks it (round 8).
+        if (e.shown && stored && Array.isArray(stored.list)) e.shown('targets', rows);
         const pg = pageOf(rows, ui.eyePage || 0);
         if ((ui.eyePage || 0) !== pg.page) ui.eyePage = pg.page;
         const statuses = e.statuses || null;
@@ -568,7 +702,7 @@ export function renderEye(m, ctx) {
         else if (!rows.length) {
             const text = msg.kind !== 'none' ? msg.text : list.counts.all ? (f.ready && list.hidden ? 'Nobody ready now: ' + list.hidden + ' hidden (hospital, away or jail).' : 'Nobody in this band.') : 'No targets yet.';
             body = h('p', { class: msg.kind === 'dead' || msg.kind === 'error' ? 'c-bad' : 'muted', style: 'margin:0' }, [text, msg.kind === 'dead' ? h('span', {}, [' · ', h('a', { href: '#settings', onclick: (ev) => { ev.preventDefault(); ctx.go('settings'); }, text: 'check it in Settings' })]) : null]);
-        } else body = targetsTable(pg.rows, { now, ctx, checking });
+        } else body = targetsTable(pg.rows, { now, ctx, checking, sort, hits });
         const notes = [];
         const d = (stored && stored.dropped) || {};
         if (stored && stored.list && stored.list.length) {
@@ -597,6 +731,7 @@ export function renderEye(m, ctx) {
         if (heads.length) pane.push(headsUpBlock(heads, now, ctx.settings));
     }
 
+    pane.push(chainModeCard(m, ctx));
     const src = e.sources();
     pane.push(
         h('div', {}, [

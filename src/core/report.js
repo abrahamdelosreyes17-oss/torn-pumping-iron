@@ -9,19 +9,21 @@
  */
 
 import { logAsText } from './errlog.js';
+import { ledgerBooking } from './ledger.js';
 
 export const REPORT_KIND = 'torn-pumping-iron-report';
 
-/** The first money-like field of a log line's data (what moneyOf reads), or null. */
-export const MONEY_FIELDS = ['money', 'total_value', 'value', 'cost', 'total_cost', 'price', 'amount', 'worth'];
-
-export function moneyFieldOf(data) {
-    if (!data || typeof data !== 'object') return null;
-    for (const k of MONEY_FIELDS) {
-        const n = Number(data[k]);
-        if (Number.isFinite(n) && n > 0) return k;
-    }
-    return null;
+/**
+ * The field a log line's amount is booked from, by the ledger's own table (core/ledger.js): its name (two fields
+ * as "won_amount - bet_amount"), "not sorted" for a log type the table does not know, "missing: <field>" when
+ * the line does not carry the field the table reads (Torn's field differs from what the table was written from).
+ */
+export function bookedFieldOf(type, data) {
+    const b = ledgerBooking(type);
+    if (!b) return 'not sorted';
+    const d = data && typeof data === 'object' ? data : {};
+    const missing = b.fields.filter((k) => d[k] === null || d[k] === undefined || d[k] === '' || !Number.isFinite(Number(d[k])));
+    return missing.length ? 'missing: ' + missing.join(', ') : b.fields.join(' - ');
 }
 
 /** What a value is, never the value: "number", "text", "list", or an object's own field names. */
@@ -40,8 +42,8 @@ function logShapeOf(v) {
 /**
  * The money log by log type: Torn's title and type id, how many lines on how
  * many days, the names of the `data` fields (never an amount, an id or a
- * name) and which field was read as the amount (ROUND7-PLAN §3 C.0: the
- * account table is written from this, not from guesses). A line listed under
+ * name) and which field the ledger books the amount from (`bookedFieldOf`;
+ * ROUND7-PLAN §3 C.0: the account table is written from this, not from guesses). A line listed under
  * two categories counts once.
  * @param {object[]} rows - raw v2 log lines ({id, timestamp, details: {id, title, category}, data})
  * @param {object} [acc] - what earlier pages gave: {types: {}, seen: Set}
@@ -66,7 +68,7 @@ export function logFieldsOf(rows, acc = null) {
             f.lines++;
             f.is[logShapeOf(v)] = 1;
         }
-        const m = moneyFieldOf(data) || '(none read)';
+        const m = bookedFieldOf(d.id, data);
         r.amount[m] = (r.amount[m] || 0) + 1;
     }
     return out;
@@ -119,11 +121,12 @@ export function planSummary(saved) {
  * @param {object|null} r.saved - the whole saved plan (summarised here)
  * @param {object[]} [r.learning] - the learning export's files (core/learndata.js exportFiles): gym samples, gym log, fights, model
  * @param {object[]|null} [r.moneyFields] - logFieldsList()
+ * @param {object|null} [r.ledger] - core/ledger.js ledgerShape(): your books in names and counts
  * @param {object} [r.statsHistory] - {day: {str, spd, def, dex, total}}
  * @param {object} [r.env] - {userAgent, screen, memoryMB, cores}
  * @returns {Array<{name: string, data: string|Uint8Array}>}
  */
-export function reportFiles({ happened = '', expected = '', shots = [], log = [], state = {}, player = null, saved = null, learning = [], moneyFields = null, statsHistory = null, env = {}, now = Date.now() }) {
+export function reportFiles({ happened = '', expected = '', shots = [], log = [], state = {}, player = null, saved = null, learning = [], moneyFields = null, ledger = null, statsHistory = null, env = {}, now = Date.now() }) {
     const errors = log.filter((e) => e.kind === 'error');
     const safe = (n) => String(n || 'screenshot').replace(/[^\w.-]+/g, '_').slice(0, 60);
     const stamp = new Date(now).toISOString();
@@ -143,7 +146,7 @@ export function reportFiles({ happened = '', expected = '', shots = [], log = []
         player ? '  stats ' + ['str', 'spd', 'def', 'dex'].map((k) => k.toUpperCase() + ' ' + fmt(player.stats[k] || 0)).join(' · ') + ' · total ' + fmt(reportTotal(player.stats)) : '  stats: not read yet',
         player ? '  happy maximum ' + fmt(player.happyMax || 0) + ' · energy maximum ' + (player.energyMax || '?') + ' · gym ' + (player.gymId || '?') + ' · build ' + (player.build || '?') : null,
         saved ? '  plan: ' + saved.months + (saved.months === 1 ? ' month, ' : ' months, ') + (saved.rec ? saved.rec.recommended : '?') + ' recommended' : '  plan: none saved',
-        (state.runs || []).length ? '  last plan run: ' + state.runs.slice(-1).map((x) => (x.kind === 'replan' ? 'Re-plan' : 'Create plan') + ' ' + (x.months || '?') + (x.months === 1 ? ' month, ' : ' months, ') + (x.ms / 1000).toFixed(1) + ' s' + (x.hiddenMs > 0 ? ' (' + (x.hiddenMs / 1000).toFixed(1) + ' s of it with the tab not in front)' : '') + (x.ok ? '' : ' - ' + (x.error || 'failed')))[0] : null,
+        (state.runs || []).length ? '  last plan run: ' + state.runs.slice(-1).map((x) => (x.kind === 'replan' ? 'Recalibrate' : 'Create plan') + ' ' + (x.months || '?') + (x.months === 1 ? ' month, ' : ' months, ') + (x.ms / 1000).toFixed(1) + ' s' + (x.hiddenMs > 0 ? ' (' + (x.hiddenMs / 1000).toFixed(1) + ' s of it with the tab not in front)' : '') + (x.ok ? '' : ' - ' + (x.error || 'failed')))[0] : null,
         '',
         'ATTACHED',
         shots.length ? shots.map((s, i) => '  screenshots/' + (i + 1) + '-' + safe(s.name)).join('\n') : '  no screenshots',
@@ -154,6 +157,7 @@ export function reportFiles({ happened = '', expected = '', shots = [], log = []
         '  stats-history.json - your stats at each day\'s last read',
         '  learning/ - your trains from Torn\'s log, the sessions the app saw, fights, what it learned',
         '  money-log-fields.json - your money log by log type: titles and the NAMES of the fields, never an amount',
+        '  ledger.json - your books: how many lines each account and log type holds and the field booked, never an amount' + (ledger ? '' : ' (not read yet)'),
         '',
         'No API key, player id or name is in these files.',
     ].filter((x) => x !== null);
@@ -166,6 +170,7 @@ export function reportFiles({ happened = '', expected = '', shots = [], log = []
         { name: 'state.json', data: JSON.stringify({ kind: REPORT_KIND, v: 1, exportedAt: stamp, ...state, env }, null, 1) },
         { name: 'stats-history.json', data: JSON.stringify(statsHistory || {}) },
         { name: 'money-log-fields.json', data: JSON.stringify(moneyFields || [], null, 1) },
+        { name: 'ledger.json', data: JSON.stringify(ledger, null, 1) },
     ];
     for (const f of learning || []) files.push({ name: 'learning/' + f.name, data: f.data });
     shots.forEach((s, i) => files.push({ name: 'screenshots/' + (i + 1) + '-' + safe(s.name), data: s.data }));
@@ -173,7 +178,7 @@ export function reportFiles({ happened = '', expected = '', shots = [], log = []
 }
 
 /** The lines Settings shows before anything is made: what the zip will hold. */
-export function reportIncludes({ shots = 0, log = [], player = null, saved = null, gymLog = 0, moneyTypes = 0 }) {
+export function reportIncludes({ shots = 0, log = [], player = null, saved = null, gymLog = 0, moneyTypes = 0, ledgerLines = 0 }) {
     const errors = log.filter((e) => e.kind === 'error').length;
     return [
         'What you wrote above',
@@ -183,6 +188,7 @@ export function reportIncludes({ shots = 0, log = [], player = null, saved = nul
         saved ? 'Your saved plan in short (every plan’s stats and cost)' : 'No saved plan yet',
         gymLog ? 'Your trains from Torn’s log (' + gymLog + ' lines) and what the app learned' : 'What the app learned from your trains',
         moneyTypes ? 'Your money log by type (' + moneyTypes + ' types): titles and field names only, never an amount' : 'Money log fields: none read (needs the Full key)',
+        ledgerLines ? 'Your books by account (' + ledgerLines + ' lines): counts and field names only, never an amount' : null,
         'Version and settings: no API key, no player id or name',
-    ];
+    ].filter(Boolean);
 }

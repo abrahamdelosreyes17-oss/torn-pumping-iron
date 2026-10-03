@@ -6,6 +6,12 @@
  * Is Bliss. Then the Recommended card, every other plan with why it isn't
  * the pick (plans that don't fit you hidden behind a tick), and where your
  * energy comes from. Pane: the 30-day chart, the build, the Bliss card.
+ *
+ * Round 8 (mockups/round8/plan-path.html, the owner's pick A): a saved plan
+ * is a path of stretches, and the path is what is recommended. The plan card
+ * says "your path" with Now and Next, each month names the plans it follows,
+ * Recommended is the table of stretches, and the single plans are listed as
+ * "One plan the whole way", every one clickable (the best of them included).
  */
 
 import { h, t } from '../dom.js';
@@ -14,7 +20,9 @@ import { fmtInt, fmtShort, fmtMoney, fmtPct, fmtSigned } from '../../core/format
 import { STRATEGIES, SPECIAL, planWhat } from '../../core/strategies.js';
 import { tierWords } from '../../core/candy.js';
 import { pickWarning, perMillion, PICK_BY } from '../../core/recommend.js';
-import { budgetOf } from '../../core/auto.js';
+import { budgetOf, affordLine } from '../../core/auto.js';
+import { moneyFigures } from '../../core/cashflow.js';
+import { rehabWords } from '../../core/rehab.js';
 import { BUILDS, BUILD_ORDER, BUILD_ALIASES, resolveBuild, highStatOf } from '../../core/builds.js';
 import { GEORGES, gymById } from '../../core/gyms.js';
 import { XANAX, EDVD, FHC, POINTS, REFILL_POINTS, ITEMS, CANDY_KISSES, CANDY_IDS, itemName } from '../../core/items.js';
@@ -22,7 +30,7 @@ import { lineChart, chartNum } from '../charts.js';
 import { sectionHead, meta, STAT_COLOR, planRunWords } from './common.js';
 import { trainInText, whyOneStat, whyMix } from '../../core/gympage.js';
 import { progressOf } from '../../core/planline.js';
-import { monthlyOf } from '../../core/saved-plan.js';
+import { monthlyOf, pathStretches, monthPlans, pathWhy } from '../../core/saved-plan.js';
 
 const KIND_TAG = { steady: 'Steady', boost: 'Boost', jump: 'Jump' };
 
@@ -126,7 +134,7 @@ function budgetControls(m, ctx) {
     const a = m.auto;
     if (pickBy === 'max') return [h('span', { class: 'muted', text: '· no budget' })];
     if (pickBy === 'auto' && a && a.ready) {
-        return [t('lab', 'with'), h('b', { class: 'white num', text: fmtMoney(Math.round(a.budgetPerDay)) + ' a day' }), h('span', { class: 'muted', text: a.source === 'floor' ? 'from your certain income (bank, dividends, rent)' : 'from your income (last ' + Math.round(a.days) + ' days' + (a.source === 'log' ? ', money log' : ', networth') + ')' + (a.floor && a.floor.perDay > 0 ? ' · ' + fmtMoney(Math.round(a.floor.perDay)) + ' of it certain' : '') }), h('span', { class: 'info', title: (a.source === 'log' ? 'Income = money in less money out a day in your money log (Full key), plus what the gym plan spends.' : 'Income = how fast your networth grew (Torn’s own history), plus what the gym plan spends; your money log has nothing readable yet.') + (a.networthPerDay !== null && a.source === 'log' ? ' Cross-check: your networth grew ' + fmtMoney(Math.round(a.networthPerDay)) + ' a day.' : '') + ' Auto spends at most that a day.', text: 'i' })];
+        return [t('lab', 'with'), h('b', { class: 'white num', text: Number.isFinite(a.budgetPerDay) ? fmtMoney(Math.round(a.budgetPerDay)) + ' a day' : 'no limit' }), h('span', { class: 'muted', text: a.source === 'books' ? 'from your books (last ' + Math.round(a.days) + ' days)' : a.source === 'floor' ? 'from your certain income (bank, dividends, rent)' : 'from your income (last ' + Math.round(a.days) + ' days, networth)' + (a.floor && a.floor.perDay > 0 ? ' · ' + fmtMoney(Math.round(a.floor.perDay)) + ' of it certain' : '') }), h('span', { class: 'info', title: (a.source === 'books' ? a.books.why + ' Your books are your money log (Full key), each line once, sorted by Torn’s log type; one-offs and money that only changed place are not counted.' : 'Income = how fast your networth grew (Torn’s own history), plus what the gym plan spends; your money log is not read yet.') + (a.networthPerDay !== null && a.source === 'books' ? ' Cross-check: your networth grew ' + fmtMoney(Math.round(a.networthPerDay)) + ' a day.' : '') + ' Auto spends at most that a day.', text: 'i' })];
     }
     // Round 6: a budget a day (the plan's length comes from Create plan).
     const perDay = Math.round((s.budget || 0) / (s.horizonDays || 30));
@@ -177,17 +185,17 @@ function controls(m, ctx) {
     const bliss = m.pc && m.pc.perks.bliss;
     bar2.push(t('lab', 'Ignorance Is Bliss'), h('span', { class: 'tag' + (bliss ? ' good' : ''), text: bliss ? 'Active' + (m.pc.perks.blissDays ? ' · ' + m.pc.perks.blissDays + ' days' : '') : 'Not active' }), h('span', { class: 'info', title: 'Read from your perks: the book’s line shows while it is active (31 days). The plan counts it the day it shows.', text: 'i' }));
     // The note for the whole bar sits at the right of the second line, so the first never wraps for it.
-    bar2.push(h('span', { class: 'muted', style: 'margin-left:auto', text: 'Used by the next Create plan or Re-plan' }));
+    bar2.push(h('span', { class: 'muted', style: 'margin-left:auto', text: 'Used by the next Create plan or Recalibrate' }));
     return [bar1, bar2];
 }
 
 /**
- * "Open it by" (round 7, optional): a date for the gym to unlock. With one, the next Create plan or Re-plan leaves
+ * "Open it by" (round 7, optional): a date for the gym to unlock. With one, the next Create plan or Recalibrate leaves
  * out the plans that open it later; without one the gym is only shown on every plan. It never outranks stats.
  */
 function openByInput(goal, ctx) {
     const value = goal.by ? new Date(goal.by - 1).toISOString().slice(0, 10) : '';
-    const inp = h('input', { class: 'inp num', type: 'date', 'aria-label': 'Open it by', title: 'Optional: plans that open the gym after this day are left out of the next Create plan or Re-plan. The gym never outranks stats otherwise.', style: 'width:138px', value });
+    const inp = h('input', { class: 'inp num', type: 'date', 'aria-label': 'Open it by', title: 'Optional: plans that open the gym after this day are left out of the next Create plan or Recalibrate. The gym never outranks stats otherwise.', style: 'width:138px', value });
     inp.addEventListener('change', () => {
         const day = Date.parse(inp.value + 'T00:00:00Z');
         // Through that Torn day: its end.
@@ -238,7 +246,7 @@ function recommendedCard(m, ctx, rec, compare, days) {
     // What the saved plan was made with (round 6: its budget and income are the ones it saw, until you recalibrate).
     const snap = m.savedPlan ? m.savedPlan.snapshot : null;
     const autoOn = Boolean(snap && snap.income && rec.pickBy === 'auto');
-    const money = autoOn ? fmtMoney(Math.round(snap.budgetPerDay)) + ' a day from your income' : snap && snap.budgetPerDay !== null ? fmtMoney(Math.round(snap.budgetPerDay)) + ' a day' : 'no budget';
+    const money = autoOn ? (snap.budgetPerDay === null ? 'no limit, your pick' : fmtMoney(Math.round(snap.budgetPerDay)) + (snap.income.source === 'books' ? ' a day from your books' : ' a day from your income')) : snap && snap.budgetPerDay !== null ? fmtMoney(Math.round(snap.budgetPerDay)) + ' a day' : 'no budget';
     const kids = [
         sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + money + ' · ' + days + ' days'])),
         h('div', { class: 'prime num' }, [
@@ -308,11 +316,11 @@ function refillLine(r, days) {
     return h('div', { class: 'note2 num' }, [h('b', { class: 'white', text: 'Daily refill: worth it.' }), words ? ' It adds' + words + '.' : ' It fits your budget.']);
 }
 
-/** Where Auto's income comes from, from the money log (the Full key). */
+/** What comes in, from your books (the money log, Full key): the biggest lines, a day. */
 function incomeLines(b) {
     const top = b.lines.filter((l) => l.dir === 'in').slice(0, 4);
     if (!top.length) return null;
-    return h('div', { class: 'note2 num', style: 'margin-top:8px' }, ['Coming in (your money log, ' + Math.round(b.days) + ' days): ', top.map((l) => l.title + ' ' + fmtMoney(Math.round(l.perDay)) + '/day').join(' · ')]);
+    return h('div', { class: 'note2 num', style: 'margin-top:8px' }, ['Coming in (your books, ' + Math.round(b.days) + ' days): ', top.map((l) => l.title + ' ' + fmtMoney(Math.round(l.perDay)) + '/day').join(' · ')]);
 }
 
 /**
@@ -441,6 +449,204 @@ function otherPlans(m, ctx, rec, compare, days) {
     ]);
 }
 
+/** The saved plan's path (round 8: the path is the recommendation), or null for a plan saved without one. */
+function pathOf(m) {
+    const y = m.savedPlan && m.savedPlan.year;
+    return y && y.path && Array.isArray(y.segments) && y.segments.length ? y : null;
+}
+
+const shortOf = (id) => (STRATEGIES[id] || {}).short || id;
+const shortDay = (ms) => new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+const stretchWord = (n) => n + (n === 1 ? ' stretch' : ' stretches');
+const xanaxWords = (list) => (list.length ? (list.length > 1 ? Math.min(...list) + ' to ' + Math.max(...list) : list[0]) + ' Xanax a day' : null);
+
+/** The stretch the day is in (before the path starts: the first; after it ends: the last). */
+function stretchNow(stretches, now) {
+    const i = stretches.findIndex((x) => now >= x.from && now < x.to);
+    return i >= 0 ? i : now < stretches[0].from ? 0 : stretches.length - 1;
+}
+
+/** What the saved plan was made with, in words: "$4M a day", "$4M a day from your books", "no budget". */
+function madeWith(m, rec) {
+    const snap = m.savedPlan ? m.savedPlan.snapshot : null;
+    const autoOn = Boolean(snap && snap.income && rec.pickBy === 'auto');
+    const money = autoOn ? (snap.budgetPerDay === null ? 'no limit, your pick' : fmtMoney(Math.round(snap.budgetPerDay)) + (snap.income.source === 'books' ? ' a day from your books' : ' a day from your income')) : snap && snap.budgetPerDay !== null ? fmtMoney(Math.round(snap.budgetPerDay)) + ' a day' : 'no budget';
+    return { snap, autoOn, money };
+}
+
+/** Recommended, as the path: its stretches with plan, dates, gain and cost, and why it is the pick. */
+function pathCard(m, ctx, rec, compare, days, y) {
+    const sp = m.savedPlan;
+    const path = y.path;
+    const stretches = pathStretches(y.segments);
+    const following = !ctx.plan.strategyPicked;
+    const cur = stretchNow(stretches, m.now);
+    const { autoOn, money } = madeWith(m, rec);
+    const a = m.auto;
+    const figs = [
+        h('div', { class: 'fig' }, [t('lab', days + ' days'), h('b', { class: 'good', text: '+' + fmtShort(path.gained) })]),
+        h('div', { class: 'fig' }, [t('lab', 'Cost'), h('b', { text: fmtMoney(path.cost) })]),
+        h('div', { class: 'fig' }, [t('lab', 'Per $1M'), h('b', { text: path.cost > 0 ? chartNum(perMillion(path)) + ' stats' : '—' })]),
+        h('div', { class: 'fig' }, [t('lab', 'A day'), h('b', { text: fmtMoney(path.cost / days) })]),
+    ];
+    const rows = [];
+    stretches.forEach((x, i) => {
+        const here = following && i === cur;
+        const joins = x.joined.map((id) => (gymById(id) || {}).name).filter(Boolean);
+        rows.push(
+            h('tr', { class: here ? 'sel' : null }, [
+                h('td', { class: 'nw', text: shortDay(x.from) + ' → ' + shortDay(x.to) }),
+                h('td', {}, [h('small', { text: kindOf(x.strategy) + ' ' }), h('b', { class: 'w', text: (STRATEGIES[x.strategy] || {}).name || x.strategy }), xanaxWords(x.xanax) ? h('small', { text: ' · ' + xanaxWords(x.xanax) }) : null, joins.length ? h('small', { text: ' · join ' + joins.join(', ') }) : null, here ? h('span', { class: 'tag chalk', style: 'margin-left:8px', text: 'you are here' }) : null]),
+                h('td', { class: 'r', text: String(x.days) }),
+                h('td', { class: 'r', text: '+' + fmtShort(x.gained) }),
+                h('td', { class: 'r', text: fmtMoney(x.cost) }),
+                h('td', { class: 'r', text: fmtMoney(x.cost / Math.max(1, x.days)) }),
+            ]),
+        );
+        // What you do in the stretch you are in: one line under its row.
+        if (here) {
+            const what = planWhat(x.strategy, { candy: x.candy, xanaxPerDay: x.xanax.length === 1 ? x.xanax[0] : undefined, used: x.refill === false ? {} : { [POINTS]: 1 } });
+            rows.push(h('tr', { class: 'sel what' }, [h('td', { colspan: '6', class: 'second', text: 'Now: ' + what.charAt(0).toLowerCase() + what.slice(1) })]));
+        }
+    });
+    const why = pathWhy({ path, budget: sp.budget, pickBy: rec.pickBy || 'most', single: compare[rec.recommended], singleName: STRATEGIES[rec.recommended].name });
+    const afford = autoOn && a ? affordLine(a, path.cost / days, path.cash || null) : null;
+    const using = ctx.plan.strategy;
+    const kids = [
+        sectionHead('Recommended', meta(['for ' + fmtInt(m.total) + ' total · ' + money + ' · ' + days + ' days'])),
+        h('div', { class: 'prime num' }, [
+            h('div', {}, [h('span', { class: 'pill-tag chalk', text: 'Path' }), h('span', { class: 'k', style: 'margin-left:8px', text: 'The best plan for each stretch' }), h('div', { class: 'd', style: 'margin-top:6px', text: 'Picked again every 10 days and around events, from the stats you will have by then.' })]),
+            h('div', { class: 'figs' }, figs),
+            h('table', { class: 'tbl' }, [
+                h('thead', {}, [h('tr', {}, [h('th', { style: 'width:158px', text: 'When' }), h('th', { text: 'Plan' }), h('th', { class: 'r', style: 'width:52px', text: 'Days' }), h('th', { class: 'r', style: 'width:84px', text: 'Stats' }), h('th', { class: 'r', style: 'width:76px', text: 'Cost' }), h('th', { class: 'r', style: 'width:72px', text: 'A day' })])]),
+                h('tbody', {}, rows),
+                h('tfoot', {}, [h('tr', {}, [h('td', { text: 'Whole plan' }), h('td', { text: stretchWord(stretches.length) }), h('td', { class: 'r', text: String(days) }), h('td', { class: 'r' }, [h('b', { text: '+' + fmtShort(path.gained) })]), h('td', { class: 'r' }, [h('b', { text: fmtMoney(path.cost) })]), h('td', { class: 'r' }, [h('b', { text: fmtMoney(path.cost / days) })])])]),
+            ]),
+            h('div', { class: 'why' }, [
+                h('div', {}, [(why.wins ? 'Wins because: ' : '') + why.text + (afford ? ' ' + afford : '') + ' ', following ? h('span', { class: 'c-good', text: 'You’re on it.' }) : null]),
+                following ? null : h('div', { class: 'acts', style: 'margin-top:4px' }, [h('button', { class: 'btn primary', type: 'button', onclick: () => { ctx.ui.planPick = null; ctx.followPath(); }, text: 'Use the path' }), h('span', {}, ['You follow ', h('b', { class: 'white', text: (STRATEGIES[using] || {}).name || using }), ' the whole way.'])]),
+            ]),
+        ]),
+        ctx.plan.pickBy === 'auto' && a && a.wait ? h('div', { class: 'warnb', style: 'margin-top:10px' }, [h('b', { text: a.needsKey ? 'Auto mode needs a Full key' : 'Reading your income' }), h('p', { text: a.wait }), a.needsKey ? h('div', { class: 'acts' }, [h('button', { class: 'btn primary sm', type: 'button', onclick: () => ctx.go('settings'), text: 'Add it in Settings' })]) : null]) : null,
+        autoOn && a && a.breakdown && a.breakdown.lines.length ? incomeLines(a.breakdown) : null,
+        m.unlock ? unlockBlock(m, ctx, days) : null,
+        gymWorthLines(m, days),
+        h('div', { class: 'note2', text: 'If you’re late: steady and goal plans re-time by themselves. Jump plans warn 5 min before the tick, then re-time.' }),
+    ];
+    if (ctx.ui.goalForm) kids.push(goalForm(m, ctx));
+    return h('div', { class: 'lead' }, kids);
+}
+
+/** What leaving the path for one plan the whole way means, asked once before it is followed. */
+export function wholeWayWarning(r, name, path, { budget = null, days }) {
+    const less = r.gained < path.gained;
+    const over = Number.isFinite(budget) && r.cost > budget;
+    const d = r.cost - path.cost;
+    return {
+        title: name + ' the whole way ' + (less ? 'gains less than the path' : over ? 'is over your budget' : 'is not the path'),
+        text: days + ' days: about +' + fmtShort(r.gained) + ' stats, against +' + fmtShort(path.gained) + ' on the path, and ' + fmtMoney(Math.abs(d)) + (d >= 0 ? ' more.' : ' less.') + (over ? ' Over your ' + fmtMoney(budget) + ' budget by ' + fmtMoney(r.cost - budget) + '.' : '') + ' The path changes plan on its dates; one plan the whole way does not.',
+    };
+}
+
+/** "One plan the whole way": every single plan over the same days, against the path; a click follows it (after its warning). */
+function singlePlans(m, ctx, rec, compare, days, y) {
+    const sp = m.savedPlan;
+    const path = y.path;
+    const budget = Number.isFinite(sp.budget) && (rec.pickBy || 'most') !== 'max' ? sp.budget : null;
+    const showAll = Boolean(ctx.ui.planShowAll);
+    const hiddenAlts = rec.alternatives.filter((x) => !x.fits);
+    const following = !ctx.plan.strategyPicked;
+    const using = ctx.plan.strategy;
+    const over = (r) => (budget !== null && r.cost > budget ? r.cost - budget : 0);
+    // The best of them first, then the ones inside your budget by stats, then the ones over it, the least over first.
+    const ids = [rec.recommended, ...rec.alternatives.filter((x) => x.fits || showAll).map((x) => x.id)].filter((id) => compare[id]);
+    const rest = ids.slice(1).sort((p, q) => (over(compare[p]) > 0) - (over(compare[q]) > 0) || (over(compare[p]) > 0 ? over(compare[p]) - over(compare[q]) : compare[q].gained - compare[p].gained));
+    const rows = [];
+    for (const id of [ids[0], ...rest]) {
+        const r = compare[id];
+        const st = STRATEGIES[id];
+        const current = !following && id === using;
+        const pending = ctx.ui.planPick === id && !current;
+        const dp = path.gained > 0 ? (100 * (r.gained - path.gained)) / path.gained : 0;
+        const dc = r.cost - path.cost;
+        rows.push(
+            h('tr', {
+                class: 'click' + (current ? ' sel' : '') + (pending ? ' pending' : ''),
+                tabindex: '0',
+                role: 'button',
+                'aria-label': 'Follow ' + st.name + ' the whole way',
+                onkeydown: (e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        e.currentTarget.click();
+                    }
+                },
+                onclick: () => {
+                    ctx.ui.planPick = current || pending ? null : id;
+                    ctx.rerender();
+                },
+            }, [
+                h('td', {}, [
+                    h('small', { text: kindOf(id) + ' ' }),
+                    h('b', { class: 'w', text: st.name }),
+                    id === rec.recommended ? h('span', { class: 'tag good', style: 'margin-left:8px', text: budget !== null && r.cost <= budget ? 'best one inside your budget' : 'best single plan' }) : null,
+                    current ? h('span', { class: 'tag chalk', style: 'margin-left:8px', text: 'current plan' }) : null,
+                    pending ? h('span', { class: 'tag warn', style: 'margin-left:8px', text: 'picked · see the warning' }) : null,
+                    h('div', { class: 'second', title: r.candy ? tierWords(r.candy.id) || null : null, text: planWhat(id, r) }),
+                ]),
+                h('td', { class: 'r' }, ['+' + fmtShort(r.gained), h('br'), h('span', { class: dp >= 0 ? 'c-good' : 'c-bad', style: 'white-space:nowrap', text: fmtPct(dp) })]),
+                h('td', { class: 'r' }, [fmtMoney(r.cost), h('br'), h('span', { class: dc > 0 ? 'c-bad' : 'c-good', style: 'white-space:nowrap', text: (dc >= 0 ? '+' : '−') + fmtMoney(Math.abs(dc)) })]),
+                h('td', { class: 'r' }, budget !== null ? [over(r) > 0 ? h('span', { class: 'c-warn', text: 'Over by ' + fmtMoney(over(r)) }) : h('span', { class: 'c-good', text: 'Inside it' }), h('br'), h('small', { text: fmtMoney(r.cost / days) + ' a day' })] : [fmtMoney(r.cost / days)]),
+            ]),
+        );
+    }
+    // The what-ifs (Ignorance Is Bliss, a company): not plans you can follow today, against the path too.
+    const whatIfRow = (cls, title, what, r, note) => {
+        const dp = path.gained > 0 ? (100 * (r.gained - path.gained)) / path.gained : 0;
+        const dc = r.cost - path.cost;
+        return h('tr', { class: cls }, [
+            h('td', {}, [h('b', { class: 'w', text: title }), ' ', h('span', { class: 'tag', text: 'what-if' }), h('div', { class: 'second', text: what + ' · ' + note })]),
+            h('td', { class: 'r', text: fmtPct(dp) }),
+            h('td', { class: 'r', text: (dc >= 0 ? '+' : '−') + fmtMoney(Math.abs(dc)) }),
+            h('td', { class: 'r', text: fmtMoney(r.cost / days) + (budget !== null ? ' a day' : '') }),
+        ]);
+    };
+    for (const w of Object.values(m.whatIf || {})) {
+        const st = STRATEGIES[w.id];
+        rows.push(whatIfRow('whatif', st.name === 'Steady with Bliss' ? st.name : st.name + ' with Bliss', planWhat(w.id, w), w, 'needs Ignorance Is Bliss active; see the Bliss card'));
+    }
+    for (const w of m.jobWhatIf || []) rows.push(whatIfRow('whatif job', w.title, planWhat(w.strategy, w.result), w.result, w.note));
+    const tick = hiddenAlts.length
+        ? h('button', { type: 'button', class: 'tk', 'aria-pressed': String(showAll), onclick: () => { ctx.ui.planShowAll = !showAll; ctx.rerender(); } }, [h('i'), 'Show plans that don’t fit you (' + hiddenAlts.length + ')'])
+        : null;
+    const one = hiddenAlts.length === 1;
+    const hidden = hiddenAlts.length && !showAll ? h('div', { class: 'note2', text: 'Hidden: ' + hiddenAlts.map((x) => STRATEGIES[x.id].name).join(', ') + ' — ' + (one ? 'it gains' : 'they gain') + ' under half of what the best single plan in your limit does at ' + fmtShort(m.total) + ' total, or ' + (one ? 'doesn’t' : 'don’t') + ' fit you.' }) : null;
+    const pick = ctx.ui.planPick;
+    let warn = null;
+    if (pick && compare[pick]) {
+        const w = wholeWayWarning(compare[pick], STRATEGIES[pick].name, path, { budget, days });
+        warn = h('div', { class: 'warnb num', style: 'margin-bottom:12px' }, [
+            h('b', { text: w.title }),
+            h('p', { text: w.text }),
+            h('div', { class: 'acts' }, [
+                h('button', { class: 'btn primary', type: 'button', onclick: () => { ctx.ui.planPick = null; ctx.rerender(); }, text: following ? 'Keep the path' : 'Keep ' + shortOf(using).toLowerCase() }),
+                h('button', { class: 'btn', type: 'button', onclick: () => { ctx.ui.planPick = null; pickPlan(ctx, pick); }, text: 'Use it anyway' }),
+            ]),
+        ]);
+    }
+    const snap = sp.snapshot;
+    return h('div', {}, [
+        sectionHead('One plan the whole way', meta(['against the path · click a row to follow it']), tick),
+        warn,
+        h('table', { class: 'tbl num' }, [
+            h('thead', {}, [h('tr', {}, [h('th', { text: 'Plan' }), h('th', { class: 'r', style: 'width:84px', title: 'Stats gained over the ' + days + ' days, and the difference from the path', text: 'Stats' }), h('th', { class: 'r', style: 'width:92px', title: 'What it costs over the ' + days + ' days, and the difference from the path', text: 'Cost' }), h('th', { class: 'r', style: 'width:136px', text: budget !== null && snap && snap.budgetPerDay !== null ? 'Your ' + fmtMoney(Math.round(snap.budgetPerDay)) + ' a day' : 'A day' })])]),
+            h('tbody', {}, rows),
+        ]),
+        h('div', { class: 'note2', text: 'Stats and cost are for all ' + days + ' days; the second line is the difference from the path.' }),
+        hidden,
+    ]);
+}
+
 function ladderCard(m, ctx) {
     const l = m.ladder;
     if (!l) return null;
@@ -462,24 +668,34 @@ function ladderCard(m, ctx) {
     ]);
 }
 
-function chartCard(m, ctx, rec, compare, days) {
+function chartCard(m, ctx, rec, compare, days, y = null) {
     const showAll = Boolean(ctx.ui.planShowAll);
     const fit = new Set([rec.recommended, ...rec.alternatives.filter((a) => a.fits || showAll).map((a) => a.id)]);
     const series = [];
+    // With a path: the path is the chalk line, the single plans the dim ones; a plan far over your budget (half
+    // again or more) is left off, or its line would flatten the rest.
+    const budget = y && Number.isFinite(m.savedPlan.budget) && (rec.pickBy || 'most') !== 'max' ? m.savedPlan.budget : null;
+    let leftOff = 0;
     for (const id of Object.keys(compare)) {
         if (!fit.has(id)) continue;
         const r = compare[id];
-        const isRec = id === rec.recommended;
-        series.push({ name: (STRATEGIES[id] || {}).short || id, color: isRec ? 'var(--chalk)' : r.gained < compare[rec.recommended].gained * 0.8 ? 'var(--warn)' : 'var(--dim)', width: isRec ? 2.5 : 1.5, values: [0, ...r.daily], rec: isRec });
+        if (budget !== null && r.cost > budget * 1.5) {
+            leftOff++;
+            continue;
+        }
+        const isRec = !y && id === rec.recommended;
+        series.push({ name: (STRATEGIES[id] || {}).short || id, color: isRec ? 'var(--chalk)' : !y && r.gained < compare[rec.recommended].gained * 0.8 ? 'var(--warn)' : 'var(--dim)', width: isRec ? 2.5 : 1.5, values: [0, ...r.daily], rec: isRec });
     }
+    if (y) series.push({ name: 'the path', color: 'var(--chalk)', width: 2.5, values: [0, ...y.path.daily], rec: true });
     for (const w of Object.values(m.whatIf || {})) series.push({ name: (STRATEGIES[w.id].short || w.id) + ' + Bliss', color: 'var(--dim)', dash: '4 3', width: 1.2, values: [0, ...w.daily] });
     series.sort((a, b) => (a.rec ? 1 : 0) - (b.rec ? 1 : 0));
     const max = Math.max(1, ...series.map((s) => Math.max(...s.values)));
     const top = Math.pow(10, Math.floor(Math.log10(max)));
     return h('div', {}, [
-        sectionHead(days + ' days', meta(['stats gained, each plan']), null, 'h3'),
+        sectionHead(days + ' days', meta([y ? 'stats gained' : 'stats gained, each plan']), null, 'h3'),
         lineChart(series, { w: 360, h: 190, left: 36, right: 96, xLabels: [[0, 'today'], [days, days + ' d']], grid: [Math.floor(max / top) * top], n: days + 1, label: 'Stats gained over ' + days + ' days, each plan' }),
-        h('div', { class: 'legend2', style: 'margin-top:6px' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), 'recommended']), m.whatIf ? h('span', {}, [h('i', { class: 'dash', style: 'color:var(--dim)' }), 'with Bliss (what-if)']) : null]),
+        h('div', { class: 'legend2', style: 'margin-top:6px' }, [h('span', {}, [h('i', { style: 'background:var(--chalk)' }), y ? 'the path' : 'recommended']), y ? h('span', {}, [h('i', { style: 'background:var(--dim)' }), 'one plan the whole way']) : null, m.whatIf ? h('span', {}, [h('i', { class: 'dash', style: 'color:var(--dim)' }), 'with Bliss (what-if)']) : null]),
+        leftOff ? h('div', { class: 'note2', text: (leftOff === 1 ? 'One plan' : leftOff + ' plans') + ' far over your budget ' + (leftOff === 1 ? 'is' : 'are') + ' left off the chart.' }) : null,
     ]);
 }
 
@@ -548,6 +764,52 @@ function blissCard(m, ctx, rec, compare, days) {
     return h('div', {}, [sectionHead('Ignorance Is Bliss', meta([bliss ? 'active' : 'not active']), null, 'h3'), h('div', { class: 'bliss num' }, lines)]);
 }
 
+/**
+ * The money block (the owner's pick P1, mockups/round8/ledger.html): six figures in a row from your books, each with
+ * one line under it. The budget choice is not here: it opens at Create plan.
+ */
+function moneyCard(m, ctx, perDay, cash, days, followed = null) {
+    const offer = m.auto && m.auto.offer;
+    // Rehab and overdoses are part of the plan's cost (round 8): said here, with or without your books.
+    const rehab = followed ? rehabLine(followed, days) : null;
+    if (!offer || !offer.flow) return rehab ? h('div', { 'data-money': '1' }, [sectionHead('Money', null, null, 'h3'), rehab]) : null;
+    const figs = moneyFigures({ offer, perDay, cash, days });
+    return h('div', { 'data-money': '1' }, [
+        sectionHead('Money', meta(['from your books, ' + Math.round(offer.flow.days) + ' days · ', h('a', { href: '#ledger', onclick: (e) => { e.preventDefault(); ctx.go('ledger'); }, text: 'Open Ledger' })]), null, 'h3'),
+        h('div', { class: 'figs6 num' }, figs.map((f) => h('div', { class: 'figc' + (f.tone ? ' ' + f.tone : ''), 'data-fig': f.id }, [h('span', { class: 'lab', text: f.label }), h('b', { text: f.value }), h('small', { text: f.sub })]))),
+        rehab,
+    ]);
+}
+
+/** "In this plan's cost: rehab about $185k a day · overdoses about $20k a day", and the training an overdose is expected to stop. */
+function rehabLine(r, days) {
+    const words = rehabWords(r.costParts, days, fmtMoney);
+    if (!words) return null;
+    return h('div', { class: 'note2 num', 'data-rehab': '1', title: 'A Xanax adds 35 addiction points and an Ecstasy 20, less your faction’s cut; 20 fade every night; the rest is paid off in rehab. An overdose is counted as what it is expected to cost. The plan never tells you when to rehab.' }, ['In this plan’s cost: ' + words + (r.costParts.rough ? ' (your lifetime rehabs are not read yet: a session is priced as a new player’s)' : '') + (r.overdoseLost > 0 ? ' · overdoses are expected to stop about ' + fmtShort(r.overdoseLost) + ' stats of training, not taken off the plan’s line' : '') + '.']);
+}
+
+/**
+ * What the plan may spend, asked where a plan is made (P1: "the budget choice opens at Create plan"): the books'
+ * offers, each checked against your free cash over the plan's days; the one the books recommend is marked, and your
+ * own choice is kept for the next Create plan or Recalibrate.
+ */
+function budgetChoice(m, ctx) {
+    const offer = m.auto && m.auto.offer;
+    if (!offer || ctx.plan.pickBy !== 'auto') return null;
+    const cur = offer.picked || (offer.recommended === 'covers' ? null : offer.recommended);
+    const pick = (id) => ctx.setSettings({ budgetPick: id === offer.recommended ? null : id });
+    return h('div', { class: 'budgets', role: 'radiogroup', 'aria-label': 'What the plan may spend', 'data-budgets': '1' }, [
+        h('div', { class: 'lab', text: 'What the plan may spend · from your books' }),
+        ...offer.options.map((o) =>
+            h('button', { type: 'button', role: 'radio', class: 'bud' + (o.id === cur ? ' on' : ''), 'aria-checked': String(o.id === cur), onclick: () => pick(o.id) }, [
+                h('span', {}, [h('b', { text: o.name }), o.id === offer.recommended ? h('span', { class: 'tag good', text: 'Recommended' }) : null, h('small', { text: o.what })]),
+                h('span', { class: 'r num' }, [h('b', { text: Number.isFinite(o.perDay) ? fmtMoney(Math.round(o.perDay)) + ' a day' : 'no limit' }), h('small', { class: o.fits === false ? 'c-warn' : 'c-good', text: o.fits === null ? 'checked day by day once picked' : o.fits ? 'your free cash lasts' : 'runs out on day ' + o.runsOutDay })]),
+            ]),
+        ),
+        offer.recommended === 'covers' && !offer.picked ? h('div', { class: 'note2', style: 'margin-top:0', text: offer.why }) : null,
+    ]);
+}
+
 /** The lengths Create plan offers (owner: 1 / 3 / 6 / 12 months). */
 const PLAN_LENGTHS = [1, 3, 6, 12];
 const monthsWord = (n) => n + (n === 1 ? ' month' : ' months');
@@ -570,7 +832,7 @@ function lengthChoice(ctx, fallback = 3) {
 function planRun(busy, ctx) {
     if (!busy) return null;
     return h('div', { class: 'planrun', role: 'status', 'aria-live': 'polite' }, [
-        h('div', { class: 'dayline', role: 'progressbar', 'aria-label': busy.recalibrate ? 'Re-planning' : 'Working out your plan' }, [h('i', { 'data-plan-bar': '1', style: 'width:' + Math.round(100 * Math.max(0.02, busy.done || 0)) + '%' })]),
+        h('div', { class: 'dayline', role: 'progressbar', 'aria-label': busy.recalibrate ? 'Recalibrating' : 'Working out your plan' }, [h('i', { 'data-plan-bar': '1', style: 'width:' + Math.round(100 * Math.max(0.02, busy.done || 0)) + '%' })]),
         h('div', { class: 'row', style: 'justify-content:space-between;margin-top:6px' }, [
             h('span', { class: 'pc-sub num', 'data-plan-words': '1', text: planRunWords(busy) }),
             h('span', { class: 'row', style: 'gap:10px' }, [h('span', { class: 'muted', style: 'font-size:13px', text: 'You can keep using the page, or leave it: your plan stays as it is until this is done.' }), h('button', { class: 'btn sm ghost', type: 'button', onclick: () => ctx.cancelPlan && ctx.cancelPlan(), text: 'Cancel' })]),
@@ -587,9 +849,9 @@ function startPlan(ctx, months) {
 
 /**
  * Your plan (round 6, the owner's pick: mockup A's card with C's months).
- * Nothing re-plans by itself: Create plan (1, 3, 6 or 12 months, from
- * scratch) and Recalibrate (any time: the days left from today, same end)
- * are the only things that work a plan out.
+ * Create plan (1, 3, 6 or 12 months, from scratch) and Recalibrate (any
+ * time: the days left from today, same end) work a plan out; round 8: the
+ * plan also recalibrates by itself once a Torn day (autoLine, its switch).
  */
 function planCard(m, ctx) {
     const sv = m.saved;
@@ -603,6 +865,7 @@ function planCard(m, ctx) {
                 lengthChoice(ctx, 3),
                 h('button', { class: 'btn primary', type: 'button', disabled: Boolean(busy), onclick: () => startPlan(ctx, months), text: busy ? 'Working out your plan…' : 'Create plan' }),
             ]),
+            budgetChoice(m, ctx),
             planRun(busy, ctx),
             err,
         ]);
@@ -611,25 +874,39 @@ function planCard(m, ctx) {
     const p = sv.progress || { day: 1, of: sv.days, ended: false };
     const last = m.savedPlan && m.savedPlan.history && m.savedPlan.history.length ? m.savedPlan.history[m.savedPlan.history.length - 1] : null;
     const incomeMove = last && last.from.budgetPerDay !== null && last.to.budgetPerDay !== null && Math.round(last.from.budgetPerDay) !== Math.round(last.to.budgetPerDay) ? ' on ' + fmtMoney(Math.round(last.to.budgetPerDay)) + ' a day (was ' + fmtMoney(Math.round(last.from.budgetPerDay)) + ')' : '';
-    const sub = [dayWord(sv.start) + ' → ' + dayWord(sv.end), p.ended ? 'ended' : 'day ' + p.day + ' of ' + p.of, 'made ' + dayWord(sv.createdAt), sv.recalibratedAt ? 're-planned ' + dayWord(sv.recalibratedAt) + incomeMove : null, ctx.plan.strategyPicked ? 'following ' + S.short.toLowerCase() + ', your pick' : null].filter(Boolean).join(' · ');
+    // Round 8: the plan is a path of stretches. On it, the card says where you are and what comes next; off it, your pick.
+    const y = pathOf(m);
+    const stretches = y ? pathStretches(y.segments) : [];
+    const onPath = Boolean(y) && !ctx.plan.strategyPicked;
+    const sub = [dayWord(sv.start) + ' → ' + dayWord(sv.end), p.ended ? 'ended' : 'day ' + p.day + ' of ' + p.of, 'made ' + dayWord(sv.createdAt), sv.recalibratedAt ? 'recalibrated ' + dayWord(sv.recalibratedAt) + (sv.recalibratedBy === 'auto' ? ' by itself' : '') + incomeMove : null, y ? stretchWord(stretches.length) : ctx.plan.strategyPicked ? 'following ' + S.short.toLowerCase() + ', your pick' : null].filter(Boolean).join(' · ');
+    let where = null;
+    if (onPath && !p.ended) {
+        const i = stretchNow(stretches, m.now);
+        const x = stretches[i];
+        const next = stretches[i + 1] || null;
+        const day = Math.min(x.days, Math.max(1, Math.floor((m.now - x.from) / 86400e3) + 1));
+        where = h('div', { class: 'pc-sub num' }, ['Now ', h('b', { class: 'white', text: shortOf(x.strategy) }), ', day ' + day + ' of ' + x.days + ' · ', ...(next ? ['then ', h('b', { class: 'white', text: shortOf(next.strategy) }), ' from ' + shortDay(next.from)] : ['to the plan’s end'])]);
+    } else if (y && ctx.plan.strategyPicked) where = h('div', { class: 'pc-sub num' }, ['Following ', h('b', { class: 'white', text: S.name }), ' the whole way, your pick']);
     // The line above is time (day N of M). Beside it: what you gained against what the plan said by now, since the
     // line you follow began (round 7: the card's line never said whether you were on the plan).
     const pr = progressOf(ctx.planLines || [], m.now, m.total);
     const soFar = pr && !p.ended ? h('div', { class: 'pc-sub num' }, ['The line is time: day ' + p.day + ' of ' + p.of + '. Stats: ', h('b', { class: 'white', text: fmtSigned(pr.gained) }), ' of ' + fmtSigned(pr.planned) + ' planned so far' + (pr.pct !== null ? ' (' + Math.round(pr.pct) + '%)' : '') + ', +' + fmtShort(pr.whole) + ' by the end · ', h('a', { href: '#progress', onclick: (e) => { e.preventDefault(); ctx.go('progress'); }, text: 'Progress' })]) : null;
-    // A build picked after the plan was made: today's steps follow it at once, the plan's numbers don't until a Re-plan.
+    // A build picked after the plan was made: today's steps follow it at once, the plan's numbers don't until a Recalibrate.
     const madeFor = m.savedPlan && m.savedPlan.snapshot ? m.savedPlan.snapshot.build : null;
-    const buildMoved = madeFor && ctx.plan.build && madeFor !== ctx.plan.build ? h('div', { class: 'pc-sub' }, [h('span', { class: 'tag warn', text: 'Build changed' }), ' Today’s steps already train toward ' + resolveBuild(ctx.plan.build).name + '; this plan’s numbers are for ' + resolveBuild(madeFor).name + '. ', h('b', { class: 'white', text: 'Re-plan to use it.' })]) : null;
+    const buildMoved = madeFor && ctx.plan.build && madeFor !== ctx.plan.build ? h('div', { class: 'pc-sub' }, [h('span', { class: 'tag warn', text: 'Build changed' }), ' Today’s steps already train toward ' + resolveBuild(ctx.plan.build).name + '; this plan’s numbers are for ' + resolveBuild(madeFor).name + '. ', h('b', { class: 'white', text: 'Recalibrate to use it.' })]) : null;
     const kids = [
         h('div', { class: 'pc-top' }, [
             h('div', { class: 'pc-what' }, [
-                h('div', { class: 'pc-title', text: monthsWord(sv.months).replace(' months', '-month').replace(' month', '-month') + ' plan · ' + S.name }),
+                h('div', { class: 'pc-title', text: monthsWord(sv.months).replace(' months', '-month').replace(' month', '-month') + ' plan · ' + (onPath ? 'your path' : S.name) }),
                 h('div', { class: 'pc-sub num', text: sub }),
                 h('div', { class: 'dayline', role: 'img', 'aria-label': 'Day ' + p.day + ' of ' + p.of }, [h('i', { style: 'width:' + Math.min(100, (100 * p.day) / Math.max(1, p.of)).toFixed(1) + '%' })]),
+                where,
                 soFar,
                 buildMoved,
+                autoLine(ctx, p),
             ]),
             h('div', { class: 'acts' }, [
-                h('button', { class: 'btn primary', type: 'button', disabled: Boolean(busy) || p.ended, title: 'Re-reads your stats, income, prices and gyms now and re-plans the days left; the end date stays', onclick: () => { ctx.ui.newPlan = false; ctx.ui.replaceAsk = false; ctx.recalibratePlan(); }, text: busy && busy.recalibrate ? 'Re-planning…' : 'Re-plan' }),
+                h('button', { class: 'btn primary', type: 'button', disabled: Boolean(busy) || p.ended, title: 'Re-reads your stats, income, prices and gyms now and recalibrates the days left; the end date stays', onclick: () => { ctx.ui.newPlan = false; ctx.ui.replaceAsk = false; ctx.recalibratePlan(); }, text: busy && busy.recalibrate ? 'Recalibrating…' : 'Recalibrate' }),
                 h('button', { class: 'btn ghost', type: 'button', disabled: Boolean(busy), 'aria-expanded': String(Boolean(ctx.ui.newPlan)), onclick: () => { ctx.ui.newPlan = !ctx.ui.newPlan; ctx.ui.replaceAsk = false; ctx.rerender(); }, text: busy && !busy.recalibrate ? 'Working out…' : 'New plan…' }),
             ]),
         ]),
@@ -650,11 +927,29 @@ function planCard(m, ctx) {
                 ctx.ui.replaceAsk ? null : h('span', { class: 'muted', text: 'replaces this plan (kept in its history)' }),
             ]),
         );
+        const choice = budgetChoice(m, ctx);
+        if (choice) kids.push(choice);
     }
     const running = planRun(busy, ctx);
     if (running) kids.push(running);
     if (err) kids.push(err);
     return h('div', { class: 'lead plancard' }, kids);
+}
+
+/**
+ * The plan recalibrates by itself once a day (round 8): the card says so, says when a try failed, and holds the
+ * switch. The Recalibrate button beside it is the manual one, any time.
+ */
+function autoLine(ctx, p) {
+    if (p.ended) return null;
+    const on = ctx.settings.autoRecalibrate !== false;
+    const last = ctx.autoRecal;
+    const failed = on && last && last.ok === false ? h('span', { class: 'c-warn', text: ' Today’s try did not finish (' + (last.error || 'no reason given') + '): it is tried again half an hour later, or press Recalibrate. ' }) : null;
+    return h('div', { class: 'pc-sub', 'data-auto-recal': on ? 'on' : 'off' }, [
+        on ? 'Recalibrates by itself once a day, just after Torn’s reset, or the first time this page is open that day. ' : 'The daily recalibration is off: the plan changes only when you press Recalibrate. ',
+        failed,
+        h('a', { href: '#plan', onclick: (e) => { e.preventDefault(); ctx.setSettings({ autoRecalibrate: !on }); }, text: on ? 'Turn off' : 'Turn on' }),
+    ]);
 }
 
 /** The plan's months (mockup C): total stats planned at each month's end, "you are here", the rough ones marked "~". */
@@ -666,6 +961,8 @@ function monthsRow(m, ctx) {
     const picked = ctx.plan.strategyPicked && sp.compare && sp.compare[m.strategy] ? sp.compare[m.strategy] : null;
     const monthly = picked ? monthlyOf(picked, { start: sp.from, days: sp.days, stats: sp.snapshot.stats, anchor: sp.start }) : sp.monthly;
     if (monthly.length < 2) return null;
+    const yp = pathOf(m);
+    const stretches = yp ? pathStretches(yp.segments) : [];
     const now = m.now;
     const total = (st) => Object.values(st || {}).reduce((a, v) => a + (Number(v) || 0), 0);
     const cells = monthly.map((mo, i) => {
@@ -673,18 +970,20 @@ function monthsRow(m, ctx) {
         const cur = now >= mo.from && now < mo.to;
         const rough = i >= 3;
         const name = new Date(mo.to - 1).toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' });
-        return h('div', { class: 'mo' + (past ? ' past' : '') + (cur ? ' now' : ''), title: dayWord(mo.from) + ' → ' + dayWord(mo.to) + ': +' + fmtShort(mo.gained) + ' for ' + fmtMoney(mo.cost) }, [h('span', { text: name }), h('b', { text: (rough ? '~' : '') + fmtShort(total(mo.stats)) }), cur ? h('em', { text: 'you are here' }) : null]);
+        // The plans the month follows (round 8): the path's stretches that take 5 days or more of it, or your own pick.
+        const plans = picked ? [m.strategy] : stretches.length ? monthPlans(stretches, mo.from, mo.to) : [];
+        return h('div', { class: 'mo' + (past ? ' past' : '') + (cur ? ' now' : ''), title: dayWord(mo.from) + ' → ' + dayWord(mo.to) + ': +' + fmtShort(mo.gained) + ' for ' + fmtMoney(mo.cost) }, [h('span', { class: 'mh' }, [h('span', { text: name }), h('b', { text: (rough ? '~' : '') + fmtShort(total(mo.stats)) })]), plans.length ? h('span', { class: 'mp', text: plans.map(shortOf).join(' → ') }) : null, cur ? h('em', { text: 'you are here' }) : null]);
     });
     const costs = monthly.map((x) => x.cost).filter((x) => x > 0);
     const y = sp.year;
     const foot = [
         costs.length ? 'About ' + fmtMoney(Math.min(...costs)) + (Math.max(...costs) > Math.min(...costs) * 1.05 ? '–' + fmtMoney(Math.max(...costs)) : '') + ' a month' : null,
         picked ? 'whole plan ~+' + fmtShort(picked.gained) + ' on ' + ((STRATEGIES[m.strategy] || {}).short || m.strategy).toLowerCase() + ', your pick' : y && y.band && y.path ? 'whole plan ~+' + fmtShort(y.path.gained) + ' (range +' + fmtShort(y.band.low) + ' to +' + fmtShort(y.band.high) + ': the model’s own error; later months are rougher)' : null,
-        y && y.unlocks && y.unlocks.length ? 'gyms: ' + y.unlocks.slice(0, 3).map((u) => ((gymById(u.gymId) || {}).name || 'gym ' + u.gymId) + ' ~day ' + u.day).join(', ') : null,
+        y && y.unlocks && y.unlocks.length ? 'gyms: ' + y.unlocks.slice(0, 3).map((u) => (u.member ? 'join ' : '') + ((gymById(u.gymId) || {}).name || 'gym ' + u.gymId) + (u.member ? ' (' + fmtMoney(u.cost) + ') day ' + (u.day + 1) : ' ~day ' + u.day)).join(', ') : null,
     ].filter(Boolean);
     return h('div', {}, [
-        sectionHead('Your ' + monthly.length + ' months', meta(['total stats planned at each month’s end'])),
-        h('div', { class: 'months num', style: 'grid-template-columns:repeat(' + Math.min(12, monthly.length) + ',minmax(0,1fr))' }, cells),
+        sectionHead('Your ' + monthly.length + ' months', meta([yp ? 'the plan each month follows · total stats planned at its end' : 'total stats planned at each month’s end'])),
+        h('div', { class: 'months num', style: 'grid-template-columns:repeat(' + Math.min(yp ? 6 : 12, monthly.length) + ',minmax(0,1fr))' }, cells),
         foot.length ? h('div', { class: 'note2 num', text: foot.join(' · ') }) : null,
     ]);
 }
@@ -700,10 +999,15 @@ export function renderPlan(m, ctx) {
         const loading = m.saved && !m.saved.whole && !m.planBusy ? h('p', { class: 'muted', style: 'margin:0', text: 'Loading your saved plan…' }) : null;
         return { ctl: controls(m, ctx), main: [planCard(m, ctx), loading].filter(Boolean), pane: [] };
     }
+    // Round 8: a saved plan with a path shows the path as what is recommended, and the single plans as "one plan the
+    // whole way"; a plan saved without one keeps the cards it had.
+    const y = pathOf(m);
+    // The plan you follow: the path, or your own pick of one plan the whole way.
+    const followed = y && !ctx.plan.strategyPicked ? y.path : compare[m.strategy] || compare[rec.recommended];
     return {
         ctl: controls(m, ctx),
-        main: [planCard(m, ctx), monthsRow(m, ctx), recommendedCard(m, ctx, rec, compare, days), otherPlans(m, ctx, rec, compare, days), ladderCard(m, ctx)].filter(Boolean),
-        pane: [chartCard(m, ctx, rec, compare, days), buildCard(m, ctx), blissCard(m, ctx, rec, compare, days)],
+        main: [planCard(m, ctx), monthsRow(m, ctx), y ? pathCard(m, ctx, rec, compare, days, y) : recommendedCard(m, ctx, rec, compare, days), moneyCard(m, ctx, followed.cost / days, followed.cash || null, days, followed), y ? singlePlans(m, ctx, rec, compare, days, y) : otherPlans(m, ctx, rec, compare, days), ladderCard(m, ctx)].filter(Boolean),
+        pane: [chartCard(m, ctx, rec, compare, days, y), buildCard(m, ctx), blissCard(m, ctx, rec, compare, days)],
     };
 }
 

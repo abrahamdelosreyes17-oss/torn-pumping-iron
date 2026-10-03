@@ -7,19 +7,20 @@
 import { gmMenu, gmOpenTab } from './platform/gm.js';
 import { K, get, set, getKey, getSettings, getPlan, getPrices } from './platform/store.js';
 import { keyProblem } from './ui/key-status.js';
-import { onModel, isVisible, refresh, pi, beatFocus, readSoon } from './runtime.js';
+import { onModel, isVisible, refresh, pi, beatFocus, readSoon, overdoseSeen } from './runtime.js';
 import { isPaused, tradingWhere } from './turns.js';
 import { Overlay } from './ui/overlay.js';
-import { ensureMarkCss, clearMarks, drawGymMarks, outline } from './ui/marks/marks.js';
-import { gymRoot, gymLoading, readStatBoxes, readGymButtons, gymListSummary, readEnergyBar, readHappyBar, barsActed } from './sources/dom/gym.js';
+import { ensureMarkCss, clearMarks, drawGymMarks, markListing, placeMarks, scheduleMarks, marksLost, marksCount, gymFill, gymNotes } from './ui/marks/marks.js';
+import { gymRoot, gymLoading, readStatBoxes, readGymButtons, gymListSummary, readEnergyBar, readHappyBar, barsActed, fillTrains } from './sources/dom/gym.js';
 import { readItemRows, readBazaarCards, readItemMarketRows, readPointsRows } from './sources/dom/market.js';
-import { planGymPage, pageReading, nextSession, gymPanel, isBoostStep, boostProgress, nextOverdose, nextBarsSeen, agedCooldowns, boostHappyTrained, REHAB_COST, TRAVEL_URL, DUE_SLACK_MS } from './core/gympage.js';
+import { planGymPage, pageReading, nextSession, gymPanel, liveNextStep, isBoostStep, boostProgress, nextBarsSeen, agedCooldowns, boostHappyTrained, OVERDOSE_WORDS, awayWords, TRAVEL_URL, DUE_SLACK_MS } from './core/gympage.js';
 import { unlockEnergyAfter } from './core/gyms.js';
 import { needsForWindow, shownTypes, typeOf } from './ui/app/buy.js';
 import { itemContext } from './core/model.js';
 import { loadPrices } from './app-page.js';
+import { eyeRideChain } from './eye-page.js';
 import { needList, fillCheapest, npcListing, SOURCE_BAZAAR, SOURCE_ITEM_MARKET, SOURCE_POINTS } from './core/market.js';
-import { stepWords } from './ui/app/home.js';
+import { panelStep } from './ui/app/home.js';
 import { trainsText } from './ui/app/common.js';
 import { tornClock } from './core/bars.js';
 import { fmtInt } from './core/format.js';
@@ -66,20 +67,17 @@ function liveReads(m, now = Date.now()) {
     return { happy, energy, ...agedCooldowns(m, now) };
 }
 
-/** GM key: an overdose seen on the bars ({at, until}), so every tab stops its jump marks. */
-export const OVERDOSE_KEY = 'overdose';
-
 /**
  * An overdose seen on the bars (gympage.js nextOverdose: the bars at 0 with the overdose's long cooldown, or a fall
  * training can't explain), kept while fresh readings still look like it and until the drug cooldown it started is over.
+ * The one stored state (runtime.js overdoseSeen, GM key K.overdose): here it is checked against Torn's sidebar, which
+ * moves before our next read; the webpage and the bot's sync follow the same key.
  */
 function overdoseOf(m, reads = liveReads(m), now = Date.now()) {
     if (!m || !m.ready) return null;
-    const prev = get(OVERDOSE_KEY, null);
-    const next = nextOverdose(prev, reads, now, tp.barsSeen);
+    const od = overdoseSeen(reads, now, tp.barsSeen);
     tp.barsSeen = nextBarsSeen(tp.barsSeen, reads, now);
-    if (JSON.stringify(next) !== JSON.stringify(prev)) set(OVERDOSE_KEY, next);
-    return next;
+    return od;
 }
 
 /** The step's one action on Torn: the page it is done on (none when you are on it). */
@@ -105,63 +103,94 @@ function overlayView(m, page) {
         return hasKey ? { pillText: 'Reading your state…', cardStep: 'Asking Torn for your bars, stats and gym.' } : { pillText: 'Open to set up', cardStep: 'Add your Torn key in Pumping Iron’s Settings.' };
     }
     const now = Date.now();
-    const next = m.next;
-    const later = m.steps.slice(1, 3).map((x) => tornClock(x.at) + ' ' + x.label.split(' · ')[0] + (trainsText(x.trains) ? ', ' + trainsText(x.trains) : ''));
+    const reads = liveReads(m);
+    // The next step by the bars Torn's page shows now: a train whose energy is already spent is not offered again
+    // while our read of your state is still the one from before it.
+    const live = liveNextStep(m.steps, reads, now);
+    const next = live.next;
+    const later = live.rest.slice(0, 2).map((x) => tornClock(x.at) + ' ' + x.label.split(' · ')[0] + (trainsText(x.trains) ? ', ' + trainsText(x.trains) : ''));
     const energy = readEnergyBar() || m.strip.energy;
     // Stacking energy for a chain (Home's "I'm stacking"): no training steps, the energy is kept.
     if (m.stacking) {
         return { tone: 'amber', label: 'Stacking', pillText: 'Stacking for a chain · training paused', cardStep: 'Stacking for a chain', cardSub: 'Training paused · energy now ' + fmtInt(energy.current) + ' / ' + fmtInt(energy.max) + ', kept', energy, later: [] };
     }
-    const reads = liveReads(m);
     if (overdoseOf(m, reads, now)) {
-        return { tone: 'amber', label: 'Overdosed', pillText: 'Overdosed · fly to Switzerland', cardStep: 'Fly to Switzerland', cardSub: 'Rehab there: about $' + fmtInt(REHAB_COST) + ' a session. The plan is worked out again after rehab.', later: [], action: { text: 'Open Travel', href: TRAVEL_URL } };
+        // Flying to Switzerland is the one thing to do: the plate rings.
+        return { tone: 'amber', ring: true, label: OVERDOSE_WORDS.title, pillText: OVERDOSE_WORDS.pill, cardStep: OVERDOSE_WORDS.step, cardSub: OVERDOSE_WORDS.sub, later: [], action: { text: 'Open Travel', href: TRAVEL_URL } };
+    }
+    // Flying or abroad (Torn's travel answer): the gym is closed; the panel says when you are back, never "Train".
+    if (m.away) {
+        const w = awayWords(m.away);
+        return { tone: 'amber', label: w.title, pillText: w.pill, cdAt: m.away.flying && m.away.until > now ? m.away.until : null, cardStep: w.step, cardSub: w.sub, energy, later };
     }
     const v = { energy, later };
     // On the gym page the bar follows the walk-through. Round 7: once the session is done and the next step is still
     // ahead, it moves on to that step and its countdown (it stayed on "Now · Session done").
     const gp = page === PAGE_GYM ? tp.lastGymPlan : null;
-    const sessionOver = gp && gp.done && next && next.at > now;
-    if (gp && gp.pill && !sessionOver) {
+    const sessionOver = Boolean(((gp && gp.done) || live.spent) && next && next.at > now);
+    if (gp && gp.pill && !sessionOver && !live.spent) {
         v.pillNow = 'Now';
         v.pillText = gp.pill;
     }
     // A jump or a daily boost due now: its checklist, ticked from the bars (every Torn page).
-    const boost = next && isBoostStep(next) && next.at <= now + DUE_SLACK_MS ? boostProgress(next, { ...reads, happyTrained: boostHappyTrained(get(K.gymSession, null), next, m.pc && m.pc.perks ? m.pc.perks.happyLossMult : 1, now) }) : null;
+    const boostReads = { ...reads, happyTrained: next && isBoostStep(next) ? boostHappyTrained(get(K.gymSession, null), next, m.pc && m.pc.perks ? m.pc.perks.happyLossMult : 1, now) : 0 };
+    const boost = next && isBoostStep(next) && next.at <= now + DUE_SLACK_MS ? boostProgress(next, boostReads) : null;
     if (next) {
-        const due = next.at <= now;
+        // Round 8 (the owner's pick B): a step due now is its actions in order, the one of the moment in the bar and in
+        // big type, and the plate rings; a step still ahead is said in words, with its countdown (home.js panelStep).
+        const ps = panelStep(next, { now, boost, sessionOver, reads: boostReads, steps: m.steps });
         if (!v.pillText) {
-            if (due) {
-                v.pillNow = 'Now';
-                v.pillText = next.kind === 'natural' ? 'Train ' + trainsText(next.trains) : next.label.split(' · ')[0];
-            } else {
-                v.cdAt = next.at;
-                v.pillText = next.label.split(' · ')[0];
-            }
-        } else if (!due) v.cdAt = next.at;
-        // A chalk edge only when it's time to act.
-        v.tone = due || boost ? 'chalk' : null;
-        v.label = due || boost ? 'Now' : 'Next';
-        v.cardStep = (sessionOver ? 'Session done. Next: ' : '') + stepWords(next);
-        v.cardSub = next.gain ? 'about +' + fmtInt(next.gain) + (next.energy ? ' · ' + fmtInt(next.energy) + ' energy' : '') : null;
+            if (ps.pillNow) v.pillNow = ps.pillNow;
+            if (ps.cdAt) v.cdAt = ps.cdAt;
+            v.pillText = ps.pillText;
+        } else if (next.at > now) v.cdAt = next.at;
+        Object.assign(v, { tone: ps.tone, ring: ps.ring, label: ps.label, cardStep: ps.cardStep, cardSub: ps.cardSub });
+        if (ps.checklist) v.checklist = ps.checklist;
         if (next.strict && next.warnAt !== null && now >= next.warnAt) v.warn = 'Strict: ' + (next.note || 'on the tick');
-        v.action = stepAction(next, page, boost);
-        if (boost) {
-            v.checklist = boost.list;
-            v.tone = boost.ready ? 'green' : 'red';
-            v.label = (boost.jump ? 'Jump' : 'Boost') + (boost.ready ? ' · now' : boost.deadline ? ' · finish before ' + tornClock(boost.deadline) : '');
-        }
+        // The one button follows the action of the moment; with nothing due it is the webpage's alone.
+        v.action = ps.acting ? stepAction(next, page, boost) : null;
     } else {
         v.pillText = 'Done for today';
         v.cardStep = 'Nothing left today';
         v.label = 'Today';
     }
     // The gym page's own states (overlays.html §6): the right gym, the wrong one, eat first, ready.
-    const panel = gp && !sessionOver ? gymPanel(gp) : null;
+    const panel = gp && !sessionOver && !live.spent ? gymPanel(gp) : null;
     if (panel) {
         Object.assign(v, { tone: panel.tone, label: panel.title, cardStep: panel.step, cardSub: panel.sub, checklist: panel.checklist, action: panel.action });
-        v.warn = null;
+        // The specialist stop ("Stop at 18 trains …"): it was the box's own line, now the panel's warning.
+        const ps = gp.current && gp.perStat ? gp.perStat[gp.current.stat] : null;
+        v.warn = ps && ps.warn ? ps.warn : null;
+        // Something to do here now (train, switch gyms, eat first): the plate rings. "Take the Xanax first" rings only
+        // once that Xanax is due (the step's own ring, above).
+        v.ring = gp.state.kind === 'right' && ps && ps.noEnergy ? Boolean(v.ring) : ['right', 'wrong', 'eat', 'ready', 'overdose'].includes(gp.state.kind);
+    }
+    // Round 7 (the owner): nothing of ours inside Torn's page. The strip's words (where to switch, the group of gyms to
+    // open, the energy kept, the session's parts) and Fill N are the panel's now.
+    if (gp && !sessionOver && !live.spent) {
+        const notes = gymNotes(gp, { hint: tp.gymHint || null });
+        if (notes.length) v.notes = notes;
+        const f = gymFill(gp);
+        if (f) v.fill = { text: 'Fill ' + f.shown, disabled: f.disabled, title: f.title };
     }
     return v;
+}
+
+/**
+ * The attack page (round 8, mockups/round8/torn-eye.html §4): Torn Eye's fight card has a Next button there, so the
+ * panel's line under it reads "Training: DEX × 17 · after this fight" and never "Next": on that page "Next" means
+ * one thing, the next target.
+ */
+export function attackPanelView(v, page) {
+    if (page !== PAGE_ATTACK || !v || v.off || v.paused) return v;
+    const out = { ...v };
+    if (/^Train /.test(String(v.pillText || ''))) {
+        out.pillText = 'Training: ' + String(v.pillText).slice(6) + (v.pillNow ? ' · after this fight' : '');
+        delete out.pillNow;
+    }
+    if (v.label === 'Next') out.label = 'Training';
+    if (v.cardStep) out.cardStep = String(v.cardStep).replace('Session done. Next: ', 'Session done. Then: ');
+    return out;
 }
 
 /**
@@ -184,10 +213,17 @@ export function pausedView(m, seen = tradingWhere()) {
 
 /** Everything we drew on Torn's page, gone (paused). */
 function clearAll() {
-    const root = gymRoot();
-    if (root) clearMarks(root);
-    clearMarks(document.querySelector('.content-wrapper') || document);
+    clearMarks();
     tp.lastGymPlan = null;
+    tp.fill = null;
+}
+
+/** The panel's Fill N: types the number into Torn's reps box as it is now (React may have replaced it). Never TRAIN. */
+function fillNow() {
+    const f = tp.fill;
+    if (!f || f.disabled || isPaused()) return;
+    const box = readStatBoxes(gymRoot()).find((b) => b.stat === f.stat);
+    if (box) fillTrains(box.input, f.n);
 }
 
 /* ----------------------------------------------------------- gym marks */
@@ -217,9 +253,10 @@ function drawGym(m) {
         }
     }
     if (!m || !m.ready || !getSettings().gymMarks) {
-        clearMarks(root);
+        clearMarks();
         // Marks off: the panel's pill stops showing the gym plan too.
         tp.lastGymPlan = null;
+        tp.fill = null;
         return;
     }
     const boxes = readStatBoxes(root);
@@ -233,9 +270,12 @@ function drawGym(m) {
     const reads = liveReads(m);
     const plan = planGymPage(m, { selectedId: sum.selectedId || m.state.gymId, boxes, reading, reads, overdose: overdoseOf(m, reads, now) }, session, now);
     tp.lastGymPlan = plan;
-    drawGymMarks(root, plan, boxes, (stat) => readStatBoxes(gymRoot()).find((b) => b.stat === stat), buttons, { motion: getSettings().motion !== false });
-    // Our own drawing is not Torn changing the page: those records are dropped, and what Torn shows now is remembered.
-    if (tp.observer) tp.observer.takeRecords();
+    const f = gymFill(plan);
+    tp.fill = f ? { stat: f.stat, n: f.n, disabled: f.disabled } : null;
+    // On our own layer, over Torn's boxes (nothing goes into Torn's page).
+    const drawn = drawGymMarks(plan, boxes, buttons, { motion: getSettings().motion !== false });
+    // The gym to go to isn't on the page (Torn shows one group of gyms at a time): the panel says which group to open.
+    tp.gymHint = plan.nextGym && !drawn.nextGymShown ? 'Open ' + plan.nextGym.group.replace(/^a /, 'the ') + 's to find it' : null;
     tp.gymSig = gymPageSig(root);
 }
 
@@ -243,8 +283,8 @@ function drawGym(m) {
 function gymPageSig(root) {
     const boxes = readStatBoxes(root).map((b) => b.stat + ':' + b.value + ':' + (b.locked ? 1 : 0)).join(',');
     const sel = gymListSummary(readGymButtons(root)).selectedId;
-    // Our marks' count too: Torn re-rendering a box (a message, same value) wipes its panel without changing a value.
-    return [boxes, sel, JSON.stringify(readEnergyBar()), JSON.stringify(readHappyBar()), gymLoading(root) ? 1 : 0, root.querySelectorAll('.pi-mark').length].join('|');
+    // A box we marked replaced by Torn (a re-render with the same value): drawn again over the new one.
+    return [boxes, sel, JSON.stringify(readEnergyBar()), JSON.stringify(readHappyBar()), gymLoading(root) ? 1 : 0, marksLost() ? 1 : 0].join('|');
 }
 
 function watchGym() {
@@ -258,10 +298,11 @@ function watchGym() {
     // Redraw only when Torn's own values change (a train, another gym, the energy bar, our marks wiped by a re-render),
     // never on any mutation: other scripts (TornTools) and Torn's timers change the page all the time, and two
     // scripts redrawing on each other's changes could loop.
-    tp.observer = new MutationObserver((muts) => {
+    tp.observer = new MutationObserver(() => {
         if (isPaused()) return;
-        // Our own marks changing is not Torn re-rendering.
-        if (muts.every((mu) => [...mu.addedNodes, ...mu.removedNodes].every((n) => n.nodeType === 1 && n.classList && n.classList.contains('pi-mark')))) return;
+        // Torn's page moved (a message, a box re-rendered): our rings follow at the next frame. Nothing of ours is
+        // inside #gymroot, so every change seen here is Torn's (or another script's).
+        scheduleMarks();
         clearTimeout(timer);
         timer = setTimeout(() => {
             const r = gymRoot();
@@ -321,7 +362,7 @@ function watchBars() {
 /* -------------------------------------------------- items and markets */
 
 function drawItems(m) {
-    clearMarks(document.querySelector('.content-wrapper') || document);
+    clearMarks();
     // Stacking for a chain: no step to buy for until Resume (the panel says so).
     if (!m || !m.ready || m.stacking || !getSettings().marketMarks) return;
     const idx = m.steps.findIndex((s) => (s.items || []).some((it) => it.id !== POINTS));
@@ -332,10 +373,11 @@ function drawItems(m) {
     let glow = true;
     for (const it of step.items) {
         for (const row of readItemRows().filter((r) => r.itemId === Number(it.id))) {
-            outline(row.el, 'Step ' + n + ' of today · ' + step.label.split(' · ')[0], { glow });
+            markListing(row.el, 'Step ' + n + ' of today · ' + step.label.split(' · ')[0], { glow });
             glow = false;
         }
     }
+    placeMarks();
 }
 
 /** The Buy list's chosen listings (same window as the Buy tab). */
@@ -364,7 +406,7 @@ function chosenFills(m) {
 }
 
 function drawMarket(m, page) {
-    clearMarks(document.querySelector('.content-wrapper') || document);
+    clearMarks();
     if (!m || !m.ready || !getSettings().marketMarks) return;
     // On a market page, the Buy list's prices are refreshed (at most every 5 minutes) so the outline is current.
     const s = getSettings();
@@ -375,7 +417,7 @@ function drawMarket(m, page) {
     // The chosen listing with its chalk tab ("TAKE 3 · $2,479,500"); at most one thing glows on a page: the first.
     let glow = true;
     const mark = (el, text) => {
-        outline(el, text, { glow });
+        markListing(el, text, { glow });
         glow = false;
     };
     if (page === PAGE_BAZAAR) {
@@ -399,6 +441,7 @@ function drawMarket(m, page) {
             if (row) mark(row.el, label(r));
         }
     }
+    placeMarks();
 }
 
 /* ------------------------------------------------------------- wiring */
@@ -439,6 +482,10 @@ export function bootTornPage() {
         dockIfShared: () => document.getElementById('pi-eyecard'),
         // Torn Eye's tags on faction and war lists (eye-page.js notes their column on its layer): never the same margin.
         avoidColumn: eyeColumn,
+        // Fill N on the gym page: types into Torn's reps box on your click (never TRAIN).
+        onFill: fillNow,
+        // Torn Eye's chain counter rides on top of the panel (round 8): the panel starts under it.
+        ride: eyeRideChain,
     });
     tp.overlay.mount();
     gmMenu('Reset overlay position', () => {
@@ -449,7 +496,9 @@ export function bootTornPage() {
     let lastSig = '';
     let lastView = '';
     tp.showView = (m) => {
-        const view = overlayView(m, detectPage(location.href));
+        const view = attackPanelView(overlayView(m, detectPage(location.href)), detectPage(location.href));
+        // Settings › Animations off: the plate's ring is drawn, not moving.
+        if (!view.off) view.still = getSettings().motion === false;
         const vs = JSON.stringify(view);
         if (vs !== lastView) {
             lastView = vs;
@@ -483,7 +532,7 @@ export function bootTornPage() {
         // What you hold is read after the first draw (the slow data): the marks take it off, so it redraws them.
         const heldSig = JSON.stringify((get(K.userStatic, {}) || {}).inventory || {});
         // Stacking for a chain, or an overdose seen on the bars: the gym page's marks change at once.
-        const stateSig = JSON.stringify([(m && m.stacking) || null, overdoseOf(m)]);
+        const stateSig = JSON.stringify([(m && m.stacking) || null, overdoseOf(m), (m && m.away) || null]);
         const sig = [p, location.hash, m && m.ready ? m.state.at : 'x', JSON.stringify(getSettings()), JSON.stringify(getPlan()), planSig, heldSig, stateSig, Object.values(getPrices()).map((x) => x.at).join(), pageRowsCount(p)].join('|');
         if (sig !== lastSig) {
             lastSig = sig;
@@ -498,7 +547,20 @@ export function bootTornPage() {
     setInterval(() => {
         tp.overlay.tick();
         if (isVisible() && isPaused()) showPaused(tp.model);
+        // Our marks follow Torn's page (lists that load or grow, images): once a second they are placed again, and a
+        // listing Torn replaced is marked again on the new one (nothing of ours is inside Torn's page to notice it).
+        if (isVisible() && !isPaused() && marksCount()) {
+            const p = detectPage(location.href);
+            if (marksLost()) {
+                if (p === PAGE_ITEMS) drawItems(tp.model);
+                else if (p === PAGE_BAZAAR || p === PAGE_ITEM_MARKET || p === PAGE_POINTS) drawMarket(tp.model, p);
+                else scheduleMarks();
+            } else scheduleMarks();
+        }
     }, 1000);
+    // A resized window, or a scroll inside one of Torn's boxes: the marks are placed again (once a frame at most).
+    window.addEventListener('resize', scheduleMarks);
+    document.addEventListener('scroll', scheduleMarks, { capture: true, passive: true });
     watchBars();
     // Torn's pages change the hash without a load (Item Market search, items tabs).
     window.addEventListener('hashchange', () => {

@@ -7,7 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { incomeFloor, dividendMoney } from '../src/core/income-floor.js';
-import { autoState, incomeBreakdown, affordLine } from '../src/core/auto.js';
+import { autoState, affordLine } from '../src/core/auto.js';
 
 const T = Date.parse('2026-09-30T12:00:00Z');
 const DAY = 86400e3;
@@ -47,17 +47,11 @@ test('Auto: the floor plans without a Full key; with one, certain + other (no do
     assert.equal(nwLow.perDay, floor.perDay);
     const nwHigh = autoState({ plan, settings, hasFullKey: true, income: { perDay: 80e6, days: 30 }, floor });
     assert.equal(nwHigh.perDay, 80e6, 'networth growth already holds the certain part');
-    // The money log: its bank maturity and dividend lines are the floor's, the rest adds on top.
-    const log = incomeBreakdown([
-        { at: T - 2 * DAY, title: 'Bazaar sell', money: 30e6 },
-        { at: T - 3 * DAY, title: 'Bank investment matured', money: 2.171e9 },
-        { at: T - 4 * DAY, title: 'Stock dividend', money: 100e6 },
-    ], T, 30, floor);
-    assert.equal(log.lines.length, 1, 'only the bazaar sale is "other" income');
-    // With nothing certain counted, a dividend that arrived is income; a maturity line (principal + profit) never is.
-    const bare = incomeBreakdown([{ at: T - 4 * DAY, title: 'Stock dividend', money: 100e6 }, { at: T - 3 * DAY, title: 'Bank investment matured', money: 2.171e9 }], T, 30);
-    assert.deepEqual(bare.lines.map((l) => l.title), ['Stock dividend']);
-    const withLog = autoState({ plan, settings, hasFullKey: true, income: { perDay: 80e6, days: 30 }, log, floor });
-    assert.equal(Math.round(withLog.perDay), Math.round(floor.perDay + 1e6));
-    assert.match(affordLine(withLog, 2e6), /certain: .*bank \$1\.9M/);
+    assert.match(affordLine(nwHigh, 2e6), /certain: .*bank \$1\.9M/);
+    // With your books (the Full key's money log) the floor steps aside: the bank's profit counts on the day it is
+    // paid, as dated money in the cash check, never a share of it a day (test/cashflow.test.js).
+    const books = autoState({ plan, settings, hasFullKey: true, income: { perDay: 80e6, days: 30 }, books: { perDay: 1e6, earnsPerDay: 1e6, why: 'x', flow: { days: 30 } }, floor });
+    assert.equal(books.source, 'books');
+    assert.equal(books.budgetPerDay, 1e6);
+    assert.equal(books.floor, null);
 });

@@ -230,4 +230,8 @@ test('no energy for one train on a step that starts with its Xanax: "Take the Xa
     assert.equal(p.perStat.def.hold, true);
     assert.equal(p.perStat.def.fill, 0);
     assert.match(p.perStat.def.tab, /^Take the Xanax first · then DEF × 30$/);
+    // The panel's top bar too (torn-check, 2026-10-03: it still read "Now · Train DEF × 30" over a card that said the Xanax).
+    assert.equal(p.pill, 'Take the Xanax first · then DEF × 30');
+    assert.equal(p.line.head, 'Take the Xanax first');
+    assert.doesNotMatch(p.pill + p.line.head, /^Train/);
 });

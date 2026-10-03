@@ -194,12 +194,11 @@ test('attack page: the fight card is #pi-eyecard, with turns, the gear note and 
     assert.equal(card.id, 'pi-eyecard');
     const t = clean(card.textContent);
     assert.match(t, /^GoodRed_Pike \[100\]Respect4\.35HP kept73%Win78%/);
-    assert.match(t, /About 8 turns · their gear shows once the fight starts/);
+    // Round 8 (his pick B): their gear has its own block; before it was ever read it says so.
+    assert.match(t, /About 8 turnsWhat they were wearingNot seen yet · attack once to read itTorn shows it when the fight starts\. It is saved for next time\./);
     assert.match(t, /Balanced74%/);
     assert.match(t, /DEF-heavy70%/);
     assert.match(t, /FFScouter 5 d/);
-    const saved = clean(eyeFightCard(viewOf(), 'full', { gearSaved: true }).textContent);
-    assert.match(saved, /their gear is saved for next time/);
     const small = clean(eyeFightCard(viewOf(), 'small', {}).textContent);
     assert.equal(small, 'GoodResp4.35HP73%Win78%');
 });

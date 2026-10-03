@@ -19,7 +19,7 @@ import { bootEyePage } from './eye-page.js';
 import { detectPage, isAppPageUrl, isTradingPageUrl, APP_PAGE_URL } from './sources/route.js';
 import { watchTrading } from './turns.js';
 import { gymLogTick } from './income.js';
-import { startProblemLog } from './problem-log.js';
+import { startProblemLog, logNote } from './problem-log.js';
 
 function menus() {
     gmMenu('Open Pumping Iron', () => gmOpenTab(APP_PAGE_URL));
@@ -45,6 +45,9 @@ export function boot() {
     setWhere(where === 'app' ? 'app' : 'torn');
     // The problem log (Settings › Report a problem): script errors of ours, and on the webpage its own freezes.
     startProblemLog({ where: where === 'app' ? 'app' : 'torn' });
+    // The report says which build was running and when the webpage was opened (bug hunt A.7); Torn's pages, opened
+    // many times a minute, do not write one.
+    if (where === 'app') logNote('Pumping Iron ' + PI_BUILD_VERSION + ' opened');
     if (where === 'app') bootAppPage();
     else {
         bootTornPage();

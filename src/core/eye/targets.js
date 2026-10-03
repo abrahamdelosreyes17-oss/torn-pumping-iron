@@ -732,3 +732,173 @@ export function mergeStatuses(a, b, now = Date.now()) {
     const kept = Object.entries(out).sort((x, y) => y[1][1] - x[1][1]).slice(0, STATUS_KEEP);
     return Object.fromEntries(kept);
 }
+
+/* ------------------------------------------------ round 8: sort by a column (mockups/round8/torn-eye.html §2, his pick A) */
+
+/** The columns a click sorts by, with the words for each way ("Sorted by HP kept, most first"). */
+export const SORT_KEYS = {
+    band: { label: 'Band', words: ['Stomp first', 'Fair first'] },
+    level: { label: 'Lvl', words: ['highest first', 'lowest first'] },
+    respect: { label: 'Respect', words: ['most first', 'least first'] },
+    keep: { label: 'HP kept', words: ['most first', 'least first'] },
+    win: { label: 'Win', words: ['highest first', 'lowest first'] },
+    status: { label: 'Status', words: ['ready first', 'away first'] },
+    hit: { label: 'Last hit', words: ['newest first', 'not hit first'] },
+};
+
+/** A kept sort as {key, dir: 1|-1}, or null (the default order) for anything else. */
+export function sortOf(s) {
+    return s && SORT_KEYS[s.key] ? { key: s.key, dir: s.dir === -1 ? -1 : 1 } : null;
+}
+
+/** A click on a column head: a new column sorts its first way; the same column again flips it. */
+export function nextSort(cur, key) {
+    const c = sortOf(cur);
+    if (!SORT_KEYS[key]) return c;
+    return c && c.key === key ? { key, dir: -c.dir } : { key, dir: 1 };
+}
+
+/** "HP kept, most first". */
+export function sortWords(s) {
+    const c = sortOf(s);
+    return c ? SORT_KEYS[c.key].label + ', ' + SORT_KEYS[c.key].words[c.dir === 1 ? 0 : 1] : '';
+}
+
+/** Where a row's status falls when sorting by it: ready, not read, anything else, hospital (by out-time), away, jail. */
+const SORT_STATE_RANK = { okay: 0, unknown: 1, other: 2, hospital: 3, travel: 4, jail: 5 };
+
+/**
+ * When you last attacked each player, from your own attacks as read (the last 100, any result): Map id → ms.
+ * A player not in it was not hit lately; whether ever is not known.
+ */
+export function lastHits(attacks) {
+    const out = new Map();
+    for (const a of attacks || []) {
+        const id = Number(a && a.def);
+        const at = (Number(a && a.ended) || 0) * 1000;
+        if (id > 0 && at > 0 && !(out.get(id) >= at)) out.set(id, at);
+    }
+    return out;
+}
+
+/** The Last hit cell: "today", "5 d ago"; "—" when none of your attacks read is on them. */
+export function lastHitText(at, now = Date.now()) {
+    if (!(at > 0)) return '—';
+    const d = Math.floor(Math.max(0, now - at) / 86400000);
+    return d < 1 ? 'today' : d + ' d ago';
+}
+
+/**
+ * The listed rows sorted by a column; rows that tie keep the default order (band, respect, HP kept, win). No sort:
+ * the default order itself.
+ * @param {object[]} rows - listTargets().rows
+ * @param {{key, dir}|null} sort
+ * @param {object} o - {now, hits: lastHits()}
+ */
+export function sortTargets(rows, sort, { now = Date.now(), hits = new Map() } = {}) {
+    const list = [...(rows || [])].sort(byOrder);
+    const s = sortOf(sort);
+    if (!s) return list;
+    const pc = (v) => (Number.isFinite(v) ? Math.round(v * 100) : -1);
+    const outAt = (r) => (r.hospitalUntil && r.hospitalUntil > now ? r.hospitalUntil : Number(r.status && r.status.until) * 1000 || Infinity);
+    const cmp = {
+        band: (a, b) => bandRank(a.band) - bandRank(b.band),
+        level: (a, b) => (Number(b.level) || 0) - (Number(a.level) || 0),
+        respect: (a, b) => shownRespect(b.respect) - shownRespect(a.respect),
+        keep: (a, b) => pc(b.forecast && b.forecast.keep) - pc(a.forecast && a.forecast.keep),
+        win: (a, b) => pc(b.forecast && b.forecast.pWin) - pc(a.forecast && a.forecast.pWin),
+        status: (a, b) => {
+            const sa = rowState(a, now);
+            const d = SORT_STATE_RANK[sa] - SORT_STATE_RANK[rowState(b, now)];
+            return d || (sa === 'hospital' ? outAt(a) - outAt(b) : 0);
+        },
+        hit: (a, b) => (hits.get(Number(b.id)) || 0) - (hits.get(Number(a.id)) || 0),
+    }[s.key];
+    // A stable sort over the default order: ties stay as they were.
+    return list.sort((a, b) => s.dir * cmp(a, b) || 0);
+}
+
+/* ------------------------------------------------ round 8: the Next button on the attack page (torn-eye.html §4, his pick A) */
+
+/** The list handed to Torn's pages is this long at most (Tampermonkey gives it to every Torn page). */
+export const NEXT_KEEP = 40;
+
+/** A handed-over list older than this is not walked (the targets themselves are asked again every 6 h). */
+export const NEXT_FRESH_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * The list the Torn Eye tab shows, as a small table for Torn's attack page: in the list's own order and filters, each
+ * row [id, name, level, band, respect, HP kept %, where, out-time ms]. `where`: 'ok', '?' (not read: it may be
+ * ready), 'hosp', 'away', 'jail'.
+ * @param {'targets'|'war'} mode
+ * @param {object[]} rows - Targets rows (band, respect, forecast, status, hospitalUntil, hit) or War rows (state, until, view, m)
+ */
+export function nextTable(mode, rows, now = Date.now()) {
+    const out = [];
+    for (const r of rows || []) {
+        if (out.length >= NEXT_KEEP) break;
+        const v = mode === 'war' ? r.view || {} : r;
+        const f = v.forecast || null;
+        let where;
+        let until = 0;
+        if (mode === 'war') {
+            if (r.state === 'fallen') continue;
+            where = r.state === 'okay' || r.state === 'early' ? 'ok' : r.state === 'hospital' ? 'hosp' : r.state === 'jail' ? 'jail' : 'away';
+            until = where === 'hosp' ? (Number(r.until) || 0) * 1000 : 0;
+        } else {
+            const s = rowState(r, now);
+            where = s === 'okay' ? 'ok' : s === 'hospital' ? 'hosp' : s === 'travel' ? 'away' : s === 'jail' ? 'jail' : '?';
+            // A hospital stay with no out-time read (your own hit): the hour a hit counts for.
+            if (where === 'hosp') until = r.hospitalUntil && r.hospitalUntil > now ? r.hospitalUntil : Number(r.status && r.status.until) * 1000 > now ? Number(r.status.until) * 1000 : r.hit ? r.hit.at + OWN_HIT_MS : 0;
+        }
+        const name = mode === 'war' ? (r.m && r.m.name) || v.name : r.name;
+        const level = mode === 'war' ? (r.m && r.m.level) || v.level : r.level;
+        out.push([Number(r.id), name || null, Number(level) || null, v.band || 'none', Number.isFinite(v.respect) && v.respect > 0 ? Math.round(v.respect * 100) / 100 : null, f && Number.isFinite(f.keep) ? Math.round(f.keep * 100) : null, where, until]);
+    }
+    return { at: now, mode: mode === 'war' ? 'war' : 'targets', rows: out };
+}
+
+/** What changes a handed-over list (its age left out): written again only when this does. */
+export function nextTableSig(t) {
+    return t ? t.mode + '|' + JSON.stringify(t.rows) : '';
+}
+
+/**
+ * The next player to open from the attack page: the first ready one after the player you are on, in the list's order
+ * (from its top when they are not in it, round to its top at its end), skipping who is not ready and the attack pages
+ * you opened in the last ten minutes (you were just there).
+ * @param {object|null} table - nextTable()
+ * @param {number} currentId - the player being attacked
+ * @param {object} o - {now, opened: Set of ids opened lately}
+ * @returns {{list: boolean, mode, next: {id, name, level, band, respect, keep}|null, skipped: {hosp, away, jail, opened}}}
+ *   list: false when no list was handed over (or it is too old)
+ */
+export function nextTarget(table, currentId, { now = Date.now(), opened = new Set() } = {}) {
+    const skipped = { hosp: 0, away: 0, jail: 0, opened: 0 };
+    if (!table || !Array.isArray(table.rows) || !(now - (Number(table.at) || 0) < NEXT_FRESH_MS)) return { list: false, mode: 'targets', next: null, skipped };
+    const rows = table.rows;
+    const at = rows.findIndex((r) => Number(r[0]) === Number(currentId));
+    for (let i = 1; i <= rows.length; i++) {
+        const r = rows[(at + i + rows.length) % rows.length];
+        const id = Number(r[0]);
+        if (id === Number(currentId)) continue;
+        if (opened.has(id)) skipped.opened++;
+        else if (r[6] === 'hosp' && !(r[7] > 0 && r[7] <= now)) skipped.hosp++;
+        else if (r[6] === 'away') skipped.away++;
+        else if (r[6] === 'jail') skipped.jail++;
+        else return { list: true, mode: table.mode === 'war' ? 'war' : 'targets', next: { id, name: r[1], level: r[2], band: r[3], respect: r[4], keep: r[5] }, skipped };
+    }
+    return { list: true, mode: table.mode === 'war' ? 'war' : 'targets', next: null, skipped };
+}
+
+/** "skips 3 not ready: 2 in hospital, 1 away"; '' when nothing was skipped. */
+export function skippedText(skipped) {
+    const s = skipped || {};
+    const parts = [];
+    if (s.hosp) parts.push(s.hosp + ' in hospital');
+    if (s.away) parts.push(s.away + ' away');
+    if (s.jail) parts.push(s.jail + ' in jail');
+    if (s.opened) parts.push(s.opened + ' you just opened');
+    const n = (s.hosp || 0) + (s.away || 0) + (s.jail || 0) + (s.opened || 0);
+    return n ? 'skips ' + n + ' not ready: ' + parts.join(', ') : '';
+}

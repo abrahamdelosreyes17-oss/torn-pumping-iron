@@ -1,14 +1,15 @@
 /*
  * Home (mockups/round3/S-home.html): one question, "what do I do today?".
- * The Now band and today's steps (the page's primary card), you against the
- * build, the next 7 days; Buy today, Heads-up, the plan in one line and this
- * week in the pane.
+ * Today's steps as one rail with the step of the moment on it (the page's
+ * primary card; round 8, mockups/round8/steps-panel.html pick B), you against
+ * the build, the next 7 days; Buy today, Heads-up, the plan in one line and
+ * this week in the pane.
  */
 
-import { h, t } from '../dom.js';
-import { STATS, STAT_LABEL } from '../../core/gain.js';
+import { h, t, tickMark } from '../dom.js';
+import { STATS, STAT_LABEL, HAPPY_CAP } from '../../core/gain.js';
 import { fmtInt, fmtSigned, fmtMoney, fmtShort } from '../../core/format.js';
-import { POINTS, XANAX, REFILL_POINTS, ITEMS } from '../../core/items.js';
+import { POINTS, XANAX, ECSTASY, REFILL_POINTS, ITEMS } from '../../core/items.js';
 import { STRATEGIES } from '../../core/strategies.js';
 import { fillCheapest, whereText, priceVerdict, unitPrice, npcListing } from '../../core/market.js';
 import { itemContext } from '../../core/model.js';
@@ -16,7 +17,7 @@ import { tornDayStart, DAY } from '../../core/bars.js';
 import { itemsUrl, gymUrl, pointsUrl, itemMarketUrl, pointsMarketUrl } from '../../sources/route.js';
 import { stackBars } from '../charts.js';
 import { clock, cd, sectionHead, meta, trainsText, headsList, gainsCard, planRunWords, STAT_COLOR, DAY_NAMES, MONTH_NAMES } from './common.js';
-import { partsText, trainInText, whyMix, whyOneStat } from '../../core/gympage.js';
+import { partsText, trainInText, whyMix, whyOneStat, isBoostStep, boostProgress, OVERDOSE_WORDS, awayWords, REHAB_COST, TRAVEL_URL, DUE_SLACK_MS } from '../../core/gympage.js';
 import { spentOverDays } from '../../core/receipts.js';
 import { hm } from '../../core/drugcd.js';
 import { lineAt, plannedBetween, planStatAt } from '../../core/planline.js';
@@ -56,27 +57,160 @@ export function stepWords(s) {
     }
 }
 
-/** "George's: STR × 12 → Frontline Fitness: DEX × 8 · +72,335 · 400 energy". */
-function stepSub(s) {
-    const parts = [];
-    const gyms = [...new Set(Object.values(s.gyms || {}).filter(Boolean))];
-    if (s.parts && s.parts.length) parts.push(partsText(s.parts));
-    else if (gyms.length) parts.push(gyms.join(' / '));
-    if (s.gain) parts.push(fmtSigned(s.gain));
-    if (s.energy) parts.push(fmtInt(s.energy) + ' energy');
-    if (s.note) parts.push(s.note);
-    return parts.join(' · ');
+/**
+ * Where a step's trains go, what they gain and the energy: "Gun Shop · about +1,391 · 270 energy" (one gym: its
+ * name; more: "George's: STR × 12 → Frontline Fitness: DEX × 8").
+ */
+function trainDetail(s, about = true) {
+    const out = [];
+    const parts = s.parts || [];
+    const gyms = [...new Set(parts.length ? parts.map((p) => p.gymName) : Object.values(s.gyms || {}).filter(Boolean))];
+    if (gyms.length > 1 && parts.length) out.push(partsText(parts));
+    else if (gyms.length) out.push(gyms.join(' / '));
+    if (s.gain) out.push((about ? 'about ' : '') + fmtSigned(s.gain));
+    if (s.energy) out.push(fmtInt(s.energy) + ' energy');
+    return out.join(' · ');
 }
 
-/** One click to the exact Torn page for this step: the gym (Fill is ready there), the items page, the points page. */
-function stepLinks(s) {
-    const items = (s.items || []).filter((it) => it.id !== POINTS && ITEMS[it.id]);
+/**
+ * A step as its actions in order (round 8, the owner's pick B in mockups/round8/steps-panel.html): "Take Xanax #2,
+ * then train DEX × 27" is 1 Take Xanax #2, 2 Train DEX × 27; a jump or boost is its own list, ticked from the bars
+ * (gympage.js boostProgress). `now` is the action of the moment: the first one not done (none once all are).
+ * @param {object} step - plan.js step
+ * @param {object} [o] - reads: {happy:{current,max}, boosterLeft, drugLeft, happyTrained, trained} (a boost's progress);
+ *   steps: the day's steps (the refill that follows a boost gives its line's gain)
+ * @returns {{id, text, detail, done, now, page: 'items'|'points'|'gym'|null}[]} page: the Torn page it is done on
+ */
+export function subSteps(step, { reads = null, steps = [] } = {}) {
+    if (!step) return [];
     const out = [];
-    const trains = Object.keys(s.trains || {}).length > 0;
-    if (s.kind === 'refill') out.push(h('a', { class: 'btn' + (trains ? '' : ' primary'), href: pointsUrl(), target: '_blank', rel: 'noopener', text: 'Points' }));
-    if (items.length) out.push(h('a', { class: 'btn' + (trains ? '' : ' primary'), href: itemsUrl(), target: '_blank', rel: 'noopener', text: 'Items' }));
-    if (trains) out.push(h('a', { class: 'btn primary', href: gymUrl(), target: '_blank', rel: 'noopener', text: 'Open the gym' }));
+    const join = (...x) => x.filter(Boolean).join(' · ');
+    if (isBoostStep(step)) {
+        const b = boostProgress(step, reads || {});
+        const happy = reads && reads.happy && Number.isFinite(reads.happy.current) ? reads.happy.current : null;
+        // The plan's own words for an action still to do ("Eat EDVD × 5", "Take the Ecstasy"); done, it is its name.
+        const said = (id) => ((step.actions || []).find((a) => a.id === id) || {}).text || null;
+        const refill = (steps || []).find((x) => x !== step && x.kind === 'refill') || null;
+        for (const a of b.list) {
+            if (a.id === 'eat') out.push({ id: a.id, text: a.done ? a.text : said('eat') || a.text, detail: a.done && !b.drugIn && happy !== null ? 'happy ' + fmtInt(happy) : '', done: a.done, page: 'items' });
+            else if (a.id === 'drug') {
+                const doubled = b.eaten && happy !== null ? ': ' + fmtInt(happy) + ' → ' + fmtInt(Math.min(HAPPY_CAP, happy * ITEMS[ECSTASY].happyMult)) : '';
+                const todo = /Ecstasy/.test(a.text) ? 'doubles your happy' + doubled : '+' + ITEMS[XANAX].energy + ' energy';
+                out.push({ id: a.id, text: a.done ? a.text : said('drug') || a.text, detail: a.done ? (happy !== null ? 'happy ' + fmtInt(happy) : '') : todo, done: a.done, page: 'items' });
+            } else if (a.id === 'train') out.push({ id: a.id, text: a.text, detail: trainDetail(step), done: a.done, page: 'gym' });
+            // The refill is a step of its own on the day's line (its Points button comes with its turn): no page here.
+            else if (a.id === 'refill') out.push({ id: a.id, text: a.text, detail: refill && refill.gain ? 'about ' + fmtSigned(refill.gain) : '', done: a.done, page: null });
+            else out.push({ id: a.id, text: a.text, detail: '', done: a.done, page: null });
+        }
+    } else {
+        const trains = trainsText(step.trains);
+        const items = (step.items || []).filter((it) => it.qty > 0);
+        const points = items.find((it) => it.id === POINTS) || null;
+        const page = step.kind === 'refill' ? 'points' : items.some((it) => it.id !== POINTS && ITEMS[it.id]) ? 'items' : null;
+        if (step.kind === 'stack' || step.kind === 'hold') {
+            // "Xanax #1 of 4 · don't train": the Xanax is the action, the rest is said under it.
+            const [what, ...rest] = String(step.label).split(' · ');
+            out.push({ id: 'use', text: 'Take ' + what, detail: join(rest.join(' · '), step.note), done: false, page });
+        } else if (step.kind === 'natural' || !trains) {
+            out.push({ id: trains ? 'train' : 'use', text: stepWords(step), detail: join(trains ? trainDetail(step) : '', step.note), done: false, page: trains ? 'gym' : page });
+        } else {
+            const adds = step.kind === 'xanax' ? '+' + ITEMS[XANAX].energy + ' energy' : points ? fmtInt(points.qty) + ' points' : '';
+            out.push({ id: 'use', text: stepWords({ ...step, trains: {} }), detail: adds, done: false, page });
+            out.push({ id: 'train', text: 'Train ' + trains, detail: join(trainDetail(step), step.note), done: false, page: 'gym' });
+        }
+    }
+    const now = out.findIndex((x) => !x.done);
+    out.forEach((x, i) => (x.now = i === now));
     return out;
+}
+
+/** "Take Xanax #2" → "take Xanax #2" after "then" or "Next at 17:00:"; an item's name ("EDVD × 5 + …") stays as it is. */
+function lowerAction(words) {
+    return /^(Take|Use|Train|Eat|Refill|Natural)\b/.test(words) ? words.charAt(0).toLowerCase() + words.slice(1) : words;
+}
+
+/**
+ * The panel's words for the plan's next step on Torn's pages (round 8, the owner's pick B). Due now (a jump or boost:
+ * within the minute): the action of the moment in the bar and in big type, what follows it on one line, the step's
+ * actions as a list, and the plate's ring. Still ahead: "Nothing due now" ("Session done" right after a train) and
+ * "Next at 17:00: …" with the countdown; nothing rings.
+ * @param {object} next - the step
+ * @param {object} o - now; boost: gympage.js boostProgress() of a jump or boost due now, else null; sessionOver: the
+ *   train before it was just done; reads and steps: as for subSteps
+ * @returns {{acting, pillText, pillNow?, cdAt?, tone, ring, label, cardStep, cardSub, checklist?}}
+ */
+export function panelStep(next, { now, boost = null, sessionOver = false, reads = null, steps = [] } = {}) {
+    const acting = next.at <= now || Boolean(boost);
+    const gain = next.gain ? 'about +' + fmtInt(next.gain) + (next.energy ? ' · ' + fmtInt(next.energy) + ' energy' : '') : '';
+    if (!acting) {
+        const at = clock(next.at);
+        return { acting, pillText: 'Nothing due', cdAt: next.at, tone: null, ring: false, label: 'Next at ' + at, cardStep: sessionOver ? 'Session done' : 'Nothing due now', cardSub: 'Next at ' + at + ': ' + [lowerAction(stepWords(next)), gain].filter(Boolean).join(' · ') };
+    }
+    const subs = subSteps(next, { reads, steps });
+    const cur = subs.find((x) => x.now) || null;
+    const after = cur ? subs[subs.indexOf(cur) + 1] || null : null;
+    const out = {
+        acting,
+        pillText: cur ? cur.text : next.label.split(' · ')[0],
+        // A chalk edge only when it's time to act.
+        tone: 'chalk',
+        ring: Boolean(cur),
+        label: 'Now',
+        cardStep: cur ? cur.text : stepWords(next),
+        cardSub: [after ? 'then ' + lowerAction(after.text.split(':')[0]) : '', gain].filter(Boolean).join(' · ') || null,
+    };
+    // A jump or boost counts down to the tick that resets the happy; any other step due says "Now".
+    if (boost && boost.deadline > now) out.cdAt = boost.deadline;
+    else out.pillNow = 'Now';
+    if (subs.length > 1) out.checklist = subs.map((x) => ({ text: x.text, done: x.done, next: x.now }));
+    if (boost) {
+        out.tone = boost.ready ? 'green' : 'red';
+        out.label = (boost.jump ? 'Jump' : 'Boost') + (boost.ready ? ' · now' : boost.deadline ? ' · finish before ' + clock(boost.deadline) : '');
+    }
+    return out;
+}
+
+/** The step's Torn pages, the action of the moment first (it is the primary button): Items, Points, the gym. */
+function stepButtons(subs) {
+    const to = { points: ['Points', pointsUrl], items: ['Items', itemsUrl], gym: ['Open the gym', gymUrl] };
+    const pages = [];
+    for (const x of subs) if (!x.done && x.page && !pages.includes(x.page)) pages.push(x.page);
+    return pages.map((p, i) => h('a', { class: 'btn' + (i === 0 ? ' primary' : ''), href: to[p][1](), target: '_blank', rel: 'noopener', text: to[p][0] }));
+}
+
+/*
+ * Today as one rail (round 8, the owner's pick B): the day is one line from done to later, the step of the moment a
+ * box on it, its actions hanging under it on the same line. The plate with the ring (his pick 1D) marks the one
+ * action to do now: one ring on the page, never two; a countdown never rings, and nothing rings when there is
+ * nothing you can do.
+ */
+
+/** The app's plate; `ring`: the one ring that leaves it. */
+const plateMark = (ring = false) => h('span', { class: 'pl' + (ring ? ' ring' : ''), 'aria-hidden': 'true' });
+/** A point on the rail: hollow (later), `on` (the step of the moment), `open` (nothing to do now). */
+const railDot = (cls = '') => h('span', { class: 'dot' + (cls ? ' ' + cls : '') });
+
+/** One row of the rail: its point on the line, its time, what it is, and what stands on the right. */
+function railRow(cls, node, when, body, right = null) {
+    return h('li', { class: cls || null }, [h('span', { class: 'node' }, [node]), h('span', { class: 't num' }, [].concat(when)), body, right]);
+}
+
+/** The step of the moment's actions, under each other: done ones ticked, the one to do now large with the ring. */
+function subList(subs) {
+    const n = subs.length;
+    return h(
+        'ol',
+        { class: 'subr' },
+        subs.map((x, i) => {
+            const under = x.now ? [n > 1 ? 'Step ' + (i + 1) + ' of ' + n : '', x.detail].filter(Boolean).join(' · ') : x.detail ? ' · ' + x.detail : '';
+            return h('li', { class: x.done ? 'done' : x.now ? 'now' : null }, [h('span', { class: 'node' }, [x.done ? tickMark() : x.now ? plateMark(true) : railDot()]), h('div', {}, [h('b', { class: 'a', text: x.text }), under ? h('span', { class: 's', text: under }) : null])]);
+        }),
+    );
+}
+
+/** A state that takes the whole day (stacking, overdosed, flying) as the rail's one point, its box beside it. */
+function railBox(node, when, box) {
+    return h('ol', { class: 'rail' }, [railRow('now', node, when, h('div', { class: 'nb solo' }, [box]))]);
 }
 
 /**
@@ -176,7 +310,7 @@ export function nextDays(m, settings) {
 /** Share bar against the target, "24.9% → 27.8%", what's left, and today's trains (none while stacking for a chain). */
 function youVsBuild(m, ctx = null) {
     const tot = {};
-    for (const st of m.stacking ? [] : m.steps) for (const [k, n] of Object.entries(st.trains || {})) tot[k] = (tot[k] || 0) + n;
+    for (const st of m.stacking || m.overdose || m.away ? [] : m.steps) for (const [k, n] of Object.entries(st.trains || {})) tot[k] = (tot[k] || 0) + n;
     const only = Object.keys(tot).length === 1 ? Object.keys(tot)[0] : null;
     const rows = m.statRows.map((r) => {
         const k = r.stat;
@@ -202,7 +336,8 @@ function youVsBuild(m, ctx = null) {
 
 function buildFoot(m, ctx = null) {
     const foot = [];
-    const tin = trainInText(m);
+    // Overdosed, stacking, flying: nothing is trained now, so no gym to train in.
+    const tin = m.overdose || m.stacking || m.away ? null : trainInText(m);
     if (tin) foot.push(h('span', {}, ['Train in ', h('b', { text: tin })]));
     // Why this session mixes stats (or trains one): "STR + DEX this session: +8.4% toward Hank's vs STR only".
     const why = ctx && ctx.plan && ctx.plan.goal ? null : whyMix(m) || whyOneStat(m);
@@ -298,7 +433,7 @@ function planLine(m, ctx) {
 
 /*
  * Stacking for a chain (round 7, the owner's pick in mockups/round7/home.html): a small card on top of the pane turns
- * it on; Today then shows that training waits instead of the steps, and Resume re-plans at once (Re-plan's run, its
+ * it on; Today then shows that training waits instead of the steps, and Resume recalibrates at once (Recalibrate's run, its
  * light sweep included). The flag is stored for every tab (platform/store.js K.stacking); the model carries it as
  * `m.stacking = {since}`.
  */
@@ -322,10 +457,10 @@ export function chainCard(m, ctx) {
         h('div', { class: 'chain-row' }, [
             h('div', {}, [
                 h('div', { class: 'chain-state', text: st ? 'Stacking since ' + sinceWords(st.since, m.now, ctx.settings) : 'Training' }),
-                h('p', { text: st ? 'Resume re-plans from your bars right away.' : 'Stacking energy for a chain?' }),
+                h('p', { text: st ? 'Resume recalibrates from your bars right away.' : 'Stacking energy for a chain?' }),
             ]),
             st
-                ? h('button', { class: 'btn primary', type: 'button', disabled: busy, title: 'Training steps come back and the plan is re-planned now, from your bars', onclick: () => ctx.resumeStacking && ctx.resumeStacking(), text: 'Resume' })
+                ? h('button', { class: 'btn primary', type: 'button', disabled: busy, title: 'Training steps come back and the plan is recalibrated now, from your bars', onclick: () => ctx.resumeStacking && ctx.resumeStacking(), text: 'Resume' })
                 : h('button', { class: 'btn', type: 'button', disabled: busy, title: 'No training steps and no Discord pings about energy or training until you resume', onclick: () => ctx.startStacking && ctx.startStacking(), text: 'I’m stacking' }),
         ]),
     ]);
@@ -341,12 +476,12 @@ function stackingBox(m, ctx) {
             h('li', {}, [h('b', { text: 'No Discord pings' }), ' about energy or training']),
             h('li', {}, ['Energy now ', h('b', { text: fmtInt(e.current) + ' / ' + fmtInt(e.max) }), ', kept for the chain']),
         ]),
-        h('button', { class: 'btn primary', type: 'button', disabled: Boolean(m.planBusy), onclick: () => ctx.resumeStacking && ctx.resumeStacking(), text: 'Resume and re-plan' }),
+        h('button', { class: 'btn primary', type: 'button', disabled: Boolean(m.planBusy), onclick: () => ctx.resumeStacking && ctx.resumeStacking(), text: 'Resume and recalibrate' }),
     ]);
 }
 
 /**
- * Re-plan running (Resume starts it from here): the Plan card's bar with the owner's light sweep (2A; still with
+ * Recalibrate running (Resume starts it from here): the Plan card's bar with the owner's light sweep (2A; still with
  * Settings › Animations off or the PC's reduce-motion). app.js planProgress moves it without a redraw.
  */
 function homeRun(m, ctx) {
@@ -356,7 +491,7 @@ function homeRun(m, ctx) {
         return err ? h('p', { class: 'c-bad', style: 'margin:8px 0 0', text: err }) : null;
     }
     return h('div', { class: 'planrun', role: 'status', 'aria-live': 'polite' }, [
-        h('div', { class: 'dayline', role: 'progressbar', 'aria-label': busy.recalibrate ? 'Re-planning' : 'Working out your plan' }, [h('i', { 'data-plan-bar': '1', style: 'width:' + Math.round(100 * Math.max(0.02, busy.done || 0)) + '%' })]),
+        h('div', { class: 'dayline', role: 'progressbar', 'aria-label': busy.recalibrate ? 'Recalibrating' : 'Working out your plan' }, [h('i', { 'data-plan-bar': '1', style: 'width:' + Math.round(100 * Math.max(0.02, busy.done || 0)) + '%' })]),
         h('div', { class: 'row', style: 'justify-content:space-between;margin-top:6px' }, [h('span', { class: 'pc-sub num', 'data-plan-words': '1', text: planRunWords(busy) }), h('span', { class: 'muted', style: 'font-size:12px', text: 'Today’s steps follow your bars meanwhile' })]),
     ]);
 }
@@ -364,7 +499,11 @@ function homeRun(m, ctx) {
 export function renderHome(m, ctx) {
     const s = ctx.settings;
     const now = m.now;
+    // An overdose first (you can't train either way), then stacking for a chain.
+    if (m.overdose) return renderOverdose(m, ctx);
     if (m.stacking) return renderStacking(m, ctx);
+    // Flying or abroad: the gym is closed (Torn's own page says so), whatever the plan has next.
+    if (m.away) return renderAway(m, ctx);
     const next = m.next;
     const late = next && next.kind === 'xanax' && m.strip.drug.left === 0;
     // "On plan" only while no step is waiting on you (the plan re-times, so a due step is the one sign of being behind).
@@ -386,38 +525,54 @@ export function renderHome(m, ctx) {
         ]),
     );
 
-    const nowBand = next
-        ? h('div', { class: 'nowb num' }, [
-              next.at > now ? cd(next.at, now, { cls: 'cd' }) : h('span', { class: 'k', text: 'NOW' }),
-              h('div', {}, [h('b', { text: stepWords(next) }), h('br'), h('span', { class: 's', text: stepSub(next) })]),
-              h('div', { class: 'acts' }, stepLinks(next)),
-          ])
-        : h('div', { class: 'nowb num' }, [h('span', { class: 'k', text: 'DONE' }), h('div', {}, [h('b', { text: 'Nothing left today' }), h('br'), h('span', { class: 's', text: 'Tomorrow’s plan starts at 00:00 Torn time' })]), h('div')]);
+    // A step past midnight says its day (round 7: tomorrow's jump was listed under Today with a clock only).
+    const dayWord = (at) => (tornDayStart(at) > tornDayStart(now) ? (Math.round((tornDayStart(at) - tornDayStart(now)) / DAY) === 1 ? 'tomorrow' : DAY_NAMES[new Date(at).getUTCDay()]) : null);
+    const when = (at) => (dayWord(at) ? [h('small', { text: dayWord(at) }), clock(at, s)] : [clock(at, s)]);
+    // A jump or boost due within the minute counts as now (as on Torn's panel), like a step whose time has come.
+    const due = Boolean(next && (next.at <= now || (isBoostStep(next) && next.at <= now + DUE_SLACK_MS)));
+    const subs = due ? subSteps(next, { reads: { happy: { current: m.strip.happy.current, max: m.strip.happy.max }, boosterLeft: m.strip.booster.left, drugLeft: m.strip.drug.left }, steps: m.steps }) : [];
 
-    const rows = [];
-    for (const d of m.done) rows.push(h('tr', { class: 'done' }, [h('td', { class: 't', text: clock(d.at, s) }), h('td', { text: d.label }), h('td', { text: Object.keys(d.trained || {}).map((k) => STAT_LABEL[k]).join(' · ') || '—' }), h('td', { class: 'r', text: d.gain ? fmtSigned(d.gain) : '' }), h('td', { class: 'r ok', text: 'Done' })]));
+    const rail = [];
+    for (const d of m.done) {
+        const trained = Object.keys(d.trained || {}).map((k) => STAT_LABEL[k]).join(' · ');
+        rail.push(railRow('done', tickMark(), clock(d.at, s), h('div', {}, [h('span', { text: d.label }), trained || d.gain ? h('span', { class: 's', text: ' · ' + [trained, d.gain ? fmtSigned(d.gain) : ''].filter(Boolean).join(' · ') }) : null]), h('span', { class: 'in', text: 'Done' })));
+    }
+    if (due) {
+        // The step of the moment: its actions on the rail, the ring on the one to do now; the buttons follow it.
+        const strict = isBoostStep(next) && next.deadline > now;
+        const side = [strict ? cd(next.deadline, now, { cls: 'cd num' }) : h('span', { class: 'k', text: 'NOW' }), strict ? h('small', { text: 'until ' + clock(next.deadline, s) + ', when happy resets' }) : null];
+        const links = stepButtons(subs);
+        if (links.length) side.push(h('div', { class: 'acts' }, links));
+        const note = isBoostStep(next) && next.note && !next.mid ? h('div', { class: 's', text: next.note }) : null;
+        rail.push(railRow('now', railDot('on'), 'now', h('div', { class: 'nb num' }, [h('div', {}, [subList(subs), note]), h('div', { class: 'side' }, side)])));
+    } else if (next) {
+        // Nothing to do yet: said in words, with the countdown; a countdown never rings.
+        const what = [lowerAction(stepWords(next)), trainDetail(next, false), next.note].filter(Boolean).join(' · ');
+        rail.push(
+            railRow('now', railDot('open'), when(next.at), h('div', { class: 'nb num' }, [
+                h('div', {}, [h('b', { class: 'big1', text: 'Nothing due now' }), h('span', { class: 's', text: 'Next ' + (dayWord(next.at) ? dayWord(next.at) + ' ' : '') + 'at ' + clock(next.at, s) + ': ' + what })]),
+                h('div', { class: 'side' }, [cd(next.at, now, { cls: 'cd num' }), h('small', { text: 'next at ' + clock(next.at, s) })]),
+            ])),
+        );
+    } else {
+        rail.push(railRow('now', railDot('open'), '', h('div', { class: 'nb num' }, [h('div', {}, [h('b', { class: 'big1', text: 'Nothing left today' }), h('span', { class: 's', text: 'Tomorrow’s plan starts at 00:00 Torn time' })]), h('div', { class: 'side' }, [h('span', { class: 'k', text: 'DONE' })])])));
+    }
     m.steps.slice(next ? 1 : 0).forEach((st) => {
-        const k = Object.keys(st.trains || {});
-        rows.push(
-            h('tr', {}, [
-                // A step past midnight says its day (round 7: tomorrow's jump was listed under Today with a clock only).
-                h('td', { class: 't' }, tornDayStart(st.at) > tornDayStart(now) ? [h('small', { class: 'muted', text: Math.round((tornDayStart(st.at) - tornDayStart(now)) / DAY) === 1 ? 'tomorrow' : DAY_NAMES[new Date(st.at).getUTCDay()] }), h('br'), clock(st.at, s)] : [clock(st.at, s)]),
-                h('td', {}, [h('b', { class: 'w', text: st.label }), st.mid && st.note ? h('div', { class: 'muted', style: 'font-size:12px', text: st.note }) : null]),
-                h('td', {}, [h('span', { class: k.length === 1 ? 's-' + k[0] : null, text: trainsText(st.trains) || '—' })]),
-                h('td', { class: 'r', text: st.gain ? fmtSigned(st.gain) : '' }),
-                h('td', { class: 'r muted' }, [st.at > now ? cd(st.at, now, { cls: 'when' }) : h('span', { class: 'when', text: 'now' })]),
-            ]),
+        const trains = trainsText(st.trains);
+        rail.push(
+            railRow(
+                null,
+                railDot(),
+                when(st.at),
+                h('div', {}, [h('b', { class: 'white', text: st.label }), trains || st.gain ? h('span', { class: 's', text: ' · ' + [trains, st.gain ? fmtSigned(st.gain) : ''].filter(Boolean).join(' · ') }) : null, st.mid && st.note ? h('div', { class: 's', text: st.note }) : null]),
+                h('span', { class: 'in num' }, st.at > now ? ['in ', cd(st.at, now)] : ['now']),
+            ),
         );
     });
-    const steps = rows.length
-        ? h('table', { class: 'tbl num', style: 'margin-top:8px' }, [
-              h('thead', {}, [h('tr', {}, [h('th', { style: 'width:64px', text: 'When' }), h('th', { text: 'Step' }), h('th', { style: 'width:190px', text: 'Train' }), h('th', { class: 'r', style: 'width:110px', text: 'Gain' }), h('th', { class: 'r', style: 'width:110px', text: 'In' })])]),
-              h('tbody', {}, rows),
-          ])
-        : null;
+    const steps = h('ol', { class: 'rail', 'data-rail': due ? 'due' : next ? 'wait' : 'done' }, rail);
     const foot = h('div', { class: 'row muted num', style: 'justify-content:space-between;margin-top:6px;font-size:12px;gap:12px;flex-wrap:wrap' }, [h('span', {}, ['So far ', h('b', { class: 'white', text: fmtSigned(m.gainedToday) }), ' of ' + fmtInt(plannedToday) + ' today']), h('span', { text: dayResetWords(m) + ' · ' + xanaxCdWords(m.xanaxCd) })]);
 
-    const lead = h('div', { class: 'lead' }, [head, homeRun(m, ctx), nowBand, steps, foot]);
+    const lead = h('div', { class: 'lead' }, [head, homeRun(m, ctx), steps, foot]);
     const week = weekChart(m, ctx);
     return {
         strip: true,
@@ -427,14 +582,74 @@ export function renderHome(m, ctx) {
 }
 
 function headsCard(m, ctx) {
-    const heads = m.stacking ? m.heads.filter((x) => !trainingHead(x)) : m.heads;
+    const heads = m.stacking || m.overdose || m.away ? m.heads.filter((x) => !trainingHead(x)) : m.heads;
     return h('div', {}, [sectionHead('Heads-up', null, null, 'h3'), headsList(heads.length ? heads : [{ tone: 'good', text: 'Nothing needs you' }], (tab) => ctx.go(tab))]);
+}
+
+/**
+ * Home while overdosed (the owner, 2026-10-03: Torn's panel said "Overdosed · fly to Switzerland" while Today still
+ * said "Train DEX × 6" and ticked the Xanax step Done). The same stored state as the panel (`m.overdose`): no steps,
+ * what to do, what it costs, and "Rehab done · recalibrate" (Resume's run). It also ends by itself with the overdose's
+ * drug cooldown, or as soon as your bars hold more than regeneration gives back (a refill, a can, a drug).
+ */
+function overdoseBox(m, ctx) {
+    const od = m.overdose;
+    const e = m.strip.energy;
+    return h('div', { class: 'stackbox num', role: 'status', 'data-overdose': 'on' }, [
+        h('div', { class: 'big', text: OVERDOSE_WORDS.pill }),
+        h('ul', {}, [
+            h('li', {}, [h('b', { text: 'No training steps' }), ' until rehab is done']),
+            h('li', {}, ['Rehab there: about ', h('b', { text: fmtMoney(REHAB_COST) }), ' a session']),
+            h('li', {}, ['No drug until ', h('b', { text: clock(od.until, ctx.settings) }), ' (', cd(od.until, m.now, { cls: 'when' }), ') · energy now ' + fmtInt(e.current) + ' / ' + fmtInt(e.max)]),
+            h('li', {}, [h('b', { text: 'No Discord pings' }), ' about energy or training']),
+        ]),
+        h('div', { class: 'row', style: 'gap:8px;flex-wrap:wrap' }, [
+            h('a', { class: 'btn primary', href: TRAVEL_URL, target: '_blank', rel: 'noopener', text: 'Open Travel' }),
+            h('button', { class: 'btn', type: 'button', disabled: Boolean(m.planBusy), title: 'Training steps come back and the plan is recalibrated now, from your bars', onclick: () => ctx.endOverdose && ctx.endOverdose(), text: 'Rehab done · recalibrate' }),
+        ]),
+    ]);
+}
+
+function renderOverdose(m, ctx) {
+    const head = sectionHead('Today', meta([dateLine(m.now) + ' · ', h('b', { style: 'color:var(--warn)', text: 'overdosed' })]));
+    // Flying to Switzerland is the one thing to do: the rail's point is the plate with the ring.
+    const lead = h('div', { class: 'lead' }, [head, homeRun(m, ctx), railBox(plateMark(true), 'now', overdoseBox(m, ctx))]);
+    return {
+        strip: true,
+        main: [lead, youVsBuild(m, ctx), weekChart(m, ctx)].filter(Boolean),
+        pane: [gainsCard(m), buyCard(m, ctx), headsCard(m, ctx), planLine(m, ctx), weekCard(m, ctx)],
+    };
+}
+
+/**
+ * Home while you fly or stand abroad (the owner's live page, 2026-10-03: "Train DEX × 6" in the air). The same state
+ * as Torn's panel (`m.away`): no step to do now, when you are back, and what comes first when you land.
+ */
+function renderAway(m, ctx) {
+    const w = awayWords(m.away);
+    const first = m.steps[0] || null;
+    const box = h('div', { class: 'stackbox num', role: 'status', 'data-away': 'on' }, [
+        h('div', { class: 'big' }, [h('span', { text: w.pill }), m.away.flying ? cd(m.away.until, m.now, { cls: 'cd num' }) : null]),
+        h('ul', {}, [
+            h('li', {}, [h('b', { text: 'No training' }), ' until you are back in Torn: the gym is closed while you travel']),
+            first ? h('li', {}, ['First when you land: ', h('b', { text: first.label.split(' · ')[0] + (trainsText(first.trains) ? ', then ' + trainsText(first.trains) : '') })]) : null,
+            m.away.flying ? h('li', {}, [m.away.where === 'Torn' ? 'Back at ' : 'Lands at ', h('b', { text: clock(m.away.until, ctx.settings) }), ' (', cd(m.away.until, m.now, { cls: 'when' }), ')']) : null,
+        ]),
+    ]);
+    const head = sectionHead('Today', meta([dateLine(m.now) + ' · ', h('b', { style: 'color:var(--warn)', text: m.away.flying ? 'flying' : 'abroad' })]));
+    // Nothing you can do until you land: nothing rings; the rail's time is when you are back.
+    const lead = h('div', { class: 'lead' }, [head, homeRun(m, ctx), railBox(railDot('open'), m.away.flying ? clock(m.away.until, ctx.settings) : 'now', box)]);
+    return {
+        strip: true,
+        main: [lead, youVsBuild(m, ctx), weekChart(m, ctx)].filter(Boolean),
+        pane: [chainCard(m, ctx), gainsCard(m), buyCard(m, ctx), headsCard(m, ctx), planLine(m, ctx), weekCard(m, ctx)],
+    };
 }
 
 /** Home while stacking for a chain: Today says training waits; no steps, no 48 h look-ahead, no training heads-up. */
 function renderStacking(m, ctx) {
     const head = sectionHead('Today', meta([dateLine(m.now) + ' · ', h('b', { style: 'color:var(--warn)', text: 'training paused' })]));
-    const lead = h('div', { class: 'lead' }, [head, stackingBox(m, ctx)]);
+    const lead = h('div', { class: 'lead' }, [head, railBox(railDot('open'), 'now', stackingBox(m, ctx))]);
     return {
         strip: true,
         main: [lead, youVsBuild(m, ctx), weekChart(m, ctx)].filter(Boolean),

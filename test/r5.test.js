@@ -64,6 +64,23 @@ test('owner’s case: Candy + Xanax with 31h 40m on the booster cooldown: no can
     if (fits < 49) assert.match(boost.note, /room for \d+ of 49/);
 });
 
+test('owner, 2026-10-03: "Candy × 22" with 13h 05m on the booster cooldown: the note says the cooldown, the cap and why 22', () => {
+    const booster = 13 * 3600 + 5 * 60;
+    const steps = dayTimeline({ state: player({ booster }), now: T0, strategy: 'candyXanax', ctx: CTX, until: T0 + 48 * HOUR });
+    const boost = steps.find((s) => s.kind === 'boost');
+    assert.ok(boost, 'a candy boost: ' + steps.map((s) => s.kind).join());
+    const leftMin = Math.ceil((T0 + booster * 1000 - boost.at) / 60000);
+    const fits = Math.floor((24 * 60 - leftMin) / 30 + 1e-9) + 1;
+    assert.equal(candyOf(boost), fits, 'the room left under the 24 h cap, 30 min a candy (the last one may go over it)');
+    assert.ok(fits < 49);
+    const m = boost.note.match(/booster cooldown (\d+)h (\d\d)m of 24h: room for (\d+) of 49 \(30 min each\)/);
+    assert.ok(m, boost.note);
+    assert.equal(Number(m[1]) * 60 + Number(m[2]), leftMin, 'the cooldown as it is when the candy is eaten');
+    assert.equal(Number(m[3]), fits);
+    // His numbers: 13 h on the cooldown leaves 11 h = 22 candy.
+    assert.equal(Math.floor((24 * 60 - 13 * 60 - 5) / 30 + 1e-9) + 1, 22);
+});
+
 test('the day plan never plans more candy than the cooldown holds, across the 48 h look-ahead', () => {
     const state = player({ booster: 3 * 3600 });
     const steps = dayTimeline({ state, now: T0, strategy: 'candyXanax', ctx: CTX, until: T0 + 48 * HOUR });

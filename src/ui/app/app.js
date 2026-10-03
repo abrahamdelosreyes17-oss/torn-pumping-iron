@@ -14,17 +14,19 @@ import { renderPlan } from './plan.js';
 import { renderBuy } from './buy.js';
 import { renderProgress } from './progress.js';
 import { renderSettings } from './settings.js';
+import { renderLedger } from './ledger-tab.js';
 
 export const APP_TABS = [
     ['home', 'Home'],
     ['plan', 'Plan'],
     ['buy', 'Buy'],
     ['progress', 'Progress'],
+    ['ledger', 'Ledger'],
     ['eye', 'Torn Eye'],
     ['settings', 'Settings'],
 ];
 
-const RENDERERS = { home: renderHome, plan: renderPlan, buy: renderBuy, progress: renderProgress, settings: renderSettings };
+const RENDERERS = { home: renderHome, plan: renderPlan, buy: renderBuy, progress: renderProgress, ledger: renderLedger, settings: renderSettings };
 
 // Round 7 type pass: Source Serif 4 for titles and the one big number, Inter for the rest (webpage only; torn.com uses Segoe UI).
 // Loaded into the document: @font-face rules there reach the app's shadow root.

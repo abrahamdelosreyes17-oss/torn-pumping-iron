@@ -11,7 +11,8 @@
 import { h, t } from '../dom.js';
 import { keyInputAttrs, keyMask } from '../mask.js';
 import { STATS, STAT_LABEL, gainPerTrain } from '../../core/gain.js';
-import { fmtInt, fmtPct } from '../../core/format.js';
+import { fmtInt, fmtPct, fmtMoney } from '../../core/format.js';
+import { LEDGER_TYPES, LEDGER_ACCOUNTS } from '../../core/ledger.js';
 import { learnGym, learnFights, describeGym, describeFights } from '../../core/learn.js';
 import { exportFiles, importFiles } from '../../core/learndata.js';
 import { makeZip, readZip } from '../../core/zip.js';
@@ -49,7 +50,7 @@ function download(bytes, name) {
 
 function exportZip(ctx) {
     const d = ctx.dev.data();
-    const files = exportFiles({ samples: d.samples, fights: d.fights, gymLog: d.gymLog, learned: d.learned, version: d.version, now: Date.now() });
+    const files = exportFiles({ samples: d.samples, fights: d.fights, gymLog: d.gymLog, learned: d.learned, ledger: d.ledger, version: d.version, now: Date.now() });
     download(makeZip(files), 'learning-' + new Date().toISOString().slice(0, 10) + '.zip');
 }
 
@@ -130,6 +131,41 @@ function selfCheck() {
 }
 
 /**
+ * Your books (round 7, R7.5): the money log as a ledger. By account: lines,
+ * money in, money out, net; the reconciliation (opening
+ * liquid + in − out = closing liquid) with its gap; the log types the table
+ * does not know. On your screen only; none of it is in the report zip.
+ */
+export function booksBlock(dev) {
+    const b = dev.books ? dev.books() : null;
+    const head = sectionHead('Your books', meta([b ? b.lines + ' log lines, each once · ' + Math.round(b.days) + ' days · read ' + new Date(b.at).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : 'the money log as a ledger']), null, 'h3');
+    if (!b) return h('div', {}, [head, h('p', { class: 'muted', style: 'margin:0', text: 'Nothing read yet: the money log needs the Full key (Settings), and is read every 6 hours.' })]);
+    const m = (v) => (v ? fmtMoney(Math.round(v)) : '—');
+    const rows = Object.values(b.ledger.accounts).map((a) =>
+        h('tr', {}, [
+            h('td', {}, [h('b', { class: 'w', text: a.name }), h('br'), h('small', { class: 'muted', text: (LEDGER_ACCOUNTS.find((x) => x.id === a.id) || {}).what || '' })]),
+            h('td', { class: 'r', text: fmtInt(a.n) }),
+            h('td', { class: 'r', text: m(a.in) }),
+            h('td', { class: 'r', text: m(a.out) }),
+            h('td', { class: 'r ' + (a.net < 0 ? 'c-warn' : ''), text: a.net ? (a.net < 0 ? '−' : '') + fmtMoney(Math.abs(Math.round(a.net))) : '—' }),
+        ]),
+    );
+    const r = b.recon;
+    const day = (t) => new Date(t).toISOString().slice(0, 10);
+    const reconLine = r
+        ? h('div', { class: 'note2 num' }, [h('b', { class: r.reconciled ? 'c-good' : 'c-warn', text: r.reconciled ? 'Reconciled · ' : 'Off · ' }), day(b.reconSpan.from) + ' to ' + day(b.reconSpan.to) + ': liquid ' + fmtMoney(Math.round(r.opening)) + ' + in ' + fmtMoney(Math.round(r.in)) + ' − out ' + fmtMoney(Math.round(r.out)) + ' = ' + fmtMoney(Math.round(r.expected)) + '; Torn says ' + fmtMoney(Math.round(r.closing)) + '. ' + r.words])
+        : h('div', { class: 'note2', text: 'The reconciliation needs your liquid money at two dates the log covers (Torn’s networth history, read every 6 hours): not there yet.' });
+    const unsorted = b.ledger.unsorted.length ? h('div', { class: 'note2 c-warn', text: 'Not sorted (no amount is read from these until the table knows them): ' + b.ledger.unsorted.map((u) => (u.title || 'type ' + u.type) + ' (' + u.type + ') × ' + u.n).join(' · ') }) : h('div', { class: 'note2', text: 'Every line is sorted: no log type the table does not know.' });
+    return h('div', {}, [
+        head,
+        h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'Account' }), h('th', { class: 'r', style: 'width:56px', text: 'Lines' }), h('th', { class: 'r', style: 'width:110px', text: 'In' }), h('th', { class: 'r', style: 'width:110px', text: 'Out' }), h('th', { class: 'r', style: 'width:110px', text: 'Net' })])]), h('tbody', {}, rows)]),
+        h('div', { class: 'note2 num', text: 'Comes in a day, recurring income less committed costs: ' + (b.flow.earnsPerDay < 0 ? '−' : '') + fmtMoney(Math.abs(Math.round(b.flow.earnsPerDay))) + ' · gym items and rehab bought: ' + fmtMoney(Math.round(b.flow.trainingPerDay)) + ' a day · the statements are on the Ledger tab' }),
+        reconLine,
+        unsorted,
+    ]);
+}
+
+/**
  * Money log fields (round 7, C.0): your money log by Torn's log type, with
  * the names of each type's data fields and which one was read as the amount.
  * Names and counts only, never an amount: the money accounts are written
@@ -139,7 +175,6 @@ export function moneyFieldsBlock(dev) {
     const mf = dev.moneyFields ? dev.moneyFields() : { at: null, list: [] };
     const head = sectionHead('Money log fields', meta([mf.list.length ? mf.list.length + ' log types · read ' + new Date(mf.at).toISOString().slice(0, 16).replace('T', ' ') + ' UTC · names only, never an amount' : 'names only, never an amount']), null, 'h3');
     if (!mf.list.length) return h('div', {}, [head, h('p', { class: 'muted', style: 'margin:0', text: 'Nothing read yet: the money log needs the Full key (Settings), and is read every 6 hours. A log read before this version has no field names: save the Full key again, or wait for the next read.' })]);
-    const amountWords = (a) => Object.entries(a || {}).sort((x, y) => y[1] - x[1]).map(([k, n]) => k + ' × ' + n).join(', ');
     const rows = mf.list.map((r) =>
         h('tr', {}, [
             h('td', {}, [h('b', { class: 'w', text: r.title || '(no title)' }), h('br'), h('small', { class: 'muted', text: r.category || '' })]),
@@ -147,13 +182,13 @@ export function moneyFieldsBlock(dev) {
             h('td', { class: 'r', text: fmtInt(r.lines) }),
             h('td', { class: 'r', text: String(r.days) }),
             h('td', { style: 'white-space:normal', text: r.fields.map((f) => f.name + ' (' + f.is + ')').join(', ') || 'no data fields' }),
-            h('td', { class: /none read/.test(amountWords(r.amount)) ? 'c-warn' : '', style: 'white-space:normal', text: amountWords(r.amount) }),
+            h('td', { class: LEDGER_TYPES[r.type] ? '' : 'c-warn', style: 'white-space:normal', text: LEDGER_TYPES[r.type] ? (LEDGER_ACCOUNTS.find((a) => a.id === LEDGER_TYPES[r.type].account) || {}).name + (LEDGER_TYPES[r.type].sign > 0 ? ' +' : ' −') : 'Not sorted' }),
         ]),
     );
     return h('div', {}, [
         head,
-        h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'Log line' }), h('th', { class: 'r', style: 'width:60px', text: 'Type' }), h('th', { class: 'r', style: 'width:56px', text: 'Lines' }), h('th', { class: 'r', style: 'width:52px', text: 'Days' }), h('th', { text: 'Data fields' }), h('th', { style: 'width:180px', text: 'Read as the amount' })])]), h('tbody', {}, rows)]),
-        h('div', { class: 'note2', text: 'A line listed under two of Torn’s categories counts once. “(none read)”: no field of that line was taken as its amount today.' }),
+        h('table', { class: 'tbl num' }, [h('thead', {}, [h('tr', {}, [h('th', { text: 'Log line' }), h('th', { class: 'r', style: 'width:60px', text: 'Type' }), h('th', { class: 'r', style: 'width:56px', text: 'Lines' }), h('th', { class: 'r', style: 'width:52px', text: 'Days' }), h('th', { text: 'Data fields' }), h('th', { style: 'width:180px', text: 'Booked as' })])]), h('tbody', {}, rows)]),
+        h('div', { class: 'note2', text: 'A line listed under two of Torn’s categories counts once. “Not sorted”: the ledger’s table does not know that log type yet, so no amount is read from it.' }),
     ]);
 }
 
@@ -285,7 +320,7 @@ export function renderDeveloper(m, ctx) {
             ]),
         ]),
     ];
-    return { ctl: [ctl], main: [learned, scat, errChart, eye, moneyFieldsBlock(dev)], pane };
+    return { ctl: [ctl], main: [learned, scat, errChart, eye, booksBlock(dev), moneyFieldsBlock(dev)], pane };
 }
 
 void fmtPct;

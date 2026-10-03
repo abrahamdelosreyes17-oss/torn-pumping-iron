@@ -9,7 +9,7 @@ import { STATS, totalOf } from './gain.js';
 import { parsePerks } from './perks.js';
 import { mergeLiveGyms, unlockedGyms, bestGymFor, gymAccess, gymById, nextGym, GYMS } from './gyms.js';
 import { buildGaps, projectBuild, resolveBuild } from './builds.js';
-import { energyAt, happyAt, drugFreeAt, boosterFreeAt, refillAvailable, tornDayStart, msToTornMidnight, DAY, countdown, tornClock } from './bars.js';
+import { energyAt, happyAt, drugFreeAt, boosterFreeAt, refillAvailable, tornDayStart, msToTornMidnight, DAY, countdown, tornClock, awayOf } from './bars.js';
 import { dayTimeline, targetShares, drugsToday, itemsNeeded, strictWarnings, REFILL_WARN_MS } from './plan.js';
 import { simulateStrategy, simulateSteps, SIM_SLICE_DAYS, feasibleStrategies, STRATEGIES, CANDY_PLANS, consoleBlocked } from './strategies.js';
 import { recommend, pickWarning, opensOnDay } from './recommend.js';
@@ -22,6 +22,7 @@ import { PICK_BY } from './recommend.js';
 import { XANAX, SAMPLE_PRICES, ITEMS, XANAX_CD_MIN, GAME_CONSOLE, POINTS } from './items.js';
 import { xanaxCdOf } from './drugcd.js';
 import { realGains } from './gains.js';
+import { rehabParams } from './rehab.js';
 import { HAPPY_CAP } from './gain.js';
 import { JUMP_STACK, CONSOLE_STACK, stackRoom } from './strategies.js';
 import { budgetOf, effectivePickBy, affordLine, autoWaitLine, unlockDays, unlockEnergyLeft } from './auto.js';
@@ -146,7 +147,7 @@ export function itemContext(statics = {}, settings = {}, now = null) {
 }
 
 /**
- * The simulation inputs every strategy shares. `live` (round 7; Create plan and Re-plan): the run starts from the
+ * The simulation inputs every strategy shares. `live` (round 7; Create plan and Recalibrate): the run starts from the
  * bars as they are (energy, happy, the drug cooldown, today's refill used), like the day plan does; without it, from
  * a full bar with no cooldown (a stretch that starts later, a what-if over past days).
  */
@@ -184,6 +185,9 @@ export function simInputs({ state, pc, shares, settings, prices, special = 0, st
         freeEdvdPerDay: ic.freeEdvdPerDay,
         // Boosters you hold go first and cost nothing new (candy and energy drinks as a pool).
         held: heldBoosters(statics.inventory),
+        // Rehab and overdoses in every plan's cost (round 8): the faction's cuts from your perks, a session's size
+        // from your lifetime rehabs (a new player's until they are read).
+        rehab: rehabParams({ perks: statics.perks, drugs: statics.drugs }),
         // Later Xanax at your own median cooldown once a few are recorded (else 7 h).
         xanaxCdMin: xanaxCdOf(statics.xanaxCds).min,
         // Today's candy pick, kept unless another is clearly cheaper.
@@ -546,7 +550,7 @@ export function keptEnergyOf({ strategy, energy, stacking = false, stacked = 0, 
  * worked out (today's steps, the 48 h look-ahead, the strip, the gym page's next two days); no ladder, no 30-day
  * projection. `saved`: where the saved plan stands (null: no plan yet).
  */
-export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, rec: recIn = null, warn = null, lite = false, saved = null, onPath = false, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, warOn = null, stacking = null, now }) {
+export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, rec: recIn = null, warn = null, lite = false, saved = null, onPath = false, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, warOn = null, stacking = null, overdose = null, now }) {
     if (!state) return { ready: false };
     // One player context per refresh: the comparison's, when the caller has it.
     const pc = pcIn || playerContext(state, statics, { unlockedKnown, learnedMult });
@@ -823,7 +827,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         // Energy the plan keeps on purpose now (null: none): what every "train now" surface leaves alone.
         energyKept,
         noRefill: Boolean(ctx.noRefill),
-        auto: auto ? { ...auto, afford: affordLine(auto, recRow ? recRow.cost / horizon : 0), wait: autoWaitLine(auto) } : null,
+        auto: auto ? { ...auto, afford: affordLine(auto, recRow ? recRow.cost / horizon : 0, recRow ? recRow.cash : null), wait: autoWaitLine(auto) } : null,
         // The saved plan: its dates and where it stands (null: no plan yet), and the days its numbers cover.
         saved,
         planDays: horizon,
@@ -837,6 +841,11 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         // Stacking energy for a chain (round 7, Home's "I'm stacking"): {since: ms}, null while training. The steps
         // above stay as they are; every surface that would ask you to train reads this and holds them back.
         stacking: stacking && Number(stacking.since) > 0 ? { since: Number(stacking.since) } : null,
+        // An overdose seen on your bars (runtime.js overdoseSeen): {at, until} while it is on, else null. Held back
+        // the same way: the steps stay, every surface says "Overdosed · fly to Switzerland" instead of them.
+        overdose: overdose && Number(overdose.until) > now && !overdose.ended ? { at: Number(overdose.at) || now, until: Number(overdose.until) } : null,
+        // Flying or abroad (Torn's travel answer): {flying, where, until}. Held back the same way: the gym is closed.
+        away: awayOf(state.travel, now),
     };
 }
 

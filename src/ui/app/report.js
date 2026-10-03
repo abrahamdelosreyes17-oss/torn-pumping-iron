@@ -34,7 +34,7 @@ function saveReportZip(zip) {
 export function buildReport(ctx, now = Date.now()) {
     const r = ctx.report.data();
     const learning = exportFiles({ samples: r.learn.samples, fights: r.learn.fights, gymLog: r.learn.gymLog, learned: r.learn.learned, version: r.state.version, now });
-    return reportFiles({ happened: reportFormState.happened, expected: reportFormState.expected, shots: reportFormState.shots, log: r.log, state: r.state, player: r.player, saved: r.saved, learning, moneyFields: r.moneyFields, statsHistory: r.statsHistory, env: r.env, now });
+    return reportFiles({ happened: reportFormState.happened, expected: reportFormState.expected, shots: reportFormState.shots, log: r.log, state: r.state, player: r.player, saved: r.saved, learning, moneyFields: r.moneyFields, ledger: r.ledger, statsHistory: r.statsHistory, env: r.env, now });
 }
 
 function downloadReport(ctx) {
@@ -56,7 +56,7 @@ export function reportSection(m, ctx) {
     if (!ctx.report) return null;
     const r = ctx.report.data();
     const errors = r.log.filter((e) => e.kind === 'error').length;
-    const happened = h('textarea', { class: 'inp ta', rows: '4', 'aria-label': 'What happened', placeholder: 'For example: I pressed Re-plan for 12 months, the bar stopped at "month 5" and nothing changed.' });
+    const happened = h('textarea', { class: 'inp ta', rows: '4', 'aria-label': 'What happened', placeholder: 'For example: I pressed Recalibrate for 12 months, the bar stopped at "month 5" and nothing changed.' });
     happened.value = reportFormState.happened;
     happened.addEventListener('input', () => (reportFormState.happened = happened.value));
     const expected = h('textarea', { class: 'inp ta', rows: '2', 'aria-label': 'What you expected', placeholder: 'For example: the new plan in a few seconds.' });
@@ -77,7 +77,7 @@ export function reportSection(m, ctx) {
             h('button', { type: 'button', class: 'x', 'aria-label': 'Remove ' + s.name, onclick: () => { URL.revokeObjectURL(s.url); reportFormState.shots.splice(i, 1); ctx.rerender(); }, text: '×' }),
         ]),
     );
-    const includes = reportIncludes({ shots: reportFormState.shots.length, log: r.log, player: r.player, saved: r.saved, gymLog: r.learn.gymLog.length, moneyTypes: (r.moneyFields || []).length });
+    const includes = reportIncludes({ shots: reportFormState.shots.length, log: r.log, player: r.player, saved: r.saved, gymLog: r.learn.gymLog.length, moneyTypes: (r.moneyFields || []).length, ledgerLines: r.ledger ? r.ledger.lines : 0 });
     const state = h('span', { class: 'state ' + (errors ? 'bad' : 'off') }, [h('i'), errors ? errors + (errors === 1 ? ' error logged' : ' errors logged') : 'Nothing logged as an error']);
     return h('div', { class: 'sec' }, [
         h('div', {}, [h('h3', { text: 'Report a problem' }), state]),

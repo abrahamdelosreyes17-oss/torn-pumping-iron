@@ -5,6 +5,7 @@
  */
 
 import { HAPPY_CAP } from './gain.js';
+import { chainFromApi } from './eye/chain.js';
 
 export const MIN = 60 * 1000;
 export const HOUR = 60 * MIN;
@@ -93,7 +94,28 @@ export function normalizeState(api, at) {
         statMods,
         gymId: a.gym && a.gym.id ? Number(a.gym.id) : null,
         gymName: a.gym && a.gym.name ? String(a.gym.name) : null,
+        // Where you are: {destination, left (ms of flight), arriveAt (ms)}; null when Torn was not asked (an old read).
+        travel: travelState(a.travel, at),
+        // Your faction's chain as the bars give it (round 8, the chain counter): {current, max, until, cooldownUntil, at}; null: none read.
+        chain: chainFromApi(bars.chain, at),
     };
+}
+
+function travelState(t, at) {
+    if (!t || typeof t !== 'object') return null;
+    const left = Math.max(0, Number(t.time_left) || 0) * 1000;
+    return { destination: String(t.destination || 'Torn'), left, arriveAt: left > 0 ? (Number(t.arrival_at) > 0 ? Number(t.arrival_at) * 1000 : at + left) : null };
+}
+
+/**
+ * Away from the gym (the one shared state, like stacking and the overdose): in the air, or standing abroad.
+ * @param {object|null} travel - normalizeState().travel
+ * @returns {{flying:boolean, where:string, until:number|null}|null} null in Torn (or when Torn was not asked)
+ */
+export function awayOf(travel, now) {
+    if (!travel) return null;
+    if (travel.left > 0 && travel.arriveAt > now) return { flying: true, where: travel.destination, until: travel.arriveAt };
+    return travel.destination && travel.destination !== 'Torn' ? { flying: false, where: travel.destination, until: null } : null;
 }
 
 /** Is this a donator/subscriber's energy bar (5 per 10 min)? */

@@ -7,17 +7,23 @@
 
 import { K, get, set, del, getKey, setKey, getPlan } from './platform/store.js';
 import { pageGet, pageSet } from './platform/archive.js';
-import { fetchKeyInfo, fetchLogCategories, fetchMoneyLog, fetchGymLog, ACCESS_FULL } from './api/torn.js';
-import { MONEY_LOG_CATEGORY } from './core/auto.js';
+import { fetchKeyInfo, fetchMoneyLog, fetchGymLog, ACCESS_FULL } from './api/torn.js';
 import { parseGymLog, mergeGymLog, gymLogFrom, GYM_LOG_EVERY_MS } from './core/gymlog.js';
-import { fullKeyClient, tornClient, pi } from './runtime.js';
+import { fullKeyClient, pi } from './runtime.js';
 import { isPaused } from './turns.js';
 import { logError } from './problem-log.js';
 
-/** How often the money log is read, how far back, and how many categories at most (one call each). */
+/** How often the money log is read and how far back. */
 export const MONEY_LOG_EVERY_MS = 6 * 60 * 60 * 1000;
 export const MONEY_LOG_DAYS = 30;
-export const MONEY_LOG_MAX_CATS = 8;
+/** Torn's log categories that hold every line that moved your wallet (ids from /torn/logcategories). */
+export const MONEY_LOG_CATS = [
+    { id: 17, title: 'Money incoming' },
+    { id: 14, title: 'Money outgoing' },
+];
+/** The stored row's shape: 2 = lines as Torn gave them, each once (round 7, R7.5). */
+export const MONEY_LOG_V = 2;
+export const MONEY_LOG_MAX_LINES = 3000;
 
 /** Save and check the Full key (Settings). */
 export async function saveFullKey(v) {
@@ -38,7 +44,7 @@ export async function saveFullKey(v) {
         // Another key may be another account: its gym log starts fresh.
         pageSet(K.gymLog, null);
         refreshMoneyLog({ force: true }).catch(() => {});
-        return { ok: true, text: getPlan().pickBy === 'auto' ? 'Saved · Full key. Auto mode is on.' : 'Saved · Full key. Pick Auto (from your income) on Plan to use it.' };
+        return { ok: true, text: getPlan().pickBy === 'auto' ? 'Saved · Full key. Auto mode is on.' : 'Saved · Full key. Pick Auto (from your books) on Plan to use it.' };
     } catch (error) {
         set(K.fullKeyState, { ok: false, error: String((error && error.message) || error), at: Date.now() });
         return { ok: false, text: String((error && error.message) || error) };
@@ -93,22 +99,24 @@ export function gymLogTick() {
 }
 
 /**
- * Read the money log (Full key), at most every 6 hours: the log categories
- * about money (Torn's own list, read with the main key), 30 days back.
+ * Read the money log (Full key), at most every 6 hours: Torn's "Money
+ * incoming" and "Money outgoing" (every line that moved your wallet), 30
+ * days back, each line once. Round 7 (R7.5): the stored row keeps the lines
+ * as Torn gave them (log id, log type id, time, data) for the ledger
+ * (core/ledger.js); a row from before that is read again once.
  */
 export async function refreshMoneyLog({ force = false, now = Date.now() } = {}) {
     const st = get(K.fullKeyState, {}) || {};
     if (!getKey(K.fullKey) || !st.ok || st.dead || isPaused()) return null;
     const prev = pageGet(K.moneyLog, null);
-    if (!force && prev && now - prev.at < MONEY_LOG_EVERY_MS) return prev;
-    const cats = (await fetchLogCategories(tornClient())).filter((c) => MONEY_LOG_CATEGORY.test(String(c.title || ''))).slice(0, MONEY_LOG_MAX_CATS);
-    const log = await fetchMoneyLog(fullKeyClient(), { from: Math.floor(now / 1000) - MONEY_LOG_DAYS * 86400, categories: cats });
-    // Only what the breakdown needs (title, amount, time), newest 1,500.
-    // Only the lines from when every category is complete count (a busy category's page may not reach back 30 days).
-    const since = log.coveredFrom || now - MONEY_LOG_DAYS * 86400e3;
-    const kept = log.filter((e) => e.at >= since);
-    // `fields` (round 7, C.0): the log by type with its data field names, for Settings › Developer and the report zip.
-    const row = { at: now, days: Math.max(1, (now - since) / 86400e3), cats: cats.map((c) => c.title), log: kept.slice(0, 1500).map((e) => ({ at: e.at, title: e.title, money: e.money })), fields: log.fields || [] };
+    if (!force && prev && prev.v === MONEY_LOG_V && now - prev.at < MONEY_LOG_EVERY_MS) return prev;
+    const from = Math.floor(now / 1000) - MONEY_LOG_DAYS * 86400;
+    const log = await fetchMoneyLog(fullKeyClient(), { from, categories: MONEY_LOG_CATS });
+    // Only the days every category is complete for count (a very busy log may not reach back 30 days in its pages).
+    const since = log.coveredFrom || from * 1000;
+    const lines = log.filter((e) => e.at >= since).slice(0, MONEY_LOG_MAX_LINES);
+    // `fields` (C.0): the log by type with its data field names, for Settings › Developer and the report zip.
+    const row = { v: MONEY_LOG_V, at: now, from: since, days: Math.max(1, (now - since) / 86400e3), cats: MONEY_LOG_CATS.map((c) => c.title), lines, fields: log.fields || [] };
     pageSet(K.moneyLog, row);
     return row;
 }

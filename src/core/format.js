@@ -8,6 +8,12 @@ export function fmtInt(n) {
     return (v < 0 ? '−' : '') + Math.abs(v).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
+/** Money to the dollar, never shortened (the books): "$2,757,839,400", "−$136,043" */
+export function fmtDollars(n) {
+    const v = Math.round(Number(n) || 0);
+    return (v < 0 ? '−$' : '$') + fmtInt(Math.abs(v));
+}
+
 /** Signed: "+1,420", "−300" */
 export function fmtSigned(n) {
     const v = Math.round(Number(n) || 0);

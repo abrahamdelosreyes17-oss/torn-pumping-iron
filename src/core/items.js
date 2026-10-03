@@ -32,6 +32,14 @@ export const GAME_CONSOLE = 104;
 export const MUNSTER = 530;
 export const RED_COW = 532;
 export const TAURINE = 533;
+// The other six energy drinks (round 8; Torn's items list, docs/reference/torn-items-dump-2024.json): the three
+// small ones and the three Christmas ones, which give what Munster, Red Cow and Taurine Elite give.
+export const SANTA_SHOOTERS = 553;
+export const ROCKSTAR_RUDOLPH = 554;
+export const X_MASS = 555;
+export const GOOSE_JUICE = 985;
+export const DAMP_VALLEY = 986;
+export const CROCOZADE = 987;
 export const BOOK_GHOGH = 757;
 export const BOOK_BLISS = 770;
 
@@ -83,6 +91,12 @@ export const ITEMS = {
     [MUNSTER]: { id: MUNSTER, name: 'Can of Munster', kind: 'booster', category: 'Energy Drink', energy: 20, boosterH: 2 },
     [RED_COW]: { id: RED_COW, name: 'Can of Red Cow', kind: 'booster', category: 'Energy Drink', energy: 25, boosterH: 2 },
     [TAURINE]: { id: TAURINE, name: 'Can of Taurine Elite', kind: 'booster', category: 'Energy Drink', energy: 30, boosterH: 2 },
+    [SANTA_SHOOTERS]: { id: SANTA_SHOOTERS, name: 'Can of Santa Shooters', kind: 'booster', category: 'Energy Drink', energy: 20, boosterH: 2 },
+    [ROCKSTAR_RUDOLPH]: { id: ROCKSTAR_RUDOLPH, name: 'Can of Rockstar Rudolph', kind: 'booster', category: 'Energy Drink', energy: 25, boosterH: 2 },
+    [X_MASS]: { id: X_MASS, name: 'Can of X-MASS', kind: 'booster', category: 'Energy Drink', energy: 30, boosterH: 2 },
+    [GOOSE_JUICE]: { id: GOOSE_JUICE, name: 'Can of Goose Juice', kind: 'booster', category: 'Energy Drink', energy: 5, boosterH: 2 },
+    [DAMP_VALLEY]: { id: DAMP_VALLEY, name: 'Can of Damp Valley', kind: 'booster', category: 'Energy Drink', energy: 10, boosterH: 2 },
+    [CROCOZADE]: { id: CROCOZADE, name: 'Can of Crocozade', kind: 'booster', category: 'Energy Drink', energy: 15, boosterH: 2 },
 };
 
 function candy(id, name, happy, short = null) {

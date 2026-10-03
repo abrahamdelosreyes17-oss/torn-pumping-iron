@@ -6,19 +6,21 @@
 
 import { gmOnChange } from './platform/gm.js';
 import { K, get, getShared, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup, DATA_GROUPS, getPrices, PRICE_LISTINGS_KEPT, loadLocalPrices, localPrices, setLocalPrices, clearLocalPrices } from './platform/store.js';
-import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE, beatFocus, apiFocus, createPlan, recalibratePlan, followStrategy, followPath, cancelPlan, onPlanProgress, startStacking, resumeTraining } from './runtime.js';
+import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE, beatFocus, apiFocus, createPlan, recalibratePlan, followStrategy, followPath, cancelPlan, onPlanProgress, startStacking, resumeTraining, overdoseDone, booksReport } from './runtime.js';
+import { ledgerShape } from './core/ledger.js';
 import { forgetSavedPlan } from './platform/plan-store.js';
 import { archived, pageGet, loadArchives, drainArchives, clearArchived, archivesReady } from './platform/archive.js';
 import { PiApp } from './ui/app/app.js';
-import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, fetchFactionMembers, fetchFactionWars, keyIsEnough } from './api/torn.js';
-import { outEarly, enemiesFromWars, warBandTable } from './core/eye/war.js';
-import { targetStatus, ownHits, statusOrder, splitTargets, cutTargets, ATTACK_OPENED_MS } from './core/eye/targets.js';
+import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, fetchFactionMembers, fetchFactionWars, fetchFactionChain, keyIsEnough } from './api/torn.js';
+import { chainFromApi, sharedChain } from './core/eye/chain.js';
+import { outEarly, enemiesFromWars, warBandTable, warAskNext, warBegun, warKeyOf } from './core/eye/war.js';
+import { targetStatus, ownHits, statusOrder, splitTargets, cutTargets, nextTable, nextTableSig, ATTACK_OPENED_MS } from './core/eye/targets.js';
 import { normBand } from './core/eye/bands.js';
 import { isWatched } from './core/eye/watch.js';
 import { W3bClient, fetchW3bListings } from './api/w3b.js';
 import { checkFfsKey } from './api/ffscouter.js';
 import { renderEye, readsTargetStatuses } from './ui/app/eye-tab.js';
-import { wantPlayers, eyeView, warmFights, fightsPending, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient, importTargets, refillTargets, dropHitTargets, storedTargets, TARGETS_KEY, WAR_BANDS_KEY, rememberFlights, flightsSeen, getWatch, watchStates, toggleWatch, setWatchTag, dismissWatchOffer, watchOffersNow, pollWatch, pumpStatuses, statusRead, onStatus, loadStatuses, attacksAfterOpen } from './eye-service.js';
+import { wantPlayers, eyeView, warmFights, fightsPending, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient, importTargets, refillTargets, dropHitTargets, storedTargets, TARGETS_KEY, WAR_BANDS_KEY, WAR_ASK_KEY, EYE_CHAIN_KEY, EYE_NEXT_KEY, rememberFlights, flightsSeen, getWatch, watchStates, toggleWatch, setWatchTag, dismissWatchOffer, watchOffersNow, pollWatch, pumpStatuses, statusRead, onStatus, loadStatuses, attacksAfterOpen } from './eye-service.js';
 import { discordState, discordRaw, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId, linkDiscord, setTargetsForSync, setEyeForSync, loginDiscord, cancelLogin, resumeLogin } from './discord.js';
 import { saveFullKey, forgetFullKey, refreshMoneyLog } from './income.js';
 import { WORKER_SETUP_URL } from './api/worker.js';
@@ -32,7 +34,9 @@ import { redactKey } from './api/client.js';
 import { keyProblem } from './ui/key-status.js';
 import { isPaused, onPauseChange } from './turns.js';
 import { joinFights } from './core/learndata.js';
-import { maybeLearn, BUILD } from './runtime.js';
+import { maybeLearn, BUILD, planNowStored } from './runtime.js';
+import { autoRecalibrateDue } from './core/saved-plan.js';
+import { tornDayStart } from './core/bars.js';
 import { normalizeState } from './core/bars.js';
 import { readLines } from './core/planline.js';
 import { problemLogNow, clearProblemLog, planRuns, logAction, logError } from './problem-log.js';
@@ -41,7 +45,7 @@ import { problemLogNow, clearProblemLog, planRuns, logAction, logError } from '.
 function fullKeyView() {
     const st = get(K.fullKeyState, null) || {};
     const ml = pageGet(K.moneyLog, null);
-    return { has: Boolean(getKey(K.fullKey)), ok: Boolean(st.ok && !st.dead), error: st.error || null, logAt: ml ? ml.at : null, logLines: ml && ml.log ? ml.log.length : 0 };
+    return { has: Boolean(getKey(K.fullKey)), ok: Boolean(st.ok && !st.dead), error: st.error || null, logAt: ml ? ml.at : null, logLines: ml && ml.lines ? ml.lines.length : 0 };
 }
 
 /** How long fetched prices count as fresh. */
@@ -293,6 +297,33 @@ function myFactionId() {
     return ki.factionId || null;
 }
 
+/** Your faction's own war that War mode shows now (null for a faction typed in, or no war). */
+function warEnemyNow() {
+    if (war.manual) return null;
+    const fid = warFid();
+    return war.enemies.find((x) => x.id === fid) || null;
+}
+
+/**
+ * War mode by itself (round 8, the owner's pick A): a war that has begun and was not seen before is noted (its key,
+ * when it was seen, no answer yet), and the Torn Eye tab opens on War: at a new war, and on a page load that has not
+ * picked a view yet. A view you pick stays.
+ */
+function warModeCheck(now = Date.now()) {
+    const enemy = warEnemyNow();
+    const next = warAskNext(get(WAR_ASK_KEY, null), enemy, now);
+    if (next.fresh) set(WAR_ASK_KEY, next.rec);
+    if (page.app && warBegun(enemy, Math.floor(now / 1000)) && (next.fresh || page.app.ui.eyeMode === undefined)) page.app.ui.eyeMode = 'war';
+    return next.fresh;
+}
+
+/** This war's record (the answer to the termed-war question), or null when War mode shows no war of your own. */
+function warAskNow() {
+    const enemy = warEnemyNow();
+    const kept = get(WAR_ASK_KEY, null);
+    return enemy && kept && kept.key === warKeyOf(enemy) ? { ...kept, kind: enemy.kind, start: enemy.start } : null;
+}
+
 async function pollOwnWars(force = false) {
     if (war.warsLoading || !isVisible() || isPaused() || !getKey(K.apiKey) || get(K.apiKeyDead, false)) return;
     const mine = myFactionId();
@@ -310,6 +341,7 @@ async function pollOwnWars(force = false) {
         war.warsLoading = false;
         war.warsAt = Date.now();
     }
+    warModeCheck();
     if (page.app) page.app.render(true);
 }
 
@@ -345,6 +377,45 @@ async function pollWarTab() {
 function warName(fid) {
     const e = war.enemies.find((x) => x.id === fid);
     return e && e.name ? e.name : null;
+}
+
+/** The enemy's chain is read this often while the War view shows or chain mode is on (one small call). */
+export const ENEMY_CHAIN_POLL_MS = 30 * 1000;
+
+const enemyChain = { fid: null, raw: null, at: 0, loading: false };
+
+/**
+ * The chain counter's other side (round 8): the enemy faction's chain, read while the War view shows or chain mode is
+ * on, and left in shared storage for Torn's own pages (they ask nothing for a war). Yours comes with your bars.
+ */
+async function pollEnemyChain() {
+    const fid = warFid();
+    const viewing = page.app && page.app.tab === 'eye' && (page.app.ui.eyeMode || 'targets') === 'war';
+    const chaining = Boolean(pi.model && pi.model.ready && pi.model.stacking);
+    if (!fid || enemyChain.loading || !(viewing || chaining) || !isVisible() || isPaused() || !getKey(K.apiKey) || get(K.apiKeyDead, false)) return;
+    if (enemyChain.fid === fid && Date.now() - enemyChain.at < ENEMY_CHAIN_POLL_MS) return;
+    enemyChain.loading = true;
+    try {
+        const c = await fetchFactionChain(tornClient(), fid);
+        const at = Date.now();
+        enemyChain.raw = chainFromApi(c, at);
+        enemyChain.fid = fid;
+        if (enemyChain.raw) set(EYE_CHAIN_KEY, { ...enemyChain.raw, fid, name: warName(fid) || (war.membersFid === fid ? war.name : null) || null });
+    } catch {
+        // Asked again in 30 s; the counter says "Not read yet" once the last read is old.
+    } finally {
+        enemyChain.loading = false;
+        enemyChain.at = Date.now();
+    }
+    if (page.app && page.app.tab === 'eye') page.app.render(true);
+}
+
+/** Both chains for the Torn Eye tab's chain mode card: yours from your bars, theirs from the last read (null: none). */
+function chainsNow(now = Date.now()) {
+    const m = pi.model;
+    const fid = warFid();
+    const theirs = fid && enemyChain.fid === fid ? sharedChain(enemyChain.raw, now) : null;
+    return { mine: m && m.ready && m.state ? m.state.chain || null : null, enemy: fid ? { fid, name: warName(fid), raw: theirs } : null };
 }
 
 /** The watch list as stored, read once per draw (a list's 300 stars each asked for a copy of it). */
@@ -490,6 +561,32 @@ function shareWarBands() {
     set(WAR_BANDS_KEY, table);
 }
 
+/*
+ * The Next button on Torn's attack page (round 8, the owner's pick A): the list the Torn Eye tab shows (Targets in
+ * its order and filters, or the war list) is handed over in shared storage as a small table, the first 40 rows. It is
+ * written when it changes, at most every 5 s, and again after 10 minutes so its age stays true.
+ */
+const nextShare = { sig: '', at: 0, timer: null, table: null };
+export const NEXT_SHARE_GAP_MS = 5000;
+export const NEXT_SHARE_REWRITE_MS = 10 * 60 * 1000;
+
+function shareNext(mode, rows) {
+    // The newest list always replaces the one waiting to be written (a sort undone inside the 5 s must not be written).
+    nextShare.table = nextTable(mode, rows, Date.now());
+    const same = () => nextTableSig(nextShare.table) === nextShare.sig && Date.now() - nextShare.at < NEXT_SHARE_REWRITE_MS;
+    if (nextShare.timer || same()) return;
+    const write = () => {
+        nextShare.timer = null;
+        if (same()) return;
+        nextShare.sig = nextTableSig(nextShare.table);
+        nextShare.at = Date.now();
+        set(EYE_NEXT_KEY, { ...nextShare.table, at: nextShare.at });
+    };
+    const wait = NEXT_SHARE_GAP_MS - (Date.now() - nextShare.at);
+    if (wait <= 0) write();
+    else nextShare.timer = setTimeout(write, wait);
+}
+
 /** Settings the report carries: the switches and limits, never a key, a faction or a player id. */
 const REPORT_SETTINGS = ['timeFormat', 'pill', 'gymMarks', 'marketMarks', 'eyeChips', 'motion', 'budget', 'horizonDays', 'buyWindow', 'w3b', 'warReserve', 'boosterCapH', 'npcShops', 'npcShopsOff'];
 
@@ -533,6 +630,8 @@ function reportData() {
         player,
         saved: pi.saved,
         moneyFields: (pageGet(K.moneyLog, null) || {}).fields || [],
+        // Your books in names and counts (never an amount).
+        ledger: ledgerShape((booksReport() || {}).ledger || null),
         statsHistory: archived(K.statsHistory, {}) || {},
         learn: { samples: ((archived('calibration', null) || {}).samples) || [], gymLog: ((pageGet(K.gymLog, null) || {}).lines) || [], fights: joinFights(pageGet(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], archived(K.eyePredictions, []) || []), learned: get(K.learned, null) },
         state: {
@@ -547,6 +646,31 @@ function reportData() {
         },
         env: { userAgent: nav.userAgent || '', screen: typeof window !== 'undefined' && window.screen ? window.screen.width + 'x' + window.screen.height : '', cores: nav.hardwareConcurrency || null, memoryGB: nav.deviceMemory || null, pageHeapMB: mem },
     };
+}
+
+/**
+ * The daily recalibration (round 8; the accountant: "recalibrate once per day, at Torn's reset; keep the button").
+ * Your books are read first (the money log, Full key), so the day's cash is what the plan runs on. A failure is
+ * said on the plan card and tried again half an hour later; the manual button always works.
+ */
+export function autoRecalibrate(now = Date.now()) {
+    const s = get(K.userState, null);
+    const m = pi.model;
+    const d = autoRecalibrateDue({ planNow: planNowStored(), settings: getSettings(), last: get(K.autoRecal, null), stateAt: s ? s.at : null, busy: Boolean(pi.planBusy), stacking: Boolean(m && m.stacking), overdose: Boolean(m && m.overdose), now });
+    if (!d.due) return null;
+    const day = tornDayStart(now);
+    set(K.autoRecal, { day, at: now, ok: null });
+    return refreshMoneyLog({ force: true })
+        .catch(() => null)
+        .then(() => recalibratePlan({ auto: true }))
+        .then(
+            (saved) => set(K.autoRecal, { day, at: Date.now(), ok: Boolean(saved) }),
+            (e) => {
+                set(K.autoRecal, { day, at: Date.now(), ok: false, error: String((e && e.message) || e) });
+                logError('The daily recalibration', e);
+            },
+        )
+        .then(() => page.app && page.app.render(true));
 }
 
 /** A Create plan or Recalibrate click: the page shows it working, then the new plan (or why it couldn't). */
@@ -570,6 +694,7 @@ function getCtx() {
     const S = STRATEGIES[plan.strategy] || STRATEGIES.steady;
     return {
         model: pi.model,
+        version: PI_BUILD_VERSION,
         paused: isPaused(),
         settings,
         plan,
@@ -589,7 +714,7 @@ function getCtx() {
         keyProblem: keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: statics.keyInfo || null }),
         planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
         fullKey: fullKeyView(),
-        sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (pageGet(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), readLines(pageGet(K.planLine, null)).map((l) => l.at).join(','), JSON.stringify(get(K.stacking, null))].join('|'),
+        sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (pageGet(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), readLines(pageGet(K.planLine, null)).map((l) => l.at).join(','), JSON.stringify(get(K.stacking, null)), JSON.stringify(get(K.overdose, null))].join('|'),
         setSettings: (p) => {
             setSettings(p);
             refresh();
@@ -597,13 +722,21 @@ function getCtx() {
         },
         setPlan: (p) => {
             const { strategy, strategyPicked, ...rest } = p;
-            // Another of the saved plans: followed at once, nothing worked out again (Progress's line follows it). The
-            // recommended one means the saved path (it switches plans on its dates).
+            // Another of the saved plans: followed at once, nothing worked out again (Progress's line follows it). A plan
+            // saved without a path (before round 6): its recommended one is the saved plan itself. With a path
+            // (round 8), every single plan is followed the whole way, the best of them too; `followPath` goes back.
             const rec = pi.saved && pi.saved.rec ? pi.saved.rec.recommended : null;
-            if (strategy !== undefined && strategy === rec) followPath();
+            const hasPath = Boolean(pi.saved && pi.saved.year && pi.saved.year.segments && pi.saved.year.segments.length);
+            if (strategy !== undefined && strategy === rec && !hasPath) followPath();
             else if (strategy !== undefined && (strategy !== ((pi.model && pi.model.strategy) || getPlan().strategy) || !getPlan().strategyPicked)) followStrategy(strategy);
             // Build, goal, the Plan rule, special refills: kept for the next Create plan or Recalibrate (a click).
             if (Object.keys(rest).length) setPlan({ ...getPlan(), ...rest });
+            refresh();
+            page.app.render(true);
+        },
+        // Back to the saved path (round 8: "Use the path").
+        followPath: () => {
+            followPath();
             refresh();
             page.app.render(true);
         },
@@ -612,7 +745,7 @@ function getCtx() {
         recalibratePlan: () => runPlan(() => recalibratePlan()),
         // The Plan card's Cancel while a plan is being worked out: nothing is saved, the old plan stays.
         cancelPlan: () => cancelPlan(),
-        // Home's "I'm stacking" (a chain) and Resume, which re-plans at once like Re-plan (round 7).
+        // Home's "I'm stacking" (a chain) and Resume, which recalibrates at once like Recalibrate (round 7).
         startStacking: () => {
             page.app.ui.homeReplan = false;
             startStacking();
@@ -621,6 +754,11 @@ function getCtx() {
         resumeStacking: () => {
             page.app.ui.homeReplan = true;
             return runPlan(() => resumeTraining());
+        },
+        // Home's "Rehab done · recalibrate" (an overdose): the steps come back and the plan is recalibrated, like Resume.
+        endOverdose: () => {
+            page.app.ui.homeReplan = true;
+            return runPlan(() => overdoseDone());
         },
         wantPrices: (ids, slim = []) => {
             if (isVisible()) setTimeout(() => loadPrices(ids, slim).catch(() => {}), 0);
@@ -689,13 +827,34 @@ function getCtx() {
             cancel: cancelLogin,
             setupUrl: WORKER_SETUP_URL,
         },
+        // The Ledger tab: your books, and a read of the money log now (it is read by itself every 6 hours).
+        // The plan's own recalibration, once a day: its last try (the plan card says when, or why it failed).
+        autoRecal: get(K.autoRecal, null),
+        books: () => booksReport(),
+        readBooks: () => {
+            page.app.ui.ledgerReading = true;
+            page.app.ui.ledgerError = null;
+            page.app.render(true);
+            return refreshMoneyLog({ force: true })
+                .then(() => refresh())
+                .catch((error) => {
+                    page.app.ui.ledgerError = String((error && error.message) || error);
+                    logError('Reading your money log', error);
+                })
+                .then(() => {
+                    page.app.ui.ledgerReading = false;
+                    page.app.render(true);
+                });
+        },
         dev: {
-            data: () => ({ samples: ((archived('calibration', null) || {}).samples) || [], gymLog: ((pageGet(K.gymLog, null) || {}).lines) || [], fights: joinFights(pageGet(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], archived(K.eyePredictions, []) || []), learned: get(K.learned, null), version: PI_BUILD_VERSION }),
+            data: () => ({ samples: ((archived('calibration', null) || {}).samples) || [], gymLog: ((pageGet(K.gymLog, null) || {}).lines) || [], fights: joinFights(pageGet(K.fightLog, []) || [], (get('myAttacks', null) || {}).list || [], archived(K.eyePredictions, []) || []), learned: get(K.learned, null), ledger: ledgerShape((booksReport() || {}).ledger || null), version: PI_BUILD_VERSION }),
             unlocked: () => Boolean(get(K.devUnlocked, false)),
             setUnlocked: (v) => (v ? set(K.devUnlocked, true) : del(K.devUnlocked)),
             log: () => pageGet(K.learnLog, []) || [],
             // The money log by type with its field names (round 7, C.0), and when it was read.
             moneyFields: () => ({ at: (pageGet(K.moneyLog, null) || {}).at || null, list: (pageGet(K.moneyLog, null) || {}).fields || [] }),
+            // Your books (round 7, R7.5): the ledger by account, the one-offs, what is not sorted, the reconciliation.
+            books: () => booksReport(),
             sizes: () => Object.fromEntries(['calibration', K.learned, K.learnLog, K.fightLog, K.eyePredictions, K.prices, K.priceHistory, K.statsHistory].map((k) => [k, JSON.stringify(get(k, null) || '').length])),
         },
         eye: {
@@ -711,6 +870,12 @@ function getCtx() {
             sources: () => ({ fights: ((get('myAttacks', null) || {}).list || []).length, ffsFree: page.ffs ? page.ffs.stats().remaining : 60, gear: page.eye.gear }),
             view: (id, extra, o) => eyeView(id, extra, o),
             attacks: () => (get('myAttacks', null) || {}).list || [],
+            /** The list a draw shows, in its order (Targets or War): handed to Torn's attack page for its Next button. */
+            shown: shareNext,
+            /** The chain counter's two sides (chain mode): {mine, enemy: {fid, name, raw}|null}. */
+            chains: () => chainsNow(),
+            /** Who you hit lately (your attacks and the attack pages you opened): Map id → {kind, at, result}. */
+            hits: () => ownHits((getShared('myAttacks', null) || {}).list || [], getShared(K.eyePredictions, []) || [], Date.now()),
             statuses: {
                 /** The rows on screen and every listed row, in order (each draw of Targets). */
                 show: showStatuses,
@@ -729,7 +894,14 @@ function getCtx() {
             war: {
                 state: () => {
                     const fid = warFid();
-                    return { fid, manual: war.manual, name: warName(fid), enemies: war.enemies, myFaction: war.myFaction === undefined ? myFactionId() : war.myFaction, warsLoading: war.warsLoading, members: war.membersFid === fid ? war.members : [], early: war.membersFid === fid ? war.early : new Set(), loading: war.loading, error: war.error };
+                    return { fid, manual: war.manual, name: warName(fid), enemies: war.enemies, myFaction: war.myFaction === undefined ? myFactionId() : war.myFaction, warsLoading: war.warsLoading, members: war.membersFid === fid ? war.members : [], early: war.membersFid === fid ? war.early : new Set(), loading: war.loading, error: war.error, ask: warAskNow() };
+                },
+                /** The answer to "Termed war / med-out deal?" for this war: true, false, or null to be asked again. */
+                termed: (v) => {
+                    const kept = warAskNow();
+                    if (!kept) return;
+                    set(WAR_ASK_KEY, { key: kept.key, autoAt: kept.autoAt, termed: v === true || v === false ? v : null });
+                    page.app.render(true);
                 },
                 /** Another faction by id (kept until "Back to our war"). */
                 watch: (fid) => {
@@ -743,6 +915,7 @@ function getCtx() {
                 pick: (fid) => {
                     war.pick = fid;
                     war.at = 0;
+                    warModeCheck();
                     pollWarTab();
                     page.app.render(true);
                 },
@@ -750,6 +923,7 @@ function getCtx() {
                     war.manual = null;
                     war.at = 0;
                     setSettings({ warFaction: null });
+                    warModeCheck();
                     pollWarTab();
                     page.app.render(true);
                 },
@@ -808,6 +982,11 @@ export function bootAppPage({ renderers = {} } = {}) {
         if (open && !eyeOpen) {
             const kept = storedTargets();
             if (kept.length) wantPlayers(kept.map((x) => x.playerId));
+            // At war by the last read of your faction's wars (a recent one): the tab opens on War (round 8). An older
+            // read waits for the one this opening starts.
+            const was = page.app.ui.eyeMode;
+            if (Date.now() - (Number((get('eyeWarAuto', null) || {}).at) || 0) < 3 * OWN_WARS_POLL_MS) warModeCheck();
+            if (page.app.ui.eyeMode !== was) page.app.render(true);
         }
         eyeOpen = open;
     };
@@ -860,6 +1039,7 @@ export function bootAppPage({ renderers = {} } = {}) {
         dropHitTargets();
         pollOwnWars().catch(() => {});
         pollWarTab().catch(() => {});
+        pollEnemyChain().catch(() => {});
         // The Watched view reads its players every 60 s while it shows (the war list just read costs nothing).
         if (page.app.ui.eyeMode === 'watched') pollWatch({ members: war.members }).catch(() => {});
         syncEye();
@@ -879,6 +1059,10 @@ export function bootAppPage({ renderers = {} } = {}) {
     };
     setTimeout(moneyLog, 5000);
     setInterval(moneyLog, 10 * 60 * 1000);
+    // The plan recalibrates by itself once a Torn day (round 8), from this page, where the whole plan is kept: at
+    // Torn's reset when it is open (a tab you are not looking at too), else the first time it is opened that day.
+    setTimeout(autoRecalibrate, 15000);
+    setInterval(autoRecalibrate, 60 * 1000);
     page.app.render(true);
     return page.app;
 }

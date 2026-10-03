@@ -1,62 +1,36 @@
 /*
- * Marks on Torn's own pages (DESIGN §5; round 7's one look, overlays.html):
- * an opaque near-black tag with our plate mark, a 5 px coloured edge, a 1 px
- * border and, on the one thing to do now, a soft glow in its colour (green
- * to train, red wrong or not yet, amber paused or overdosed, chalk "take
- * this"). At most one thing glows on a page. On the gym page: the strip (one
- * line before the stat boxes), the stat to train outlined with its tab, the
- * gym you're in (steady green or red), the gym to go to (the only pulse for
- * gyms), and Fill N, which types into Torn's reps box on your click. Our
- * things never take the pointer except our own buttons, never sit on Torn's
- * content, and carry the class `pi-mark` so they go at once.
+ * Marks on Torn's own pages (DESIGN §5; round 7's one look, overlays.html), as an OVERLAY (the owner, 2026-10-03):
+ * nothing of ours goes into Torn's page. No element is inserted into Torn's DOM and no class, style or attribute is
+ * put on Torn's elements, so Torn's widths, heights and rows stay exactly as they are without the script. Everything
+ * is drawn on our own layer (#pi-marks-layer, appended to <body>, position absolute in page coordinates), placed from
+ * the rects of Torn's elements and placed again on resize, scroll and Torn's changes (once a frame at most).
+ *
+ * What is drawn: a thin ring over a box (+3 px) and a small pill straddling its top border. Green to train (the one
+ * thing that glows), a red pulse to eat first, dashed grey to wait (the wrong gym, no energy yet), amber to warn,
+ * chalk "take this" on markets. The gym you're in: a steady ring (green right, red wrong); the gym to go to pulses
+ * green. The words the old strip said, and Fill N, are in the panel (overlay.js). Nothing takes the pointer.
  */
 
-import { h } from '../dom.js';
-import { fillTrains } from '../../sources/dom/gym.js';
+import { h, fill } from '../dom.js';
 
 export const MARK_CSS = `
+#pi-marks-layer { position: absolute; left: 0; top: 0; width: 0; height: 0; overflow: visible; z-index: 9989; pointer-events: none; }
+#pi-marks-layer > * { position: absolute; pointer-events: none; box-sizing: border-box; margin: 0; }
 .pi-mark, .pi-mark * { box-sizing: border-box; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
 .pi-c-green { --b: #3fbf5a; } .pi-c-red { --b: #ff6b5e; } .pi-c-amber { --b: #e8a33d; } .pi-c-chalk { --b: #efebe2; } .pi-c-grey { --b: #6c737a; } .pi-c-plain { --b: #6c737a; }
-.pi-tag { display: flex; align-items: center; gap: 10px; min-height: 32px; padding: 0 12px 0 0; border-radius: 6px; background: #101214; border: 1px solid color-mix(in srgb, var(--b, #efebe2) 55%, transparent); box-shadow: 0 2px 8px rgba(0,0,0,.4); color: #f2f3f5; font-size: 13px; line-height: 1.35; overflow: hidden; }
-.pi-tag > .pi-edge { align-self: stretch; width: 5px; flex: none; background: var(--b, #efebe2); }
-.pi-glow { box-shadow: 0 0 0 3px color-mix(in srgb, var(--b) 14%, transparent), 0 0 16px color-mix(in srgb, var(--b) 24%, transparent), 0 2px 8px rgba(0,0,0,.4) !important; }
-.pi-plate { width: 16px; height: 16px; border-radius: 50%; background: #efebe2; display: inline-grid; place-items: center; box-shadow: inset 0 0 0 3px #efebe2, inset 0 0 0 4.5px #15171a; flex: none; }
-.pi-plate i { width: 4px; height: 4px; border-radius: 50%; background: #15171a; }
-.pi-strip { flex-wrap: wrap; row-gap: 2px; padding-top: 5px; padding-bottom: 5px; margin: 0 0 10px; }
-.pi-strip b { color: #fff; font-weight: 700; }
-.pi-strip .pi-sep { width: 1px; align-self: stretch; margin: 2px 0; background: #2f3439; flex: none; }
-.pi-strip .pi-src { color: #9aa1a8; font-size: 11px; }
-.pi-strip .pi-hint { color: #e8a33d; font-weight: 700; }
-.pi-strip .pi-part { color: #939aa1; white-space: nowrap; }
-.pi-strip .pi-part.pi-cur { color: #fff; font-weight: 700; }
-.pi-strip .pi-part.pi-done { color: #9bdc8a; }
-.pi-strip .pi-arrow { color: #6c737a; }
-.pi-strip a.pi-link { color: #101214; background: var(--b); border-radius: 5px; padding: 2px 10px; font-weight: 700; font-size: 12px; text-decoration: none; white-space: nowrap; }
-.pi-strip a.pi-link:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
-.pi-rel { position: relative; }
-.pi-statmark { position: absolute; inset: -3px; border: 2px solid var(--b); border-radius: 6px; pointer-events: none; z-index: 1; }
-.pi-statmark.pi-dashed { border-style: dashed; }
-.pi-tab { height: 22px; padding: 0 9px; border-radius: 4px; background: var(--b); color: #101214; font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; flex: none; }
-.pi-tab::before { content: ''; width: 10px; height: 10px; border-radius: 50%; box-shadow: inset 0 0 0 2px #101214; flex: none; }
+.pi-ring { border: 2px solid var(--b, #efebe2); border-radius: 6px; background: transparent; }
+.pi-ring.pi-dashed { border-style: dashed; }
+.pi-ring.pi-glow { box-shadow: 0 0 0 3px color-mix(in srgb, var(--b) 14%, transparent), 0 0 16px color-mix(in srgb, var(--b) 24%, transparent); }
 .pi-pulse::after { content: ''; position: absolute; inset: -2px; border-radius: 7px; box-shadow: 0 0 0 2px color-mix(in srgb, var(--b) 80%, transparent), 0 0 22px color-mix(in srgb, var(--b) 80%, transparent); opacity: 0; animation: pi-pulse 1.4s ease-in-out infinite; pointer-events: none; }
 .pi-pulse.pi-still::after { animation: none; opacity: .7; }
 @keyframes pi-pulse { 50% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .pi-pulse::after { animation: none; opacity: .7; } }
-.pi-gymmark { outline: 2px solid var(--b) !important; outline-offset: 1px; position: relative; }
-.pi-ring { position: absolute; inset: -2px; border-radius: 6px; pointer-events: none; }
-.pi-panel { min-height: 32px; margin: 6px 0; font-size: 12px; }
-.pi-panel b { color: #fff; font-size: 13px; }
-.pi-panel .pi-sub { color: #c5cad0; }
-.pi-fill { white-space: nowrap; height: 24px; padding: 0 12px; border-radius: 5px; border: 1px solid #3fbf5a; background: #3fbf5a; color: #101214; font: 700 12px 'Segoe UI', system-ui, sans-serif; cursor: pointer; margin-left: auto; flex: none; }
-.pi-fill:disabled { background: #24282c; color: #6c737a; border-color: #3a4046; cursor: default; }
-.pi-fill:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
-.pi-warn { --b: #e8a33d; }
-.pi-warn b { color: #ffe3b3; }
-.pi-corner { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; margin: 4px 0; border-radius: 4px; background: #101214; border: 1px solid #3a4046; color: #c5cad0; font-size: 11px; white-space: nowrap; }
-.pi-outlined { box-shadow: inset 0 0 0 2px #efebe2 !important; position: relative; }
-.pi-outlined.pi-glow { box-shadow: inset 0 0 0 2px #efebe2, 0 0 0 3px rgba(239,235,226,.15), 0 0 16px rgba(239,235,226,.22) !important; }
-.pi-label { position: absolute; top: -11px; left: 10px; height: 20px; padding: 0 8px 0 6px; border-radius: 5px; background: #efebe2; color: #15171a; font: 700 11px 'Segoe UI', system-ui, sans-serif; letter-spacing: .4px; text-transform: uppercase; pointer-events: none; z-index: 2; white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; }
-.pi-label::before { content: ''; width: 9px; height: 9px; border-radius: 50%; box-shadow: inset 0 0 0 2px #15171a; flex: none; }
+.pi-pill { display: flex; align-items: center; gap: 5px; width: max-content; height: 20px; padding: 0 8px 0 6px; border-radius: 5px; font: 700 11px/1 'Segoe UI', system-ui, -apple-system, sans-serif; letter-spacing: .4px; text-transform: uppercase; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: 0 1px 4px rgba(0,0,0,.45); }
+.pi-pill > span { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.pi-pill::before { content: ''; width: 9px; height: 9px; border-radius: 50%; flex: none; box-shadow: inset 0 0 0 2px currentColor; }
+.pi-pill.pi-solid { background: var(--b); color: #101214; border: 0; }
+.pi-pill.pi-dark { background: #101214; color: #c5cad0; border: 1px solid #3a4046; text-transform: none; letter-spacing: 0; font-weight: 600; }
+.pi-pill.pi-dark.pi-c-grey { border-color: #6c737a; color: #d6d9dc; }
 `;
 
 /** Our page CSS, once per page (torn.com: no outside fonts). */
@@ -68,129 +42,250 @@ export function ensureMarkCss(doc = document) {
     (doc.head || doc.documentElement).appendChild(st);
 }
 
-/** The classes we put on Torn's own elements (taken off with our marks). */
-const ON_TORN = ['pi-on', 'pi-wait', 'pi-rel', 'pi-outlined', 'pi-dim', 'pi-glow', 'pi-gymmark', 'pi-c-green', 'pi-c-red', 'pi-c-grey', 'pi-c-chalk', 'pi-c-amber'];
+/* ---------------------------------------------------------- placement math */
 
-/** Remove every mark we drew inside `scope`. */
-export function clearMarks(scope = document) {
-    for (const el of scope.querySelectorAll('.pi-mark')) el.remove();
-    for (const el of scope.querySelectorAll('.pi-on, .pi-wait, .pi-rel, .pi-outlined, .pi-dim, .pi-gymmark')) el.classList.remove(...ON_TORN);
-    for (const el of scope.querySelectorAll('[data-pi-gym]')) el.removeAttribute('data-pi-gym');
-}
-
-function plate() {
-    return h('span', { class: 'pi-plate' }, [h('i')]);
-}
-
-const TONE = { green: 'pi-c-green', red: 'pi-c-red', amber: 'pi-c-amber', chalk: 'pi-c-chalk', plain: 'pi-c-plain' };
+/** Space between a box and its ring. */
+export const RING_PAD = 3;
+/** A pill on a listing sits this far in from the row's left edge (the old label's spot). */
+export const PILL_INSET = 10;
+/** Kept from the window's edges (so nothing of ours makes the page scroll sideways). */
+export const VIEW_EDGE = 2;
 
 /**
- * Draw the gym page marks from planGymPage() output.
- * @param {Element} root - #gymroot
+ * The ring over a box: its rect grown by `pad`, in our layer's coordinates, kept inside the window's width.
+ * @param {{left, top, width, height}} r - the box (viewport)
+ * @param {{x, y}} o - our layer's (0, 0) on screen
+ * @param {number} [pad]
+ * @param {number} [viewW] - the window's width without its scrollbar
+ * @returns {{left, top, width, height}}
+ */
+export function ringRect(r, o, pad = RING_PAD, viewW = Infinity) {
+    const l = Math.max(0, r.left - pad);
+    const rt = Math.min(viewW, r.left + r.width + pad);
+    return { left: Math.round(l - o.x), top: Math.round(r.top - pad - o.y), width: Math.max(0, Math.round(rt - l)), height: Math.max(0, Math.round(r.height + 2 * pad)) };
+}
+
+/**
+ * A pill straddling a box's top border (its middle on the ring's top edge): centred, or `inset` px in from the left.
+ * Never wider than the box (less 4 px each side), never past the window's edges.
+ * @param {{left, top, width, height}} r - the box (viewport)
+ * @param {{x, y}} o - our layer's (0, 0) on screen
+ * @param {number} w - the pill's natural width
+ * @param {number} ht - its height
+ * @returns {{left, top, maxWidth}}
+ */
+export function pillSpot(r, o, w, ht, { pad = RING_PAD, align = 'center', inset = PILL_INSET, viewW = Infinity } = {}) {
+    const maxWidth = Math.max(24, Math.min(r.width - 8, viewW - 2 * VIEW_EDGE));
+    const ww = Math.min(w, maxWidth);
+    let x = align === 'left' ? r.left + Math.min(inset, Math.max(4, r.width - ww - 4)) : r.left + (r.width - ww) / 2;
+    x = Math.min(Math.max(x, VIEW_EDGE), viewW - VIEW_EDGE - ww);
+    return { left: Math.round(x - o.x), top: Math.round(r.top - pad - ht / 2 - o.y), maxWidth: Math.round(maxWidth) };
+}
+
+/* ---------------------------------------------------------- our layer */
+
+const ml = { items: [], queued: false };
+
+/** Our layer for the marks (made on first use, on <body>). */
+export function marksLayer(doc = document) {
+    let el = doc.getElementById('pi-marks-layer');
+    if (!el) {
+        el = h('div', { id: 'pi-marks-layer', class: 'pi-mark', 'aria-hidden': 'true' });
+        (doc.body || doc.documentElement).appendChild(el);
+    }
+    return el;
+}
+
+/** Remove every mark we drew (nothing of ours is ever inside Torn's page, so this is only our layer). */
+export function clearMarks(doc = document) {
+    ml.items = [];
+    const layer = doc.getElementById('pi-marks-layer');
+    if (layer) fill(layer, []);
+}
+
+/** Marks drawn now. */
+export function marksCount() {
+    return ml.items.length;
+}
+
+/** A box we marked is gone from Torn's page (React replaced it): the marks are drawn again. */
+export function marksLost() {
+    return ml.items.some((it) => !it.target.isConnected);
+}
+
+function addRing(target, cls, { pad = RING_PAD, title = null, data = {} } = {}) {
+    const el = h('div', { class: 'pi-ring ' + cls, title, ...data });
+    marksLayer().appendChild(el);
+    ml.items.push({ el, target, kind: 'ring', pad });
+    return el;
+}
+
+function addPill(target, cls, text, { title = null, align = 'center', pad = RING_PAD, data = {} } = {}) {
+    const el = h('div', { class: 'pi-pill ' + cls, title: title || text, ...data }, [h('span', { text })]);
+    marksLayer().appendChild(el);
+    ml.items.push({ el, target, kind: 'pill', pad, align });
+    return el;
+}
+
+/** Place every mark over its box now (all rects read first, then our styles written: one layout). */
+export function placeMarks(doc = document) {
+    if (!ml.items.length) return;
+    const layer = doc.getElementById('pi-marks-layer');
+    if (!layer) return;
+    const lr = layer.getBoundingClientRect();
+    const o = { x: lr.left, y: lr.top };
+    const viewW = (doc.documentElement && doc.documentElement.clientWidth) || window.innerWidth;
+    // A pill hidden last time has no width to read: shown again first (rare: its box came back).
+    for (const it of ml.items) if (it.kind === 'pill' && it.el.style.display === 'none' && it.target.isConnected) it.el.style.display = '';
+    const reads = ml.items.map((it) => {
+        const r = it.target.isConnected ? it.target.getBoundingClientRect() : null;
+        return { r: r && r.width > 0 && r.height > 0 ? r : null, w: it.kind === 'pill' ? it.el.scrollWidth : 0, ht: it.kind === 'pill' ? it.el.offsetHeight || 20 : 0 };
+    });
+    ml.items.forEach((it, i) => {
+        const { r, w, ht } = reads[i];
+        const s = it.el.style;
+        if (!r) {
+            s.display = 'none';
+            return;
+        }
+        s.display = '';
+        if (it.kind === 'ring') {
+            const b = ringRect(r, o, it.pad, viewW);
+            s.left = b.left + 'px';
+            s.top = b.top + 'px';
+            s.width = b.width + 'px';
+            s.height = b.height + 'px';
+        } else {
+            const p = pillSpot(r, o, w, ht, { pad: it.pad, align: it.align, viewW });
+            s.left = p.left + 'px';
+            s.top = p.top + 'px';
+            s.maxWidth = p.maxWidth + 'px';
+        }
+    });
+}
+
+/** Place the marks at the next frame (resize, scroll, Torn's page changing): once a frame at most. */
+export function scheduleMarks() {
+    if (ml.queued || !ml.items.length) return;
+    ml.queued = true;
+    const run = () => {
+        ml.queued = false;
+        placeMarks();
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+    else setTimeout(run, 16);
+}
+
+/* ---------------------------------------------------------- gym page */
+
+/** "Train this · 27 trains · about +1,234" → "Train this · 27 trains": the pill's short words (the rest on hover). */
+export function shortTab(tab) {
+    return String(tab || '').split(' · ').slice(0, 2).join(' · ');
+}
+
+/**
+ * Fill N in the panel, from planGymPage's per-stat words: the stat, how many to type, the number shown, and whether
+ * it waits (the wrong gym, the boosters still to take, no energy for one train yet). null: nothing to fill.
+ * @returns {{stat, n, shown, disabled, title}|null}
+ */
+export function gymFill(plan) {
+    if (!plan || !plan.perStat) return null;
+    for (const [stat, p] of Object.entries(plan.perStat)) {
+        if (!p || (p.kind !== 'train' && p.kind !== 'wait')) continue;
+        const wait = p.kind === 'wait';
+        const n = p.fill !== undefined ? p.fill : p.trains;
+        const shown = p.fillN !== undefined && (p.hold || wait) ? p.fillN : n;
+        const disabled = Boolean(wait || p.hold || p.noEnergy || !(n > 0));
+        const title = wait ? 'Switch gyms first' : p.noEnergy ? String(p.tab || '').split(' · then ')[0] : p.hold ? 'Take the boosters and the drug first' : 'Types ' + n + ' into Torn’s box (you press TRAIN)';
+        return { stat, n, shown, disabled, title };
+    }
+    return null;
+}
+
+/**
+ * The words the strip over the stat boxes used to say that the panel's own card doesn't (they now live in the panel):
+ * where you are and where to switch, which group of gyms to open, the energy kept, the session's parts, the box's
+ * own line (energy and what's left).
+ * @param {object} plan - planGymPage()
+ * @param {{hint?: string|null}} [o] - "Open the heavyweight gyms to find it" when the gym to go to isn't shown
+ * @returns {string[]}
+ */
+export function gymNotes(plan, { hint = null } = {}) {
+    const st = plan && plan.state;
+    if (!st || st.kind === 'overdose' || st.kind === 'stacking' || st.kind === 'away') return [];
+    const out = [];
+    const cur = plan.current;
+    const p = cur && plan.perStat ? plan.perStat[cur.stat] : null;
+    if (p && p.kind === 'train' && !p.hold && p.sub) out.push(p.sub.replace(/ · about [+−-]?[\d,]+/, ''));
+    if (st.kind === 'wrong' && plan.switchHint) out.push(plan.switchHint.charAt(0).toUpperCase() + plan.switchHint.slice(1));
+    if (hint) out.push(hint);
+    if (st.kind === 'kept' && plan.line) out.push([plan.line.head, plan.line.text].filter(Boolean).join(' · '));
+    // The next gym and how far it is ("Force Training in 7,300 E, DEX 6.4 there").
+    if ((st.kind === 'right' || st.kind === 'done' || st.kind === 'idle') && plan.line && plan.line.src) out.push('Next gym: ' + plan.line.src);
+    const parts = plan.parts || [];
+    if (parts.length > 1 || parts.some((x) => x.state === 'done')) {
+        out.push(parts.map((x) => (x.state === 'done' ? '✓ ' : '') + x.gymName + ': ' + String(x.stat).toUpperCase() + ' × ' + x.trains + (x.state === 'current' && x.done > 0 ? ' (' + x.left + ' left)' : '')).join(' → '));
+    }
+    return out;
+}
+
+/**
+ * Draw the gym page's marks from planGymPage() output, on our layer.
  * @param {object} plan - planGymPage(model, page)
  * @param {object[]} boxes - readStatBoxes(root)
- * @param {function} rereadBox - (stat) => the box as it is now (React may have replaced the input)
  * @param {{id, el}[]} [buttons] - readGymButtons(root): the gym you're in and the gym to go to
  * @param {{motion:boolean}} [opts] - motion false (Settings › Animations off): the pulse is held still
+ * @returns {{nextGymShown: boolean}} false: the gym to go to isn't on the page (Torn shows one group of gyms at a time)
  */
-export function drawGymMarks(root, plan, boxes, rereadBox, buttons = [], { motion = true } = {}) {
-    clearMarks(root);
-    const list = root.querySelector('ul[class*="properties___"]');
-    if (!list) return;
-    const line = plan.line || { tone: 'plain', head: plan.strip[0] || '', text: '', src: null };
-    const kind = plan.state ? plan.state.kind : 'idle';
+export function drawGymMarks(plan, boxes, buttons = [], { motion = true } = {}) {
+    clearMarks();
     const still = motion === false ? ' pi-still' : '';
-    const sep = () => h('span', { class: 'pi-sep' });
-    // The one thing that glows: the stat to train (right, ready), the stat to eat for (pulse), the gym to go to
-    // (pulse), or the strip itself when it is all there is (an overdose, stacking for a chain).
-    const stripGlows = kind === 'overdose' || kind === 'stacking';
-    const strip = h('div', { class: 'pi-mark pi-tag pi-strip ' + (TONE[line.tone] || TONE.plain) + (stripGlows ? ' pi-glow' : ''), 'data-pi-state': kind }, [h('span', { class: 'pi-edge' }), plate(), h('b', { text: line.head })]);
-    if (line.text) {
-        strip.appendChild(sep());
-        strip.appendChild(h('span', { class: 'pi-words', text: line.text }));
-    }
-    // A session in more than one part (or one already ticked): the parts, the current one bright.
-    if (plan.parts && (plan.parts.length > 1 || plan.parts.some((p) => p.state === 'done')) && kind !== 'overdose' && kind !== 'stacking') {
-        strip.appendChild(sep());
-        plan.parts.forEach((p, i) => {
-            if (i) strip.appendChild(h('span', { class: 'pi-arrow', text: '→' }));
-            const words = p.gymName + ': ' + p.stat.toUpperCase() + ' × ' + p.trains + (p.state === 'current' && p.done > 0 ? ' (' + p.left + ' left)' : '');
-            strip.appendChild(h('span', { class: 'pi-part' + (p.state === 'done' ? ' pi-done' : p.state === 'current' ? ' pi-cur' : ''), text: (p.state === 'done' ? '✓ ' : '') + words }));
-        });
-    }
-    if (line.src) {
-        strip.appendChild(sep());
-        strip.appendChild(h('span', { class: 'pi-src', text: line.src }));
-    }
-    if (line.link) strip.appendChild(h('a', { class: 'pi-link', href: line.link.href, text: line.link.text }));
-    list.parentNode.insertBefore(strip, list);
-
-    // The gym you're in: a steady outline, green when right, red when wrong (no glow).
+    let nextGymShown = true;
+    // The gym you're in: a steady ring, green when right, red when wrong (no glow).
     if (plan.hereGym) {
         const b = buttons.find((x) => x.id === plan.hereGym.id);
-        if (b && b.el) {
-            b.el.classList.add('pi-gymmark', plan.hereGym.wrong ? 'pi-c-red' : 'pi-c-green');
-            b.el.setAttribute('data-pi-gym', plan.hereGym.wrong ? 'wrong' : 'right');
-        }
+        if (b && b.el) addRing(b.el, plan.hereGym.wrong ? 'pi-c-red' : 'pi-c-green', { pad: 2, title: plan.hereGym.label, data: { 'data-pi-gym': plan.hereGym.wrong ? 'wrong' : 'right', 'data-pi-gym-id': String(b.id) } });
     }
     // The gym to go to: green, and it pulses (the only pulse for gyms). The user switches; we never do.
     if (plan.nextGym) {
         const b = buttons.find((x) => x.id === plan.nextGym.id);
-        if (b && b.el) {
-            b.el.classList.add('pi-gymmark', 'pi-c-green');
-            b.el.setAttribute('data-pi-gym', 'go');
-            b.el.appendChild(h('span', { class: 'pi-mark pi-ring pi-pulse' + still, title: plan.nextGym.label, 'aria-hidden': 'true' }));
-        } else {
-            // Its button isn't on the page (Torn shows one group of gyms at a time): the strip says which group to open.
-            strip.appendChild(h('span', { class: 'pi-hint', text: 'open ' + plan.nextGym.group.replace(/^a /, 'the ') + 's to find it' }));
-        }
+        if (b && b.el) addRing(b.el, 'pi-c-green pi-pulse' + still, { pad: 2, title: plan.nextGym.label, data: { 'data-pi-gym': 'go', 'data-pi-gym-id': String(b.id) } });
+        else nextGymShown = false;
     }
-
     for (const box of boxes) {
         const p = plan.perStat[box.stat];
         if (!p || p.kind === 'off') continue;
+        const data = { 'data-pi-stat': box.stat };
         if (p.kind === 'train' || p.kind === 'wait') {
-            const wait = p.kind === 'wait';
-            const tone = wait ? 'pi-c-grey' : p.mark === 'eat' ? 'pi-c-red' : 'pi-c-green';
-            box.li.classList.add(wait ? 'pi-wait' : 'pi-on', 'pi-rel');
-            // The mark: steady green to train, a red pulse until the boosters are in, dashed grey in the wrong gym.
-            const markCls = 'pi-mark pi-statmark ' + tone + (wait ? ' pi-dashed' : p.mark === 'eat' ? ' pi-pulse' + still : ' pi-glow');
-            // The outline is a border just outside the box (pointer-events none); its tab sits in our own row inside
-            // the box, never floating over Torn's controls (the owner: nothing of ours covers Torn's page).
-            box.li.appendChild(h('span', { class: markCls, 'aria-hidden': 'true' }));
-            const n = p.fill !== undefined ? p.fill : p.trains;
-            const shown = p.fillN !== undefined && (p.hold || wait) ? p.fillN : n;
-            const fill = h('button', {
-                class: 'pi-fill',
-                type: 'button',
-                text: 'Fill ' + shown,
-                title: wait ? 'Switch gyms first' : p.hold ? 'Take the boosters and the drug first' : null,
-                disabled: wait || p.hold || n <= 0,
-                onclick: (e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    const now = rereadBox(box.stat) || box;
-                    fillTrains(now.input, n);
-                },
-            });
-            const row = p.warn
-                ? h('div', { class: 'pi-mark pi-tag pi-panel pi-warn' }, [h('span', { class: 'pi-edge' }), h('span', {}, [h('b', { text: p.warn.split('. ')[0] + '.' }), ' ' + p.warn.split('. ').slice(1).join('. ')]), fill])
-                : h('div', { class: 'pi-mark pi-tag pi-panel ' + tone }, [h('span', { class: 'pi-edge' }), h('span', { class: 'pi-tab', text: p.tab }), wait || p.hold ? h('b', { text: wait ? 'Switch gyms first' : p.text }) : null, p.sub ? h('span', { class: 'pi-sub', text: wait || p.hold ? p.sub : p.sub.replace(/ · about [+−-]?[\d,]+/, '') }) : null, fill]);
-            box.content.insertBefore(row, box.content.firstChild);
+            const wait = p.kind === 'wait' || p.noEnergy;
+            const eat = !wait && p.mark === 'eat';
+            const tone = wait ? 'pi-c-grey' : eat ? 'pi-c-red' : 'pi-c-green';
+            // Steady green to train (the one thing that glows), a red pulse until the boosters are in, dashed grey
+            // in the wrong gym or with no energy for one train yet.
+            addRing(box.li, tone + (wait ? ' pi-dashed' : eat ? ' pi-pulse' + still : ' pi-glow'), { data: { ...data, 'data-pi-kind': p.noEnergy ? 'noenergy' : p.kind === 'wait' ? 'wait' : eat ? 'eat' : 'train' } });
+            const full = [p.tab, p.kind === 'wait' ? 'Switch gyms first' : p.hold ? p.text : null, p.sub, p.warn].filter(Boolean).join(' · ');
+            // Short enough for the box (the owner: "TAKE THE XANAX FIRST · TH…" was clipped): what comes first only;
+            // the rest ("then DEX × 25") is in the panel and on hover.
+            const words = eat ? 'Eat first' : p.warn && !wait ? p.warn.split('. ')[0] : p.noEnergy ? String(p.tab || '').split(' · then ')[0] : shortTab(p.tab);
+            const pillCls = wait ? 'pi-dark pi-c-grey' : 'pi-solid ' + (p.warn ? 'pi-c-amber' : tone);
+            addPill(box.li, pillCls, words, { title: full, data });
         } else if (p.tag) {
-            // Never dims or covers Torn's boxes (round 6): a small dark tag on its own line, the full words on hover.
-            box.content.insertBefore(h('div', { class: 'pi-mark pi-corner', title: p.text, text: p.tag }), box.content.firstChild);
+            // Never dims or covers Torn's boxes (round 6): a small dark pill on its top border, the full words on hover.
+            addPill(box.li, 'pi-dark', p.tag, { title: p.text, data });
         }
     }
+    placeMarks();
+    return { nextGymShown };
 }
 
+/* ---------------------------------------------------------- markets */
+
 /**
- * Outline one element with its chalk tab (items, bazaar cards, market rows, points lots). `glow`: the one thing
- * that glows on the page (the first listing to take).
+ * Mark one listing (items, bazaar cards, market rows, points lots): a chalk ring over its rect and its pill
+ * ("TAKE 3 · $2,479,500") on its top edge. `glow`: the one thing that glows on the page (the first listing to take).
  */
-export function outline(el, label, { glow = false } = {}) {
+export function markListing(el, label, { glow = false } = {}) {
     if (!el) return;
-    el.classList.add('pi-outlined');
-    if (glow) el.classList.add('pi-glow');
-    el.appendChild(h('span', { class: 'pi-mark pi-label', text: label }));
+    addRing(el, 'pi-c-chalk' + (glow ? ' pi-glow' : ''), { pad: 2 });
+    addPill(el, 'pi-solid pi-c-chalk', label, { align: 'left', pad: 2, data: { 'data-pi-listing': '1' } });
 }

@@ -25,7 +25,7 @@ const clock = (s) => new Date(s * 1000).toISOString().slice(11, 16);
 const clockS = (s) => new Date(s * 1000).toISOString().slice(11, 19);
 
 const TORN = 'https://www.torn.com/';
-export const LINKS = { items: TORN + 'item.php', gym: TORN + 'gym.php', points: TORN + 'points.php' };
+export const LINKS = { items: TORN + 'item.php', gym: TORN + 'gym.php', points: TORN + 'points.php', travel: TORN + 'travelagency.php' };
 
 const DRUG_STEP = (s) => s.kind === 'xanax' || s.kind === 'stack' || s.kind === 'hold';
 const withTrain = (s) => s.label + (s.train ? ', then ' + s.train : '');
@@ -106,6 +106,16 @@ export function stackingChain(plan) {
 }
 
 /**
+ * Overdosed (the userscript's one overdose state, synced as `plan.overdose: {at, until}` in unix seconds, with no
+ * steps): the owner asked for "Overdosed · fly to Switzerland" on Discord too, and no training steps until it is
+ * over. The same kinds as a chain stack never go out; one ping says it, once per overdose.
+ */
+export function overdosed(plan, nowS) {
+    const od = plan && plan.overdose && typeof plan.overdose === 'object' ? plan.overdose : null;
+    return Boolean(od && Number(od.until) > nowS);
+}
+
+/**
  * @param {object} state - Torn's answer to /v2/user?selections=bars,cooldowns,refills,travel
  * @param {object} plan - {type, steps:[{at (s), kind, label, train, strict, tick (s)}], noRefill?, chain?: {since (s)}}
  * @param {number} nowS - unix seconds
@@ -118,11 +128,15 @@ export function dueAlerts(state, plan, nowS, rules = {}, ctx = {}) {
     const prev = ctx.prev || null;
     // Stacking for a chain: no training steps to name (an older sync's steps included) and no energy or training kinds.
     const chain = stackingChain(plan);
-    if (chain) plan = { type: 'chain', chain: plan.chain, steps: [] };
+    const od = overdosed(plan, nowS) ? plan.overdose : null;
+    if (od) plan = { type: 'overdose', overdose: od, steps: [], noRefill: true };
+    else if (chain) plan = { type: 'chain', chain: plan.chain, steps: [] };
     // A plan not synced for 12 h: pings from Torn's own state, strict jump steps still ahead
     // (a 1.0.1 client syncs only when its steps change), and one "out of date" per synced plan.
     if (ctx.planStale) plan = plan && Array.isArray(plan.steps) ? { type: plan.type, steps: plan.steps.filter((s) => s && s.strict && s.tick && Number(s.at) > nowS) } : null;
     const out = [];
+    // Told once per overdose (its id is the moment it was seen); it goes under the drug pings' switch.
+    if (od && on.drug) out.push({ id: 'overdose:' + Number(od.at), kind: 'overdose', link: LINKS.travel, title: 'Overdosed · fly to Switzerland', text: 'No training steps until rehab is done. Rehab there is about $215,000 a session; open Pumping Iron and press Rehab done to recalibrate.', step: null });
     const cd = (state && state.cooldowns) || {};
     const bars = (state && state.bars) || {};
     const refills = (state && state.refills) || {};
@@ -216,7 +230,7 @@ export function dueAlerts(state, plan, nowS, rules = {}, ctx = {}) {
     }
 
     if (traveling) for (const a of out) a.text += ' (you’re flying)';
-    return chain ? out.filter((a) => !CHAIN_SKIPPED.includes(a.kind)) : out;
+    return chain || od ? out.filter((a) => !CHAIN_SKIPPED.includes(a.kind)) : out;
 }
 
 /**

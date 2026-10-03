@@ -32,6 +32,14 @@ export const RULES = [
 /** The plan lengths timed (months). */
 export const LENGTHS = [1, 3, 12];
 
+/**
+ * The paths under a budget (session 9): "Most stats in my budget" at these dollars a day, over these months. The
+ * path must stay inside the budget and should not total less than the best single plan (`single`, the comparison's
+ * pick over the same days): docs/sims/round8/path-vs-single.mjs.
+ */
+export const PATH_BUDGETS = [5e6, 2e6];
+export const PATH_BUDGET_LENGTHS = [3, 12];
+
 const itemsOf = (used = {}) => {
     const out = {};
     for (const [k, v] of Object.entries(used)) if (typeof v === 'number' && v > 0 && (ITEMS[k] || k === 'points' || k === 'special')) out[k] = v;
@@ -67,7 +75,7 @@ export async function runBaseline({ lengths = LENGTHS, timed = true } = {}) {
     const numbers = {};
     const time = {};
     for (const [pid, p] of Object.entries(PLAYERS)) {
-        const out = { month: {}, path: {} };
+        const out = { month: {}, path: {}, pathBudget: {} };
         time[pid] = {};
         for (const rule of RULES) {
             const { saved } = await plan(p, { months: 1, pickBy: rule.pickBy, settings: rule.settings, prices: rule.prices });
@@ -87,6 +95,14 @@ export async function runBaseline({ lengths = LENGTHS, timed = true } = {}) {
             const y = best.year;
             out.path[months] = { days: best.days, gained: y.path.gained, cost: y.path.cost, energy: y.path.energyTrained, low: y.band ? y.band.low : null, high: y.band ? y.band.high : null, plans: y.segments.map((s) => s.strategy + ':' + s.days).join(' ') };
             time[pid][months] = Math.round(ms);
+        }
+        for (const perDay of PATH_BUDGETS) {
+            for (const months of PATH_BUDGET_LENGTHS) {
+                const { saved } = await plan(p, { months, pickBy: 'most', settings: { budget: perDay * 30, horizonDays: 30 } });
+                const y = saved.year;
+                const one = saved.compare[saved.rec.recommended];
+                out.pathBudget[perDay / 1e6 + 'M:' + months] = { days: saved.days, budget: perDay * saved.days, gained: y.path.gained, cost: y.path.cost, plans: y.segments.map((s) => s.strategy + ':' + s.days).join(' '), single: saved.rec.recommended, singleGained: one.gained, singleCost: one.cost };
+            }
         }
         numbers[pid] = out;
     }
@@ -115,6 +131,9 @@ export function stringify({ numbers, time }) {
         lines.push('      },', '      "path": {');
         const lens = Object.keys(n.path);
         lens.forEach((len, li) => lines.push('        ' + JSON.stringify(len) + ': ' + JSON.stringify(n.path[len]) + (li < lens.length - 1 ? ',' : '')));
+        lines.push('      },', '      "pathBudget": {');
+        const keys = Object.keys(n.pathBudget || {});
+        keys.forEach((k, ki) => lines.push('        ' + JSON.stringify(k) + ': ' + JSON.stringify(n.pathBudget[k]) + (ki < keys.length - 1 ? ',' : '')));
         lines.push('      }', '    }' + (pi < pids.length - 1 ? ',' : ''));
     });
     lines.push('  },', '  "time": ' + JSON.stringify(time), '}');
@@ -153,6 +172,15 @@ export function markdown({ numbers, time }) {
         out.push('| Length | Path | Stats | Cost | Range | Time (ms) |', '|---|---|---|---|---|---|');
         for (const [len, y] of Object.entries(n.path)) out.push('| ' + len + ' mo (' + y.days + ' d) | ' + pathWords(y.plans) + ' | +' + fmtInt(y.gained) + ' | ' + fmtMoney(y.cost) + ' | ' + (y.low === null ? '—' : '+' + fmtInt(y.low) + ' to +' + fmtInt(y.high)) + ' | ' + (time && time[pid] && time[pid][len] !== undefined ? fmtInt(time[pid][len]) : '—') + ' |');
         out.push('');
+        if (n.pathBudget && Object.keys(n.pathBudget).length) {
+            out.push('| Budget · length | Path | Stats | Cost (budget) | Best single plan | Path against it |', '|---|---|---|---|---|---|');
+            for (const [k, y] of Object.entries(n.pathBudget)) {
+                const [b, len] = k.split(':');
+                const pct = (100 * (y.gained - y.singleGained)) / y.singleGained;
+                out.push('| $' + b + ' a day · ' + len + ' mo (' + y.days + ' d) | ' + pathWords(y.plans) + ' | +' + fmtInt(y.gained) + ' | ' + fmtMoney(y.cost) + ' (' + fmtMoney(y.budget) + (y.cost > y.budget ? ', OVER' : '') + ') | ' + nameOf(y.single) + ' +' + fmtInt(y.singleGained) + ' for ' + fmtMoney(y.singleCost) + ' | ' + (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%' + (pct < -1 ? ' LOSES' : '') + ' |');
+            }
+            out.push('');
+        }
     }
     return out.join('\n');
 }

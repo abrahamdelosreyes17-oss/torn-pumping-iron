@@ -85,22 +85,25 @@ export function learnedModel(learned) {
 }
 
 /**
- * The export's files: gym-samples.json, fights.json, model.json, meta.json.
+ * The export's files: gym-samples.json, fights.json, model.json, meta.json,
+ * and ledger.json when your books are read (core/ledger.js ledgerShape: names
+ * and counts, never an amount).
  * Player ids are left out (fights carry a hashed stand-in) unless asked.
  */
-export function exportFiles({ samples = [], fights = [], gymLog = [], learned = null, version = '', now = Date.now(), includeIds = false }) {
+export function exportFiles({ samples = [], fights = [], gymLog = [], learned = null, ledger = null, version = '', now = Date.now(), includeIds = false }) {
     const gym = samples.map((s) => ({ at: s.at || null, stat: s.stat, trains: s.trains, predicted: Math.round(s.predicted), actual: Math.round(s.actual), S: round4sig(s.S), H: s.H, dots: s.dots, E: s.E, perks: s.perks, gym: s.gym || null }));
     const fl = fights.map((f) => ({ at: f.at, who: includeIds ? f.key.split(':')[0] : f.who, predictedWin: f.predictedWin, won: f.won, predictedHpKept: f.predictedHpKept, hpKept: f.hpKept }));
     const model = learned ? { at: learned.at, gym: learned.gym ? { accepted: learned.gym.accepted, model: learned.gym.model, heldOut: learned.gym.heldOut, sessions: learned.gym.sessions } : null, fights: learned.fights ? { accepted: learned.fights.accepted, model: learned.fights.model, fights: learned.fights.fights } : null } : null;
     // Every TRAIN click from Torn's log (Full key): the stat before, trains, gym and gain, for checking the split on real sessions.
     const log = (gymLog || []).map((x) => ({ at: x.at, stat: x.stat, trains: x.trains, energy: x.energy, happy: x.happy, gym: x.gymId, before: x.before === null || x.before === undefined ? null : round4sig(x.before), gain: x.gain }));
-    const meta = { app: 'Torn Pumping Iron', version, exportedAt: new Date(now).toISOString(), sessions: gym.length, fights: fl.length, gymLog: log.length, ids: includeIds ? 'included' : 'left out' };
+    const meta = { app: 'Torn Pumping Iron', version, exportedAt: new Date(now).toISOString(), sessions: gym.length, fights: fl.length, gymLog: log.length, ledgerLines: ledger ? ledger.lines : 0, ids: includeIds ? 'included' : 'left out' };
     return [
         { name: 'gym-samples.json', data: JSON.stringify(gym) },
         { name: 'gym-log.json', data: JSON.stringify(log) },
         { name: 'fights.json', data: JSON.stringify(fl) },
         { name: 'model.json', data: JSON.stringify(model) },
         { name: 'meta.json', data: JSON.stringify(meta, null, 1) },
+        ...(ledger ? [{ name: 'ledger.json', data: JSON.stringify(ledger, null, 1) }] : []),
     ];
 }
 

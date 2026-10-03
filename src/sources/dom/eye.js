@@ -54,6 +54,20 @@ export function enemyFactionId(doc = document) {
     return m ? Number(m[1]) : null;
 }
 
+/**
+ * Your faction's chain as Torn's sidebar shows it: the count over the next bonus ("247/250") and the timer ("03:42")
+ * [check live: the selectors follow the energy bar's, #barChain or the bar classed chain]. Read only: two texts are
+ * looked at. null when the page shows no chain bar.
+ * @returns {{value: string, time: string}|null}
+ */
+export function readChainBar(doc = document) {
+    const bar = doc.getElementById('barChain') || doc.querySelector('[class*="bar___"][class*="chain"]') || doc.querySelector('[class*="chain-bar___"]');
+    const v = bar && bar.querySelector('[class*="bar-value___"]');
+    if (!v) return null;
+    const t = bar.querySelector('[class*="bar-timeleft___"]');
+    return { value: String(v.textContent || '').trim(), time: t ? String(t.textContent || '').trim() : '' };
+}
+
 /** The player the mini-profile popup is showing. */
 export function miniProfileId(doc = document) {
     const root = doc.getElementById('profile-mini-root');

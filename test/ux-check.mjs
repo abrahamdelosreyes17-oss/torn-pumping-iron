@@ -22,6 +22,8 @@ const { chromium } = require(process.env.PWPATH || 'playwright-core');
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const shots = process.env.SHOTS || tmpdir();
 const only = process.argv.slice(2);
+// PORT=… when another check already serves 8782 (another worktree's run).
+const PORT = Number(process.env.UXPORT || process.env.PORT) || 8782;
 
 const types = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json' };
 const server = http.createServer(async (req, res) => {
@@ -34,7 +36,7 @@ const server = http.createServer(async (req, res) => {
         res.writeHead(404);
         res.end();
     }
-}).listen(8782);
+}).listen(PORT);
 
 const browser = await chromium.launch({ channel: process.env.PWCHANNEL || 'msedge' });
 let failures = 0;
@@ -93,7 +95,7 @@ async function openApp(query) {
     });
     await page.route(/fonts\.(googleapis|gstatic)\.com/, (r) => r.abort());
     // &noplan=1: start with no saved plan (Create plan is clicked by the check itself).
-    const base = 'http://127.0.0.1:8782/test/harness-live.html?pi=app&key=1&at=2026-09-29T10:48:00Z&wait=100000' + (/noplan=1/.test(query || '') ? '' : '&plan=1&follow=steady');
+    const base = 'http://127.0.0.1:' + PORT + '/test/harness-live.html?pi=app&key=1&at=2026-09-29T10:48:00Z&wait=100000' + (/noplan=1/.test(query || '') ? '' : '&plan=1&follow=steady');
     await page.goto(base + (query || ''));
     await page.waitForFunction(() => {
         const sr = document.getElementById('pi-app') && document.getElementById('pi-app').shadowRoot;
@@ -122,7 +124,7 @@ async function checkTab(page, tab, errors, want) {
 
 const TABS = {
     home: ['Auto mode needs a Full key · Add it in Settings', 'Today', 'Take Xanax #1, then train', 'Refill · 30 points', 'Buy today', 'Heads-up', 'Pick your build type', "You vs Baldr's, STR high", 'Next 7 days', 'This week'],
-    plan: ['Auto (from your income)', 'Auto mode needs a Full key', 'month plan ·', 'Re-plan', 'New plan…', 'Recommended', 'Steady training', 'Per $1M', 'Other plans', 'Why it isn’t the pick', 'Where your energy comes from', 'Natural energy', 'Build', 'High stat', "Hank's", 'pick yours', 'Ignorance Is Bliss', 'what-if'],
+    plan: ['Auto (from your books)', 'Auto mode needs a Full key', 'month plan ·', 'Recalibrate', 'New plan…', 'Recommended', 'The best plan for each stretch', 'Whole plan', 'Per $1M', 'One plan the whole way', 'against the path · click a row to follow it', 'Where your energy comes from', 'Natural energy', 'Build', 'High stat', "Hank's", 'pick yours', 'Ignorance Is Bliss', 'what-if'],
     buy: ['Buy for', 'Your list', 'Xanax', 'Iron_Monk', 'Points market', 'Deals', '7-day prices', 'You hold', 'TornW3B'],
     progress: ['Total stats against the plan', 'Each stat', 'Gained against plan', 'Receipts', 'Energy trained', '$ per 1,000 stats', 'What if you’d done another plan', 'the comparison appears after two days', 'Last trains', 'This week', 'Budget', 'Force Training'],
     eye: ['Targets', 'War', 'Watched', 'Ready now', 'Order: band › respect › HP kept › win', 'How sure', 'FFScouter', 'Gear seen', 'Your side'],
@@ -181,10 +183,10 @@ for (const [tab, want] of Object.entries(TABS)) {
     const shotA = resolve(shots, 'app-plan-card.png');
     await o.page.screenshot({ path: shotA, fullPage: true });
     console.log('     shot ' + shotA);
-    const run2 = await clickRun('Re-plan');
-    ok(run2 !== null, 'buttons: Re-plan clicked');
-    ok(run2 === true, 'buttons: the re-plan shows its bar and Cancel');
-    ok(await waitText(/re-planned /), 'buttons: re-planned (same end)');
+    const run2 = await clickRun('Recalibrate');
+    ok(run2 !== null, 'buttons: Recalibrate clicked');
+    ok(run2 === true, 'buttons: the recalibrate shows its bar and Cancel');
+    ok(await waitText(/recalibrated /), 'buttons: recalibrated (same end)');
     const pn2 = await o.page.evaluate(() => JSON.parse(_store['pumpingIron.v1.planNow'] || 'null'));
     ok(pn2 && pn2.end === pn.end && pn2.rev !== pn.rev && pn2.recalibratedAt, 'buttons: the end date stays, the plan is re-worked');
     ok(await click('New plan…'), 'buttons: New plan… opens the lengths');
@@ -206,7 +208,7 @@ if (!only.length || only.includes('plan')) {
     await page.locator('#pi-app tr.click', { hasText: 'Choco jump' }).click();
     await page.waitForTimeout(300);
     let m = await measure(page);
-    ok(m.text.includes("A choco jump isn't worth it for you"), 'plan: picking the choco jump warns');
+    ok(/Choco jump the whole way (gains less than the path|is over your budget|is not the path)/.test(m.text), 'plan: picking the choco jump warns');
     // The warning offers to keep the recommended plan (whichever it is: the refill check can change it).
     const keep = page.locator('#pi-app .warnb button', { hasText: /^Keep / });
     ok((await keep.count()) === 1, 'plan: the warning offers to keep the recommended plan (' + (await keep.count() ? await keep.first().textContent() : 'none') + ')');
@@ -215,7 +217,7 @@ if (!only.length || only.includes('plan')) {
     await keep.first().click();
     await page.waitForTimeout(300);
     m = await measure(page);
-    ok(!m.text.includes("isn't worth it"), 'plan: keeping the recommended plan closes the warning');
+    ok(!/the whole way (gains less than the path|is over your budget|is not the path)/.test(m.text), 'plan: keeping your plan closes the warning');
     // Build type is yours: pick DEF as the high stat, then Hank's.
     await page.locator('#pi-app .seg[aria-label="High stat"] button', { hasText: 'DEF' }).click();
     await page.waitForTimeout(300);
@@ -326,6 +328,33 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     ok(stomp.every((r, i) => i === 0 || r.resp <= stomp[i - 1].resp), 'eye: most respect first inside a band');
     await o.page.locator('#pi-app .eye-chip', { hasText: 'All' }).click();
     await o.page.waitForTimeout(300);
+    // Round 8 (his pick A): a click on a column head sorts by it, again flips it; the order line is the way back.
+    {
+        const sr = () => o.page.evaluate(() => { const r = document.getElementById('pi-app').shadowRoot; return { keep: [...r.querySelectorAll('.tbl tbody tr.click')].map((tr) => parseInt(tr.cells[4].textContent.replace('~', ''), 10)), rule: r.querySelector('.eye-rule').textContent.replace(/\s+/g, ' ').trim(), heads: [...r.querySelectorAll('.tbl thead .sortb')].map((b) => b.textContent.trim()), on: [...r.querySelectorAll('.tbl thead .sortb.on')].map((b) => b.textContent.trim() + (b.classList.contains('up') ? ' up' : '')), hit: [...r.querySelectorAll('.tbl tbody td[data-col="hit"]')].map((td) => td.textContent) }; });
+        const d0 = await sr();
+        ok(JSON.stringify(d0.heads) === JSON.stringify(['Band', 'Lvl', 'Respect', 'HP kept', 'Win', 'Status', 'Last hit']) && d0.on.length === 0 && /^Order: band › respect › HP kept › win$/.test(d0.rule), 'eye sort: seven column heads to click, the default order named in the bar (' + d0.heads + ' · ' + d0.rule + ')');
+        ok(d0.hit.length > 0 && d0.hit.every((x) => x === '—' || /^(today|\d+ d ago)$/.test(x)), 'eye sort: the Last hit column (' + d0.hit.slice(0, 3) + ')');
+        await o.page.locator('#pi-app .tbl thead .sortb[data-sort="keep"]').click();
+        await o.page.waitForTimeout(300);
+        const d1 = await sr();
+        ok(/^Sorted by HP kept, most first\s?Default order$/.test(d1.rule) && d1.on.join() === 'HP kept' && d1.keep.every((k, i) => i === 0 || k <= d1.keep[i - 1]), 'eye sort: a click on HP kept sorts by it, most first, and the bar says so (' + d1.rule + ' · ' + d1.keep.slice(0, 6) + ')');
+        await o.page.locator('#pi-app .tbl thead .sortb[data-sort="keep"]').click();
+        await o.page.waitForTimeout(300);
+        const d2 = await sr();
+        ok(/^Sorted by HP kept, least first/.test(d2.rule) && d2.on.join() === 'HP kept up' && d2.keep.every((k, i) => i === 0 || k >= d2.keep[i - 1]), 'eye sort: the same head again flips it (' + d2.keep.slice(0, 6) + ')');
+        const m2 = await measure(o.page);
+        ok(m2.scrollW <= 1280 && m2.hostScrollW <= m2.hostW && m2.small.length === 0 && m2.covered.length === 0, 'eye sort: sorted, the bar and the table still fit (' + JSON.stringify({ scrollW: m2.scrollW, host: m2.hostScrollW + '/' + m2.hostW, small: m2.small.slice(0, 3), covered: m2.covered.slice(0, 3) }) + ')');
+        await o.page.screenshot({ path: resolve(shots, 'app-eye-sorted.png'), fullPage: true });
+        await o.page.locator('#pi-app .eye-rule button[data-act="default-order"]').click();
+        await o.page.waitForTimeout(300);
+        const d3 = await sr();
+        ok(/^Order: band › respect › HP kept › win$/.test(d3.rule) && d3.on.length === 0 && JSON.stringify(d3.keep) === JSON.stringify(d0.keep), 'eye sort: Default order goes back');
+    }
+    // Round 8 (his pick A): the list as it shows is handed over for the attack page's Next button, in its own order
+    // (written when it changes, at most every 5 s).
+    await o.page.waitForTimeout(5500);
+    const handed = await o.page.evaluate(() => { const v = window.GM_getValue('pumpingIron.v1.eyeNext', null); const t = typeof v === 'string' ? JSON.parse(v) : v; const drawn = [...document.getElementById('pi-app').shadowRoot.querySelectorAll('.tbl tbody tr.click')].map((tr) => tr.cells[1].textContent.trim()); return t ? { mode: t.mode, names: t.rows.map((r) => r[1]), where: t.rows.map((r) => r[6]), drawn, fresh: Date.now() - t.at < 60000 } : null; });
+    ok(handed && handed.mode === 'targets' && JSON.stringify(handed.names) === JSON.stringify(handed.drawn) && handed.fresh && handed.where.every((x) => x === 'ok' || x === '?'), 'eye next: the Targets list is handed over for the attack page, in its order (' + JSON.stringify(handed) + ')');
     // War: watch a faction; everyone listed, attackable first.
     await o.page.locator('#pi-app .modes button', { hasText: 'War' }).click();
     await o.page.waitForTimeout(300);
@@ -352,6 +381,80 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     await o.page.close();
 }
 
+// Round 8 (his pick A): war mode by itself. Your faction is in a ranked war: the Torn Eye tab opens on War with the
+// enemy picked, asks "Termed war / med-out deal?" on top of the list, and the answer sets the ticks.
+if (!only.length || only.includes('war')) {
+    const o = await openApp('&ffs=1&who=owner&war=new&chain=247/250/222&echain=96/100/58');
+    await o.page.evaluate(() => (location.hash = 'eye'));
+    await o.page.waitForTimeout(6000);
+    const read = () => o.page.evaluate(() => {
+        const r = document.getElementById('pi-app').shadowRoot;
+        const tx = (s) => { const e = r.querySelector(s); return e ? e.textContent.replace(/\s+/g, ' ').trim() : null; };
+        return {
+            mode: tx('.modes button[aria-pressed="true"]'),
+            vs: tx('.ctl .sel'),
+            head: tx('.lead .sh'),
+            ask: tx('.lead .ask'),
+            answ: tx('.lead .answ'),
+            rows: [...r.querySelectorAll('.lead .tbl tbody tr')].map((tr) => tr.cells[1].textContent.trim() + ':' + tr.getAttribute('data-state') + (tr.classList.contains('whatif') ? ':grey' : '') + ':' + tr.cells[6].textContent.replace(/\s+/g, ' ').trim()),
+            ticks: [...r.querySelectorAll('.ticks .tk')].map((b) => b.textContent.trim() + (b.getAttribute('aria-pressed') === 'true' ? ' on' : ' off') + (b.classList.contains('set') ? ' ring' : '')),
+            order: tx('.ctl [data-war-order]'),
+            hidden: tx('[data-war-hidden]'),
+        };
+    });
+    const a = await read();
+    ok(a.mode === 'War' && /^vs Rival Syndicate \[7777\] · ranked war$/.test(a.vs || ''), 'war mode by itself: the Torn Eye tab opens on War with the enemy picked (' + a.mode + ' · ' + a.vs + ')');
+    ok(/^War · Rival Syndicate\s?War mode turned itself on at \d\d:\d\d, when your faction’s ranked war began/.test(a.head || ''), 'war mode by itself: the card says when it turned itself on (' + a.head + ')');
+    ok(/^Termed war \/ med-out deal\?\s?You hit, they med out, you hit again\. Your answer sets this war’s filters\. Asked once per war\.\s?Yes\s?No$/.test(a.ask || '') && a.answ === null, 'termed question: asked in a card on top of the list (' + a.ask + ')');
+    ok(a.rows.length === 4 && a.ticks.join() === 'Hide under 50% off,Hide hospital off,Hide traveling off' && /^Not answered yet: the list is as it is today/.test(a.hidden || ''), 'termed question: until answered the list is as it is today (' + a.rows.length + ' rows · ' + a.hidden + ')');
+    const m0 = await measure(o.page);
+    ok(m0.scrollW <= 1280 && m0.hostScrollW <= m0.hostW && m0.small.length === 0 && m0.covered.length === 0, 'termed question: the card fits, no small text, its buttons on top (' + JSON.stringify({ small: m0.small.slice(0, 3), covered: m0.covered.slice(0, 3) }) + ')');
+    await o.page.screenshot({ path: resolve(shots, 'app-eye-war-ask.png'), fullPage: true });
+    // Yes: termed. Hospital rows stay in place, greyed, "back soon"; the away are hidden.
+    await o.page.locator('#pi-app .ask button[data-termed="yes"]').click();
+    await o.page.waitForTimeout(400);
+    const y = await read();
+    ok(y.ask === null && /^Termed war · hospital rows stay in the list\s?Change$/.test(y.answ || ''), 'termed Yes: the card folds to one line with Change (' + y.answ + ')');
+    ok(y.ticks.join() === 'Hide under 50% off,Hide hospital off ring,Hide traveling on ring' && /^Stomp, then respect · hospital keeps its place$/.test(y.order || ''), 'termed Yes: the ticks it set carry a ring, the order says hospital keeps its place (' + y.ticks + ' · ' + y.order + ')');
+    ok(y.rows.length === 3 && y.rows.filter((r) => /:hospital:grey:Hospital · \d+:\d\d · back soon$/.test(r)).length === 2 && !y.rows.some((r) => /Flyer/.test(r)), 'termed Yes: hospital rows stay, greyed, "back soon"; the traveller is hidden (' + y.rows.join(' | ') + ')');
+    ok(/^Hidden by your answer: 1 away\. Hospital rows stay: they med out\.$/.test(y.hidden || ''), 'termed Yes: what the answer hides, said under the list (' + y.hidden + ')');
+    await o.page.screenshot({ path: resolve(shots, 'app-eye-war-yes.png'), fullPage: true });
+    // Change asks again; No: a real war, hospital rows hidden.
+    await o.page.locator('#pi-app .answ button[data-termed="change"]').click();
+    await o.page.waitForTimeout(400);
+    ok(/^Termed war \/ med-out deal\?/.test((await read()).ask || ''), 'termed question: Change asks again');
+    await o.page.locator('#pi-app .ask button[data-termed="no"]').click();
+    await o.page.waitForTimeout(400);
+    const n = await read();
+    ok(/^Real war · hospital rows hidden\s?Change$/.test(n.answ || '') && n.ticks.join() === 'Hide under 50% off,Hide hospital on ring,Hide traveling on ring' && n.rows.length === 1 && /^Rival:okay/.test(n.rows[0]), 'termed No: a real war, only who you can hit now (' + n.answ + ' · ' + n.rows.join(' | ') + ')');
+    ok(/^Hidden by your answer: 2 in hospital \(next out in \d+:\d\d\) · 1 away\.$/.test(n.hidden || '') && /^ready first, then out of hospital soonest$/.test(n.order || ''), 'termed No: what it hides, and the order (' + n.hidden + ')');
+    const m1 = await measure(o.page);
+    ok(m1.scrollW <= 1280 && m1.small.length === 0 && m1.covered.length === 0 && /Next out of hospital/.test(m1.text), 'termed No: the page still fits; "Next out of hospital" stays in the side pane');
+    await o.page.screenshot({ path: resolve(shots, 'app-eye-war-no.png'), fullPage: true });
+    // The war list as it shows now is what the attack page's Next button walks ("Next enemy"): written within 5 s.
+    await o.page.waitForTimeout(5500);
+    const handedWar = await o.page.evaluate(() => { const v = window.GM_getValue('pumpingIron.v1.eyeNext', null); const t = typeof v === 'string' ? JSON.parse(v) : v; return t ? { mode: t.mode, rows: t.rows.map((r) => r[1] + ':' + r[6]) } : null; });
+    ok(handedWar && handedWar.mode === 'war' && handedWar.rows.join() === 'Rival:ok', 'eye next: in war mode the war list is handed over, as the answer left it (' + JSON.stringify(handedWar) + ')');
+    // A view you pick stays: Targets is not switched back to War by the next look at your wars.
+    await o.page.locator('#pi-app .modes button', { hasText: 'Targets' }).click();
+    await o.page.waitForTimeout(4500);
+    ok((await read()).mode === 'Targets', 'war mode by itself: a view you pick stays');
+    // Chain mode carries the chain counter (round 8): your chain from your bars, the enemy's read while you are at war.
+    const counter = () => o.page.evaluate(() => { const c = document.getElementById('pi-app').shadowRoot.querySelector('[data-chain-mode] .chainc'); return c ? { text: c.textContent.replace(/\s+/g, ' ').trim(), low: [...c.querySelectorAll('.time')].map((t) => t.classList.contains('low')) } : null; });
+    ok((await counter()) === null, 'chain mode off: no counter in its card');
+    await o.page.locator('#pi-app [data-chain-mode] button', { hasText: 'Chain mode' }).click();
+    await o.page.waitForTimeout(3500);
+    const cc = await counter();
+    ok(cc && /^Your faction\s?3:\d\d\s?247\s?3 hits to the 250 bonus\s?Rival Syndicate\s?0:\d\d\s?96\s?4 hits to the 100 bonus$/.test(cc.text) && JSON.stringify(cc.low) === '[false,true]', 'chain mode on: the chain counter in its card, both chains, the low timer amber (' + JSON.stringify(cc) + ')');
+    const mc = await measure(o.page);
+    ok(mc.scrollW <= 1280 && mc.small.length === 0 && mc.covered.length === 0 && /on since \d\d:\d\d · stacking/.test(mc.text), 'chain mode on: the card fits its pane (' + JSON.stringify({ small: mc.small.slice(0, 3), covered: mc.covered.slice(0, 3) }) + ')');
+    const asked = await o.page.evaluate(() => window.__calls.filter((x) => /faction\/7777\/chain/.test(x)).length);
+    ok(asked >= 1 && asked <= 3, 'chain mode on: the enemy’s chain is read, about every 30 s (' + asked + ' in the first seconds)');
+    await o.page.screenshot({ path: resolve(shots, 'app-eye-chain-mode.png'), fullPage: true });
+    ok(o.errors.length === 0, 'war mode: no page errors ' + JSON.stringify(o.errors.slice(0, 2)));
+    await o.page.close();
+}
+
 // Taking turns: Torn Trading seen → the webpage says Paused, keeps the plan moving, asks nothing; back by itself.
 {
     const o = await openApp('');
@@ -374,8 +477,8 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     await o.page.close();
 }
 
-// Auto mode: without a Full key the top bar says so on every page; with one, the plan runs on your income.
-{
+// Auto mode: without a Full key the top bar says so on every page; with one, the plan runs on your books (R7.5).
+if (!only.length || only.includes('auto')) {
     const o = await openApp('&full=1&who=owner');
     await o.page.evaluate(() => (location.hash = 'plan'));
     // The money log is read 5 s after the page opens; then Create plan (round 6: a plan is made on a click, from your income).
@@ -384,11 +487,32 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     await o.page.waitForTimeout(1500);
     const m = await measure(o.page);
     ok(!/Auto mode needs a Full key · Add it/.test(m.text), 'auto: no header warning with a Full key');
-    ok(/a day from your income/.test(m.text) && /You can afford this with your income/.test(m.text), 'auto: the plan runs on your income (' + (m.text.match(/[^.]*from your income[^.]*/) || [''])[0].slice(0, 120) + ')');
-    ok(/Bazaar sell/.test(m.text), 'auto: where the income comes from (money log)');
-    ok(/of it certain/.test(m.text), 'auto: the certain income (bank, dividends, rent) is counted (R6.4)');
+    ok(/a day from your books/.test(m.text) && /This plan costs/.test(m.text), 'auto: the plan runs on your books (' + (m.text.match(/[^.]*from your books[^.]*/) || [''])[0].slice(0, 120) + ')');
+    ok(/Coming in \(your books, \d+ days\): Company employee pay/.test(m.text), 'auto: where the money comes from, by Torn’s log type');
+    ok(/\$3\.8M a day from your books/.test(m.text) && !/\$[67]\d(\.\d)?M a day from your/.test(m.text), 'auto: $4M of pay less the upkeep a day; the $2B gift and the $2B banked are not income (' + (m.text.match(/\$[\d.]+[MB] a day from your books/) || [''])[0] + ')');
     ok(o.errors.length === 0, 'auto: no page errors ' + JSON.stringify(o.errors.slice(0, 2)));
     await o.page.screenshot({ path: resolve(shots, 'app-auto.png'), fullPage: true });
+    // Round 8: Plan's money block (the owner's pick P1): six figures from your books, in the accountant's words.
+    const figs = await o.page.evaluate(() => [...document.getElementById('pi-app').shadowRoot.querySelectorAll('[data-money] .figc')].map((f) => ({ id: f.dataset.fig, label: f.querySelector('.lab').textContent, value: f.querySelector('b').textContent, sub: f.querySelector('small').textContent, w: Math.round(f.getBoundingClientRect().width), clipped: f.scrollWidth > f.clientWidth + 1 })));
+    ok(figs.map((f) => f.id).join() === 'free,in,habit,restricted,oneoffs,plan', 'money: six figures in a row (' + figs.map((f) => f.label).join(' | ') + ')');
+    ok(figs.length === 6 && figs.every((f) => !f.clipped), 'money: no figure is cut off ' + JSON.stringify(figs.filter((f) => f.clipped)));
+    ok(figs.length === 6 && /^Total free cash$/.test(figs[0].label) && /^Non-recurring, not counted$/.test(figs[4].label) && /lines?$/.test(figs[4].value), 'money: free cash and the non-recurring lines (' + (figs[0] || {}).value + ', ' + (figs[4] || {}).value + ' ' + (figs[4] || {}).sub + ')');
+    ok(figs.length === 6 && /fits: lasts all \d+ days|runs out on day \d+/.test(figs[5].sub), 'money: the plan is checked against your free cash (' + (figs[5] || {}).sub + ')');
+    // The budget choice opens at Create plan.
+    await o.page.evaluate(() => [...document.getElementById('pi-app').shadowRoot.querySelectorAll('button')].find((b) => /^New plan/.test(b.textContent)).click());
+    await o.page.waitForTimeout(300);
+    const buds = await o.page.evaluate(() => [...document.getElementById('pi-app').shadowRoot.querySelectorAll('[data-budgets] .bud')].map((b) => b.textContent));
+    ok(buds.length === 4 && /^Your habit/.test(buds[0]) && /^Stretch/.test(buds[1]) && /^All your free cash/.test(buds[2]) && /^No limit/.test(buds[3]) && buds.filter((x) => /Recommended/.test(x)).length === 1, 'money: the budget choice at Create plan, one recommended (' + buds.map((x) => x.slice(0, 26)).join(' | ') + ')');
+    await o.page.screenshot({ path: resolve(shots, 'app-plan-money.png'), fullPage: true });
+    // Round 8: the Ledger tab (option A, adjusted): the statement, what you own, by account, every line.
+    await o.page.evaluate(() => (location.hash = 'ledger'));
+    await o.page.waitForTimeout(600);
+    const lg = await measure(o.page);
+    for (const words of ['How your income was worked out', 'Recurring income', 'Committed costs', 'Disposable income', 'What you chose to spend it on', 'Uncontrollable gains and losses', 'Non-recurring', 'Transfers between your own accounts', 'Change in cash by the books', 'What you own', 'Total free cash', 'Restricted cash', 'By account', 'Every line', 'Download CSV', 'The account table', 'Export log', 'A plan may spend']) ok(lg.text.includes(words), 'ledger: says "' + words + '"');
+    ok(lg.small.length === 0, 'ledger: no text under 11px ' + JSON.stringify(lg.small.slice(0, 3)));
+    ok(lg.hostScrollW <= lg.hostW + 1, 'ledger: no sideways scroll (' + lg.hostScrollW + ' in ' + lg.hostW + ')');
+    ok(o.errors.length === 0, 'ledger: no page errors ' + JSON.stringify(o.errors.slice(0, 2)));
+    await o.page.screenshot({ path: resolve(shots, 'app-ledger.png'), fullPage: true });
     // Settings › Discord: one button, the old form under Advanced.
     await o.page.evaluate(() => (location.hash = 'settings'));
     await o.page.waitForTimeout(600);
@@ -410,11 +534,148 @@ ok(tornHits() === 0, 'nothing loaded from torn.com');
     await o.page.close();
 }
 
+// Overdosed (the owner, 2026-10-03): Torn answers happy 0, energy 0 and a day of drug cooldown. Home says
+// "Overdosed · fly to Switzerland" with no training steps (it said "Train DEX × 6"); the strip says it too.
+if (!only.length || only.includes('overdose')) {
+    const o = await openApp('&energy=0&happy=0&drug=86400');
+    await o.page.waitForTimeout(800);
+    const m = await measure(o.page);
+    ok(/Overdosed · fly to Switzerland/.test(m.text) && /No training steps until rehab is done/.test(m.text), 'overdose: Home says "Overdosed · fly to Switzerland", no training steps');
+    ok(!/Train (STR|DEF|SPD|DEX) ×|Take Xanax #|Open the gym/.test(m.text), 'overdose: no training step anywhere on Home (' + (m.text.match(/(Train (STR|DEF|SPD|DEX) ×|Take Xanax #|Open the gym)[^\n]{0,30}/) || [''])[0] + ')');
+    const od = await o.page.evaluate(() => {
+        const sr = document.getElementById('pi-app').shadowRoot;
+        return { box: Boolean(sr.querySelector('.stackbox[data-overdose="on"]')), strip: (sr.querySelector('.strip [data-overdose="on"]') || {}).textContent || '', btn: [...sr.querySelectorAll('.stackbox .btn')].map((b) => b.textContent), stored: JSON.parse(_store['pumpingIron.v1.overdose'] || 'null') };
+    });
+    ok(od.box && /Overdosed · fly to Switzerland/.test(od.strip), 'overdose: the strip\'s Drug cell says it too (' + od.strip.slice(0, 80) + ')');
+    ok(od.btn.join('|') === 'Open Travel|Rehab done · recalibrate', 'overdose: Open Travel and "Rehab done · recalibrate" (' + od.btn.join('|') + ')');
+    ok(od.stored && od.stored.until > od.stored.at, 'overdose: stored under the key Torn\'s pages read (' + JSON.stringify(od.stored) + ')');
+    // Round 8 (pick B): flying to Switzerland is the one thing to do, so the rail's point is the plate with the ring.
+    const odRing = await o.page.evaluate(() => { const sr = document.getElementById('pi-app').shadowRoot; return { rings: sr.querySelectorAll('.ring').length, onNode: Boolean(sr.querySelector('.rail > li.now > .node > .pl.ring')), rows: sr.querySelector('.rail').children.length }; });
+    ok(odRing.rings === 1 && odRing.onNode && odRing.rows === 1, 'overdose: one ring, on the rail\'s point, the box alone on the rail (' + JSON.stringify(odRing) + ')');
+    ok(m.scrollW <= 1280 && m.small.length === 0 && m.covered.length === 0, 'overdose: no overflow, no small text, every control on top');
+    ok(o.errors.length === 0, 'overdose: no page errors ' + JSON.stringify(o.errors.slice(0, 2)));
+    await o.page.screenshot({ path: resolve(shots, 'app-home-overdose.png'), fullPage: true });
+    await o.page.close();
+}
+
+/*
+ * Round 8, the owner's pick B (mockups/round8/steps-panel.html): Today is one rail, the step of the moment a box on it
+ * with its actions under each other, and the plate ring (his pick 1D) on the one action to do now. One ring on the
+ * page, none on a countdown; opacity and transform only; drawn still under "reduce motion" and with Animations off.
+ */
+const railOf = (page) => page.evaluate(() => {
+    const sr = document.getElementById('pi-app').shadowRoot;
+    const rail = sr.querySelector('.lead .rail');
+    if (!rail) return null;
+    const ring = sr.querySelector('.pl.ring');
+    const after = ring ? getComputedStyle(ring, '::after') : null;
+    const txt = (el) => (el ? el.textContent.replace(/\s+/g, ' ').trim() : null);
+    return {
+        state: rail.getAttribute('data-rail'), rows: rail.children.length, tables: sr.querySelectorAll('.lead table').length, bands: sr.querySelectorAll('.nowb').length,
+        rings: sr.querySelectorAll('.ring').length, ringIn: ring ? (ring.closest('.subr li.now') ? 'sub' : ring.closest('.rail > li.now > .node') ? 'node' : 'other') : null,
+        anim: after && after.animationName, opacity: after && after.opacity, transform: after && after.transform, still: sr.querySelector('.pi-root').classList.contains('still'),
+        subs: [...sr.querySelectorAll('.subr li')].map((li) => (li.classList.contains('done') ? '✓ ' : li.classList.contains('now') ? '● ' : '○ ') + txt(li)), ticks: sr.querySelectorAll('.subr li.done svg.tick').length,
+        nb: txt(sr.querySelector('.nb')), side: txt(sr.querySelector('.nb .side')), when: txt(sr.querySelector('.rail > li.now > .t')),
+        btns: [...sr.querySelectorAll('.nb .btn')].map((b) => b.textContent + (b.classList.contains('primary') ? '*' : '')),
+        later: [...rail.querySelectorAll(':scope > li:not(.now):not(.done)')].map(txt),
+    };
+});
+if (!only.length || only.includes('rail')) {
+    // Nothing due (the Xanax is 3:50 away): said in words, with the countdown; nothing rings.
+    {
+        const o = await openApp('');
+        await o.page.waitForTimeout(600);
+        const r = await railOf(o.page);
+        ok(r && r.state === 'wait' && r.tables === 0 && r.bands === 0 && r.rows >= 2, 'rail: Today is one rail, no band and no table (' + JSON.stringify(r && { state: r.state, rows: r.rows, tables: r.tables, bands: r.bands }) + ')');
+        ok(r && /^Nothing due now ?Next at \d\d:\d\d: take Xanax #1, then train (STR|DEF|SPD|DEX) × \d+ · .+ · \+[\d,]+ · \d+ energy/.test(r.nb) && /^\d+:\d\d ?next at \d\d:\d\d$/.test(r.side), 'rail, nothing due: "Nothing due now · Next at …" with the countdown (' + (r && r.nb.slice(0, 130)) + ')');
+        ok(r && r.rings === 0 && r.btns.length === 0 && r.subs.length === 0, 'rail, nothing due: a countdown never rings; no buttons (' + JSON.stringify(r && { rings: r.rings, btns: r.btns }) + ')');
+        ok(r && r.later.length >= 1 && r.later.every((x) => /in \d/.test(x)), 'rail: the later steps hang on the same line, each with when it comes (' + (r && r.later[0]) + ')');
+        await o.page.close();
+    }
+    // A step due (the Xanax cooldown is over): its two actions, the ring on the one to do now, Items first.
+    {
+        const o = await openApp('&drug=0');
+        await o.page.waitForTimeout(600);
+        const r = await railOf(o.page);
+        ok(r && r.state === 'due' && r.when === 'now' && /NOW/.test(r.side), 'rail, a step due: the step of the moment is a box on the rail, "now" (' + JSON.stringify(r && { state: r.state, when: r.when, side: r.side }) + ')');
+        ok(r && r.subs.length === 2 && /^● Take Xanax #1 ?Step 1 of 2 · \+250 energy$/.test(r.subs[0]) && /^○ Train (STR|DEF|SPD|DEX) × \d+ · .+ · about \+[\d,]+ · \d+ energy$/.test(r.subs[1]), 'rail, a step due: "Take Xanax #1, then train …" is its two actions (' + (r && r.subs.join(' | ')) + ')');
+        ok(r && r.rings === 1 && r.ringIn === 'sub' && r.anim === 'pi-ring', 'rail, a step due: one ring on the page, on the action to do now (' + JSON.stringify(r && { rings: r.rings, ringIn: r.ringIn, anim: r.anim }) + ')');
+        ok(r && r.btns.join('|') === 'Items*|Open the gym', 'rail, a step due: the first button follows the action of the moment (' + (r && r.btns.join('|')) + ')');
+        const m = await measure(o.page);
+        ok(m.scrollW <= 1280 && m.small.length === 0 && m.covered.length === 0, 'rail, a step due: no overflow, no small text, every control on top ' + JSON.stringify([m.scrollW, m.small.slice(0, 3), m.covered.slice(0, 3)]));
+        await o.page.screenshot({ path: resolve(shots, 'app-home-due.png'), fullPage: true });
+        // The PC's "reduce motion": nothing moves, the ring stays drawn around the plate.
+        await o.page.emulateMedia({ reducedMotion: 'reduce' });
+        await o.page.waitForTimeout(150);
+        const red = await railOf(o.page);
+        ok(red && red.anim === 'none' && red.opacity === '0.55' && /matrix\(1\.7, 0, 0, 1\.7/.test(red.transform), 'rail, reduce motion: the ring is drawn still (' + JSON.stringify(red && [red.anim, red.opacity, red.transform]) + ')');
+        await o.page.emulateMedia({ reducedMotion: 'no-preference' });
+        // Settings › Animations off: the same.
+        await o.page.evaluate(() => {
+            window.GM_setValue('pumpingIron.v1.settings', JSON.stringify({ motion: false }));
+            window.__pi.refresh();
+        });
+        await o.page.waitForTimeout(1200);
+        const off = await railOf(o.page);
+        ok(off && off.still && off.rings === 1 && off.anim === 'none' && off.opacity === '0.55', 'rail, Animations off: the ring is drawn still (' + JSON.stringify(off && [off.still, off.rings, off.anim, off.opacity]) + ')');
+        await o.page.screenshot({ path: resolve(shots, 'app-home-due-still.png'), fullPage: true });
+        ok(o.errors.length === 0, 'rail, a step due: no page errors ' + JSON.stringify(o.errors.slice(0, 2)));
+        await o.page.close();
+    }
+    // A jump mid-way: the 5 EDVD are in (happy 17,525 of 5,025), the Ecstasy is the action of the moment.
+    {
+        const o = await openApp('&energy=1000&happy=17525&drug=0');
+        // Once the harness has made its plan and followed steady: follow the EDVD jump, as picking its row on Plan does.
+        await o.page.waitForFunction(() => Boolean(_store['pumpingIron.v1.planNow']), null, { timeout: 30000 });
+        await o.page.waitForTimeout(400);
+        await o.page.evaluate(() => window.__pi.followStrategy('edvdJump'));
+        await o.page.waitForTimeout(1200);
+        const r = await railOf(o.page);
+        ok(r && r.state === 'due' && r.subs[0] === '✓ EDVD × 5 · happy 17,525' && /^● Take the Ecstasy ?Step 2 of \d · doubles your happy: 17,525 → 35,050$/.test(r.subs[1]) && r.ticks === 1, 'rail, a jump mid-way: the eaten EDVD keep their name and are ticked, the Ecstasy is the action of the moment (' + (r && r.subs.slice(0, 2).join(' | ')) + ')');
+        ok(r && /^○ Train it all/.test(r.subs[2] || ''), 'rail, a jump mid-way: training stays small until its turn (' + (r && r.subs[2]) + ')');
+        ok(r && r.rings === 1 && r.ringIn === 'sub', 'rail, a jump mid-way: one ring, on the Ecstasy (' + JSON.stringify(r && { rings: r.rings, ringIn: r.ringIn }) + ')');
+        ok(r && /^\d+:\d\d ?until \d\d:\d\d, when happy resets/.test(r.side) && !/NOW/.test(r.side), 'rail, a jump mid-way: the countdown to the tick that resets the happy (' + (r && r.side) + ')');
+        ok(r && r.btns.join('|') === 'Items*|Open the gym', 'rail, a jump mid-way: Items first while the drug is next (' + (r && r.btns.join('|')) + ')');
+        const m = await measure(o.page);
+        ok(m.scrollW <= 1280 && m.small.length === 0 && m.covered.length === 0, 'rail, a jump mid-way: no overflow, no small text, every control on top ' + JSON.stringify([m.scrollW, m.small.slice(0, 3), m.covered.slice(0, 3)]));
+        ok(o.errors.length === 0, 'rail, a jump mid-way: no page errors ' + JSON.stringify(o.errors.slice(0, 2)));
+        await o.page.screenshot({ path: resolve(shots, 'app-home-jump.png'), fullPage: true });
+        await o.page.close();
+    }
+    // Stacking for a chain: the rail holds the box alone; nothing rings.
+    {
+        const o = await openApp('');
+        await o.page.locator('#pi-app button', { hasText: 'I’m stacking' }).click();
+        await o.page.waitForTimeout(600);
+        const r = await railOf(o.page);
+        ok(r && r.rows === 1 && r.rings === 0 && /Stacking for a chain/.test(r.nb) && r.btns.join('|') === 'Resume and recalibrate*', 'rail, stacking: the box alone on the rail, nothing rings (' + JSON.stringify(r && { rows: r.rows, rings: r.rings, btns: r.btns }) + ')');
+        const m = await measure(o.page);
+        ok(m.scrollW <= 1280 && m.small.length === 0 && m.covered.length === 0, 'rail, stacking: no overflow, no small text, every control on top');
+        await o.page.screenshot({ path: resolve(shots, 'app-home-stacking.png'), fullPage: true });
+        await o.page.close();
+    }
+}
+
+// Flying (the owner's live page, 2026-10-03): Home says so, with no training step to do now.
+if (!only.length || only.includes('flying')) {
+    const o = await openApp('&energy=60&fly=43');
+    await o.page.waitForTimeout(800);
+    const m = await measure(o.page);
+    const fr = await railOf(o.page);
+    ok(fr && fr.rows === 1 && fr.rings === 0 && /^\d\d:\d\d$/.test(fr.when || ''), 'flying: the rail holds the box alone at the time you are back, nothing rings (' + JSON.stringify(fr && { rows: fr.rows, rings: fr.rings, when: fr.when }) + ')');
+    ok(/Flying · back in Torn at \d\d:\d\d/.test(m.text) && /No training until you are back in Torn/.test(m.text) && /First when you land:/.test(m.text), 'flying: Home says "Flying · back in Torn at HH:MM" and what comes first when you land');
+    ok(!/Open the gym/.test(m.text), 'flying: no "Open the gym" on Home');
+    ok(m.scrollW <= 1280 && m.small.length === 0 && m.covered.length === 0, 'flying: no overflow, no small text, every control on top');
+    ok(o.errors.length === 0, 'flying: no page errors ' + JSON.stringify(o.errors.slice(0, 2)));
+    await o.page.screenshot({ path: resolve(shots, 'app-home-flying.png'), fullPage: true });
+    await o.page.close();
+}
+
 // No key: the page opens on Settings with the ToS table open.
 {
     const p2 = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     await p2.route(/fonts\.(googleapis|gstatic)\.com/, (r) => r.abort());
-    await p2.goto('http://127.0.0.1:8782/test/harness-live.html?pi=app&wait=100000');
+    await p2.goto('http://127.0.0.1:' + PORT + '/test/harness-live.html?pi=app&wait=100000');
     await p2.waitForTimeout(1500);
     const m = await measure(p2);
     ok(m.text.includes('No key yet') && m.text.includes('Data storage'), 'no key: Settings with the ToS table');
