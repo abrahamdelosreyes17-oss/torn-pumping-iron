@@ -5,7 +5,7 @@
  */
 
 import { gmOnChange } from './platform/gm.js';
-import { K, get, set, del, getKey, getSettings, getPlan, setPlan, getPrices, getShared } from './platform/store.js';
+import { K, get, set, del, getKey, getSettings, getPlan, setPlan, getPrices, getShared, getStacking, setStacking } from './platform/store.js';
 import { tabWindow } from './platform/tab-window.js';
 import { makeTabId, LEADER_HEARTBEAT_MS } from './core/leader.js';
 import { focusFrom, FOCUS_FRESH_MS } from './core/lanes.js';
@@ -462,6 +462,32 @@ export function recalibratePlan(o = {}) {
 }
 
 /**
+ * Home's "I'm stacking" (round 7): energy is kept for a faction chain. Stored in GM, so every tab and Torn's pages
+ * follow at once (their change event); today's steps, the panel's "train now" and the bot's energy and training
+ * pings wait until Resume. Nothing on torn.com is clicked.
+ */
+export function startStacking(now = Date.now()) {
+    const v = setStacking(true, now);
+    logAction('I’m stacking pressed (a chain)');
+    refresh();
+    return v;
+}
+
+/**
+ * Resume (round 7): stacking ends and the plan is re-planned at once from your bars, the same run as Re-plan (its
+ * light sweep included). No saved plan to re-plan (none yet, or it has ended): today's steps simply come back.
+ * @returns {Promise<object|null>} the re-planned saved plan, or null
+ */
+export function resumeTraining(o = {}) {
+    setStacking(false);
+    logAction('Resume pressed (stacking ends)');
+    refresh();
+    const pn = planNowStored();
+    if (!pn || planProgress(pn, Date.now()).ended) return Promise.resolve(null);
+    return recalibratePlan(o);
+}
+
+/**
  * Picking another of the saved plans yourself (the Plan page): followed the
  * whole length, nothing worked out again; Progress's line follows the pick.
  */
@@ -529,7 +555,7 @@ export function currentModel(now = Date.now()) {
     // Income (Plan's "Plan from my income"): read on the webpage only, where a plan is made.
     const auto = app ? autoFor(plan, settings, statics, () => (pn && pn.slim.steady ? pn.slim.steady.cost / pn.days : 0)) : null;
     const planInfo = pn ? { start: pn.start, end: pn.end, months: pn.months, days: pn.days, from: pn.from, createdAt: pn.createdAt, recalibratedAt: pn.recalibratedAt, progress: planProgress(pn, now), whole: Boolean(saved) } : null;
-    const m = buildModel({ state, statics, plan: followed, onPath: Boolean(seg && seg.strategy), settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: (app ? archived(K.statsHistory, {}) : get(K.statsHistory, {})) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), now });
+    const m = buildModel({ state, statics, plan: followed, onPath: Boolean(seg && seg.strategy), settings: planSettings, auto, warOn: warOnNow(now, statics), log: get(K.dayLog, []) || [], history: (app ? archived(K.statsHistory, {}) : get(K.statsHistory, {})) || {}, prices: getPrices(), compare, rec, warn: pn ? pn.warn : null, lite: !app, saved: planInfo, whatIf: saved ? saved.whatIf : null, jobWhatIf: saved ? saved.jobWhatIf : null, pc, learnedMult: learnedNow().mult, skipped: (get(K.skipped, []) || []).filter((x) => now - x.at < 24 * 3600e3), gymProgress: get(K.gymProgress, null), unlockedKnown: get(K.unlocked, null), stacking: getStacking(), now });
     if (m.ready) {
         m.strategy = followed.strategy;
         m.planBusy = pi.planBusy ? { recalibrate: pi.planBusy.recalibrate, months: pi.planBusy.months, at: pi.planBusy.at, done: pi.planBusy.done, words: pi.planBusy.words } : null;
@@ -752,6 +778,8 @@ export function startFeed() {
     gmOnChange(K.plan, refresh);
     gmOnChange(K.planNow, refresh);
     gmOnChange(K.skipped, refresh);
+    // "I'm stacking" or Resume in another tab: this one follows at once (Torn's pages too).
+    gmOnChange(K.stacking, refresh);
     gmOnChange(K.settings, refresh);
     gmOnChange(K.stateError, refresh);
     gmOnChange(K.apiKeyDead, refresh);

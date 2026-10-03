@@ -509,7 +509,7 @@ export function drugNotBefore(skipped, now, cdMin = XANAX_CD_MIN) {
  * worked out (today's steps, the 48 h look-ahead, the strip, the gym page's next two days); no ladder, no 30-day
  * projection. `saved`: where the saved plan stands (null: no plan yet).
  */
-export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, rec: recIn = null, warn = null, lite = false, saved = null, onPath = false, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, warOn = null, now }) {
+export function buildModel({ state, statics = {}, plan, settings, log = [], history = {}, prices = {}, compare = null, rec: recIn = null, warn = null, lite = false, saved = null, onPath = false, whatIf = null, jobWhatIf = null, gymProgress = null, unlockedKnown = null, learnedMult = null, skipped = [], pc: pcIn = null, auto = null, warOn = null, stacking = null, now }) {
     if (!state) return { ready: false };
     // One player context per refresh: the comparison's, when the caller has it.
     const pc = pcIn || playerContext(state, statics, { unlockedKnown, learnedMult });
@@ -794,6 +794,9 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         // held: while any are held the daily refill is a special (Torn blocks the points refill until they're spent [verify]).
         special: { have: state.specialRefills, left: specialLeft(plan, state), use: plan.specialUse || 0, held: ctx.specialHeld },
         prices,
+        // Stacking energy for a chain (round 7, Home's "I'm stacking"): {since: ms}, null while training. The steps
+        // above stay as they are; every surface that would ask you to train reads this and holds them back.
+        stacking: stacking && Number(stacking.since) > 0 ? { since: Number(stacking.since) } : null,
     };
 }
 

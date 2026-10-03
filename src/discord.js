@@ -112,8 +112,14 @@ export function discordState() {
     return w && (w.discordName || w.connectedAt) ? w : null;
 }
 
-function planPayload(m) {
+/**
+ * The plan the Worker pings from. Stacking for a chain (round 7, Home's "I'm stacking"): `chain: {since}` (unix
+ * seconds) and no steps, so the bot sends nothing about energy or training (worker/src/alerts.js) and /today lists
+ * nothing until Resume. Not the jump plan's stack (`type: 'jump'`): that one is part of a training plan.
+ */
+export function planPayload(m) {
     if (!m || !m.ready) return null;
+    if (m.stacking) return { type: 'chain', steps: [], chain: { since: Math.floor(m.stacking.since / 1000) } };
     return { type: m.steps.some((s) => s.kind === 'stack' || s.kind === 'jump') ? 'jump' : 'steady', steps: stepsForWorker(m.upcoming || m.steps), ...(m.noRefill ? { noRefill: true } : {}) };
 }
 
@@ -333,7 +339,8 @@ export function maybeSyncPlan(m, now = Date.now()) {
     if (!w || !isVisible() || isPaused()) return false;
     const plan = planPayload(m);
     if (!plan) return false;
-    const sig = JSON.stringify(plan.steps.map((s) => [s.kind, s.label, Math.round(s.at / 300)]));
+    // "I'm stacking" and Resume change it too: the bot hears either within a minute.
+    const sig = JSON.stringify([plan.chain ? plan.chain.since : 0, plan.steps.map((s) => [s.kind, s.label, Math.round(s.at / 300)])]);
     const pendingAcks = w.pendingAcks || [];
     const targetsDue = sync.targets && sync.targetsSig !== w.targetsSig && now - (w.targetsAt || 0) >= TARGETS_EVERY_MS;
     // Logged in with Discord: a new main key goes along once (the service pauses pings on a refused key until then).

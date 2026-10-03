@@ -7,7 +7,7 @@
  * message is only sent when there's room left to record it.
  */
 
-import { dueAlerts, resolvedBy, nextPrev } from './alerts.js';
+import { dueAlerts, resolvedBy, nextPrev, stackingChain, CHAIN_SKIPPED } from './alerts.js';
 import { Q, parse, meterDb, ensureSchema, forgetUser, FORGET, QUERY_BUDGET } from './db.js';
 import { LOGIN_TTL_S } from './login.js';
 import { guard, BudgetError } from './net.js';
@@ -171,7 +171,8 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
     const prev = parse(row.prev, null);
     const on = kindsOn(row);
     const planAt = Number(row.plan_at || row.updated) || 0;
-    const alerts = dueAlerts(state, parse(row.plan, null), nowS, on, { prev, planStale: planStale(row, nowS), planAge: planAge(row, nowS), planAt });
+    const plan = parse(row.plan, null);
+    const alerts = dueAlerts(state, plan, nowS, on, { prev, planStale: planStale(row, nowS), planAge: planAge(row, nowS), planAt });
     // Price watches, when 5 minutes have passed since this user's last check.
     const watching = watchDue(row, nowS);
     if (watching) {
@@ -224,6 +225,8 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
     fresh = fresh.filter((a) => !(a.kind === 'drugready' && drugDone));
     // Muted kinds wait (not recorded: they come if still due when the mute ends).
     fresh = fresh.filter((a) => !muted(st, a.kind, nowS));
+    // Stacking for a chain: a snoozed energy or training ping waits too (after Resume it comes if Torn still shows it due).
+    if (stackingChain(plan)) fresh = fresh.filter((a) => !CHAIN_SKIPPED.includes(a.kind));
     // Quiet hours and caps: strict jump steps still go through. War pings have their own cap.
     const normal = rows.filter((r) => !isWarRow(r));
     const room = Math.min(st.perHour - messagesSince(normal, nowS - 3600), st.perDay - messagesSince(normal, nowS - DAY_S));
