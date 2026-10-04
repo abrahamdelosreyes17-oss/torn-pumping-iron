@@ -12,8 +12,10 @@ installFakeDom();
 const { sortWar, warKeyOf, warBegun, warAskNext, termedFilters, TERMED_WORDS, enemiesFromWars } = await import('../src/core/eye/war.js');
 const { renderEye } = await import('../src/ui/app/eye-tab.js');
 
-const NOW = Date.now();
-const S = Math.floor(NOW / 1000);
+// The page reads the clock when it draws: held still on a whole second, or a slow run reads "1:39" for "1:40".
+const NOW = Math.floor(Date.now() / 1000) * 1000;
+Date.now = () => NOW;
+const S = NOW / 1000;
 const ENEMY = { id: 8124, name: 'Iron Legion', kind: 'ranked', warId: 25000, start: S - 36 * 60, end: null };
 
 test('a war is named by its kind and Torn’s war id; it counts once it has begun', () => {

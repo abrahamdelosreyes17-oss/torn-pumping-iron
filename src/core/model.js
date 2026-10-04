@@ -173,7 +173,7 @@ export function simInputs({ state, pc, shares, settings, prices, special = 0, st
         // The booster cooldown running now: the first boosts wait for it (a full candy load takes 24.5 h).
         boosterCdMin: Math.max(0, Number(state.boosterCd) || 0) / 60,
         special,
-        // Special refills held: the daily refill uses them while any are left (the points refill waits) [verify].
+        // Special refills held: the daily refill uses them while any are left (the points refill waits: Torn uses the free ones first).
         specialHeld: Math.max(0, Number(state.specialRefills) || 0),
         canMult: pc.perks.canMult || 1,
         candyMult: pc.perks.candyMult || 1,
@@ -844,7 +844,7 @@ export function buildModel({ state, statics = {}, plan, settings, log = [], hist
         // Your Xanax cooldown (median of the ones recorded, the range) and when the Torn day resets.
         xanaxCd: xcd,
         dayResetAt: tornDayStart(now) + DAY,
-        // held: while any are held the daily refill is a special (Torn blocks the points refill until they're spent [verify]).
+        // held: while any are held the daily refill is a special (Torn uses them before the points refill).
         special: { have: state.specialRefills, left: specialLeft(plan, state), use: plan.specialUse || 0, held: ctx.specialHeld },
         prices,
         // Stacking energy for a chain (round 7, Home's "I'm stacking"): {since: ms}, null while training. The steps

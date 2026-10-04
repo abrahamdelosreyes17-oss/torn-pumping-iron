@@ -280,7 +280,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     };
     // Special refills the plan may use: all in the session that gains most (a jump or boost; else the next Xanax session).
     // In a boosted session: as many as keep happy above the maximum; otherwise what's left of today's share.
-    // While specials are held the day's refill is one of them (Torn blocks the points refill until they're spent [verify]).
+    // While specials are held the day's refill is one of them (Torn uses them before the points refill).
     let heldLeft = Math.max(0, Math.floor(ctx.specialHeld || 0));
     let specialLeft = Math.min(Math.max(0, Math.floor(ctx.specialLeft || 0)), ctx.specialHeld === undefined || ctx.specialHeld === null ? Infinity : heldLeft);
     let shareLeft = Math.max(0, Math.floor((ctx.specialPerDay || 0) - (ctx.specialToday || 0)));
@@ -305,14 +305,16 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         if (heldLeft > 0) {
             heldLeft--;
             specialLeft = Math.min(specialLeft, heldLeft);
-            return trainEach(at, 'refill', 'Special refill (instead of the points refill)', [{ id: SPECIAL, qty: 1 }], 1, { ...extra, note: 'Torn lets you use the points refill only once your special refills are spent [1 source]' }, 0, leave);
+            return trainEach(at, 'refill', 'Special refill (instead of the points refill)', [{ id: SPECIAL, qty: 1 }], 1, { ...extra, note: (extra.note ? extra.note + ' · ' : '') + 'Torn lets you use the points refill only once your special refills are spent' }, 0, leave);
         }
         // Not worth its price under the Plan rule (the comparison decided): the points refill is left out.
         if (ctx.noRefill) return null;
         return trainEach(at, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }], 1, extra, 0, leave);
     };
-    // Would the day's refill add energy (a special held, or the points refill when the plan keeps it)?
-    const refillGives = () => heldLeft > 0 || !ctx.noRefill;
+    // The refill before a stack is the points refill, when the plan keeps it (it is lost at midnight). A special refill
+    // held waits for the jump, where it is worth several times more, unless the whole of it stays in the bar for the
+    // jump (`stackKeep`: the console jump). The simulator's rule (strategies.js `refillBeforeStack`).
+    const refillBeforeStack = (stackKeep) => (heldLeft > 0 ? stackKeep >= maxE : !ctx.noRefill);
     const candyMult = ctx.candyMult || 1;
     const candyId = ctx.candyId && ITEMS[ctx.candyId] ? ctx.candyId : CANDY_KISSES;
     const candyQty = () => ctx.candyCount || boostersThatFit(candyId, capH, 0, cdMult);
@@ -474,7 +476,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
                     // energy is stacked above the maximum a refill adds nothing). The bar is trained first, so the
                     // refill fills all of it. The simulator does the same (strategies.js).
                     const jumpFrom = Math.max(drugAt + stackTo * xanCD, ctx.holdBooster ? ctx.holdUntil || 0 : 0, roomFor(boostItem, qty));
-                    const refillNow = refillLeft && jumpFrom >= curDay + DAY && refillGives();
+                    const refillNow = refillLeft && jumpFrom >= curDay + DAY && refillBeforeStack(stackKeep);
                     const leave = refillNow ? 0 : stackKeep;
                     if (E - leave >= minTrain) {
                         const st = train(drugAt, 'natural', 'Train what’s in the bar', [], { note: 'before Xanax #1: energy stops at ' + ENERGY_CAP.toLocaleString('en-US') + (stackKeep ? '' : ', so ' + stackTo + ' Xanax need an empty bar') }, leave);
@@ -566,6 +568,41 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         const at = roomFor(candyId, 1);
         return 'the booster cooldown is full; candy fits again at ' + (tornDayStart(at) > curDay ? 'tomorrow ' : '') + clockOf(at) + ' TCT';
     };
+    // FHC you hold (session 11): plain steady training uses them too, after a session, while the booster cooldown has
+    // room, whatever the budget; none is bought (the simulator's rule: strategies.js `ownFhc`).
+    const ownFhc = !eb && !ctx.holdBooster && (s === 'steady' || s === 'steadyLite');
+    const boosterNow = () => eb || (ownFhc && pool[FHC] > 0 ? { id: FHC, perDay: Infinity, own: true } : null);
+    const energyBoosters = () => {
+        const b = boosterNow();
+        if (!b) return;
+        const most = b.own ? pool[FHC] : Infinity;
+        // As many as the booster cooldown and the day's share allow, one after another (train after each).
+        const it = ITEMS[b.id];
+        const at = t + MIN;
+        let qty = 0;
+        const boosterBefore = boosterAt;
+        while (ebToday + qty < b.perDay && qty < most && boosterAt - at < capMs) {
+            qty++;
+            boosterAt = Math.max(boosterAt, at) + boosterHours(b.id, cdMult) * HOUR;
+        }
+        if (qty > 0) {
+            advance(at);
+            // An FHC sets energy to the maximum (never above): one at a time, train after each.
+            let used = true;
+            if (it.toMax) {
+                used = Boolean(trainEach(at, 'booster', itemNameShort(b.id) + ' × ' + qty + ', train after each', [{ id: b.id, qty }], qty, b.own ? { note: 'from your items: the FHC you hold are used whatever your budget, none is bought' } : {}, it.happy || 0));
+                if (used) takeFromHeld(pool, fillFromPool(qty, b.id, pool));
+            } else {
+                // Cans as a pool: the ones you hold first (the most energy first).
+                const f = fillPool(qty, b.id);
+                E = Math.min(ENERGY_CAP, E + Math.round(f.value * (ctx.canMult || 1)));
+                const words = f.held ? fillWords(f, b.id) : itemNameShort(b.id) + ' × ' + qty;
+                train(at, 'booster', words + ', train after each', f.alloc.map((a) => ({ id: a.id, qty: a.qty })), f.held ? { note: heldWords(f) } : {});
+            }
+            if (used) ebToday += qty;
+            else boosterAt = boosterBefore;
+        }
+    };
     for (let guard = 0; guard < 200; guard++) {
         if (daily && holding) {
             const tick = nextQuarterTick(drugAt - 1);
@@ -605,6 +642,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
                 refill(t);
                 refillLeft = false;
             }
+            if (st.energy && ownFhc) energyBoosters();
             continue;
         }
         if (drugAt >= end && steps.length) break;
@@ -702,34 +740,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             refillLeft = false;
         }
         if (!daily && !candyDaily) special(t + MIN);
-        if (eb) {
-            // As many as the booster cooldown and the day's share allow, one after another (train after each).
-            const it = ITEMS[eb.id];
-            const at = t + MIN;
-            let qty = 0;
-            const boosterBefore = boosterAt;
-            while (ebToday + qty < eb.perDay && boosterAt - at < capMs) {
-                qty++;
-                boosterAt = Math.max(boosterAt, at) + boosterHours(eb.id, cdMult) * HOUR;
-            }
-            if (qty > 0) {
-                advance(at);
-                // An FHC sets energy to the maximum (never above): one at a time, train after each.
-                let used = true;
-                if (it.toMax) {
-                    used = Boolean(trainEach(at, 'booster', itemNameShort(eb.id) + ' × ' + qty + ', train after each', [{ id: eb.id, qty }], qty, {}, it.happy || 0));
-                    if (used) takeFromHeld(pool, fillFromPool(qty, eb.id, pool));
-                } else {
-                    // Cans as a pool: the ones you hold first (the most energy first).
-                    const f = fillPool(qty, eb.id);
-                    E = Math.min(ENERGY_CAP, E + Math.round(f.value * (ctx.canMult || 1)));
-                    const words = f.held ? fillWords(f, eb.id) : itemNameShort(eb.id) + ' × ' + qty;
-                    train(at, 'booster', words + ', train after each', f.alloc.map((a) => ({ id: a.id, qty: a.qty })), f.held ? { note: heldWords(f) } : {});
-                }
-                if (used) ebToday += qty;
-                else boosterAt = boosterBefore;
-            }
-        }
+        energyBoosters();
         drugAt += xanCD;
         if (drugAt >= end) {
             // Energy that comes in after the last drug of the day.

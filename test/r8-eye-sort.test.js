@@ -13,6 +13,8 @@ const { SORT_KEYS, sortOf, nextSort, sortWords, sortTargets, lastHits, lastHitTe
 const { renderEye } = await import('../src/ui/app/eye-tab.js');
 
 const NOW = Date.parse('2026-10-03T14:38:00Z');
+// The page reads the clock when it draws: held at NOW, or "1 d ago" turns into "2 d ago" the day after.
+Date.now = () => NOW;
 const DAY = 86400000;
 const S = (ms) => Math.floor(ms / 1000);
 // The mockup's ten players: level, respect, HP kept and win from the fight model; status and last hit set by hand.

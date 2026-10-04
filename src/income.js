@@ -8,6 +8,7 @@
 import { K, get, set, del, getKey, setKey, getPlan } from './platform/store.js';
 import { pageGet, pageSet } from './platform/archive.js';
 import { fetchKeyInfo, fetchMoneyLog, fetchGymLog, ACCESS_FULL } from './api/torn.js';
+import { moneyLogKept, moneyLogAskFrom, mergeMoneyLog } from './core/moneylog.js';
 import { parseGymLog, mergeGymLog, gymLogFrom, GYM_LOG_EVERY_MS } from './core/gymlog.js';
 import { fullKeyClient, pi } from './runtime.js';
 import { isPaused } from './turns.js';
@@ -23,7 +24,11 @@ export const MONEY_LOG_CATS = [
 ];
 /** The stored row's shape: 2 = lines as Torn gave them, each once (round 7, R7.5). */
 export const MONEY_LOG_V = 2;
-export const MONEY_LOG_MAX_LINES = 3000;
+/** Lines kept at most: a busy log's 30 days (470 lines a day) is about 14,000. */
+export const MONEY_LOG_MAX_LINES = 15000;
+/** Pages of 100 lines a category a read may walk back: the first read, and one that builds on the lines kept (two days away on a busy log still joins). */
+export const MONEY_LOG_PAGES = 6;
+export const MONEY_LOG_PAGES_JOIN = 12;
 
 /** Save and check the Full key (Settings). */
 export async function saveFullKey(v) {
@@ -101,7 +106,7 @@ export function gymLogTick() {
 /**
  * Read the money log (Full key), at most every 6 hours: Torn's "Money
  * incoming" and "Money outgoing" (every line that moved your wallet), 30
- * days back, each line once. Round 7 (R7.5): the stored row keeps the lines
+ * days back, each line once, built on the lines kept from the last read (core/moneylog.js). Round 7 (R7.5): the stored row keeps the lines
  * as Torn gave them (log id, log type id, time, data) for the ledger
  * (core/ledger.js); a row from before that is read again once.
  */
@@ -110,13 +115,14 @@ export async function refreshMoneyLog({ force = false, now = Date.now() } = {}) 
     if (!getKey(K.fullKey) || !st.ok || st.dead || isPaused()) return null;
     const prev = pageGet(K.moneyLog, null);
     if (!force && prev && prev.v === MONEY_LOG_V && now - prev.at < MONEY_LOG_EVERY_MS) return prev;
-    const from = Math.floor(now / 1000) - MONEY_LOG_DAYS * 86400;
-    const log = await fetchMoneyLog(fullKeyClient(), { from, categories: MONEY_LOG_CATS });
-    // Only the days every category is complete for count (a very busy log may not reach back 30 days in its pages).
-    const since = log.coveredFrom || from * 1000;
-    const lines = log.filter((e) => e.at >= since).slice(0, MONEY_LOG_MAX_LINES);
+    const since = now - MONEY_LOG_DAYS * 86400e3;
+    // Session 11: the lines kept are built on. The read asks for what is newer than the last one; only the days every
+    // category is complete for count, and they grow with each read (a busy log fills a read's pages in two days).
+    const kept = moneyLogKept(prev, MONEY_LOG_V);
+    const log = await fetchMoneyLog(fullKeyClient(), { from: Math.floor(moneyLogAskFrom(kept, since) / 1000), categories: MONEY_LOG_CATS, pages: kept ? MONEY_LOG_PAGES_JOIN : MONEY_LOG_PAGES });
     // `fields` (C.0): the log by type with its data field names, for Settings › Developer and the report zip.
-    const row = { v: MONEY_LOG_V, at: now, from: since, days: Math.max(1, (now - since) / 86400e3), cats: MONEY_LOG_CATS.map((c) => c.title), lines, fields: log.fields || [] };
+    const m = mergeMoneyLog(kept, log, { now, since, maxLines: MONEY_LOG_MAX_LINES });
+    const row = { v: MONEY_LOG_V, at: m.at, from: m.from, days: m.days, cats: MONEY_LOG_CATS.map((c) => c.title), lines: m.lines, fields: m.fields };
     pageSet(K.moneyLog, row);
     return row;
 }

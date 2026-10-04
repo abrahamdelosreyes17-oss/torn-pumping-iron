@@ -76,6 +76,47 @@ test('ledger: the amount is read from the type’s own field, signed by what it 
     assert.equal(ledgerEntry({ id: 'v', type: 5851, at: T, data: { withdrawn: 500, balance: 1 } }).internal, true);
 });
 
+/*
+ * The types an "Export log" of 2026-10-04 listed as not sorted (a log of about 470 lines a day: bazaar buys, sales
+ * to item shops and in a bazaar, money from trades). Field names as that file gave them; the amounts are made up.
+ */
+test('ledger: sales and money from a trade are non-recurring, shop and ammo buys are spending, money the faction gives is a transfer, a slots win is the casino', () => {
+    const cases = [
+        // A sale is cash that is not certain to come again (the accountant's Q8, on points sold).
+        [1226, { buyer: 1, items: [{ id: 9999, uid: null, qty: 2 }], cost_each: 500, cost_total: 1000 }, 'nonrecurring', 1000],
+        [4210, { item: 9999, quantity: 3, value_each: 100, total_value: 300, area: 'x' }, 'nonrecurring', 300],
+        [4441, { user: 1, trade_id: 'x', parsed_trade_id: 7, money: 2500 }, 'nonrecurring', 2500],
+        [4200, { item: 9999, quantity: 2, cost_each: 50, cost_total: 100, area: 1 }, 'chosen', -100],
+        [4500, { ammo: 1, quantity: 100, value: 4000 }, 'chosen', -4000],
+        // Your faction balance paid out to your wallet: the other way of 6726.
+        [6736, { sender: 1, faction: 1, money_given: 900 }, 'transfers', 900],
+        [8300, { bet_amount: 100, won_amount: 350, barrel_positions: [1, 1, 1], combination: 3 }, 'uncontrollable', 250],
+    ];
+    for (const [type, data, account, amount] of cases) {
+        const e = ledgerEntry({ id: 'x', type, title: '', at: T, data });
+        assert.equal(e.known, true, type + ' is in the table');
+        assert.equal(e.account, account, type + ' account');
+        assert.equal(e.amount, amount, type + ' amount');
+    }
+    // Candy from a shop is for the gym, as from a bazaar.
+    assert.equal(ledgerEntry({ id: 's', type: 4200, at: T, data: { item: XANAX, quantity: 1, cost_each: 9, cost_total: 9, area: 1 } }, isGymItem).account, 'training');
+});
+
+test('ledger: a trader’s days sort to the last line; what was sold is not counted on, and the cash adds up', () => {
+    const l = book([
+        ...pay(2, 1e6),
+        line('buy', 1225, 1, { seller: 1, items: [{ id: 9999, uid: null, qty: 10 }], cost_each: 1000, cost_total: 10000 }),
+        line('shop', 4210, 1, { item: 9999, quantity: 6, value_each: 1200, total_value: 7200, area: 'x' }),
+        line('baz', 1226, 1, { buyer: 1, items: [{ id: 9999, uid: null, qty: 2 }], cost_each: 1500, cost_total: 3000 }),
+        line('trade', 4441, 1, { user: 1, trade_id: 'x', parsed_trade_id: 7, money: 3200 }),
+    ]);
+    assert.deepEqual(l.unsorted, []);
+    assert.equal(l.accounts.recurring.in, 2e6, 'pay only');
+    assert.equal(l.accounts.chosen.out, 10000);
+    assert.equal(l.accounts.nonrecurring.in, 13400);
+    assert.equal(l.entries.reduce((n, e) => n + e.amount, 0), 2e6 - 10000 + 13400);
+});
+
 test('ledger: a line listed under two categories counts once; a line outside the days does not count', () => {
     const lines = [...pay(3), ...pay(3), line('old', 6221, 40, { pay: 5e6 })];
     const l = book(lines);

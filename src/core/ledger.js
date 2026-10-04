@@ -29,9 +29,9 @@ export const LEDGER_ACCOUNTS = [
     { id: 'recurring', name: 'Recurring income', kind: 'income', what: 'pay, stock benefits, crimes, bounties, mugs' },
     { id: 'committed', name: 'Committed costs', kind: 'spend', what: 'property upkeep, education' },
     { id: 'training', name: 'Gym', kind: 'spend', what: 'gym items bought, rehab' },
-    { id: 'chosen', name: 'Other spending', kind: 'spend', what: 'items bought that are not for the gym' },
+    { id: 'chosen', name: 'Other spending', kind: 'spend', what: 'items and ammo bought that are not for the gym' },
     { id: 'uncontrollable', name: 'Uncontrollable gains and losses', kind: 'apart', what: 'the casino, being mugged, what others pay into your faction balance' },
-    { id: 'nonrecurring', name: 'Non-recurring', kind: 'apart', what: 'gifts, money sent, trades, auctions, points sold, a gain or loss on stocks sold' },
+    { id: 'nonrecurring', name: 'Non-recurring', kind: 'apart', what: 'gifts, money sent, trades, auctions, points and items sold, a gain or loss on stocks sold' },
     { id: 'transfers', name: 'Transfers', kind: 'balance', what: 'the bank, stocks bought and sold, the faction vault, your vault' },
     { id: 'unsorted', name: 'Not sorted', kind: 'none', what: 'log types the table does not know yet' },
 ];
@@ -65,8 +65,12 @@ export const LEDGER_TYPES = {
     1112: { title: 'Item market buy', account: 'chosen', sign: -1, amount: ledgerField('cost_total'), items: (d) => (Array.isArray(d.items) ? d.items.map((x) => x && x.id) : []) },
     1225: { title: 'Bazaar buy', account: 'chosen', sign: -1, amount: ledgerField('cost_total'), items: (d) => (Array.isArray(d.items) ? d.items.map((x) => x && x.id) : []) },
     4201: { title: 'Item abroad buy', account: 'chosen', sign: -1, amount: ledgerField('cost_total'), items: (d) => [d.item] },
+    4200: { title: 'Item shop buy', account: 'chosen', sign: -1, amount: ledgerField('cost_total'), items: (d) => [d.item] },
+    4500: { title: 'Ammo buy', account: 'chosen', sign: -1, amount: ledgerField('value') },
     // One line per spin: the payout holds the winning stake, the whole bet left the wallet.
     8305: { title: 'Casino roulette win', account: 'uncontrollable', sign: 1, amount: ledgerAmount(['won_amount', 'bet_amount'], (d) => ledgerNum(d.won_amount) - ledgerNum(d.bet_amount)) },
+    // Booked as the roulette win is (same two fields); not yet checked against a balance.
+    8300: { title: 'Casino slots win', account: 'uncontrollable', sign: 1, amount: ledgerAmount(['won_amount', 'bet_amount'], (d) => ledgerNum(d.won_amount) - ledgerNum(d.bet_amount)) },
     8301: { title: 'Casino slots lose', account: 'uncontrollable', sign: -1, amount: ledgerField('bet_amount') },
     8306: { title: 'Casino roulette lose', account: 'uncontrollable', sign: -1, amount: ledgerField('bet_amount') },
     8350: { title: 'Casino blackjack start', account: 'uncontrollable', sign: -1, amount: ledgerField('bet') },
@@ -77,7 +81,12 @@ export const LEDGER_TYPES = {
     4810: { title: 'Money receive', account: 'nonrecurring', sign: 1, amount: ledgerField('money') },
     4800: { title: 'Money send', account: 'nonrecurring', sign: -1, amount: ledgerField('money') },
     4440: { title: 'Trade money outgoing', account: 'nonrecurring', sign: -1, amount: ledgerField('money') },
+    4441: { title: 'Trade money incoming', account: 'nonrecurring', sign: 1, amount: ledgerField('money') },
     5011: { title: 'Points market sell', account: 'nonrecurring', sign: 1, amount: ledgerField('cost_total') },
+    // A sale is cash that is not certain to come again, as points sold are (Q8). Whether buying to resell is a
+    // business of its own is the accountant's to settle (docs/LEDGER-QUESTIONS.md, 21).
+    1226: { title: 'Bazaar sell', account: 'nonrecurring', sign: 1, amount: ledgerField('cost_total') },
+    4210: { title: 'Item shop sell', account: 'nonrecurring', sign: 1, amount: ledgerField('total_value') },
     // The whole bid leaves the wallet; what is over the winning price comes back as a cashier's check.
     4310: { title: 'Auction house item bid', account: 'nonrecurring', sign: -1, amount: ledgerField('bid_price') },
     5460: { title: 'Cashiers check withdraw', account: 'nonrecurring', sign: 1, amount: ledgerField('amount') },
@@ -87,6 +96,8 @@ export const LEDGER_TYPES = {
     5511: { title: 'Stock sell', account: 'transfers', sign: 1, amount: ledgerField('worth'), gain: ledgerField('profit') },
     5851: { title: 'Vault withdraw', account: 'transfers', sign: 1, amount: ledgerField('withdrawn'), internal: true },
     6726: { title: 'Faction deposit money', account: 'transfers', sign: -1, amount: ledgerField('money_deposited') },
+    // Your faction balance paid out to your wallet. The line does not say whether it was your own deposit or war pay.
+    6736: { title: 'Faction give money receive', account: 'transfers', sign: 1, amount: ledgerField('money_given') },
 };
 
 /** How a log type is booked, in names only: its account, its sign and the fields its amount is read from; null for a type not in the table. */

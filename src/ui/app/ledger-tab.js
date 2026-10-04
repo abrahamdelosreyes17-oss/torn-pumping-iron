@@ -251,7 +251,7 @@ export function nonRecurringFacts(b) {
         sectionHead('Non-recurring', meta([list.length ? list.length + (list.length === 1 ? ' line' : ' lines') + ', not counted · ' + (sum > 0 ? '+' : '') + fmtMoney(Math.round(sum)) + ' together' : 'none in these days']), null, 'h3'),
         ...list.slice(0, 8).map((e) => h('div', { class: 'ledger-one' }, [h('span', {}, [h('span', { class: 'white', text: e.title }), h('span', { class: 'muted', text: ' · ' + ledgerDay(e.at) + (e.ticked ? ' · your tick' : '') })]), h('b', { class: 'num ' + (e.amount < 0 ? 'c-cost' : 'white'), text: (e.amount > 0 ? '+' : '') + fmtMoney(Math.round(e.amount)) })])),
         list.length > 8 ? h('div', { class: 'note2', text: 'and ' + (list.length - 8) + ' more, in “Every line” under Non-recurring.' }) : null,
-        h('p', { class: 'muted', style: 'margin:12px 0 0;font-size:13px', text: 'Gifts, money sent, trades, auctions and points sold are non-recurring by what they are, whatever their size. Untick a line in the list to count it as usual money.' }),
+        h('p', { class: 'muted', style: 'margin:12px 0 0;font-size:13px', text: 'Gifts, money sent, trades, auctions, and points and items sold are non-recurring by what they are, whatever their size. Untick a line in the list to count it as usual money.' }),
     ]);
 }
 

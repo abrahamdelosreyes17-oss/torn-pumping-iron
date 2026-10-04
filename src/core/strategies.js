@@ -93,6 +93,9 @@ export function planWhat(id, r = null) {
     return s.what;
 }
 
+/** The FHC you hold, in plain steady training: as often as the booster cooldown allows, never bought. */
+const OWN_FHC = { id: FHC, perDay: Infinity };
+
 /** Minutes per simulation step. */
 export const STEP_MIN = 5;
 
@@ -147,8 +150,9 @@ export const TICK_OFFSET_MIN = 5;
  * @param {number} [o.candyMult] - candy perks (faction Voracity, a book, Absorption): × candy happy
  * @param {number} [o.cdMult] - consumable cooldown cuts (Grocery 3★, Restaurant 10★, Self Control Is For Losers): × candy/can cooldown
  * @param {number} [o.specialHeld] - special refills the account holds. When given, the daily refill is a special
- *   while any are held (Torn blocks the points refill until they're spent [verify, 1 source]); extras (o.special)
- *   come from the same stock. At most SPECIAL_WEEK_MAX a week either way.
+ *   while any are held (Torn uses them before the points refill: its own page says so, the owner's screenshot of
+ *   2026-10-04); extras (o.special) come from the same stock. At most SPECIAL_WEEK_MAX a week either way. On a
+ *   jump plan a special is never spent before the stack (it is not lost at midnight, as the points refill is).
  * @param {boolean} [o.consoleOwned] - a Game Console in the inventory (else the console jump buys one)
  * @param {object} [o.jobHappy] - job-point happy specials where the player works: {specials:[{jp, happy}], jpPerDay, bank}
  *   spent in each boosted session (steady plans: the first Xanax session of a day), before the Ecstasy
@@ -494,19 +498,27 @@ export function* simulateSteps(id, o) {
         if (n > 0) useBoosters(EDVD, n);
     };
     // Energy boosters on the booster cooldown, only once energy is spent (FHC fills to max; cans add theirs).
+    // FHC you hold (session 11; the owner: "does pumping iron now use the xanax and edvd etc in inventory?"): plain
+    // steady training uses them too, one whenever energy is spent and the booster cooldown has room, whatever the
+    // budget: they cost nothing new, and none is bought (Steady + FHC max and Steady + energy boosters buy). Before,
+    // only those two plans used them, and a small budget fits neither. The day plan does the same (plan.js).
+    const ownFhc = !eb && (id === 'steady' || id === 'steadyLite');
     const energyBoost = (t, day) => {
-        if (!eb) return;
+        const own = ownFhc && stock[FHC] > 0;
+        if (!eb && !own) return;
+        const b = eb || OWN_FHC;
+        const item = eb ? ebItem : ITEMS[FHC];
         if (day !== ebDay) {
             ebDay = day;
             ebToday = 0;
         }
-        while (ebToday < eb.perDay && fitsAt(eb.id, t) > 0 && E < 10) {
-            const f = useBoosters(eb.id, 1);
-            if (ebItem.toMax) {
+        while (ebToday < b.perDay && fitsAt(b.id, t) > 0 && E < 10 && (eb || stock[FHC] > 0)) {
+            const f = useBoosters(b.id, 1);
+            if (item.toMax) {
                 E = Math.max(E, maxE);
-                H += ebItem.happy || 0;
+                H += item.happy || 0;
             } else E = Math.min(ENERGY_CAP, E + Math.round(f.value * canMult * evCan));
-            addBooster(eb.id, 1, t);
+            addBooster(b.id, 1, t);
             ebToday++;
             train();
         }
@@ -525,8 +537,11 @@ export function* simulateSteps(id, o) {
         E = Math.max(E, maxE);
         buy(POINTS, REFILL_POINTS);
     };
-    // Would the day's refill add energy (a special held, or the points refill when the plan keeps it)?
-    const refillGives = (day) => (heldRule && specialOk(day)) || !o.noRefill;
+    // The refill before a stack is the points refill, when the plan keeps it: it is lost at Torn's midnight. A special
+    // refill held is not lost (session 11; a new player with 100 of them was told to use one before Xanax #1, at
+    // normal happy, where the same refill in the jump gave eight times as much): it waits for the jump, unless the
+    // whole of it stays in the bar for the jump (the console jump's 3 Xanax leave room for the bar).
+    const refillBeforeStack = (day) => (heldRule && heldLeft > 0 ? stackKeep >= maxE && specialOk(day) : !o.noRefill);
     const xanax = (t) => {
         // Never above 1,000: what doesn't fit is lost (900 + a Xanax = 1,000).
         E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
@@ -660,7 +675,7 @@ export function* simulateSteps(id, o) {
                 // The stack's first Xanax on a Torn day no jump can land in, with that day's refill unused: the
                 // refill goes in now, before the stack (once energy is stacked above the maximum a refill adds
                 // nothing). The bar is trained first, so the refill fills all of it. The day plan does the same.
-                if (t >= drugFree && day !== refillDay && refillGives(day)) {
+                if (t >= drugFree && day !== refillDay && refillBeforeStack(day)) {
                     const jumpFrom = Math.max(t + stackTo * xanCD, boosterFree - capH * 60 + (boostN - 1) * boosterHours(boostItem, cdMult) * 60);
                     if (jumpFrom >= (day + 1) * 1440 - dayMin) {
                         train();

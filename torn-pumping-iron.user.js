@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Pumping Iron
 // @namespace    torn-pumping-iron
-// @version      1.5.1
+// @version      1.5.2
 // @description  Gym planner and fight scout for Torn: what to take, what to train, what to buy, who you can beat. Reads the API and the page you're on; never acts for you.
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
@@ -48,8 +48,8 @@
 (function (Math, Number, Object, Array, JSON, Date, Set, Map, WeakMap, WeakSet, Promise, String, Boolean, Error, Infinity, NaN, undefined) {
     'use strict';
 
-    const PI_BUILD_VERSION = '1.5.1';
-    const PI_BUILD_HASH = 'd9fec0e49a4a';
+    const PI_BUILD_VERSION = '1.5.2';
+    const PI_BUILD_HASH = 'd9880d251173';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -3715,6 +3715,9 @@
         return s.what;
     }
 
+    /** The FHC you hold, in plain steady training: as often as the booster cooldown allows, never bought. */
+    const OWN_FHC = { id: FHC, perDay: Infinity };
+
     /** Minutes per simulation step. */
     const STEP_MIN = 5;
 
@@ -3769,8 +3772,9 @@
      * @param {number} [o.candyMult] - candy perks (faction Voracity, a book, Absorption): × candy happy
      * @param {number} [o.cdMult] - consumable cooldown cuts (Grocery 3★, Restaurant 10★, Self Control Is For Losers): × candy/can cooldown
      * @param {number} [o.specialHeld] - special refills the account holds. When given, the daily refill is a special
-     *   while any are held (Torn blocks the points refill until they're spent [verify, 1 source]); extras (o.special)
-     *   come from the same stock. At most SPECIAL_WEEK_MAX a week either way.
+     *   while any are held (Torn uses them before the points refill: its own page says so, the owner's screenshot of
+     *   2026-10-04); extras (o.special) come from the same stock. At most SPECIAL_WEEK_MAX a week either way. On a
+     *   jump plan a special is never spent before the stack (it is not lost at midnight, as the points refill is).
      * @param {boolean} [o.consoleOwned] - a Game Console in the inventory (else the console jump buys one)
      * @param {object} [o.jobHappy] - job-point happy specials where the player works: {specials:[{jp, happy}], jpPerDay, bank}
      *   spent in each boosted session (steady plans: the first Xanax session of a day), before the Ecstasy
@@ -4116,19 +4120,27 @@
             if (n > 0) useBoosters(EDVD, n);
         };
         // Energy boosters on the booster cooldown, only once energy is spent (FHC fills to max; cans add theirs).
+        // FHC you hold (session 11; the owner: "does pumping iron now use the xanax and edvd etc in inventory?"): plain
+        // steady training uses them too, one whenever energy is spent and the booster cooldown has room, whatever the
+        // budget: they cost nothing new, and none is bought (Steady + FHC max and Steady + energy boosters buy). Before,
+        // only those two plans used them, and a small budget fits neither. The day plan does the same (plan.js).
+        const ownFhc = !eb && (id === 'steady' || id === 'steadyLite');
         const energyBoost = (t, day) => {
-            if (!eb) return;
+            const own = ownFhc && stock[FHC] > 0;
+            if (!eb && !own) return;
+            const b = eb || OWN_FHC;
+            const item = eb ? ebItem : ITEMS[FHC];
             if (day !== ebDay) {
                 ebDay = day;
                 ebToday = 0;
             }
-            while (ebToday < eb.perDay && fitsAt(eb.id, t) > 0 && E < 10) {
-                const f = useBoosters(eb.id, 1);
-                if (ebItem.toMax) {
+            while (ebToday < b.perDay && fitsAt(b.id, t) > 0 && E < 10 && (eb || stock[FHC] > 0)) {
+                const f = useBoosters(b.id, 1);
+                if (item.toMax) {
                     E = Math.max(E, maxE);
-                    H += ebItem.happy || 0;
+                    H += item.happy || 0;
                 } else E = Math.min(ENERGY_CAP, E + Math.round(f.value * canMult * evCan));
-                addBooster(eb.id, 1, t);
+                addBooster(b.id, 1, t);
                 ebToday++;
                 train();
             }
@@ -4147,8 +4159,11 @@
             E = Math.max(E, maxE);
             buy(POINTS, REFILL_POINTS);
         };
-        // Would the day's refill add energy (a special held, or the points refill when the plan keeps it)?
-        const refillGives = (day) => (heldRule && specialOk(day)) || !o.noRefill;
+        // The refill before a stack is the points refill, when the plan keeps it: it is lost at Torn's midnight. A special
+        // refill held is not lost (session 11; a new player with 100 of them was told to use one before Xanax #1, at
+        // normal happy, where the same refill in the jump gave eight times as much): it waits for the jump, unless the
+        // whole of it stays in the bar for the jump (the console jump's 3 Xanax leave room for the bar).
+        const refillBeforeStack = (day) => (heldRule && heldLeft > 0 ? stackKeep >= maxE && specialOk(day) : !o.noRefill);
         const xanax = (t) => {
             // Never above 1,000: what doesn't fit is lost (900 + a Xanax = 1,000).
             E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
@@ -4282,7 +4297,7 @@
                     // The stack's first Xanax on a Torn day no jump can land in, with that day's refill unused: the
                     // refill goes in now, before the stack (once energy is stacked above the maximum a refill adds
                     // nothing). The bar is trained first, so the refill fills all of it. The day plan does the same.
-                    if (t >= drugFree && day !== refillDay && refillGives(day)) {
+                    if (t >= drugFree && day !== refillDay && refillBeforeStack(day)) {
                         const jumpFrom = Math.max(t + stackTo * xanCD, boosterFree - capH * 60 + (boostN - 1) * boosterHours(boostItem, cdMult) * 60);
                         if (jumpFrom >= (day + 1) * 1440 - dayMin) {
                             train();
@@ -4974,7 +4989,7 @@
         };
         // Special refills the plan may use: all in the session that gains most (a jump or boost; else the next Xanax session).
         // In a boosted session: as many as keep happy above the maximum; otherwise what's left of today's share.
-        // While specials are held the day's refill is one of them (Torn blocks the points refill until they're spent [verify]).
+        // While specials are held the day's refill is one of them (Torn uses them before the points refill).
         let heldLeft = Math.max(0, Math.floor(ctx.specialHeld || 0));
         let specialLeft = Math.min(Math.max(0, Math.floor(ctx.specialLeft || 0)), ctx.specialHeld === undefined || ctx.specialHeld === null ? Infinity : heldLeft);
         let shareLeft = Math.max(0, Math.floor((ctx.specialPerDay || 0) - (ctx.specialToday || 0)));
@@ -4999,14 +5014,16 @@
             if (heldLeft > 0) {
                 heldLeft--;
                 specialLeft = Math.min(specialLeft, heldLeft);
-                return trainEach(at, 'refill', 'Special refill (instead of the points refill)', [{ id: SPECIAL, qty: 1 }], 1, { ...extra, note: 'Torn lets you use the points refill only once your special refills are spent [1 source]' }, 0, leave);
+                return trainEach(at, 'refill', 'Special refill (instead of the points refill)', [{ id: SPECIAL, qty: 1 }], 1, { ...extra, note: (extra.note ? extra.note + ' · ' : '') + 'Torn lets you use the points refill only once your special refills are spent' }, 0, leave);
             }
             // Not worth its price under the Plan rule (the comparison decided): the points refill is left out.
             if (ctx.noRefill) return null;
             return trainEach(at, 'refill', 'Refill · ' + REFILL_POINTS + ' points', [{ id: POINTS, qty: REFILL_POINTS }], 1, extra, 0, leave);
         };
-        // Would the day's refill add energy (a special held, or the points refill when the plan keeps it)?
-        const refillGives = () => heldLeft > 0 || !ctx.noRefill;
+        // The refill before a stack is the points refill, when the plan keeps it (it is lost at midnight). A special refill
+        // held waits for the jump, where it is worth several times more, unless the whole of it stays in the bar for the
+        // jump (`stackKeep`: the console jump). The simulator's rule (strategies.js `refillBeforeStack`).
+        const refillBeforeStack = (stackKeep) => (heldLeft > 0 ? stackKeep >= maxE : !ctx.noRefill);
         const candyMult = ctx.candyMult || 1;
         const candyId = ctx.candyId && ITEMS[ctx.candyId] ? ctx.candyId : CANDY_KISSES;
         const candyQty = () => ctx.candyCount || boostersThatFit(candyId, capH, 0, cdMult);
@@ -5168,7 +5185,7 @@
                         // energy is stacked above the maximum a refill adds nothing). The bar is trained first, so the
                         // refill fills all of it. The simulator does the same (strategies.js).
                         const jumpFrom = Math.max(drugAt + stackTo * xanCD, ctx.holdBooster ? ctx.holdUntil || 0 : 0, roomFor(boostItem, qty));
-                        const refillNow = refillLeft && jumpFrom >= curDay + DAY && refillGives();
+                        const refillNow = refillLeft && jumpFrom >= curDay + DAY && refillBeforeStack(stackKeep);
                         const leave = refillNow ? 0 : stackKeep;
                         if (E - leave >= minTrain) {
                             const st = train(drugAt, 'natural', 'Train what’s in the bar', [], { note: 'before Xanax #1: energy stops at ' + ENERGY_CAP.toLocaleString('en-US') + (stackKeep ? '' : ', so ' + stackTo + ' Xanax need an empty bar') }, leave);
@@ -5260,6 +5277,41 @@
             const at = roomFor(candyId, 1);
             return 'the booster cooldown is full; candy fits again at ' + (tornDayStart(at) > curDay ? 'tomorrow ' : '') + clockOf(at) + ' TCT';
         };
+        // FHC you hold (session 11): plain steady training uses them too, after a session, while the booster cooldown has
+        // room, whatever the budget; none is bought (the simulator's rule: strategies.js `ownFhc`).
+        const ownFhc = !eb && !ctx.holdBooster && (s === 'steady' || s === 'steadyLite');
+        const boosterNow = () => eb || (ownFhc && pool[FHC] > 0 ? { id: FHC, perDay: Infinity, own: true } : null);
+        const energyBoosters = () => {
+            const b = boosterNow();
+            if (!b) return;
+            const most = b.own ? pool[FHC] : Infinity;
+            // As many as the booster cooldown and the day's share allow, one after another (train after each).
+            const it = ITEMS[b.id];
+            const at = t + MIN;
+            let qty = 0;
+            const boosterBefore = boosterAt;
+            while (ebToday + qty < b.perDay && qty < most && boosterAt - at < capMs) {
+                qty++;
+                boosterAt = Math.max(boosterAt, at) + boosterHours(b.id, cdMult) * HOUR;
+            }
+            if (qty > 0) {
+                advance(at);
+                // An FHC sets energy to the maximum (never above): one at a time, train after each.
+                let used = true;
+                if (it.toMax) {
+                    used = Boolean(trainEach(at, 'booster', itemNameShort(b.id) + ' × ' + qty + ', train after each', [{ id: b.id, qty }], qty, b.own ? { note: 'from your items: the FHC you hold are used whatever your budget, none is bought' } : {}, it.happy || 0));
+                    if (used) takeFromHeld(pool, fillFromPool(qty, b.id, pool));
+                } else {
+                    // Cans as a pool: the ones you hold first (the most energy first).
+                    const f = fillPool(qty, b.id);
+                    E = Math.min(ENERGY_CAP, E + Math.round(f.value * (ctx.canMult || 1)));
+                    const words = f.held ? fillWords(f, b.id) : itemNameShort(b.id) + ' × ' + qty;
+                    train(at, 'booster', words + ', train after each', f.alloc.map((a) => ({ id: a.id, qty: a.qty })), f.held ? { note: heldWords(f) } : {});
+                }
+                if (used) ebToday += qty;
+                else boosterAt = boosterBefore;
+            }
+        };
         for (let guard = 0; guard < 200; guard++) {
             if (daily && holding) {
                 const tick = nextQuarterTick(drugAt - 1);
@@ -5299,6 +5351,7 @@
                     refill(t);
                     refillLeft = false;
                 }
+                if (st.energy && ownFhc) energyBoosters();
                 continue;
             }
             if (drugAt >= end && steps.length) break;
@@ -5396,34 +5449,7 @@
                 refillLeft = false;
             }
             if (!daily && !candyDaily) special(t + MIN);
-            if (eb) {
-                // As many as the booster cooldown and the day's share allow, one after another (train after each).
-                const it = ITEMS[eb.id];
-                const at = t + MIN;
-                let qty = 0;
-                const boosterBefore = boosterAt;
-                while (ebToday + qty < eb.perDay && boosterAt - at < capMs) {
-                    qty++;
-                    boosterAt = Math.max(boosterAt, at) + boosterHours(eb.id, cdMult) * HOUR;
-                }
-                if (qty > 0) {
-                    advance(at);
-                    // An FHC sets energy to the maximum (never above): one at a time, train after each.
-                    let used = true;
-                    if (it.toMax) {
-                        used = Boolean(trainEach(at, 'booster', itemNameShort(eb.id) + ' × ' + qty + ', train after each', [{ id: eb.id, qty }], qty, {}, it.happy || 0));
-                        if (used) takeFromHeld(pool, fillFromPool(qty, eb.id, pool));
-                    } else {
-                        // Cans as a pool: the ones you hold first (the most energy first).
-                        const f = fillPool(qty, eb.id);
-                        E = Math.min(ENERGY_CAP, E + Math.round(f.value * (ctx.canMult || 1)));
-                        const words = f.held ? fillWords(f, eb.id) : itemNameShort(eb.id) + ' × ' + qty;
-                        train(at, 'booster', words + ', train after each', f.alloc.map((a) => ({ id: a.id, qty: a.qty })), f.held ? { note: heldWords(f) } : {});
-                    }
-                    if (used) ebToday += qty;
-                    else boosterAt = boosterBefore;
-                }
-            }
+            energyBoosters();
             drugAt += xanCD;
             if (drugAt >= end) {
                 // Energy that comes in after the last drug of the day.
@@ -6058,9 +6084,9 @@
         { id: 'recurring', name: 'Recurring income', kind: 'income', what: 'pay, stock benefits, crimes, bounties, mugs' },
         { id: 'committed', name: 'Committed costs', kind: 'spend', what: 'property upkeep, education' },
         { id: 'training', name: 'Gym', kind: 'spend', what: 'gym items bought, rehab' },
-        { id: 'chosen', name: 'Other spending', kind: 'spend', what: 'items bought that are not for the gym' },
+        { id: 'chosen', name: 'Other spending', kind: 'spend', what: 'items and ammo bought that are not for the gym' },
         { id: 'uncontrollable', name: 'Uncontrollable gains and losses', kind: 'apart', what: 'the casino, being mugged, what others pay into your faction balance' },
-        { id: 'nonrecurring', name: 'Non-recurring', kind: 'apart', what: 'gifts, money sent, trades, auctions, points sold, a gain or loss on stocks sold' },
+        { id: 'nonrecurring', name: 'Non-recurring', kind: 'apart', what: 'gifts, money sent, trades, auctions, points and items sold, a gain or loss on stocks sold' },
         { id: 'transfers', name: 'Transfers', kind: 'balance', what: 'the bank, stocks bought and sold, the faction vault, your vault' },
         { id: 'unsorted', name: 'Not sorted', kind: 'none', what: 'log types the table does not know yet' },
     ];
@@ -6094,8 +6120,12 @@
         1112: { title: 'Item market buy', account: 'chosen', sign: -1, amount: ledgerField('cost_total'), items: (d) => (Array.isArray(d.items) ? d.items.map((x) => x && x.id) : []) },
         1225: { title: 'Bazaar buy', account: 'chosen', sign: -1, amount: ledgerField('cost_total'), items: (d) => (Array.isArray(d.items) ? d.items.map((x) => x && x.id) : []) },
         4201: { title: 'Item abroad buy', account: 'chosen', sign: -1, amount: ledgerField('cost_total'), items: (d) => [d.item] },
+        4200: { title: 'Item shop buy', account: 'chosen', sign: -1, amount: ledgerField('cost_total'), items: (d) => [d.item] },
+        4500: { title: 'Ammo buy', account: 'chosen', sign: -1, amount: ledgerField('value') },
         // One line per spin: the payout holds the winning stake, the whole bet left the wallet.
         8305: { title: 'Casino roulette win', account: 'uncontrollable', sign: 1, amount: ledgerAmount(['won_amount', 'bet_amount'], (d) => ledgerNum(d.won_amount) - ledgerNum(d.bet_amount)) },
+        // Booked as the roulette win is (same two fields); not yet checked against a balance.
+        8300: { title: 'Casino slots win', account: 'uncontrollable', sign: 1, amount: ledgerAmount(['won_amount', 'bet_amount'], (d) => ledgerNum(d.won_amount) - ledgerNum(d.bet_amount)) },
         8301: { title: 'Casino slots lose', account: 'uncontrollable', sign: -1, amount: ledgerField('bet_amount') },
         8306: { title: 'Casino roulette lose', account: 'uncontrollable', sign: -1, amount: ledgerField('bet_amount') },
         8350: { title: 'Casino blackjack start', account: 'uncontrollable', sign: -1, amount: ledgerField('bet') },
@@ -6106,7 +6136,12 @@
         4810: { title: 'Money receive', account: 'nonrecurring', sign: 1, amount: ledgerField('money') },
         4800: { title: 'Money send', account: 'nonrecurring', sign: -1, amount: ledgerField('money') },
         4440: { title: 'Trade money outgoing', account: 'nonrecurring', sign: -1, amount: ledgerField('money') },
+        4441: { title: 'Trade money incoming', account: 'nonrecurring', sign: 1, amount: ledgerField('money') },
         5011: { title: 'Points market sell', account: 'nonrecurring', sign: 1, amount: ledgerField('cost_total') },
+        // A sale is cash that is not certain to come again, as points sold are (Q8). Whether buying to resell is a
+        // business of its own is the accountant's to settle (docs/LEDGER-QUESTIONS.md, 21).
+        1226: { title: 'Bazaar sell', account: 'nonrecurring', sign: 1, amount: ledgerField('cost_total') },
+        4210: { title: 'Item shop sell', account: 'nonrecurring', sign: 1, amount: ledgerField('total_value') },
         // The whole bid leaves the wallet; what is over the winning price comes back as a cashier's check.
         4310: { title: 'Auction house item bid', account: 'nonrecurring', sign: -1, amount: ledgerField('bid_price') },
         5460: { title: 'Cashiers check withdraw', account: 'nonrecurring', sign: 1, amount: ledgerField('amount') },
@@ -6116,6 +6151,8 @@
         5511: { title: 'Stock sell', account: 'transfers', sign: 1, amount: ledgerField('worth'), gain: ledgerField('profit') },
         5851: { title: 'Vault withdraw', account: 'transfers', sign: 1, amount: ledgerField('withdrawn'), internal: true },
         6726: { title: 'Faction deposit money', account: 'transfers', sign: -1, amount: ledgerField('money_deposited') },
+        // Your faction balance paid out to your wallet. The line does not say whether it was your own deposit or war pay.
+        6736: { title: 'Faction give money receive', account: 'transfers', sign: 1, amount: ledgerField('money_given') },
     };
 
     /** How a log type is booked, in names only: its account, its sign and the fields its amount is read from; null for a type not in the table. */
@@ -8492,7 +8529,7 @@
             // The booster cooldown running now: the first boosts wait for it (a full candy load takes 24.5 h).
             boosterCdMin: Math.max(0, Number(state.boosterCd) || 0) / 60,
             special,
-            // Special refills held: the daily refill uses them while any are left (the points refill waits) [verify].
+            // Special refills held: the daily refill uses them while any are left (the points refill waits: Torn uses the free ones first).
             specialHeld: Math.max(0, Number(state.specialRefills) || 0),
             canMult: pc.perks.canMult || 1,
             candyMult: pc.perks.candyMult || 1,
@@ -9163,7 +9200,7 @@
             // Your Xanax cooldown (median of the ones recorded, the range) and when the Torn day resets.
             xanaxCd: xcd,
             dayResetAt: tornDayStart(now) + DAY,
-            // held: while any are held the daily refill is a special (Torn blocks the points refill until they're spent [verify]).
+            // held: while any are held the daily refill is a special (Torn uses them before the points refill).
             special: { have: state.specialRefills, left: specialLeft(plan, state), use: plan.specialUse || 0, held: ctx.specialHeld },
             prices,
             // Stacking energy for a chain (round 7, Home's "I'm stacking"): {since: ms}, null while training. The steps
@@ -20627,7 +20664,7 @@
             sectionHead('Non-recurring', meta([list.length ? list.length + (list.length === 1 ? ' line' : ' lines') + ', not counted · ' + (sum > 0 ? '+' : '') + fmtMoney(Math.round(sum)) + ' together' : 'none in these days']), null, 'h3'),
             ...list.slice(0, 8).map((e) => h('div', { class: 'ledger-one' }, [h('span', {}, [h('span', { class: 'white', text: e.title }), h('span', { class: 'muted', text: ' · ' + ledgerDay(e.at) + (e.ticked ? ' · your tick' : '') })]), h('b', { class: 'num ' + (e.amount < 0 ? 'c-cost' : 'white'), text: (e.amount > 0 ? '+' : '') + fmtMoney(Math.round(e.amount)) })])),
             list.length > 8 ? h('div', { class: 'note2', text: 'and ' + (list.length - 8) + ' more, in “Every line” under Non-recurring.' }) : null,
-            h('p', { class: 'muted', style: 'margin:12px 0 0;font-size:13px', text: 'Gifts, money sent, trades, auctions and points sold are non-recurring by what they are, whatever their size. Untick a line in the list to count it as usual money.' }),
+            h('p', { class: 'muted', style: 'margin:12px 0 0;font-size:13px', text: 'Gifts, money sent, trades, auctions, and points and items sold are non-recurring by what they are, whatever their size. Untick a line in the list to count it as usual money.' }),
         ]);
     }
 
@@ -24292,6 +24329,66 @@
         return ask;
     }
 
+    /* ===== src/core/moneylog.js ===== */
+    /*
+     * The money log kept between reads (session 11). A read walks each of
+     * Torn's categories back at most a few pages of 100 lines; a busy log (a
+     * trader: 470 lines a day) fills them in two days, and every read used to
+     * start over, so the books covered 2 days, never 30. Now a read asks only
+     * for what is newer than the last one and is joined to the lines kept: the
+     * days the books cover grow with every read, up to 30. Pure.
+     */
+
+
+
+
+    /** A read starts this long before the last one ended: lines Torn files a little late are not missed (each line counts once, by its id). */
+    const MONEY_LOG_OVERLAP_MS = 10 * 60 * 1000;
+
+    /** The lines kept from the last read, when they can be built on. */
+    function moneyLogKept(prev, v) {
+        return prev && prev.v === v && Array.isArray(prev.lines) && prev.lines.length && Number.isFinite(prev.from) && Number.isFinite(prev.at) ? prev : null;
+    }
+
+    /** From when the next read asks (ms): just before the last read, or the start of the span when nothing is kept. */
+    function moneyLogAskFrom(kept, since) {
+        return kept ? Math.max(since, kept.at - MONEY_LOG_OVERLAP_MS) : since;
+    }
+
+    /**
+     * The stored row after a read.
+     * @param {object|null} kept - moneyLogKept(): {from, at, lines, fields}
+     * @param {object[]} read - fetchMoneyLog()'s lines, with `coveredFrom` (ms: complete from there) and `fields`
+     * @param {object} o
+     * @param {number} o.now - ms
+     * @param {number} o.since - ms: the oldest moment the books may reach (30 days back)
+     * @param {number} o.maxLines - lines kept at most (the newest; the books then start at the oldest one kept)
+     * @returns {{at, from, days, lines, fields, joined}} `joined`: the read reached back to the lines kept
+     */
+    function mergeMoneyLog(kept, read, { now, since, maxLines = Infinity }) {
+        const covered = Number.isFinite(read.coveredFrom) ? read.coveredFrom : since;
+        // The read is complete back to the moment of the last one: nothing is missing in between.
+        const joined = Boolean(kept) && covered <= kept.at;
+        let from = Math.max(since, joined ? kept.from : covered);
+        const seen = new Set();
+        let lines = [];
+        for (const l of joined ? [...read, ...kept.lines] : read) {
+            if (!l || seen.has(l.id) || !(l.at >= from)) continue;
+            seen.add(l.id);
+            lines.push(l);
+        }
+        lines.sort((a, b) => b.at - a.at);
+        if (lines.length > maxLines) {
+            // Only the newest are kept: the books start after the second the cut falls in (that second may be cut in two).
+            from = Math.floor(lines[maxLines].at / 1000) * 1000 + 1000;
+            lines = lines.filter((l) => l.at >= from);
+        }
+        // The field names by type, over every line kept (Torn's category comes from the reads: a kept line does not carry it).
+        const cat = new Map([...((kept && kept.fields) || []), ...(read.fields || [])].map((f) => [Number(f.type), f.category]));
+        const fields = logFieldsList(logFieldsOf(lines.map((l) => ({ id: l.id, timestamp: l.at / 1000, details: { id: l.type, title: l.title, category: cat.get(Number(l.type)) || '' }, data: l.data }))));
+        return { at: now, from, days: Math.max(1, (now - from) / DAY), lines, fields, joined };
+    }
+
     /* ===== src/income.js ===== */
     /*
      * Auto mode's Full key: saved only in this browser and used for one thing,
@@ -24299,6 +24396,7 @@
      * saved (it must be a Full key); read at most every 6 hours by the leader
      * tab, never while Torn Trading runs.
      */
+
 
 
 
@@ -24318,7 +24416,11 @@
     ];
     /** The stored row's shape: 2 = lines as Torn gave them, each once (round 7, R7.5). */
     const MONEY_LOG_V = 2;
-    const MONEY_LOG_MAX_LINES = 3000;
+    /** Lines kept at most: a busy log's 30 days (470 lines a day) is about 14,000. */
+    const MONEY_LOG_MAX_LINES = 15000;
+    /** Pages of 100 lines a category a read may walk back: the first read, and one that builds on the lines kept (two days away on a busy log still joins). */
+    const MONEY_LOG_PAGES = 6;
+    const MONEY_LOG_PAGES_JOIN = 12;
 
     /** Save and check the Full key (Settings). */
     async function saveFullKey(v) {
@@ -24396,7 +24498,7 @@
     /**
      * Read the money log (Full key), at most every 6 hours: Torn's "Money
      * incoming" and "Money outgoing" (every line that moved your wallet), 30
-     * days back, each line once. Round 7 (R7.5): the stored row keeps the lines
+     * days back, each line once, built on the lines kept from the last read (core/moneylog.js). Round 7 (R7.5): the stored row keeps the lines
      * as Torn gave them (log id, log type id, time, data) for the ledger
      * (core/ledger.js); a row from before that is read again once.
      */
@@ -24405,13 +24507,14 @@
         if (!getKey(K.fullKey) || !st.ok || st.dead || isPaused()) return null;
         const prev = pageGet(K.moneyLog, null);
         if (!force && prev && prev.v === MONEY_LOG_V && now - prev.at < MONEY_LOG_EVERY_MS) return prev;
-        const from = Math.floor(now / 1000) - MONEY_LOG_DAYS * 86400;
-        const log = await fetchMoneyLog(fullKeyClient(), { from, categories: MONEY_LOG_CATS });
-        // Only the days every category is complete for count (a very busy log may not reach back 30 days in its pages).
-        const since = log.coveredFrom || from * 1000;
-        const lines = log.filter((e) => e.at >= since).slice(0, MONEY_LOG_MAX_LINES);
+        const since = now - MONEY_LOG_DAYS * 86400e3;
+        // Session 11: the lines kept are built on. The read asks for what is newer than the last one; only the days every
+        // category is complete for count, and they grow with each read (a busy log fills a read's pages in two days).
+        const kept = moneyLogKept(prev, MONEY_LOG_V);
+        const log = await fetchMoneyLog(fullKeyClient(), { from: Math.floor(moneyLogAskFrom(kept, since) / 1000), categories: MONEY_LOG_CATS, pages: kept ? MONEY_LOG_PAGES_JOIN : MONEY_LOG_PAGES });
         // `fields` (C.0): the log by type with its data field names, for Settings › Developer and the report zip.
-        const row = { v: MONEY_LOG_V, at: now, from: since, days: Math.max(1, (now - since) / 86400e3), cats: MONEY_LOG_CATS.map((c) => c.title), lines, fields: log.fields || [] };
+        const m = mergeMoneyLog(kept, log, { now, since, maxLines: MONEY_LOG_MAX_LINES });
+        const row = { v: MONEY_LOG_V, at: m.at, from: m.from, days: m.days, cats: MONEY_LOG_CATS.map((c) => c.title), lines: m.lines, fields: m.fields };
         pageSet(K.moneyLog, row);
         return row;
     }

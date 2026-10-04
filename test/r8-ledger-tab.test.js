@@ -60,7 +60,7 @@ const LINES = [
     line('send', 4800, 7, { receiver: 1, money: 600e3 }),
     line('sell', 5511, 7, { stock: 1, amount: 1, worth: 100e6, profit: -4e6 }),
 ];
-const UNKNOWN = [line('bz1', 1226, 3, { buyer: 9, cost_total: 77 }, 'Bazaar sell'), line('bz2', 1226, 4, { buyer: 9, cost_total: 78 }, 'Bazaar sell'), line('odd', 5861, 5, { deposited: 5 }, 'Vault deposit')];
+const UNKNOWN = [line('bz1', 4999, 3, { buyer: 9, cost_total: 77 }, 'Something new'), line('bz2', 4999, 4, { buyer: 9, cost_total: 78 }, 'Something new'), line('odd', 5861, 5, { deposited: 5 }, 'Vault deposit')];
 
 function books(lines, { liquid = 442.28e6, bank = { amount: 3e9, profit: 526.5e6, until: T + 33 * DAY }, opening = null, closing = null, days = 92, pick = null } = {}) {
     const ledger = ledgerOf(lines, { from: FROM, to: T, isGymItem: (id) => id === 206 });
@@ -68,7 +68,7 @@ function books(lines, { liquid = 442.28e6, bank = { amount: 3e9, profit: 526.5e6
     const recon = opening === null ? null : reconcile({ ledger, opening, closing });
     return { at: T, from: FROM, days: 30, lines: lines.length, ledger, flow, recon, reconSpan: recon ? { from: FROM, to: T } : null, offer: { ...budgetOffer({ flow, days, now: T, pick }), flow, ledger } };
 }
-const ctxFor = (b, over = {}) => ({ settings: { oneOffs: {} }, ui: {}, plan: { pickBy: 'auto' }, fullKey: { has: true, ok: true }, books: () => b, dev: { moneyFields: () => ({ list: [{ type: 1226, title: 'Bazaar sell', category: 'Money incoming', lines: 2, days: 2, fields: [{ name: 'buyer', is: 'number' }, { name: 'cost_total', is: 'number' }] }] }) }, version: '1.5.0', rerender: () => {}, setSettings: () => {}, go: () => {}, ...over });
+const ctxFor = (b, over = {}) => ({ settings: { oneOffs: {} }, ui: {}, plan: { pickBy: 'auto' }, fullKey: { has: true, ok: true }, books: () => b, dev: { moneyFields: () => ({ list: [{ type: 4999, title: 'Something new', category: 'Money incoming', lines: 2, days: 2, fields: [{ name: 'buyer', is: 'number' }, { name: 'cost_total', is: 'number' }] }] }) }, version: '1.5.0', rerender: () => {}, setSettings: () => {}, go: () => {}, ...over });
 const textOf = (nodes) => nodes.filter(Boolean).map((n) => n.textContent).join(' | ');
 const buttons = (node) => node.all((n) => n.tagName === 'button');
 
@@ -103,7 +103,7 @@ test('Ledger: a log line the table does not know is a warning at the top, with w
     const warn = page.main[0];
     assert.equal(warn.attrs['data-ledger-warn'], '1', 'the warning is the first card on the tab');
     assert.ok(warn.textContent.includes('3 log lines are not sorted'));
-    assert.ok(warn.textContent.includes('Bazaar sell type 1226 · 2 lines') && warn.textContent.includes('Vault deposit type 5861 · 1 line'), warn.textContent);
+    assert.ok(warn.textContent.includes('Something new type 4999 · 2 lines') && warn.textContent.includes('Vault deposit type 5861 · 1 line'), warn.textContent);
     assert.deepEqual(buttons(warn).map((x) => x.textContent), ['Export log']);
     // Never "Reconciled" while a line is unsorted, and the top bar says by how much it is off.
     assert.match(textOf(page.ctl[0]), /Off by \$/);
@@ -111,8 +111,8 @@ test('Ledger: a log line the table does not know is a warning at the top, with w
     // The file: types, field names and counts; no amount, no log id, no player.
     const file = ledgerExportOf({ ledger: b.ledger, fields: ctx.dev.moneyFields().list, version: '1.5.0', now: T });
     const j = JSON.parse(file);
-    assert.deepEqual(j.unsorted, [{ type: 1226, title: 'Bazaar sell', lines: 2, fields: [{ name: 'buyer', is: 'number' }, { name: 'cost_total', is: 'number' }] }, { type: 5861, title: 'Vault deposit', lines: 1, fields: [] }]);
-    assert.deepEqual(j.types.map((t) => [t.type, t.sorted]), [[1226, false]]);
+    assert.deepEqual(j.unsorted, [{ type: 4999, title: 'Something new', lines: 2, fields: [{ name: 'buyer', is: 'number' }, { name: 'cost_total', is: 'number' }] }, { type: 5861, title: 'Vault deposit', lines: 1, fields: [] }]);
+    assert.deepEqual(j.types.map((t) => [t.type, t.sorted]), [[4999, false]]);
     for (const secret of ['bz1', '2000000000', '40000000', '"77"', ': 77', ': 78']) assert.ok(!file.includes(secret), 'the export holds ' + secret);
 });
 
