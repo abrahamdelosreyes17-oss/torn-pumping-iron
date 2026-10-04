@@ -82,7 +82,10 @@ export function notePlanRun(run) {
     const list = [...(gmGet(K.planRuns, null) || []), run].slice(-PLAN_RUNS_KEPT);
     gmSet(K.planRuns, list);
     const words = (run.kind === 'replan' ? 'Recalibrate' : 'Create plan') + ' ' + (run.months || '?') + (run.months === 1 ? ' month' : ' months') + ' (' + (run.days || '?') + ' days)';
-    const time = (run.ms / 1000).toFixed(1) + ' s' + (run.hiddenMs > 0 ? ', ' + (run.hiddenMs / 1000).toFixed(1) + ' s of it with the tab not in front' : '');
+    // Where the time went (session 10): comparing the plans, the path's stretches, its range.
+    const PART = { compare: 'comparing', path: 'the path', band: 'the range' };
+    const parts = Object.entries(run.parts || {}).filter(([k, v]) => PART[k] && v >= 100).map(([k, v]) => PART[k] + ' ' + (v / 1000).toFixed(1) + ' s');
+    const time = (run.ms / 1000).toFixed(1) + ' s' + (run.hiddenMs > 0 ? ', ' + (run.hiddenMs / 1000).toFixed(1) + ' s of it with the tab not in front' : '') + (parts.length ? ' (' + parts.join(', ') + ')' : '');
     if (run.ok) logNote(words + ' took ' + time);
     else if (run.cancelled) logNote(words + ' cancelled after ' + time);
     else logProblem('error', words + ' failed after ' + time, run.error || null);

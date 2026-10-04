@@ -350,12 +350,6 @@ details.dis[open] > summary::before { content: "▾ "; }
 .bl .r.sel { border: 1px solid var(--chalk); border-radius: 8px; }
 .bl .r:focus-visible { outline: 2px solid var(--chalk); outline-offset: -2px; }
 .bl .ratio { height: 8px; }
-.nowb { display: grid; grid-template-columns: auto 1fr auto; gap: 24px; align-items: center; padding: 20px 24px; border-radius: 12px; background: var(--card2); }
-.nowb .k { font: 600 12px var(--sans); color: var(--on-chalk); background: var(--chalk); border-radius: 6px; padding: 4px 8px; }
-.nowb .cd { font: 600 40px/1 var(--serif); color: var(--chalk); min-width: 88px; }
-.nowb b { font-size: 17px; font-weight: 600; line-height: 1.35; color: var(--white); }
-.nowb span.s { color: var(--muted); font-size: 13px; }
-.nowb .acts { display: flex; gap: 8px; }
 .tbl tr.ih td { height: var(--row); background: #191c1f; }
 .tbl tr.ih b { font-size: 14px; color: var(--white); }
 .tbl tr.sub td:first-child { padding-left: 24px; }

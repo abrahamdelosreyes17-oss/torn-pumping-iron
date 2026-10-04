@@ -265,9 +265,23 @@ async function main() {
         })
         .join('\n\n');
 
+    /*
+     * The language's own globals, handed in as parameters (session 10).
+     *
+     * Tampermonkey runs a script that has a @grant inside `with (sandbox)`.
+     * Every global the code names is then looked up through that sandbox on
+     * each use, and the engine cannot optimise it: the simulator's loop names
+     * Math, Number and Infinity thousands of times a simulated day. The owner's
+     * recalibration took 13 to 15 s in his browser for work node does in 1 to
+     * 2 s (docs/sims/round9/sandbox-bench.mjs: 8.9x slower inside such a scope;
+     * test/perf-check.mjs with SANDBOX=1). As parameters they are locals:
+     * looked up once, here, in whatever scope the script runs in.
+     */
+    const BOUND = ['Math', 'Number', 'Object', 'Array', 'JSON', 'Date', 'Set', 'Map', 'WeakMap', 'WeakSet', 'Promise', 'String', 'Boolean', 'Error', 'Infinity', 'NaN', 'undefined'];
+
     const bundle =
         HEADER +
-        '\n(function () {\n' +
+        '\n(function (' + BOUND.join(', ') + ') {\n' +
         "    'use strict';\n\n" +
         `    const PI_BUILD_VERSION = '${VERSION}';\n` +
         // The code's own fingerprint: work kept between pages (the plan comparison) is never reused by other code,
@@ -275,7 +289,7 @@ async function main() {
         `    const PI_BUILD_HASH = '${createHash('sha256').update(body).digest('hex').slice(0, 12)}';\n\n` +
         indent(body) +
         '\n\n    boot();\n' +
-        '})();\n';
+        '})(' + BOUND.map((name) => (name === 'undefined' ? 'void 0' : name)).join(', ') + ');\n';
 
     /*
      * Parse the bundle before writing it.

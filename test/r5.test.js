@@ -190,7 +190,9 @@ test('the simulator counts held candy as free (cost) and uses it first', () => {
     assert.equal(held.used.held[CHOC_KISSES], 49);
     assert.equal(held.used[CHOC_KISSES], 49);
     assert.equal(heldBoosters({ [CHOC_KISSES]: 3, [XANAX]: 4, cash: 5, points: 9 })[CHOC_KISSES], 3);
-    assert.equal(heldBoosters({ [XANAX]: 4 })[XANAX], undefined, 'drugs aren’t pooled');
+    // Session 10: Xanax held count too (taken first, free: test/r9-held-drugs.test.js); they never fill a candy slot.
+    assert.equal(heldBoosters({ [XANAX]: 4 })[XANAX], 4);
+    assert.equal(fillFromPool(49, LOLLIPOP, { [XANAX]: 4 }).held, 0, 'drugs aren’t pooled');
 });
 
 /* 3. Sally's Sweet Shop and the allowance */

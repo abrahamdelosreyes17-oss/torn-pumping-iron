@@ -55,14 +55,14 @@ Max gains, every candy priced (2024 dump) · 31 days · recommended: EDVD jump
 
 | Length | Path | Stats | Cost | Range | Time (ms) |
 |---|---|---|---|---|---|
-| 1 mo (31 d) | EDVD jump 31 d | +349,825 | $528.4M | +329,905 to +369,990 | 79 |
-| 3 mo (92 d) | EDVD jump 45 d → Steady + FHC max 47 d | +1,976,127 | $3.40B | +1,776,260 to +2,193,248 | 232 |
-| 12 mo (365 d) | EDVD jump 45 d → Steady + FHC max 320 d | +689,782,410 | $18.59B | +598,207,395 to +782,218,783 | 957 |
+| 1 mo (31 d) | EDVD jump 31 d | +349,825 | $528.4M | +329,905 to +369,990 | 130 |
+| 3 mo (92 d) | EDVD jump 45 d → Steady + FHC max 47 d | +1,976,127 | $3.40B | +1,776,260 to +2,193,248 | 329 |
+| 12 mo (365 d) | EDVD jump 45 d → Steady + FHC max 320 d | +689,782,410 | $18.59B | +598,207,395 to +782,218,783 | 1,509 |
 
 | Budget · length | Path | Stats | Cost (budget) | Best single plan | Path against it |
 |---|---|---|---|---|---|
 | $5M a day · 3 mo (92 d) | Console jump 35 d → Choco jump 8 d → Daily choco 2 d → Candy + Xanax 11 d → Steady 10 d → Candy + Xanax 26 d | +728,323 | $455.1M ($460.0M) | Candy + Xanax +627,322 for $450.1M | +16.1% |
-| $5M a day · 12 mo (365 d) | Console jump 35 d → Candy + Xanax 8 d → Console jump 2 d → Candy + Xanax 11 d → Steady 10 d → Candy + Xanax 10 d → Steady 40 d → Daily choco 10 d → Steady 47 d → Daily choco 9 d → Steady 90 d → Daily choco 10 d → Steady 40 d → Candy + Xanax 10 d → Steady 20 d → Candy + Xanax 10 d → Steady + boosters 3 d | +67,917,166 | $1.82B ($1.82B) | Daily choco +28,303,775 for $1.82B | +140.0% |
+| $5M a day · 12 mo (365 d) | Choco jump 12 d → Console jump 31 d → Choco jump 2 d → Console jump 1 d → Candy + Xanax 10 d → Steady 10 d → Candy + Xanax 10 d → Steady 10 d → Candy + Xanax 10 d → Steady 40 d → Candy + Xanax 10 d → Steady 46 d → Candy + Xanax 10 d → Steady 100 d → Candy + Xanax 10 d → Steady 20 d → Candy + Xanax 10 d → Steady 23 d | +71,737,324 | $1.82B ($1.82B) | Daily choco +28,303,775 for $1.82B | +153.5% |
 | $2M a day · 3 mo (92 d) | Steady, fewer Xanax 86 d → Steady 6 d | +361,833 | $183.1M ($184.0M) | Steady, fewer Xanax +253,756 for $99.6M | +42.6% |
 | $2M a day · 12 mo (365 d) | Steady, fewer Xanax 362 d → Steady 3 d | +12,920,659 | $729.5M ($730.0M) | Steady, fewer Xanax +7,123,948 for $515.2M | +81.4% |
 
@@ -119,9 +119,9 @@ Max gains, every candy priced (2024 dump) · 31 days · recommended: Steady + FH
 
 | Length | Path | Stats | Cost | Range | Time (ms) |
 |---|---|---|---|---|---|
-| 1 mo (31 d) | Steady + FHC max 31 d | +6,259,793 | $1.85B | +5,816,638 to +6,757,175 | 101 |
-| 3 mo (92 d) | Steady + FHC max 92 d | +51,921,786 | $5.15B | +45,482,520 to +59,389,380 | 289 |
-| 12 mo (365 d) | Steady + FHC max 365 d | +1,433,034,415 | $19.92B | +1,329,701,206 to +1,537,168,811 | 1,136 |
+| 1 mo (31 d) | Steady + FHC max 31 d | +6,259,793 | $1.85B | +5,816,638 to +6,757,175 | 116 |
+| 3 mo (92 d) | Steady + FHC max 92 d | +51,921,786 | $5.15B | +45,482,520 to +59,389,380 | 286 |
+| 12 mo (365 d) | Steady + FHC max 365 d | +1,433,034,415 | $19.92B | +1,329,701,206 to +1,537,168,811 | 1,201 |
 
 | Budget · length | Path | Stats | Cost (budget) | Best single plan | Path against it |
 |---|---|---|---|---|---|
@@ -183,9 +183,9 @@ Max gains, every candy priced (2024 dump) · 31 days · recommended: Steady + FH
 
 | Length | Path | Stats | Cost | Range | Time (ms) |
 |---|---|---|---|---|---|
-| 1 mo (31 d) | Steady + FHC max 31 d | +76,376,098 | $1.85B | +68,394,360 to +84,216,611 | 99 |
-| 3 mo (92 d) | Steady + FHC max 92 d | +385,809,628 | $5.20B | +360,579,474 to +409,702,278 | 252 |
-| 12 mo (365 d) | Steady + FHC max 365 d | +1,926,676,644 | $19.97B | +1,818,356,617 to +2,035,345,679 | 1,034 |
+| 1 mo (31 d) | Steady + FHC max 31 d | +76,376,098 | $1.85B | +68,394,360 to +84,216,611 | 114 |
+| 3 mo (92 d) | Steady + FHC max 92 d | +385,809,628 | $5.20B | +360,579,474 to +409,702,278 | 327 |
+| 12 mo (365 d) | Steady + FHC max 365 d | +1,926,676,644 | $19.97B | +1,818,356,617 to +2,035,345,679 | 1,294 |
 
 | Budget · length | Path | Stats | Cost (budget) | Best single plan | Path against it |
 |---|---|---|---|---|---|

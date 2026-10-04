@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Pumping Iron
 // @namespace    torn-pumping-iron
-// @version      1.5.0
+// @version      1.5.1
 // @description  Gym planner and fight scout for Torn: what to take, what to train, what to buy, who you can beat. Reads the API and the page you're on; never acts for you.
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
@@ -45,11 +45,11 @@
  *   - The attack-page reader only copies Torn's response; it never changes it.
  */
 
-(function () {
+(function (Math, Number, Object, Array, JSON, Date, Set, Map, WeakMap, WeakSet, Promise, String, Boolean, Error, Infinity, NaN, undefined) {
     'use strict';
 
-    const PI_BUILD_VERSION = '1.5.0';
-    const PI_BUILD_HASH = '6f65175f2c2e';
+    const PI_BUILD_VERSION = '1.5.1';
+    const PI_BUILD_HASH = 'd9fec0e49a4a';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -3779,6 +3779,11 @@
      * @param {number} [o.boosterCdMin] - booster cooldown already running at the start, minutes (the live one)
      * @param {object} [o.held] - {[itemId]: qty} boosters in the inventory: used first and free (candy and energy
      *   drinks as a pool, the most happy or energy first; EDVD and FHC as themselves). `used.held` counts them.
+     *   Xanax and Ecstasy held too (session 10): taken first and free, and the small-budget plan that buys no Xanax
+     *   (`xanaxPerDay` 0) still takes the ones held.
+     * @param {boolean} [o.feesApart] - session 10 (a stretch of a path under a budget): a gym's fee is not added to
+     *   `cost` (the stretch's item money); it is returned apart (`fees`, `feeDays`: [{day, cost}]) and the path pays
+     *   it out of the money kept back for that gym
      * @param {object[]} [o.events] - round 6 (year plans): [{from, to (minutes from the start), candyMult, canMult,
      *   freeEnergy, freeHappy}]: candy and cans count the event's × while it runs; free energy/happy land at its start
      * @param {object} [o.unlock] - round 6: gyms opening as energy is trained: {left: energy to the next gym,
@@ -3921,6 +3926,9 @@
         // What each of those days costs (the cash check, cashflow.js): a jump buys in lumps, steady training evenly.
         const costDaily = [];
         let costSeen = 0;
+        // Gym fees kept apart from the cost (`o.feesApart`), with the day each was paid.
+        let fees = 0;
+        const feeDays = [];
         // The drugs taken on each of those days (rehab and overdoses are priced on the plan's own days, core/rehab.js).
         const xanDaily = [];
         const ecsDaily = [];
@@ -4003,7 +4011,10 @@
             }
             // `t`: the minute it opened (round 7: each plan says when it opens a gym).
             unlocked.push({ at: trainedE, t: curT, gymId: n.gymId, cost: n.cost || 0, joined: n.joined || [] });
-            cost += n.cost || 0;
+            if (o.feesApart) {
+                fees += n.cost || 0;
+                if (n.cost > 0) feeDays.push({ day: costDaily.length, cost: n.cost });
+            } else cost += n.cost || 0;
             if (n.gyms) {
                 o = { ...o, gyms: n.gyms };
                 if (cands) cands.splice(0, cands.length, ...STATS.filter((k) => o.gyms[k] && o.gyms[k].dots > 0).map((k) => ({ k, dots: o.gyms[k].dots, energy: o.gyms[k].energy })));
@@ -4027,6 +4038,17 @@
             }
             cost += price(item) * f.buy;
             return f;
+        };
+        // Drugs held (session 10; the owner: "I have Xanax in my inventory and it's not making me use my Xanax"): taken
+        // first and free, as boosters are. Before, every Xanax was priced as bought, so a small budget cut the Xanax
+        // you already own. The day plan keeps the same count (plan.js).
+        const drugStock = {};
+        for (const k of [XANAX, ECSTASY]) if (o.held && Number(o.held[k]) > 0) drugStock[k] = Math.floor(Number(o.held[k]));
+        const takeDrug = (item) => {
+            if (!(drugStock[item] > 0)) return buy(item);
+            drugStock[item]--;
+            used[item] = (used[item] || 0) + 1;
+            used.held = { ...(used.held || {}), [item]: ((used.held && used.held[item]) || 0) + 1 };
         };
         // A candy boost of `n`: the happy it adds (held candy may give more than the pick).
         const eatCandy = (n) => useBoosters(candyId, n).value * (o.candyMult || 1) * evCandy;
@@ -4131,7 +4153,7 @@
             // Never above 1,000: what doesn't fit is lost (900 + a Xanax = 1,000).
             E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
             H += ITEMS[XANAX].happy;
-            buy(XANAX);
+            takeDrug(XANAX);
             drugFree = t + xanCD;
         };
 
@@ -4179,7 +4201,8 @@
                     xanDay = day;
                     xanToday = 0;
                 }
-                const took = t >= drugFree && xanToday < xanCap;
+                // The small plan's count is what the budget buys a day; when it buys none, the Xanax you hold are still taken.
+                const took = t >= drugFree && (xanToday < xanCap || (xanCap === 0 && drugStock[XANAX] > 0));
                 if (took) {
                     xanax(t);
                     xanToday++;
@@ -4227,7 +4250,7 @@
                     H = Math.min(HAPPY_CAP, (H + eatCandy(qty) + jobHappy(day)) * 2);
                     addBooster(candyId, qty, t);
                     used.candyBoosts = (used.candyBoosts || 0) + 1;
-                    buy(ECSTASY);
+                    takeDrug(ECSTASY);
                     drugFree = t + ecsCD;
                     train();
                     // One refill a Torn day: a day with no room for candy earlier may already have used it.
@@ -4292,7 +4315,7 @@
                     }
                     addBooster(boostItem, boostN, t);
                     H = Math.min(HAPPY_CAP, H);
-                    buy(ECSTASY);
+                    takeDrug(ECSTASY);
                     drugFree = t + ecsCD;
                     train();
                     if (day !== refillDay) {
@@ -4332,6 +4355,10 @@
             if (rh.lost > 0) out.overdoseLost = Math.round(rh.lost);
         }
         if (unlocked.length) out.unlocked = unlocked;
+        if (o.feesApart) {
+            out.fees = fees;
+            out.feeDays = feeDays;
+        }
         return out;
     }
 
@@ -4864,6 +4891,10 @@
         let xanN = (ctx.drugsToday || 0) + 1;
         // The small-budget plan: at most this many Xanax a Torn day (the simulator keeps the same count: strategies.js).
         const xanCap = Number.isFinite(ctx.xanaxPerDay) ? Math.max(0, Math.floor(ctx.xanaxPerDay)) : Infinity;
+        // Session 10: that count is what the budget buys. When it buys none, the Xanax you hold are still taken, one
+        // per cooldown, until they are gone (the simulator does the same: strategies.js `drugStock`).
+        let ownXanax = xanCap === 0 ? Math.max(0, Math.floor(Number((ctx.held || {})[XANAX]) || 0)) : 0;
+        const xanaxDone = () => xanN > xanCap && !(ownXanax > 0);
         const steps = [];
         let n = 0;
         let curDay = tornDayStart(now);
@@ -5262,7 +5293,7 @@
                 if (!st.energy) {
                     steps.pop();
                     naturalOk = false;
-                } else if (refillLeft && xanN > xanCap && full + 5 * MIN < Math.min(end, curDay + DAY)) {
+                } else if (refillLeft && xanaxDone() && full + 5 * MIN < Math.min(end, curDay + DAY)) {
                     // No Xanax left today (the small-budget plan): the day's refill goes right after this session, when energy is near zero.
                     advance(full + 5 * MIN);
                     refill(t);
@@ -5275,7 +5306,7 @@
             advance(drugAt);
             // The day's Xanax are taken (the small-budget plan): the next one waits for the next Torn day; natural
             // energy is trained as it fills meanwhile (the branch above).
-            if (xanN > xanCap) {
+            if (xanaxDone()) {
                 drugAt = curDay + DAY;
                 if (drugAt >= end && !(naturalOk && fullAt() < end)) break;
                 continue;
@@ -5335,6 +5366,10 @@
             let label = 'Xanax #' + xanN++;
             // Steady plans spend the job's banked happy points on the day's first Xanax session.
             let xNote = waitNote;
+            if (ownXanax > 0) {
+                ownXanax--;
+                xNote = joinNote(xNote, 'from your items: your budget buys no Xanax, the ones you hold are still used');
+            }
             if (!daily && !candyDaily && ctx.jobHappy && jpBank > 0) {
                 const jp = jobPoints();
                 if (jp.happy) {
@@ -8435,7 +8470,7 @@
      * bars as they are (energy, happy, the drug cooldown, today's refill used), like the day plan does; without it, from
      * a full bar with no cooldown (a stretch that starts later, a what-if over past days).
      */
-    function simInputs({ state, pc, shares, settings, prices, special = 0, statics = {}, events = null, unlock = null, live = false }) {
+    function simInputs({ state, pc, shares, settings, prices, special = 0, statics = {}, events = null, unlock = null, live = false, feesApart = false }) {
         const gyms = {};
         for (const k of STATS) if (pc.best[k]) gyms[k] = { dots: pc.best[k].dots[k], energy: pc.best[k].energy };
         const ic = itemContext(statics, settings);
@@ -8467,7 +8502,7 @@
             consoleOwned: ic.consoleOwned,
             jobHappy: ic.jobHappy,
             freeEdvdPerDay: ic.freeEdvdPerDay,
-            // Boosters you hold go first and cost nothing new (candy and energy drinks as a pool).
+            // Boosters, Xanax and Ecstasy you hold go first and cost nothing new (candy and energy drinks as a pool).
             held: heldBoosters(statics.inventory),
             // Rehab and overdoses in every plan's cost (round 8): the faction's cuts from your perks, a session's size
             // from your lifetime rehabs (a new player's until they are read).
@@ -8481,13 +8516,22 @@
             // Year plans (core/year.js): events on their dates, gyms opening as energy is trained.
             ...(events ? { events } : {}),
             ...(unlock ? { unlock } : {}),
+            // A stretch of a path under a budget: a gym's fee is paid out of the money kept back for it, not the stretch's own.
+            ...(feesApart ? { feesApart: true } : {}),
         };
     }
 
-    /** The boosters in the inventory (candy, energy drinks, EDVD, FHC): {[id]: qty}. */
+    /**
+     * What a plan uses first out of the inventory, free: the boosters (candy, energy drinks, EDVD, FHC) and, from
+     * session 10, the Xanax and Ecstasy (the owner: "I have Xanax in my inventory and it's not making me use my Xanax").
+     * @returns {{[id]: qty}}
+     */
     function heldBoosters(inventory) {
         const out = {};
-        for (const [k, v] of Object.entries(inventory || {})) if (ITEMS[k] && ITEMS[k].kind === 'booster' && Number(v) > 0) out[k] = Math.floor(Number(v));
+        for (const [k, v] of Object.entries(inventory || {})) {
+            const it = ITEMS[k];
+            if (it && (it.kind === 'booster' || Number(k) === XANAX || Number(k) === ECSTASY) && Number(v) > 0) out[k] = Math.floor(Number(v));
+        }
         return out;
     }
 
@@ -8562,8 +8606,8 @@
      * The comparison as a generator: it yields the id of each plan as it starts on it (progress), and a number every few
      * simulated weeks inside a run (a chance for a break: see compareStrategies / compareStrategiesAsync, core/slices.js).
      */
-    function* compareSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', events = null, unlock = null, live = false }) {
-        const base = simInputs({ state, pc, shares, settings, prices, special, statics, events, unlock, live });
+    function* compareSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', events = null, unlock = null, live = false, feesApart = false }) {
+        const base = simInputs({ state, pc, shares, settings, prices, special, statics, events, unlock, live, feesApart });
         const results = {};
         const budget = budgetOf(settings);
         for (const id of feasibleStrategies({ bliss: pc.perks.bliss, boosterCapH: base.boosterCapH, toyShop5: base.toyShop5, adultNovelties10: base.adultNovelties10 })) {
@@ -11013,6 +11057,11 @@
         // foresee (the energy a day grows as the budget frees up) is not bought with money that is not there; the ladder
         // waits at it (`cap`), its bar full, and the next stretch keeps its fee back. Before, the friend's 12 months at
         // $2M a day ended $93M over: George's opened in the last five days.
+        // Session 10: the money kept back for a gym is spent only on that gym. Before, the fee of a gym expected in a
+        // stretch was added to the stretch's budget, so a plan that never opened the gym could spend it on items (the
+        // owner's case with Xanax held: an EDVD jump for $73M that gained 0.06M more than the small plan, and George's
+        // then never opened). Now a stretch's budget is its item money; a gym it opens is paid apart (`feesApart`),
+        // within `cap`.
         const budgetFor = (seg, fees) => {
             if (!Number.isFinite(budgetPerDay)) return { budget: Infinity, cap: GEORGES };
             const daysLeft = totalDays - daysDone;
@@ -11020,9 +11069,9 @@
             const left = Math.max(0, budgetPerDay * totalDays - cost - fees);
             const ahead = ladderFeesAhead(top, toNext, perDay * daysLeft, gymExpMult, table, left);
             const items = ((left - ahead) * seg.days) / daysLeft;
-            const here = ladderFeesAhead(top, toNext, perDay * seg.days, gymExpMult, table, left - items);
-            return { budget: items + here, cap: ladderTopWithin(top, left - items, table) };
+            return { budget: items, cap: ladderTopWithin(top, left - items, table) };
         };
+        const feesApart = Number.isFinite(budgetPerDay);
         for (const seg of segs) {
             yield seg;
             const openAll = openAt(top, knownSpecialists);
@@ -11037,7 +11086,7 @@
                 const money = budgetFor(seg, feesNow);
                 const unlock = unlockHook({ top, progress: toNext, gymExpMult, table, active, known: knownSpecialists, paid: held, joinNew: !weigh, stopAt: money.cap });
                 // The first stretch starts from the bars as they are now; a later one from where the stretch before it ended.
-                const segArgs = { ...cur, state, pc, settings: { ...cur.settings, horizonDays: seg.days, budget: money.budget }, events: segEvents(events, seg), unlock, live: (Boolean(args.live) && first) || Boolean(cur.state.carried) };
+                const segArgs = { ...cur, state, pc, settings: { ...cur.settings, horizonDays: seg.days, budget: money.budget }, events: segEvents(events, seg), unlock, feesApart, live: (Boolean(args.live) && first) || Boolean(cur.state.carried) };
                 const cmp = yield* compare(segArgs);
                 const rec = recommend(cmp, { budget: budgetOf(segArgs.settings), bliss: pc.perks.bliss, pickBy: cur.pickBy || 'most', openBy: segOpenBy });
                 // A probe may put another plan in a stretch's place (usePathPick): what the path would be with it.
@@ -11074,7 +11123,10 @@
             if (!r) break;
             const base = totalOf(stats) - startTotal;
             for (const v of r.daily) daily.push(Math.round(base + v));
-            for (let d = 0; d < r.daily.length; d++) costDaily.push(((r.costDaily && r.costDaily[d]) || 0) + (d ? 0 : fees));
+            // What the stretch pays: its items, a membership joined at its start, and the ladder gyms it opened (kept apart).
+            const gymFees = r.fees || 0;
+            const feeOn = (d) => (r.feeDays || []).reduce((a, x) => a + (x.day === d ? x.cost : 0), 0);
+            for (let d = 0; d < r.daily.length; d++) costDaily.push(((r.costDaily && r.costDaily[d]) || 0) + (d ? 0 : fees) + feeOn(d));
             if (r.quart) quart.push(...r.quart);
             else for (let d = 0; d < r.daily.length; d++) quart.push(360, 720, 1080);
             for (const k of STATS) for (let d = 1; d <= r.daily.length; d++) statDaily[k].push(Math.round(perStat[k] + statCurveAt(r.statLine, k, dayEndMs(r.dayMin, d))));
@@ -11085,7 +11137,7 @@
                 perStat[k] += r.perStat[k] || 0;
             }
             for (const [id, n] of Object.entries(r.used || {})) if (typeof n === 'number') used[id] = (used[id] || 0) + n;
-            cost += r.cost + fees;
+            cost += r.cost + gymFees + fees;
             // Rehab and overdoses (round 8): each stretch's part, added up for the path.
             if (r.costParts) {
                 parts.rehab += r.costParts.rehab || 0;
@@ -11101,7 +11153,7 @@
             // The memberships joined at this stretch's start, listed with the gyms the path opens.
             for (const x of joined) unlocks.push({ gymId: x.id, day: Math.round((seg.from - start) / DAY), cost: x.cost, member: true });
             ({ top, toNext } = climb(top, toNext, r.energyTrained || 0, gymExpMult, cap));
-            out.push({ from: seg.from, to: seg.to, days: seg.days, ...(cap < GEORGES ? { cap } : {}), ...(joined.length ? { joined: joined.map((x) => x.id) } : {}), event: seg.event ? segEvents(events, seg).map((e) => e.id) : null, strategy: rec.recommended, gained: r.gained, cost: r.cost + fees, energy: r.energyTrained || 0, statsEnd: { ...stats }, candy: r.candy || null, refill: r.refill, booster: r.booster || null, ...(Number.isFinite(r.xanaxPerDay) ? { xanaxPerDay: r.xanaxPerDay } : {}), alternatives: rec.alternatives.slice(0, 3).map((a) => ({ id: a.id, deltaStatsPct: a.deltaStatsPct })) });
+            out.push({ from: seg.from, to: seg.to, days: seg.days, ...(cap < GEORGES ? { cap } : {}), ...(joined.length ? { joined: joined.map((x) => x.id) } : {}), event: seg.event ? segEvents(events, seg).map((e) => e.id) : null, strategy: rec.recommended, gained: r.gained, cost: r.cost + gymFees + fees, energy: r.energyTrained || 0, statsEnd: { ...stats }, candy: r.candy || null, refill: r.refill, booster: r.booster || null, ...(Number.isFinite(r.xanaxPerDay) ? { xanaxPerDay: r.xanaxPerDay } : {}), alternatives: rec.alternatives.slice(0, 3).map((a) => ({ id: a.id, deltaStatsPct: a.deltaStatsPct })) });
             cur = carryOver(cur, r, seg.to);
         }
         const result = { id: 'year', gained: Math.round(totalOf(stats) - startTotal), perStat: Object.fromEntries(STATS.map((k) => [k, Math.round(perStat[k])])), cost: Math.round(cost), energyTrained: energy, daily, costDaily, used, unlocks, quart, statLine: { ...statLineFrom(statDaily, daily.length > STAT_LINE_DAILY_DAYS ? 7 : 1), dayMin: firstDayMin }, dayMin: firstDayMin, ...(parts.rehab + parts.overdose > 0 ? { costParts: { rehab: Math.round(parts.rehab), overdose: Math.round(parts.overdose), rough: parts.rough }, overdoseLost: Math.round(parts.lost) } : {}) };
@@ -12669,7 +12721,10 @@
         const list = [...(gmGet(K.planRuns, null) || []), run].slice(-PLAN_RUNS_KEPT);
         gmSet(K.planRuns, list);
         const words = (run.kind === 'replan' ? 'Recalibrate' : 'Create plan') + ' ' + (run.months || '?') + (run.months === 1 ? ' month' : ' months') + ' (' + (run.days || '?') + ' days)';
-        const time = (run.ms / 1000).toFixed(1) + ' s' + (run.hiddenMs > 0 ? ', ' + (run.hiddenMs / 1000).toFixed(1) + ' s of it with the tab not in front' : '');
+        // Where the time went (session 10): comparing the plans, the path's stretches, its range.
+        const PART = { compare: 'comparing', path: 'the path', band: 'the range' };
+        const parts = Object.entries(run.parts || {}).filter(([k, v]) => PART[k] && v >= 100).map(([k, v]) => PART[k] + ' ' + (v / 1000).toFixed(1) + ' s');
+        const time = (run.ms / 1000).toFixed(1) + ' s' + (run.hiddenMs > 0 ? ', ' + (run.hiddenMs / 1000).toFixed(1) + ' s of it with the tab not in front' : '') + (parts.length ? ' (' + parts.join(', ') + ')' : '');
         if (run.ok) logNote(words + ' took ' + time);
         else if (run.cancelled) logNote(words + ' cancelled after ' + time);
         else logProblem('error', words + ' failed after ' + time, run.error || null);
@@ -13814,8 +13869,11 @@
         const own = pauseIn ? null : makePause({ cancelled });
         const pause = own || (() => (cancelled() ? Promise.reject(new PlanCancelled()) : pauseIn()));
         let told = 0;
+        // When each part of the run began (the problem log says where the time went: session 10).
+        const partAt = [];
         const tell = (part, done, words) => {
             const moved = part !== busy.part;
+            if (moved) partAt.push([part, Date.now()]);
             busy.part = part;
             busy.done = Math.max(busy.done, Math.min(1, done));
             busy.words = words;
@@ -13936,7 +13994,7 @@
         const done = (ok, error, saved) => {
             if (doc) doc.removeEventListener('visibilitychange', onVis);
             if (hidAt !== null) hiddenMs += Date.now() - hidAt;
-            notePlanRun({ at: t0, kind: recalibrate ? 'replan' : 'create', months: saved ? saved.months : months, days: saved ? saved.days : null, ms: Date.now() - t0, hiddenMs, ok, cancelled: Boolean(error && error.cancelled), error: ok ? null : String((error && error.message) || error) });
+            notePlanRun({ at: t0, kind: recalibrate ? 'replan' : 'create', months: saved ? saved.months : months, days: saved ? saved.days : null, ms: Date.now() - t0, hiddenMs, parts: Object.fromEntries(partAt.map(([part, at], i) => [part, (i + 1 < partAt.length ? partAt[i + 1][1] : Date.now()) - at])), ok, cancelled: Boolean(error && error.cancelled), error: ok ? null : String((error && error.message) || error) });
         };
         let saved = null;
         try {
@@ -15354,12 +15412,6 @@
     .bl .r.sel { border: 1px solid var(--chalk); border-radius: 8px; }
     .bl .r:focus-visible { outline: 2px solid var(--chalk); outline-offset: -2px; }
     .bl .ratio { height: 8px; }
-    .nowb { display: grid; grid-template-columns: auto 1fr auto; gap: 24px; align-items: center; padding: 20px 24px; border-radius: 12px; background: var(--card2); }
-    .nowb .k { font: 600 12px var(--sans); color: var(--on-chalk); background: var(--chalk); border-radius: 6px; padding: 4px 8px; }
-    .nowb .cd { font: 600 40px/1 var(--serif); color: var(--chalk); min-width: 88px; }
-    .nowb b { font-size: 17px; font-weight: 600; line-height: 1.35; color: var(--white); }
-    .nowb span.s { color: var(--muted); font-size: 13px; }
-    .nowb .acts { display: flex; gap: 8px; }
     .tbl tr.ih td { height: var(--row); background: #191c1f; }
     .tbl tr.ih b { font-size: 14px; color: var(--white); }
     .tbl tr.sub td:first-child { padding-left: 24px; }
@@ -28993,4 +29045,4 @@
     }
 
     boot();
-})();
+})(Math, Number, Object, Array, JSON, Date, Set, Map, WeakMap, WeakSet, Promise, String, Boolean, Error, Infinity, NaN, void 0);

@@ -33,6 +33,9 @@
  *                 every write sent to the other open tabs (BroadcastChannel); counts in window.__tm
  *   &churn=1      a Torn-like page that keeps changing (header, sidebar, chat, bars every second, a train every 15 s)
  *   &noscript=1   the page without Pumping Iron (what the page alone costs)
+ *   &sandbox=1    Tampermonkey-like scope (session 10): the script runs inside `with (sandbox)`, the sandbox a Proxy
+ *                 over the window, as Tampermonkey runs a script that has a @grant. Every global the code names
+ *                 (Math, Number, Infinity...) is looked up through it on each use, unless the script binds it first.
  *   &plan=1       make a saved plan (1, 3, 6 or 12 months) once the first read is in, as Plan's Create plan does
  *   &follow=steady   and follow that plan of it (a row picked on Plan)
  *   window.__piSeed  {storeKey: raw} set before load (Playwright addInitScript): the store an earlier page left
@@ -297,7 +300,26 @@ if (Q.get('churn')) {
   }, 15000);
 }
 </script>
-<script>if (!Q.get('noscript')) document.write('<script src="../torn-pumping-iron.user.js?v=' + Date.now() + '"><\/script>');</script>
+<script>
+if (!Q.get('noscript') && Q.get('sandbox')) {
+  const x = new XMLHttpRequest();
+  x.open('GET', '../torn-pumping-iron.user.js?v=' + Date.now(), false);
+  x.send();
+  const bound = new Map();
+  const sandbox = new Proxy(window, {
+    has: () => true,
+    get: (t, k) => {
+      if (k === Symbol.unscopables) return undefined;
+      const v = t[k];
+      // A native function called through the scope gets the sandbox as `this`: hand it the window.
+      if (typeof v !== 'function' || v.prototype) return v;
+      if (!bound.has(v)) bound.set(v, v.bind(t));
+      return bound.get(v);
+    },
+  });
+  new Function('sandbox', 'with (sandbox) {' + x.responseText + '\n}')(sandbox);
+} else if (!Q.get('noscript')) document.write('<script src="../torn-pumping-iron.user.js?v=' + Date.now() + '"><\/script>');
+</script>
 <script>
 // &plan=N: once the first read is in, make an N-month plan the way Plan's Create plan does (only when none is saved).
 if (Q.get('plan')) {

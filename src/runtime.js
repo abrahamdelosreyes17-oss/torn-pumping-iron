@@ -340,8 +340,11 @@ export async function createPlan({ months = 1, recalibrate = false, auto: byItse
     const own = pauseIn ? null : makePause({ cancelled });
     const pause = own || (() => (cancelled() ? Promise.reject(new PlanCancelled()) : pauseIn()));
     let told = 0;
+    // When each part of the run began (the problem log says where the time went: session 10).
+    const partAt = [];
     const tell = (part, done, words) => {
         const moved = part !== busy.part;
+        if (moved) partAt.push([part, Date.now()]);
         busy.part = part;
         busy.done = Math.max(busy.done, Math.min(1, done));
         busy.words = words;
@@ -462,7 +465,7 @@ export async function createPlan({ months = 1, recalibrate = false, auto: byItse
     const done = (ok, error, saved) => {
         if (doc) doc.removeEventListener('visibilitychange', onVis);
         if (hidAt !== null) hiddenMs += Date.now() - hidAt;
-        notePlanRun({ at: t0, kind: recalibrate ? 'replan' : 'create', months: saved ? saved.months : months, days: saved ? saved.days : null, ms: Date.now() - t0, hiddenMs, ok, cancelled: Boolean(error && error.cancelled), error: ok ? null : String((error && error.message) || error) });
+        notePlanRun({ at: t0, kind: recalibrate ? 'replan' : 'create', months: saved ? saved.months : months, days: saved ? saved.days : null, ms: Date.now() - t0, hiddenMs, parts: Object.fromEntries(partAt.map(([part, at], i) => [part, (i + 1 < partAt.length ? partAt[i + 1][1] : Date.now()) - at])), ok, cancelled: Boolean(error && error.cancelled), error: ok ? null : String((error && error.message) || error) });
     };
     let saved = null;
     try {

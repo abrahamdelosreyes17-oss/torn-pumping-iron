@@ -291,6 +291,11 @@ export function* yearSteps({ compare, inputs = null, args, start, end, budgetPer
     // foresee (the energy a day grows as the budget frees up) is not bought with money that is not there; the ladder
     // waits at it (`cap`), its bar full, and the next stretch keeps its fee back. Before, the friend's 12 months at
     // $2M a day ended $93M over: George's opened in the last five days.
+    // Session 10: the money kept back for a gym is spent only on that gym. Before, the fee of a gym expected in a
+    // stretch was added to the stretch's budget, so a plan that never opened the gym could spend it on items (the
+    // owner's case with Xanax held: an EDVD jump for $73M that gained 0.06M more than the small plan, and George's
+    // then never opened). Now a stretch's budget is its item money; a gym it opens is paid apart (`feesApart`),
+    // within `cap`.
     const budgetFor = (seg, fees) => {
         if (!Number.isFinite(budgetPerDay)) return { budget: Infinity, cap: GEORGES };
         const daysLeft = totalDays - daysDone;
@@ -298,9 +303,9 @@ export function* yearSteps({ compare, inputs = null, args, start, end, budgetPer
         const left = Math.max(0, budgetPerDay * totalDays - cost - fees);
         const ahead = ladderFeesAhead(top, toNext, perDay * daysLeft, gymExpMult, table, left);
         const items = ((left - ahead) * seg.days) / daysLeft;
-        const here = ladderFeesAhead(top, toNext, perDay * seg.days, gymExpMult, table, left - items);
-        return { budget: items + here, cap: ladderTopWithin(top, left - items, table) };
+        return { budget: items, cap: ladderTopWithin(top, left - items, table) };
     };
+    const feesApart = Number.isFinite(budgetPerDay);
     for (const seg of segs) {
         yield seg;
         const openAll = openAt(top, knownSpecialists);
@@ -315,7 +320,7 @@ export function* yearSteps({ compare, inputs = null, args, start, end, budgetPer
             const money = budgetFor(seg, feesNow);
             const unlock = unlockHook({ top, progress: toNext, gymExpMult, table, active, known: knownSpecialists, paid: held, joinNew: !weigh, stopAt: money.cap });
             // The first stretch starts from the bars as they are now; a later one from where the stretch before it ended.
-            const segArgs = { ...cur, state, pc, settings: { ...cur.settings, horizonDays: seg.days, budget: money.budget }, events: segEvents(events, seg), unlock, live: (Boolean(args.live) && first) || Boolean(cur.state.carried) };
+            const segArgs = { ...cur, state, pc, settings: { ...cur.settings, horizonDays: seg.days, budget: money.budget }, events: segEvents(events, seg), unlock, feesApart, live: (Boolean(args.live) && first) || Boolean(cur.state.carried) };
             const cmp = yield* compare(segArgs);
             const rec = recommend(cmp, { budget: budgetOf(segArgs.settings), bliss: pc.perks.bliss, pickBy: cur.pickBy || 'most', openBy: segOpenBy });
             // A probe may put another plan in a stretch's place (usePathPick): what the path would be with it.
@@ -352,7 +357,10 @@ export function* yearSteps({ compare, inputs = null, args, start, end, budgetPer
         if (!r) break;
         const base = totalOf(stats) - startTotal;
         for (const v of r.daily) daily.push(Math.round(base + v));
-        for (let d = 0; d < r.daily.length; d++) costDaily.push(((r.costDaily && r.costDaily[d]) || 0) + (d ? 0 : fees));
+        // What the stretch pays: its items, a membership joined at its start, and the ladder gyms it opened (kept apart).
+        const gymFees = r.fees || 0;
+        const feeOn = (d) => (r.feeDays || []).reduce((a, x) => a + (x.day === d ? x.cost : 0), 0);
+        for (let d = 0; d < r.daily.length; d++) costDaily.push(((r.costDaily && r.costDaily[d]) || 0) + (d ? 0 : fees) + feeOn(d));
         if (r.quart) quart.push(...r.quart);
         else for (let d = 0; d < r.daily.length; d++) quart.push(360, 720, 1080);
         for (const k of STATS) for (let d = 1; d <= r.daily.length; d++) statDaily[k].push(Math.round(perStat[k] + statCurveAt(r.statLine, k, dayEndMs(r.dayMin, d))));
@@ -363,7 +371,7 @@ export function* yearSteps({ compare, inputs = null, args, start, end, budgetPer
             perStat[k] += r.perStat[k] || 0;
         }
         for (const [id, n] of Object.entries(r.used || {})) if (typeof n === 'number') used[id] = (used[id] || 0) + n;
-        cost += r.cost + fees;
+        cost += r.cost + gymFees + fees;
         // Rehab and overdoses (round 8): each stretch's part, added up for the path.
         if (r.costParts) {
             parts.rehab += r.costParts.rehab || 0;
@@ -379,7 +387,7 @@ export function* yearSteps({ compare, inputs = null, args, start, end, budgetPer
         // The memberships joined at this stretch's start, listed with the gyms the path opens.
         for (const x of joined) unlocks.push({ gymId: x.id, day: Math.round((seg.from - start) / DAY), cost: x.cost, member: true });
         ({ top, toNext } = climb(top, toNext, r.energyTrained || 0, gymExpMult, cap));
-        out.push({ from: seg.from, to: seg.to, days: seg.days, ...(cap < GEORGES ? { cap } : {}), ...(joined.length ? { joined: joined.map((x) => x.id) } : {}), event: seg.event ? segEvents(events, seg).map((e) => e.id) : null, strategy: rec.recommended, gained: r.gained, cost: r.cost + fees, energy: r.energyTrained || 0, statsEnd: { ...stats }, candy: r.candy || null, refill: r.refill, booster: r.booster || null, ...(Number.isFinite(r.xanaxPerDay) ? { xanaxPerDay: r.xanaxPerDay } : {}), alternatives: rec.alternatives.slice(0, 3).map((a) => ({ id: a.id, deltaStatsPct: a.deltaStatsPct })) });
+        out.push({ from: seg.from, to: seg.to, days: seg.days, ...(cap < GEORGES ? { cap } : {}), ...(joined.length ? { joined: joined.map((x) => x.id) } : {}), event: seg.event ? segEvents(events, seg).map((e) => e.id) : null, strategy: rec.recommended, gained: r.gained, cost: r.cost + gymFees + fees, energy: r.energyTrained || 0, statsEnd: { ...stats }, candy: r.candy || null, refill: r.refill, booster: r.booster || null, ...(Number.isFinite(r.xanaxPerDay) ? { xanaxPerDay: r.xanaxPerDay } : {}), alternatives: rec.alternatives.slice(0, 3).map((a) => ({ id: a.id, deltaStatsPct: a.deltaStatsPct })) });
         cur = carryOver(cur, r, seg.to);
     }
     const result = { id: 'year', gained: Math.round(totalOf(stats) - startTotal), perStat: Object.fromEntries(STATS.map((k) => [k, Math.round(perStat[k])])), cost: Math.round(cost), energyTrained: energy, daily, costDaily, used, unlocks, quart, statLine: { ...statLineFrom(statDaily, daily.length > STAT_LINE_DAILY_DAYS ? 7 : 1), dayMin: firstDayMin }, dayMin: firstDayMin, ...(parts.rehab + parts.overdose > 0 ? { costParts: { rehab: Math.round(parts.rehab), overdose: Math.round(parts.overdose), rough: parts.rough }, overdoseLost: Math.round(parts.lost) } : {}) };

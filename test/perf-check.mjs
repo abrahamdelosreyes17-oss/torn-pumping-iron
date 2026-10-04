@@ -17,6 +17,7 @@
  * startup (round 7): opening the webpage on what an earlier visit left, then a click on its Torn Eye tab, at 1× and 4×.
  * plan (round 7): Create plan and Recalibrate for 12 months on the webpage, at 1× and at 4× whatever CPU says.
  * CPU=1 runs without the slowdown. PERF_OUT=<file> appends each result as a JSON line.
+ * SANDBOX=1 (session 10) runs the plan case inside a Tampermonkey-like scope (harness &sandbox=1).
  * Exits 1 when a target is missed (REPORT_ONLY=1: always 0).
  */
 import { createRequire } from 'node:module';
@@ -372,7 +373,8 @@ async function planPage() {
     const p = await ctx.newPage();
     const errors = [];
     p.on('pageerror', (e) => errors.push(String(e)));
-    await p.goto(BASE + 'pi=app&' + PAGES.plain + '#plan');
+    // SANDBOX=1 (session 10): inside a Tampermonkey-like scope (harness &sandbox=1), where a player's script really runs.
+    await p.goto(BASE + 'pi=app&' + PAGES.plain + (process.env.SANDBOX ? '&sandbox=1' : '') + '#plan');
     await p.waitForFunction(() => window.__pi && window.__pi.model() && window.__pi.model().ready, null, { timeout: 30000 });
     await p.waitForTimeout(2500);
     return { ctx, p, errors, cdp: await ctx.newCDPSession(p) };

@@ -19,7 +19,7 @@ import { companyJob, jobHappyOf, freeEdvdPerDayOf, worksAt, VOYEUR_JP, JOB_LOCK_
 import { energyLadder, boosterChoice, priceFor } from './ladder.js';
 import { upcomingEvents, holdBoosterFor, eventHeadsUp, eventMults } from './events.js';
 import { PICK_BY } from './recommend.js';
-import { XANAX, SAMPLE_PRICES, ITEMS, XANAX_CD_MIN, GAME_CONSOLE, POINTS } from './items.js';
+import { XANAX, ECSTASY, SAMPLE_PRICES, ITEMS, XANAX_CD_MIN, GAME_CONSOLE, POINTS } from './items.js';
 import { xanaxCdOf } from './drugcd.js';
 import { realGains } from './gains.js';
 import { rehabParams } from './rehab.js';
@@ -151,7 +151,7 @@ export function itemContext(statics = {}, settings = {}, now = null) {
  * bars as they are (energy, happy, the drug cooldown, today's refill used), like the day plan does; without it, from
  * a full bar with no cooldown (a stretch that starts later, a what-if over past days).
  */
-export function simInputs({ state, pc, shares, settings, prices, special = 0, statics = {}, events = null, unlock = null, live = false }) {
+export function simInputs({ state, pc, shares, settings, prices, special = 0, statics = {}, events = null, unlock = null, live = false, feesApart = false }) {
     const gyms = {};
     for (const k of STATS) if (pc.best[k]) gyms[k] = { dots: pc.best[k].dots[k], energy: pc.best[k].energy };
     const ic = itemContext(statics, settings);
@@ -183,7 +183,7 @@ export function simInputs({ state, pc, shares, settings, prices, special = 0, st
         consoleOwned: ic.consoleOwned,
         jobHappy: ic.jobHappy,
         freeEdvdPerDay: ic.freeEdvdPerDay,
-        // Boosters you hold go first and cost nothing new (candy and energy drinks as a pool).
+        // Boosters, Xanax and Ecstasy you hold go first and cost nothing new (candy and energy drinks as a pool).
         held: heldBoosters(statics.inventory),
         // Rehab and overdoses in every plan's cost (round 8): the faction's cuts from your perks, a session's size
         // from your lifetime rehabs (a new player's until they are read).
@@ -197,13 +197,22 @@ export function simInputs({ state, pc, shares, settings, prices, special = 0, st
         // Year plans (core/year.js): events on their dates, gyms opening as energy is trained.
         ...(events ? { events } : {}),
         ...(unlock ? { unlock } : {}),
+        // A stretch of a path under a budget: a gym's fee is paid out of the money kept back for it, not the stretch's own.
+        ...(feesApart ? { feesApart: true } : {}),
     };
 }
 
-/** The boosters in the inventory (candy, energy drinks, EDVD, FHC): {[id]: qty}. */
+/**
+ * What a plan uses first out of the inventory, free: the boosters (candy, energy drinks, EDVD, FHC) and, from
+ * session 10, the Xanax and Ecstasy (the owner: "I have Xanax in my inventory and it's not making me use my Xanax").
+ * @returns {{[id]: qty}}
+ */
 export function heldBoosters(inventory) {
     const out = {};
-    for (const [k, v] of Object.entries(inventory || {})) if (ITEMS[k] && ITEMS[k].kind === 'booster' && Number(v) > 0) out[k] = Math.floor(Number(v));
+    for (const [k, v] of Object.entries(inventory || {})) {
+        const it = ITEMS[k];
+        if (it && (it.kind === 'booster' || Number(k) === XANAX || Number(k) === ECSTASY) && Number(v) > 0) out[k] = Math.floor(Number(v));
+    }
     return out;
 }
 
@@ -278,8 +287,8 @@ export async function compareStrategiesAsync(args, { pause = null } = {}) {
  * The comparison as a generator: it yields the id of each plan as it starts on it (progress), and a number every few
  * simulated weeks inside a run (a chance for a break: see compareStrategies / compareStrategiesAsync, core/slices.js).
  */
-export function* compareSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', events = null, unlock = null, live = false }) {
-    const base = simInputs({ state, pc, shares, settings, prices, special, statics, events, unlock, live });
+export function* compareSteps({ state, pc, shares, settings, prices, special = 0, statics = {}, pickBy = 'most', events = null, unlock = null, live = false, feesApart = false }) {
+    const base = simInputs({ state, pc, shares, settings, prices, special, statics, events, unlock, live, feesApart });
     const results = {};
     const budget = budgetOf(settings);
     for (const id of feasibleStrategies({ bliss: pc.perks.bliss, boosterCapH: base.boosterCapH, toyShop5: base.toyShop5, adultNovelties10: base.adultNovelties10 })) {

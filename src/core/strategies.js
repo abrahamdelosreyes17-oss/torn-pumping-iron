@@ -157,6 +157,11 @@ export const TICK_OFFSET_MIN = 5;
  * @param {number} [o.boosterCdMin] - booster cooldown already running at the start, minutes (the live one)
  * @param {object} [o.held] - {[itemId]: qty} boosters in the inventory: used first and free (candy and energy
  *   drinks as a pool, the most happy or energy first; EDVD and FHC as themselves). `used.held` counts them.
+ *   Xanax and Ecstasy held too (session 10): taken first and free, and the small-budget plan that buys no Xanax
+ *   (`xanaxPerDay` 0) still takes the ones held.
+ * @param {boolean} [o.feesApart] - session 10 (a stretch of a path under a budget): a gym's fee is not added to
+ *   `cost` (the stretch's item money); it is returned apart (`fees`, `feeDays`: [{day, cost}]) and the path pays
+ *   it out of the money kept back for that gym
  * @param {object[]} [o.events] - round 6 (year plans): [{from, to (minutes from the start), candyMult, canMult,
  *   freeEnergy, freeHappy}]: candy and cans count the event's × while it runs; free energy/happy land at its start
  * @param {object} [o.unlock] - round 6: gyms opening as energy is trained: {left: energy to the next gym,
@@ -299,6 +304,9 @@ export function* simulateSteps(id, o) {
     // What each of those days costs (the cash check, cashflow.js): a jump buys in lumps, steady training evenly.
     const costDaily = [];
     let costSeen = 0;
+    // Gym fees kept apart from the cost (`o.feesApart`), with the day each was paid.
+    let fees = 0;
+    const feeDays = [];
     // The drugs taken on each of those days (rehab and overdoses are priced on the plan's own days, core/rehab.js).
     const xanDaily = [];
     const ecsDaily = [];
@@ -381,7 +389,10 @@ export function* simulateSteps(id, o) {
         }
         // `t`: the minute it opened (round 7: each plan says when it opens a gym).
         unlocked.push({ at: trainedE, t: curT, gymId: n.gymId, cost: n.cost || 0, joined: n.joined || [] });
-        cost += n.cost || 0;
+        if (o.feesApart) {
+            fees += n.cost || 0;
+            if (n.cost > 0) feeDays.push({ day: costDaily.length, cost: n.cost });
+        } else cost += n.cost || 0;
         if (n.gyms) {
             o = { ...o, gyms: n.gyms };
             if (cands) cands.splice(0, cands.length, ...STATS.filter((k) => o.gyms[k] && o.gyms[k].dots > 0).map((k) => ({ k, dots: o.gyms[k].dots, energy: o.gyms[k].energy })));
@@ -405,6 +416,17 @@ export function* simulateSteps(id, o) {
         }
         cost += price(item) * f.buy;
         return f;
+    };
+    // Drugs held (session 10; the owner: "I have Xanax in my inventory and it's not making me use my Xanax"): taken
+    // first and free, as boosters are. Before, every Xanax was priced as bought, so a small budget cut the Xanax
+    // you already own. The day plan keeps the same count (plan.js).
+    const drugStock = {};
+    for (const k of [XANAX, ECSTASY]) if (o.held && Number(o.held[k]) > 0) drugStock[k] = Math.floor(Number(o.held[k]));
+    const takeDrug = (item) => {
+        if (!(drugStock[item] > 0)) return buy(item);
+        drugStock[item]--;
+        used[item] = (used[item] || 0) + 1;
+        used.held = { ...(used.held || {}), [item]: ((used.held && used.held[item]) || 0) + 1 };
     };
     // A candy boost of `n`: the happy it adds (held candy may give more than the pick).
     const eatCandy = (n) => useBoosters(candyId, n).value * (o.candyMult || 1) * evCandy;
@@ -509,7 +531,7 @@ export function* simulateSteps(id, o) {
         // Never above 1,000: what doesn't fit is lost (900 + a Xanax = 1,000).
         E = Math.min(ENERGY_CAP, E + ITEMS[XANAX].energy);
         H += ITEMS[XANAX].happy;
-        buy(XANAX);
+        takeDrug(XANAX);
         drugFree = t + xanCD;
     };
 
@@ -557,7 +579,8 @@ export function* simulateSteps(id, o) {
                 xanDay = day;
                 xanToday = 0;
             }
-            const took = t >= drugFree && xanToday < xanCap;
+            // The small plan's count is what the budget buys a day; when it buys none, the Xanax you hold are still taken.
+            const took = t >= drugFree && (xanToday < xanCap || (xanCap === 0 && drugStock[XANAX] > 0));
             if (took) {
                 xanax(t);
                 xanToday++;
@@ -605,7 +628,7 @@ export function* simulateSteps(id, o) {
                 H = Math.min(HAPPY_CAP, (H + eatCandy(qty) + jobHappy(day)) * 2);
                 addBooster(candyId, qty, t);
                 used.candyBoosts = (used.candyBoosts || 0) + 1;
-                buy(ECSTASY);
+                takeDrug(ECSTASY);
                 drugFree = t + ecsCD;
                 train();
                 // One refill a Torn day: a day with no room for candy earlier may already have used it.
@@ -670,7 +693,7 @@ export function* simulateSteps(id, o) {
                 }
                 addBooster(boostItem, boostN, t);
                 H = Math.min(HAPPY_CAP, H);
-                buy(ECSTASY);
+                takeDrug(ECSTASY);
                 drugFree = t + ecsCD;
                 train();
                 if (day !== refillDay) {
@@ -710,6 +733,10 @@ export function* simulateSteps(id, o) {
         if (rh.lost > 0) out.overdoseLost = Math.round(rh.lost);
     }
     if (unlocked.length) out.unlocked = unlocked;
+    if (o.feesApart) {
+        out.fees = fees;
+        out.feeDays = feeDays;
+    }
     return out;
 }
 

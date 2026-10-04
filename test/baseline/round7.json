@@ -47,7 +47,7 @@
       },
       "pathBudget": {
         "5M:3": {"days":92,"budget":460000000,"gained":728323,"cost":455119931,"plans":"consoleJump:12 consoleJump:3 consoleJump:10 consoleJump:10 chocoJump:8 dailyChoco:2 candyXanax:1 candyXanax:10 steady:10 candyXanax:10 candyXanax:10 candyXanax:6","single":"candyXanax","singleGained":627322,"singleCost":450112844},
-        "5M:12": {"days":365,"budget":1825000000,"gained":67917166,"cost":1817215074,"plans":"consoleJump:12 consoleJump:3 consoleJump:10 consoleJump:10 candyXanax:8 consoleJump:2 candyXanax:1 candyXanax:10 steady:10 candyXanax:10 steady:10 steady:10 steady:10 steady:10 dailyChoco:10 steady:10 steady:10 steady:10 steady:10 steady:7 dailyChoco:9 steady:10 steady:10 steady:10 steady:10 steady:10 steady:10 steady:10 steady:10 steady:10 dailyChoco:10 steady:10 steady:10 steady:10 steady:10 candyXanax:10 steady:10 steady:10 candyXanax:10 steadyBoost:3","single":"dailyChoco","singleGained":28303775,"singleCost":1822046797},
+        "5M:12": {"days":365,"budget":1825000000,"gained":71737324,"cost":1820998657,"plans":"chocoJump:12 consoleJump:3 consoleJump:10 consoleJump:10 consoleJump:8 chocoJump:2 consoleJump:1 candyXanax:10 steady:10 candyXanax:10 steady:10 candyXanax:10 steady:10 steady:10 steady:10 steady:10 candyXanax:10 steady:10 steady:10 steady:7 steady:9 steady:10 candyXanax:10 steady:10 steady:10 steady:10 steady:10 steady:10 steady:10 steady:10 steady:10 steady:10 steady:10 candyXanax:10 steady:10 steady:10 candyXanax:10 steady:10 steady:10 steady:3","single":"dailyChoco","singleGained":28303775,"singleCost":1822046797},
         "2M:3": {"days":92,"budget":184000000,"gained":361833,"cost":183123566,"plans":"steadyLite:12 steadyLite:3 steadyLite:10 steadyLite:10 steadyLite:8 steadyLite:2 steadyLite:1 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steady:6","single":"steadyLite","singleGained":253756,"singleCost":99591192},
         "2M:12": {"days":365,"budget":730000000,"gained":12920659,"cost":729509274,"plans":"steadyLite:12 steadyLite:3 steadyLite:10 steadyLite:10 steadyLite:8 steadyLite:2 steadyLite:1 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:7 steadyLite:9 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steadyLite:10 steady:3","single":"steadyLite","singleGained":7123948,"singleCost":515220490}
       }
@@ -157,5 +157,5 @@
       }
     }
   },
-  "time": {"friend":{"1":79,"3":232,"12":957},"mid":{"1":101,"3":289,"12":1136},"owner":{"1":99,"3":252,"12":1034}}
+  "time": {"friend":{"1":130,"3":329,"12":1509},"mid":{"1":116,"3":286,"12":1201},"owner":{"1":114,"3":327,"12":1294}}
 }

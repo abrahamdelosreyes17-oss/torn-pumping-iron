@@ -197,6 +197,10 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
     let xanN = (ctx.drugsToday || 0) + 1;
     // The small-budget plan: at most this many Xanax a Torn day (the simulator keeps the same count: strategies.js).
     const xanCap = Number.isFinite(ctx.xanaxPerDay) ? Math.max(0, Math.floor(ctx.xanaxPerDay)) : Infinity;
+    // Session 10: that count is what the budget buys. When it buys none, the Xanax you hold are still taken, one
+    // per cooldown, until they are gone (the simulator does the same: strategies.js `drugStock`).
+    let ownXanax = xanCap === 0 ? Math.max(0, Math.floor(Number((ctx.held || {})[XANAX]) || 0)) : 0;
+    const xanaxDone = () => xanN > xanCap && !(ownXanax > 0);
     const steps = [];
     let n = 0;
     let curDay = tornDayStart(now);
@@ -595,7 +599,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
             if (!st.energy) {
                 steps.pop();
                 naturalOk = false;
-            } else if (refillLeft && xanN > xanCap && full + 5 * MIN < Math.min(end, curDay + DAY)) {
+            } else if (refillLeft && xanaxDone() && full + 5 * MIN < Math.min(end, curDay + DAY)) {
                 // No Xanax left today (the small-budget plan): the day's refill goes right after this session, when energy is near zero.
                 advance(full + 5 * MIN);
                 refill(t);
@@ -608,7 +612,7 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         advance(drugAt);
         // The day's Xanax are taken (the small-budget plan): the next one waits for the next Torn day; natural
         // energy is trained as it fills meanwhile (the branch above).
-        if (xanN > xanCap) {
+        if (xanaxDone()) {
             drugAt = curDay + DAY;
             if (drugAt >= end && !(naturalOk && fullAt() < end)) break;
             continue;
@@ -668,6 +672,10 @@ export function dayTimeline({ state, now, strategy, ctx, until = null }) {
         let label = 'Xanax #' + xanN++;
         // Steady plans spend the job's banked happy points on the day's first Xanax session.
         let xNote = waitNote;
+        if (ownXanax > 0) {
+            ownXanax--;
+            xNote = joinNote(xNote, 'from your items: your budget buys no Xanax, the ones you hold are still used');
+        }
         if (!daily && !candyDaily && ctx.jobHappy && jpBank > 0) {
             const jp = jobPoints();
             if (jp.happy) {
