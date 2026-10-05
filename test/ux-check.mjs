@@ -275,6 +275,7 @@ if (!only.length || only.includes('plan')) {
     ok(/^pumping-iron-report-\d{8}-\d{4}\.zip$/.test(dl.suggestedFilename()), 'report: the file is named ' + dl.suggestedFilename());
     ok(['report.txt', 'problem-log.txt', 'player.json', 'plan.json', 'state.json', 'stats-history.json', 'money-log-fields.json', 'learning/gym-log.json'].every((n) => n in zip), 'report: the zip holds its files (' + Object.keys(zip).length + ')');
     ok(zip['report.txt'].includes('The bar stopped at month 5.') && /stats STR [\d,]+/.test(zip['report.txt']), 'report: your words and your stats are in report.txt');
+    ok(/\n {2}Discord pings: not connected\n/.test(zip['report.txt']) && JSON.parse(zip['state.json']).discord.connected === false && JSON.parse(zip['state.json']).discord.ticks.nerve.on === true, 'report: Discord pings said, not connected (with the ping ticks)');
     const keys = await page.evaluate(() => Object.entries(_store).filter(([k]) => /Key$/.test(k)).map(([, v]) => String(JSON.parse(v))).filter((v) => v && v.length >= 8));
     const all = Object.values(zip).join(' ');
     ok(keys.length > 0 && keys.every((k) => !all.includes(k)), 'report: no API key in any file (' + keys.length + ' keys checked)');
@@ -538,6 +539,132 @@ if (!only.length || only.includes('auto')) {
     await o.page.close();
 }
 
+// Settings › Discord pings (a friend: "I did not receive an alert from the discord bot", and all he saw was "Your
+// Worker answered 502."): the state in words with what to do, never "Working" while the bot can't reach you, and
+// the ping ticks (closed until opened; stacking moves them and says so; a hand change during it stays).
+if (!only.length || only.includes('discord')) {
+    const discordOf = (page) => page.evaluate(() => {
+        const sr = document.getElementById('pi-app').shadowRoot;
+        const sec = [...sr.querySelectorAll('.sec')].find((s) => (s.querySelector('h3') || {}).textContent === 'Discord pings');
+        if (!sec) return null;
+        const ticks = {};
+        for (const l of sec.querySelectorAll('details.pings [data-ping]')) ticks[l.getAttribute('data-ping')] = { on: l.querySelector('input').checked, why: (l.querySelector('.why') || {}).textContent || null };
+        const box = sec.querySelector('[data-discord]');
+        const det = sec.querySelector('details.pings');
+        return {
+            tag: (sec.querySelector('.state') || {}).textContent || '',
+            state: box ? box.getAttribute('data-discord') : null,
+            title: box ? box.querySelector('b').textContent : null,
+            steps: [...sec.querySelectorAll('ol.steps-list li')].map((li) => li.textContent),
+            msgs: [...sec.querySelectorAll('.msg')].map((x) => x.textContent).filter(Boolean),
+            ticks,
+            open: Boolean(det && det.open),
+            summary: det ? det.querySelector('summary').textContent : null,
+            text: sec.innerText.replace(/\s+/g, ' '),
+        };
+    });
+    const toSettings = async (page) => {
+        await page.evaluate(() => (location.hash = 'settings'));
+        await page.waitForTimeout(500);
+    };
+    const press = async (page, text) => {
+        await page.locator('#pi-app button', { hasText: text }).first().click();
+        await page.waitForTimeout(400);
+    };
+    const bodies = (page) => page.evaluate(() => window.__workerBodies);
+    // Discord refuses the bot's DM.
+    {
+        const o = await openApp('&discord=refused');
+        await toSettings(o.page);
+        let d = await discordOf(o.page);
+        ok(d && d.tag === 'Not reaching you' && d.state === 'dm_refused' && d.title === 'Discord refuses the bot’s DMs', 'discord, DMs refused: the tag says "Not reaching you", not "Working" (' + JSON.stringify(d && [d.tag, d.state, d.title]) + ')');
+        ok(d && d.steps.join(' | ') === 'In Discord, open the server the bot is in. | Click the server name, then Privacy Settings. | Turn Direct Messages on. | Then press Send a test ping here.', 'discord, DMs refused: the steps that fix it (' + (d && d.steps.join(' | ')) + ')');
+        ok(d && /Last refused 10:38 UTC/.test(d.text) && d.open === false && d.summary === 'Which pings the bot sends · 1 off', 'discord, DMs refused: since when, and the ticks are closed until opened (' + (d && d.summary) + ')');
+        const m = await measure(o.page);
+        ok(m.scrollW <= 1280 && m.hostScrollW <= m.hostW && m.small.length === 0 && m.covered.length === 0, 'discord, DMs refused: no overflow, no small text, every control on top ' + JSON.stringify([m.scrollW, m.small.slice(0, 3), m.covered.slice(0, 3)]));
+        await o.page.screenshot({ path: resolve(shots, 'app-settings-discord-refused.png'), fullPage: true });
+        await press(o.page, 'Send a test ping');
+        d = await discordOf(o.page);
+        ok(d && d.msgs.includes('Discord refused the bot’s DM. What to do is above.') && !/answered \d+/.test(d.text), 'discord, DMs refused: the test ping says why (' + (d && d.msgs.join(' | ')) + ')');
+        // Direct Messages turned on in Discord: the test ping arrives and the tag follows at once.
+        await o.page.evaluate(() => (window.__dmFixed = true));
+        await press(o.page, 'Send a test ping');
+        d = await discordOf(o.page);
+        ok(d && d.tag === 'Working' && d.state === null && d.steps.length === 0 && d.msgs.includes('Sent. Check your Discord DMs.'), 'discord, DMs back on: the test ping arrives and the tag says Working (' + JSON.stringify(d && [d.tag, d.msgs]) + ')');
+        ok(o.errors.length === 0, 'discord, DMs refused: no page errors ' + JSON.stringify(o.errors.slice(0, 2)));
+        await o.page.close();
+    }
+    // The ticks.
+    {
+        const o = await openApp('&discord=ok');
+        await toSettings(o.page);
+        await o.page.locator('#pi-app summary', { hasText: 'Which pings the bot sends' }).click();
+        await o.page.waitForTimeout(300);
+        let d = await discordOf(o.page);
+        const kinds = Object.keys((d && d.ticks) || {});
+        ok(d && d.tag === 'Working' && d.open && kinds.length === 13 && kinds.filter((k) => !d.ticks[k].on).join() === 'chain' && kinds.every((k) => !d.ticks[k].why), 'ticks: every ping listed, all on but "Chain about to drop" (' + kinds.join(' ') + ')');
+        for (const w of ['Cooldowns', 'Bars', 'Your plan', 'Players and prices', 'Nerve full · about a minute before, once', 'the latest change wins']) ok(d && d.text.toLowerCase().includes(w.toLowerCase()), 'ticks: shows "' + w + '"');
+        const m = await measure(o.page);
+        ok(m.scrollW <= 1280 && m.hostScrollW <= m.hostW && m.small.length === 0 && m.covered.length === 0, 'ticks: no overflow, no small text, every control on top ' + JSON.stringify([m.scrollW, m.small.slice(0, 3), m.covered.slice(0, 3)]));
+        await o.page.screenshot({ path: resolve(shots, 'app-settings-discord-ticks.png'), fullPage: true });
+        await o.page.locator('#pi-app [data-ping="booster"] input').click();
+        await o.page.waitForTimeout(600);
+        d = await discordOf(o.page);
+        ok(d && d.open && d.ticks.booster.on === false && d.summary === 'Which pings the bot sends · 2 off', 'ticks: one unticked stays open and is counted (' + (d && d.summary) + ')');
+        await o.page.waitForFunction(() => window.__workerBodies.some((b) => b.body && b.body.rules && b.body.rules.booster === false), null, { timeout: 9000 }).catch(() => {});
+        let sent = (await bodies(o.page)).filter((b) => b.path === '/plan' && b.body && b.body.rules).pop();
+        ok(sent && sent.body.rules.booster === false && sent.body.rules.energy === true && sent.body.rulesAt.booster > 0, 'ticks: the change goes to the service within seconds (' + JSON.stringify(sent && [sent.body.rules.booster, sent.body.rulesAt]) + ')');
+        // Stacking for a chain turns the energy and training ticks off by itself, and says so.
+        await o.page.evaluate(() => (location.hash = 'home'));
+        await o.page.waitForTimeout(500);
+        await press(o.page, 'I’m stacking');
+        await toSettings(o.page);
+        d = await discordOf(o.page);
+        ok(d && ['energy', 'refill', 'jump'].every((k) => d.ticks[k].on === false && d.ticks[k].why === 'off while you are stacking · back on Resume') && d.ticks.drug.on && !d.ticks.drug.why, 'ticks, stacking: energy, refill and jump are off and say why (' + JSON.stringify(d && d.ticks.energy) + ')');
+        const ms = await measure(o.page);
+        ok(ms.scrollW <= 1280 && ms.hostScrollW <= ms.hostW && ms.small.length === 0, 'ticks, stacking: no overflow, no small text ' + JSON.stringify([ms.scrollW, ms.small.slice(0, 3)]));
+        await o.page.screenshot({ path: resolve(shots, 'app-settings-discord-stacking.png'), fullPage: true });
+        // Ticked back on by hand while stacking: it stays, and the service is told to keep it.
+        await o.page.waitForTimeout(5200);
+        await o.page.locator('#pi-app [data-ping="energy"] input').click();
+        await o.page.waitForTimeout(800);
+        d = await discordOf(o.page);
+        sent = (await bodies(o.page)).filter((b) => b.path === '/plan' && b.body && b.body.plan && b.body.plan.chain).pop();
+        ok(d && d.ticks.energy.on && !d.ticks.energy.why && d.ticks.refill.on === false, 'ticks, stacking: one ticked back on by hand stays on (' + JSON.stringify(d && d.ticks.energy) + ')');
+        ok(sent && JSON.stringify(sent.body.plan.chain.keep) === '["energy"]' && sent.body.rules.energy === true, 'ticks, stacking: the service is told to keep it (' + JSON.stringify(sent && sent.body.plan.chain) + ')');
+        ok(o.errors.length === 0, 'ticks: no page errors ' + JSON.stringify(o.errors.slice(0, 2)));
+        await o.page.close();
+    }
+    // The service in use before this release: it does not say where pings go, and a failed test ping is a bare 502.
+    {
+        const o = await openApp('&discord=old');
+        await toSettings(o.page);
+        await o.page.locator('#pi-app summary', { hasText: 'Which pings the bot sends' }).click();
+        await o.page.waitForTimeout(300);
+        let d = await discordOf(o.page);
+        ok(d && d.tag === 'Working' && d.ticks.nerve && d.ticks.nerve.why === 'the service is older · no nerve pings yet' && Object.values(d.ticks).filter((x) => x.why).length === 1, 'older service: nothing looks broken; the nerve tick says the service is older (' + JSON.stringify(d && [d.tag, d.ticks.nerve]) + ')');
+        await press(o.page, 'Send a test ping');
+        d = await discordOf(o.page);
+        ok(d && d.tag === 'Not reaching you' && d.state === 'test_failed' && d.msgs.includes('The test ping did not arrive. What to try is above.') && !/answered 502/.test(d.text), 'older service: a failed test ping says what to try, not "answered 502" (' + JSON.stringify(d && [d.tag, d.msgs]) + ')');
+        ok(d && d.steps.length === 5 && /^Then press Disconnect here and Log in with Discord again/.test(d.steps[3]) && d.steps[4] === 'Then press Send a test ping.', 'older service: the steps end with Disconnect and Log in with Discord again (' + (d && d.steps.slice(3).join(' | ')) + ')');
+        const m = await measure(o.page);
+        ok(m.scrollW <= 1280 && m.hostScrollW <= m.hostW && m.small.length === 0 && m.covered.length === 0, 'older service: no overflow, no small text, every control on top ' + JSON.stringify([m.scrollW, m.small.slice(0, 3), m.covered.slice(0, 3)]));
+        await o.page.screenshot({ path: resolve(shots, 'app-settings-discord-old.png'), fullPage: true });
+        // The report says it (his held only "discord: true"): the state, the failed test ping, the line in the log.
+        const [dl] = await Promise.all([o.page.waitForEvent('download'), o.page.locator('#pi-app button', { hasText: 'Download report (.zip)' }).click()]);
+        const zip = readZip(new Uint8Array(await readFile(await dl.path()))).files;
+        const short = (zip['report.txt'].match(/ {2}Discord pings: [^\n]*/) || [''])[0];
+        ok(/Discord pings: Not reaching you \(test_failed\) · logged in with Discord · last sync [\d-]+ [\d:]+ UTC · an older service: it does not say where pings go · last test ping failed \(unknown\) · ticked off: chain/.test(short), 'report: IN SHORT says the Discord state (' + short.trim() + ')');
+        const sd = JSON.parse(zip['state.json']).discord;
+        ok(sd && sd.connected && sd.state === 'test_failed' && sd.delivery === null && sd.serviceTells === false && sd.lastTest && sd.lastTest.http === 502 && sd.ticks.nerve.on === true && sd.keySent === true, 'report: state.json carries the Discord state (' + JSON.stringify(sd && { state: sd.state, lastTest: sd.lastTest && sd.lastTest.reason, tells: sd.serviceTells, keySent: sd.keySent }) + ')');
+        ok(/ERROR \[[^\]]*\] Discord test ping failed: unknown - Your Worker answered 502\. \[http 502\]/.test(zip['problem-log.txt']), 'report: the failed test ping is in the problem log (' + (zip['problem-log.txt'].match(/[^\n]*Discord test ping[^\n]*/) || [''])[0].slice(20) + ')');
+        const whole = Object.values(zip).join(' ');
+        ok(['harness0secret', 'DiscordFriend77', '112233445566778899', 'workers.dev'].every((x) => !whole.includes(x)), 'report: no secret, Discord name, Discord id or service address in any file');
+        ok(o.errors.length === 0, 'older service: no page errors ' + JSON.stringify(o.errors.slice(0, 2)));
+        await o.page.close();
+    }
+}
+
 // Overdosed (the owner, 2026-10-03): Torn answers happy 0, energy 0 and a day of drug cooldown. Home says
 // "Overdosed · fly to Switzerland" with no training steps (it said "Train DEX × 6"); the strip says it too.
 if (!only.length || only.includes('overdose')) {
@@ -685,6 +812,83 @@ if (!only.length || only.includes('flying')) {
     ok(m.text.includes('No key yet') && m.text.includes('Data storage'), 'no key: Settings with the ToS table');
     await p2.screenshot({ path: resolve(shots, 'app-nokey.png'), fullPage: true });
     await p2.close();
+}
+
+// Round 9 (the owner's pick 4B): the tab's title. Plain "Pumping Iron" until the last ten minutes before the next step,
+// then its countdown, then "Now". (On Torn's pages we never touch the title: test/r12-tab-title.test.js.)
+{
+    // The harness's Xanax cooldown ends about 3 minutes from its clock: inside the last ten minutes.
+    const soon = await openApp('');
+    await soon.page.waitForTimeout(1500);
+    const t1 = await soon.page.title();
+    ok(/^\d:\d\d · Xanax #1 · Pumping Iron$/.test(t1), 'tab title, a step in under ten minutes: its countdown and the step (' + t1 + ')');
+    await soon.page.close();
+    const due = await openApp('&drug=0');
+    await due.page.waitForTimeout(1500);
+    const t2 = await due.page.title();
+    ok(t2 === 'Now · Xanax #1 · Pumping Iron', 'tab title, a step due: "Now" and the step (' + t2 + ')');
+    // Stacking for a chain: no step to do, the plain title.
+    await due.page.evaluate(() => {
+        window.GM_setValue('pumpingIron.v1.stackingChain', JSON.stringify({ since: Date.now() }));
+        window.__pi.refresh();
+    });
+    await due.page.waitForTimeout(1500);
+    const t3 = await due.page.title();
+    ok(t3 === 'Pumping Iron', 'tab title, stacking: plain (' + t3 + ')');
+    await due.page.close();
+}
+
+// Round 9 (the owner's pick 5B): Settings › Back up and restore. One file; the keys only with the tick; never the
+// Discord login; a restore says what the file holds, asks, replaces, and leaves the keys and the login alone.
+{
+    const { page, errors } = await openApp('');
+    const setGm = (k, v) => page.evaluate(([key, val]) => { window.GM_setValue('pumpingIron.v1.' + key, JSON.stringify(val)); window.__pi.refresh(); }, [k, v]);
+    const getGm = (k) => page.evaluate((key) => { const v = _store['pumpingIron.v1.' + key]; return v === undefined ? null : JSON.parse(v); }, k);
+    await setGm('settings', { timeFormat: 'local', oneOffs: { 77: true } });
+    await setGm('worker', { base: 'https://worker.example', secret: 'DISCORD-LOGIN-SECRET' });
+    await page.evaluate(() => { location.hash = 'settings'; });
+    await page.waitForTimeout(600);
+    let m = await measure(page);
+    ok(['Back up and restore', 'Download backup', 'Restore from a file…', 'Put my API keys in the file', 'anyone with the file can use them', 'In the file', 'Last backup', 'never'].every((w) => m.text.includes(w)), 'backup: the card, with what is in the file and what never is');
+    const keys = await page.evaluate(() => Object.entries(_store).filter(([k]) => /Key$/.test(k)).map(([, v]) => String(JSON.parse(v))).filter((v) => v && v.length >= 8));
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.locator('#pi-app button', { hasText: 'Download backup' }).click()]);
+    const text = String(await readFile(await dl.path()));
+    const file = JSON.parse(text);
+    ok(/^pumping-iron-backup-\d{8}-\d{4}\.json$/.test(dl.suggestedFilename()), 'backup: the file is named ' + dl.suggestedFilename());
+    ok(file.app === 'torn-pumping-iron' && file.gm.settings.timeFormat === 'local' && file.gm.settings.oneOffs['77'] === true && file.gm.plan && file.savedPlan && file.savedPlan.rev > 0 && file.savedPlan.days > 0, 'backup: the settings, the ticks on the Ledger, the build and the whole saved plan are in it (' + Object.keys(file.gm).join(',') + ' | ' + Object.keys(file.page).join(',') + ' | ' + (file.savedPlan ? Object.keys(file.savedPlan).slice(0, 8).join(',') : 'no saved plan') + ')');
+    ok(keys.length > 0 && keys.every((k) => !text.includes(k)) && !text.includes('DISCORD-LOGIN-SECRET') && !text.includes('worker.example') && !('keys' in file), 'backup: no API key and no Discord login in the file (' + keys.length + ' keys checked)');
+    await page.waitForTimeout(300);
+    m = await measure(page);
+    ok(m.text.includes('Saved pumping-iron-backup-') && !/Last backup\s*never/.test(m.text), 'backup: saved, and "Last backup" says when');
+    // With the tick: the keys go in, the name says so, the tick goes off again.
+    await page.locator('#pi-app label.check', { hasText: 'Put my API keys in the file' }).locator('input').check();
+    const [dl2] = await Promise.all([page.waitForEvent('download'), page.locator('#pi-app button', { hasText: 'Download backup' }).click()]);
+    const text2 = String(await readFile(await dl2.path()));
+    ok(/-WITH-KEYS\.json$/.test(dl2.suggestedFilename()) && keys.some((k) => text2.includes(k)) && !text2.includes('DISCORD-LOGIN-SECRET'), 'backup with the tick: the keys are in, the name says so, the Discord login still is not (' + dl2.suggestedFilename() + ')');
+    await page.waitForTimeout(300);
+    const ticked = await page.evaluate(() => document.getElementById('pi-app').shadowRoot.querySelector('[data-card="backup"] input[type="checkbox"]').checked);
+    ok(!ticked, 'backup with the tick: the tick is off again for the next one');
+    // A file that is not ours is refused, and nothing changes.
+    await page.locator('#pi-app input[aria-label="Backup file"]').setInputFiles({ name: 'other.json', mimeType: 'application/json', buffer: Buffer.from('{"app":"something else"}') });
+    await page.waitForTimeout(300);
+    m = await measure(page);
+    ok(m.text.includes('That file is not a Pumping Iron backup.') && !m.text.includes('Replace what this browser has'), 'restore: a file that is not ours is refused');
+    // What changed since the backup: the time format, a ledger tick; the keys and the login must survive the restore.
+    await setGm('settings', { timeFormat: 'torn', oneOffs: {} });
+    const keyBefore = await getGm('apiKey');
+    await page.locator('#pi-app input[aria-label="Backup file"]').setInputFiles({ name: dl.suggestedFilename(), mimeType: 'application/json', buffer: Buffer.from(text) });
+    await page.waitForTimeout(400);
+    m = await measure(page);
+    ok(/Replace what this browser has with the backup of \w{3} \d+ \w{3}\?/.test(m.text) && m.text.includes('settings, your build and plan') && m.text.includes('Your keys here stay as they are.'), 'restore: it says the backup’s day and what it holds, and asks first');
+    ok((await getGm('settings')).timeFormat === 'torn', 'restore: nothing is replaced before you say so');
+    await page.screenshot({ path: resolve(shots, 'app-settings-backup.png'), fullPage: true });
+    await page.locator('#pi-app button', { hasText: 'Replace with this backup' }).click();
+    await page.waitForFunction(() => /Restored the backup of/.test(document.getElementById('pi-app').shadowRoot.textContent), null, { timeout: 8000 });
+    const after = await page.evaluate(() => { const g = (k) => { const v = _store['pumpingIron.v1.' + k]; return v === undefined ? null : JSON.parse(v); }; return { settings: g('settings'), apiKey: g('apiKey'), worker: g('worker') }; });
+    ok(after.settings.timeFormat === 'local' && after.settings.oneOffs['77'] === true, 'restore: the settings and the ledger ticks are the backup’s (' + JSON.stringify(after.settings).slice(0, 80) + ')');
+    ok(after.apiKey === keyBefore && after.worker && after.worker.secret === 'DISCORD-LOGIN-SECRET', 'restore: the keys here and the Discord login are untouched');
+    ok(errors.length === 0, 'backup: no page errors ' + JSON.stringify(errors.slice(0, 2)));
+    await page.close();
 }
 
 await browser.close();

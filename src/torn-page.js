@@ -16,10 +16,11 @@ import { readItemRows, readBazaarCards, readItemMarketRows, readPointsRows } fro
 import { planGymPage, pageReading, nextSession, gymPanel, liveNextStep, isBoostStep, boostProgress, nextBarsSeen, agedCooldowns, boostHappyTrained, OVERDOSE_WORDS, awayWords, TRAVEL_URL, DUE_SLACK_MS } from './core/gympage.js';
 import { unlockEnergyAfter } from './core/gyms.js';
 import { needsForWindow, shownTypes, typeOf } from './ui/app/buy.js';
-import { itemContext } from './core/model.js';
+import { itemContext, boosterCapOf } from './core/model.js';
+import { stepTiles } from './core/steptiles.js';
 import { loadPrices } from './app-page.js';
 import { eyeRideChain } from './eye-page.js';
-import { needList, fillCheapest, npcListing, SOURCE_BAZAAR, SOURCE_ITEM_MARKET, SOURCE_POINTS } from './core/market.js';
+import { needList, fillCheapest, npcListing, WINDOWS, SOURCE_BAZAAR, SOURCE_ITEM_MARKET, SOURCE_POINTS } from './core/market.js';
 import { panelStep } from './ui/app/home.js';
 import { trainsText } from './ui/app/common.js';
 import { tornClock } from './core/bars.js';
@@ -92,6 +93,50 @@ export function stepAction(step, page, boost = null) {
     return null;
 }
 
+/** The Buy list's rows for its window (the Buy tab's own list: what the plan takes, less what you hold). */
+function buyNeeds(m, s = getSettings(), statics = get(K.userStatic, {}) || {}) {
+    return needList(needsForWindow(m, m.compare, { ...getPlan(), strategy: m.strategy || getPlan().strategy }, s.buyWindow || 'three', m.planDays || s.horizonDays), statics.inventory || {});
+}
+
+/**
+ * The step's items as tiles (round 9, the owner's pick 1B; core/steptiles.js): would a use work now, how many you
+ * hold, and what the Buy list's window still needs. Read from the bars, the cooldowns and Torn's answer about what you
+ * hold: nothing is used for you. Show goes to Torn's items page, or on it to the item's own row.
+ */
+function stepTilesView(m, step, rest, reads, boost, page, now) {
+    const s = getSettings();
+    const statics = get(K.userStatic, {}) || {};
+    let needs = [];
+    try {
+        needs = buyNeeds(m, s, statics);
+    } catch (e) {
+        needs = [];
+    }
+    const t = stepTiles(step, {
+        inventory: statics.inventory || null,
+        energy: reads.energy ? { current: reads.energy.current, max: reads.energy.max } : null,
+        drugLeft: reads.drugLeft,
+        boosterLeft: reads.boosterLeft,
+        capH: boosterCapOf(m.pc || {}, s),
+        cdMult: (m.pc && m.pc.perks && m.pc.perks.consumableCdMult) || 1,
+        needs,
+        windowDays: WINDOWS[s.buyWindow || 'three'] || 1,
+        rest,
+        done: boost ? { boosters: boost.eaten, drug: boost.drugIn } : {},
+        boost: isBoostStep(step),
+        now,
+    });
+    return t ? { ...t, href: page === PAGE_ITEMS ? null : itemsUrl() } : null;
+}
+
+/** On Torn's items page: scroll to the item's own row (the tile's Show). False when it isn't on the open tab. */
+function showItemRow(id) {
+    const row = readItemRows().find((r) => r.itemId === Number(id));
+    if (!row || !row.el || typeof row.el.scrollIntoView !== 'function') return false;
+    row.el.scrollIntoView({ block: 'center', behavior: getSettings().motion === false ? 'auto' : 'smooth' });
+    return true;
+}
+
 function overlayView(m, page) {
     const s = getSettings();
     const relevant = [PAGE_GYM, PAGE_ITEMS, PAGE_BAZAAR, PAGE_ITEM_MARKET, PAGE_POINTS].includes(page);
@@ -149,6 +194,8 @@ function overlayView(m, page) {
         if (next.strict && next.warnAt !== null && now >= next.warnAt) v.warn = 'Strict: ' + (next.note || 'on the tick');
         // The one button follows the action of the moment; with nothing due it is the webpage's alone.
         v.action = ps.acting ? stepAction(next, page, boost) : null;
+        const tiles = stepTilesView(m, next, live.rest, reads, boost, page, now);
+        if (tiles) v.tiles = tiles;
     } else {
         v.pillText = 'Done for today';
         v.cardStep = 'Nothing left today';
@@ -385,7 +432,7 @@ function chosenFills(m) {
     const s = getSettings();
     const statics = get(K.userStatic, {}) || {};
     const prices = getPrices();
-    const needs = needList(needsForWindow(m, m.compare, { ...getPlan(), strategy: m.strategy || getPlan().strategy }, s.buyWindow || 'three', m.planDays || s.horizonDays), statics.inventory || {});
+    const needs = buyNeeds(m, s, statics);
     // The same list as the Buy tab: its type ticks, and a city shop you ticked joins the listings.
     const show = shownTypes(s, [...new Set(needs.map((n) => typeOf(n.id)))]);
     const ic = itemContext(statics, s, m.now);
@@ -484,6 +531,8 @@ export function bootTornPage() {
         avoidColumn: eyeColumn,
         // Fill N on the gym page: types into Torn's reps box on your click (never TRAIN).
         onFill: fillNow,
+        // A tile's Show on the items page: scrolls to Torn's own row (on other pages it is a link to the items page).
+        onShow: showItemRow,
         // Torn Eye's chain counter rides on top of the panel (round 8): the panel starts under it.
         ride: eyeRideChain,
     });
@@ -504,6 +553,9 @@ export function bootTornPage() {
             lastView = vs;
             tp.overlay.update(view);
         }
+        // A tile's cooldown that ends before the next model: the view is worked out again then ("Ready").
+        const ends = view.tiles ? view.tiles.tiles.map((t) => t.cdAt).filter(Boolean) : [];
+        tp.tileDue = ends.length ? Math.min(...ends) : null;
     };
     // The paused card follows where Torn Trading is still seen (another tab reloaded or closed) without a new model.
     const showPaused = (m) => {
@@ -547,6 +599,10 @@ export function bootTornPage() {
     setInterval(() => {
         tp.overlay.tick();
         if (isVisible() && isPaused()) showPaused(tp.model);
+        if (tp.tileDue && Date.now() >= tp.tileDue && isVisible() && !isPaused()) {
+            tp.tileDue = null;
+            tp.showView(tp.model);
+        }
         // Our marks follow Torn's page (lists that load or grow, images): once a second they are placed again, and a
         // listing Torn replaced is marked again on the new one (nothing of ours is inside Torn's page to notice it).
         if (isVisible() && !isPaused() && marksCount()) {

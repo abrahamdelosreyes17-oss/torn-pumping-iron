@@ -10,6 +10,7 @@
 
 import { logAsText } from './errlog.js';
 import { ledgerBooking } from './ledger.js';
+import { discordShort } from './discord-state.js';
 
 export const REPORT_KIND = 'torn-pumping-iron-report';
 
@@ -116,7 +117,7 @@ export function planSummary(saved) {
  * @param {string} r.expected
  * @param {Array<{name: string, data: Uint8Array}>} r.shots
  * @param {object[]} r.log - the problem log
- * @param {object} r.state - {version, build, settings, plan, runs, diagnostics, keys: which are saved (yes/no only)}
+ * @param {object} r.state - {version, build, settings, plan, runs, diagnostics, keys: which are saved (yes/no only), discord: core/discord-state.js discordReport()}
  * @param {object|null} r.player - {stats, happyMax, energyMax, gymId, unlocked, build, perks: {mult, lines, unknown}, job}
  * @param {object|null} r.saved - the whole saved plan (summarised here)
  * @param {object[]} [r.learning] - the learning export's files (core/learndata.js exportFiles): gym samples, gym log, fights, model
@@ -147,13 +148,15 @@ export function reportFiles({ happened = '', expected = '', shots = [], log = []
         player ? '  happy maximum ' + fmt(player.happyMax || 0) + ' · energy maximum ' + (player.energyMax || '?') + ' · gym ' + (player.gymId || '?') + ' · build ' + (player.build || '?') : null,
         saved ? '  plan: ' + saved.months + (saved.months === 1 ? ' month, ' : ' months, ') + (saved.rec ? saved.rec.recommended : '?') + ' recommended' : '  plan: none saved',
         (state.runs || []).length ? '  last plan run: ' + state.runs.slice(-1).map((x) => (x.kind === 'replan' ? 'Recalibrate' : 'Create plan') + ' ' + (x.months || '?') + (x.months === 1 ? ' month, ' : ' months, ') + (x.ms / 1000).toFixed(1) + ' s' + (x.hiddenMs > 0 ? ' (' + (x.hiddenMs / 1000).toFixed(1) + ' s of it with the tab not in front)' : '') + (x.ok ? '' : ' - ' + (x.error || 'failed')))[0] : null,
+        // A friend's report said only "discord: true" while Discord refused every DM: the state is said here.
+        state.discord ? '  Discord pings: ' + discordShort(state.discord) : null,
         '',
         'ATTACHED',
         shots.length ? shots.map((s, i) => '  screenshots/' + (i + 1) + '-' + safe(s.name)).join('\n') : '  no screenshots',
         '  problem-log.txt - ' + errors.length + ' errors and ' + (log.length - errors.length) + ' other lines, the last 7 days, every tab',
         '  player.json - stats, happy and energy maximum, gym, gyms unlocked, build, the perks read (and the lines not understood)',
         '  plan.json - the saved plan in short: every plan\'s stats and cost, the path, what it was made from',
-        '  state.json - version, settings (no keys), the last plan runs with their time, diagnostics',
+        '  state.json - version, settings (no keys), the last plan runs with their time, diagnostics, Discord pings (what the service said, the ping ticks; no login, no Discord name)',
         '  stats-history.json - your stats at each day\'s last read',
         '  learning/ - your trains from Torn\'s log, the sessions the app saw, fights, what it learned',
         '  money-log-fields.json - your money log by log type: titles and the NAMES of the fields, never an amount',
@@ -189,6 +192,6 @@ export function reportIncludes({ shots = 0, log = [], player = null, saved = nul
         gymLog ? 'Your trains from Torn’s log (' + gymLog + ' lines) and what the app learned' : 'What the app learned from your trains',
         moneyTypes ? 'Your money log by type (' + moneyTypes + ' types): titles and field names only, never an amount' : 'Money log fields: none read (needs the Full key)',
         ledgerLines ? 'Your books by account (' + ledgerLines + ' lines): counts and field names only, never an amount' : null,
-        'Version and settings: no API key, no player id or name',
+        'Version, settings and the state of Discord pings: no API key, no player id or name, no Discord login or name',
     ].filter(Boolean);
 }

@@ -136,9 +136,9 @@ function optionsOf(i) {
     return out;
 }
 
-async function saveSettings(env, user, st) {
-    const { kinds, mute, delivery, quiet, perHour, perDay, warPerHour, warLead } = st;
-    const text = JSON.stringify({ kinds, mute, delivery, quiet, perHour, perDay, warPerHour, warLead });
+export async function saveSettings(env, user, st) {
+    const { kinds, kindsAt, mute, delivery, quiet, perHour, perDay, warPerHour, warLead } = st;
+    const text = JSON.stringify({ kinds, kindsAt, mute, delivery, quiet, perHour, perDay, warPerHour, warLead });
     await env.DB.prepare(Q.userSettings).bind(text, user.id).run();
     user.settings = text;
 }
@@ -176,7 +176,7 @@ export function settingsText(user, env) {
     ].join('\n');
 }
 
-export async function settingsCmd(user, i, env) {
+export async function settingsCmd(user, i, env, fetchImpl, ctx, nowS = Math.floor(Date.now() / 1000)) {
     const o = optionsOf(i);
     const st = settingsOf(user);
     const changed = [];
@@ -195,6 +195,8 @@ export async function settingsCmd(user, i, env) {
         if (!KINDS[o.kind]) return reply('Unknown ping kind.');
         if (o.on === undefined) return reply('Say `on:True` or `on:False` with the kind.');
         st.kinds[o.kind] = Boolean(o.on);
+        // When: the userscript's ticks take it over at its next sync, unless a tick there was changed later.
+        st.kindsAt[o.kind] = nowS;
         changed.push(KINDS[o.kind] + (o.on ? ' on' : ' off'));
     }
     if (o.per_hour !== undefined) {

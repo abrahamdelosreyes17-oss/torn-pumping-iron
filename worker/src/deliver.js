@@ -16,7 +16,7 @@ export const DM_RETRY_S = 6 * 3600;
 /** Discord allows 5 button rows: one per ping, so 5 pings a message. */
 export const PER_MESSAGE = 5;
 
-export const KIND_WORD = { drug: 'Drug', drugready: 'Drug', booster: 'Booster', energy: 'Energy', refill: 'Refill', jump: 'Jump', step: 'Jump', landed: 'Travel', price: 'Price', watch: 'Watch', war: 'War', chain: 'Chain', stale: 'Plan', test: 'Test' };
+export const KIND_WORD = { drug: 'Drug', drugready: 'Drug', booster: 'Booster', energy: 'Energy', nerve: 'Nerve', refill: 'Refill', jump: 'Jump', step: 'Jump', landed: 'Travel', price: 'Price', watch: 'Watch', war: 'War', chain: 'Chain', stale: 'Plan', test: 'Test' };
 
 export function bodyOf(row) {
     return typeof row.body === 'string' ? parse(row.body, {}) : row.body || {};
@@ -140,30 +140,67 @@ function dmPossible(env, user) {
 }
 
 /**
- * Send one message for these rows.
- * @returns {Promise<{ok: true, via, channel, message} | {ok: false, retry?: boolean}>}
+ * Where this user's pings go now, for the sync answer (the browser says it in words): `via` 'dm', 'channel' (the
+ * webhook) or null; `reason` why nothing can arrive ('dm_refused': Discord refused the bot's last DM and there is
+ * no webhook; 'no_route': no linked account and no webhook); `dmRefusedAt` the last refused DM (unix s) until one
+ * arrives again; `webhook` whether a channel webhook is saved.
  */
-export async function deliver(env, fetchImpl, db, user, rows, nowS) {
+export function deliveryState(env, user) {
+    const dm = dmPossible(env, user) && settingsOf(user).delivery !== 'channel';
+    const refusedAt = dmPossible(env, user) && Number(user.dm_fail) > 0 ? Number(user.dm_fail) : null;
+    const hook = Boolean(user.webhook);
+    const via = dm && !refusedAt ? 'dm' : hook ? 'channel' : null;
+    const reason = via ? null : dm && refusedAt ? 'dm_refused' : 'no_route';
+    return { ok: via !== null, via, reason, dmRefusedAt: refusedAt, webhook: hook };
+}
+
+/** Is the bot resting DMs to this user (a DM was refused less than DM_RETRY_S ago)? */
+export function dmResting(user, nowS) {
+    return Number(user.dm_fail) > nowS - DM_RETRY_S;
+}
+
+/**
+ * Send one message for these rows.
+ *
+ * A failure says why (`why`), so a test ping can tell the browser: 'dm_refused' (Discord refused the bot's DM:
+ * 50007, 403 or 404, and there is no webhook to fall back on), 'discord_error' (Discord answered another error;
+ * `status` and `code` are Discord's), 'no_route' (nothing to deliver through: no DM possible now, no webhook).
+ * `dmRefused: true` rides along whenever the DM was refused in this call, also when the webhook then delivered.
+ *
+ * @param {object} [o] - {force: true} tries the DM even inside the rest after a refused one (the test ping)
+ * @returns {Promise<{ok: true, via, channel, message, dmRefused?} | {ok: false, why, retry?, bad?, status?, code?, dmRefused?}>}
+ */
+export async function deliver(env, fetchImpl, db, user, rows, nowS, { force = false } = {}) {
     const st = settingsOf(user);
-    const tryDm = dmPossible(env, user) && st.delivery !== 'channel' && !(Number(user.dm_fail) > nowS - DM_RETRY_S);
+    const tryDm = dmPossible(env, user) && st.delivery !== 'channel' && (force || !dmResting(user, nowS));
+    let blocked = false;
     if (tryDm) {
         let ch = user.dm_channel || null;
-        let blocked = false;
+        const other = (r) => ({ ok: false, retry: true, why: 'discord_error', status: r.status, code: r.code });
         if (!ch) {
             const r = await discordCall(env, fetchImpl, db, { url: DISCORD_API + '/users/@me/channels', body: { recipient_id: String(user.discord_id) }, route: 'dm-open:' + user.discord_id });
             if (r.ok && r.data && r.data.id) {
                 ch = String(r.data.id);
                 user.dm_channel = ch;
-                if (!dry(env)) await db.prepare(Q.userDm).bind(ch, 0, user.id).run();
+                // After a refused DM the channel is saved with the message's outcome below (one write, and the
+                // refusal stays on record until a DM really arrives: opening the channel proves nothing).
+                if (!dry(env) && !Number(user.dm_fail)) await db.prepare(Q.userDm).bind(ch, 0, user.id).run();
             } else if (r.code === CANNOT_DM || r.status === 403) blocked = true;
-            else if (!user.webhook) return { ok: false, retry: true };
+            else if (!user.webhook) return other(r);
         }
         if (ch) {
             const r = await discordCall(env, fetchImpl, db, { url: DISCORD_API + '/channels/' + ch + '/messages', body: alertMessage(rows), route: 'dm:' + user.discord_id });
-            if (r.ok) return { ok: true, via: dry(env) ? 'dry' : 'dm', channel: ch, message: r.data && r.data.id ? String(r.data.id) : null };
-            if (r.status === 400) return { ok: false, bad: true };
+            if (r.ok) {
+                // A DM that arrived ends the rest (and what the sync answer says about refused DMs).
+                if (Number(user.dm_fail) && !dry(env)) {
+                    user.dm_fail = 0;
+                    await db.prepare(Q.userDm).bind(ch, 0, user.id).run();
+                }
+                return { ok: true, via: dry(env) ? 'dry' : 'dm', channel: ch, message: r.data && r.data.id ? String(r.data.id) : null };
+            }
+            if (r.status === 400) return { ok: false, bad: true, why: 'discord_error', status: r.status, code: r.code };
             if (r.code === CANNOT_DM || r.status === 403 || r.status === 404) blocked = true;
-            else if (!user.webhook) return { ok: false, retry: true };
+            else if (!user.webhook) return other(r);
         }
         if (blocked) {
             user.dm_channel = null;
@@ -171,13 +208,16 @@ export async function deliver(env, fetchImpl, db, user, rows, nowS) {
             await db.prepare(Q.userDm).bind(null, nowS, user.id).run();
         }
     }
+    const dmRefused = blocked ? { dmRefused: true } : {};
     if (user.webhook) {
         const r = await discordCall(env, fetchImpl, db, { url: hookUrl(user.webhook, '', { wait: 'true' }), body: webhookMessage(rows, user.discord_id), bot: false, route: 'hook' });
-        if (r.ok) return { ok: true, via: dry(env) ? 'dry' : 'hook', channel: null, message: r.data && r.data.id ? String(r.data.id) : null };
-        if (r.status === 400) return { ok: false, bad: true };
-        return { ok: false, retry: true };
+        if (r.ok) return { ok: true, via: dry(env) ? 'dry' : 'hook', channel: null, message: r.data && r.data.id ? String(r.data.id) : null, ...dmRefused };
+        if (r.status === 400) return { ok: false, bad: true, why: 'discord_error', status: r.status, code: r.code, ...dmRefused };
+        return { ok: false, retry: true, why: 'discord_error', status: r.status, code: r.code, ...dmRefused };
     }
-    return { ok: false };
+    // Refused now, or still resting after a refusal: the DM is the only way and Discord does not take it.
+    if (blocked || (dmPossible(env, user) && st.delivery !== 'channel' && dmResting(user, nowS))) return { ok: false, why: 'dm_refused', dmRefused: true };
+    return { ok: false, why: 'no_route' };
 }
 
 /** Edit a message already sent, from its rows (all with the same message id). */

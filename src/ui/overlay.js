@@ -98,6 +98,26 @@ export const OVERLAY_CSS = `
 .note { font-size: 12px; color: #c5cad0; }
 .cta:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .warn { color: #e8a33d; font-size: 12px; font-weight: 700; }
+/* Round 9 (the owner's pick 1B): the step's items as tiles. Greyed when a use would not work or would waste something;
+   Show goes to Torn's own row (nothing here uses an item). */
+.tiles { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid #262a2e; }
+.tile { --t: #9aa1a8; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; align-items: center; padding: 8px 10px; border-radius: 8px; background: #181b1e; border: 1px solid color-mix(in srgb, var(--t) 55%, #2c3136); }
+.tile.t-green { --t: #3fbf5a; }
+.tile.t-amber { --t: #e8a33d; }
+.tile.t-red { --t: #ff6b5e; }
+.tile .nm { grid-column: 1; font-weight: 700; color: #fff; overflow-wrap: anywhere; }
+.tile .st { grid-column: 1; font-size: 12px; font-weight: 600; color: var(--t); font-variant-numeric: tabular-nums; }
+.tile .hold { grid-column: 1; font-size: 12px; color: #9aa1a8; }
+.tile .hold.lowc { color: #ff6b5e; font-weight: 600; }
+.tile .tb { grid-row: 1 / span 3; grid-column: 2; display: block; height: 30px; padding: 0 12px; border-radius: 6px; border: 1px solid #3a4046; background: transparent; color: #e3e5e8; font: 600 12px/28px 'Segoe UI', system-ui, sans-serif; white-space: nowrap; text-decoration: none; cursor: pointer; }
+.tile .tb.go { background: #efebe2; color: #15171a; border-color: #efebe2; font-weight: 700; }
+.tile .tb:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.tile.off .nm, .tile.off .st { opacity: .6; }
+.tile.small { padding: 5px 10px; background: transparent; border-color: #2c3136; }
+.tile.small .nm { font-weight: 600; font-size: 12px; color: #c5cad0; }
+.wrap.fit-narrow .tile { padding: 6px 8px; }
+.wrap.fit-narrow .tile .st, .wrap.fit-narrow .tile .hold { font-size: 11px; }
+.wrap.fit-narrow .tile .tb { padding: 0 8px; }
 /* Sized to the free space beside Torn's page (fitTier): narrower with smaller type, then one tag, then the smallest. */
 .wrap.fit-narrow .body { padding: 8px 10px 10px; gap: 6px; }
 .wrap.fit-narrow .sub, .wrap.fit-narrow .later, .wrap.fit-narrow .prail .pr1, .wrap.fit-narrow .row2 { font-size: 11px; }
@@ -273,16 +293,18 @@ export class Overlay {
      * @param {function} [o.dockIfShared] - () => Element|null: dock under it only when it sits in the panel's margin (the profile card)
      * @param {function} [o.avoidColumn] - () => {left, right}|null: a column it never shares (Torn Eye's list tags)
      * @param {function} [o.onFill] - the gym page's Fill N (types into Torn's reps box)
+     * @param {function} [o.onShow] - (itemId) => boolean: on Torn's items page, scroll to the item's own row (false: not on the open tab)
      * @param {function} [o.ride] - (spot: {x, y, width}|null) => px: a card that rides on top of the panel (Torn Eye's
      *   chain counter) is told where the panel would sit and answers the height to leave for it; null: the panel is
      *   folded under a card, off, or in the corner
      */
-    constructor({ onOpen, loadPos, savePos, loadCollapsed, saveCollapsed, pageRect, avoidRect = () => null, dockTo = () => null, dockIfShared = () => null, avoidColumn = () => null, onFill = () => {}, ride = null }) {
+    constructor({ onOpen, loadPos, savePos, loadCollapsed, saveCollapsed, pageRect, avoidRect = () => null, dockTo = () => null, dockIfShared = () => null, avoidColumn = () => null, onFill = () => {}, onShow = () => false, ride = null }) {
         this.onOpen = onOpen;
         this.ride = ride;
         this.lift = 0;
         this.rideSpot = null;
         this.onFill = onFill;
+        this.onShow = onShow;
         this.loadPos = loadPos;
         this.savePos = savePos;
         this.loadCollapsed = loadCollapsed;
@@ -516,6 +538,8 @@ export class Overlay {
      *   ring: there is an action to do now (the plate's one ring; never while paused); still: Settings › Animations
      *   is off (the ring is drawn, not moving)
      *   checklist: the step's actions in order [{text, done, next}], as a small rail (next: the one to do now)
+     *   tiles: the step's items (core/steptiles.js) {tiles:[{id, name, status, cdAt, after, tone, ok, show, hold, low, tab}],
+     *   warn, later:{text, hold}|null, href}: href is Torn's items page (none when you are on it: Show scrolls to the row)
      */
     update(v) {
         const wasOff = this.off;
@@ -548,6 +572,7 @@ export class Overlay {
         if (v.checklist && v.checklist.length) kids.push(h('div', { class: 'prail' }, v.checklist.map((c) => h('div', { class: 'pr1' + (c.done ? ' done' : c.next ? ' now' : '') }, [h('span', { class: 'pn' }, [c.done ? tickMark() : h('span', { class: 'pd' })]), h('span', { text: c.text })]))));
         if (v.notes) for (const n of v.notes) kids.push(h('span', { class: 'note', text: n }));
         if (v.warn) kids.push(h('span', { class: 'warn', text: v.warn }));
+        if (v.tiles && v.tiles.tiles && v.tiles.tiles.length) kids.push(this.tilesEl(v.tiles, now));
         if (v.seen) {
             const s = v.seen;
             if (s.count > 0) {
@@ -573,6 +598,31 @@ export class Overlay {
             this.placed = true;
             this.placeSoon();
         }
+    }
+
+    /** The step's items (round 9, pick 1B). Show is a link to Torn's items page, or on that page a scroll to the row. */
+    tilesEl(tv, now) {
+        const miss = h('span', { class: 'sub', role: 'status' });
+        const showBtn = (t) => {
+            if (!t.show) return null;
+            const cls = 'tb' + (t.ok ? ' go' : '');
+            const label = 'Show ' + t.name + ' on Torn’s items page';
+            if (tv.href) return h('a', { class: cls, href: tv.href, title: label, 'aria-label': label, text: 'Show' });
+            const onclick = (e) => {
+                e.preventDefault();
+                miss.textContent = this.onShow(t.id) ? '' : t.tab ? 'Its row isn’t on this tab: open Torn’s ' + t.tab + ' tab.' : 'Its row isn’t on this tab.';
+            };
+            return h('button', { class: cls, type: 'button', title: label, 'aria-label': label, onclick, text: 'Show' });
+        };
+        const kids = [h('span', { class: 'lbl', text: 'For this step' })];
+        for (const t of tv.tiles) {
+            const st = h('span', { class: 'st' }, [t.status, t.cdAt ? h('span', { 'data-cd': String(t.cdAt), text: countdown(t.cdAt - now) }) : null, t.after || null]);
+            kids.push(h('div', { class: 'tile t-' + t.tone + (t.ok ? '' : ' off'), 'data-item': String(t.id) }, [h('span', { class: 'nm', text: t.name }), showBtn(t), st, t.hold ? h('span', { class: 'hold' + (t.low ? ' lowc' : ''), text: t.hold }) : null]));
+        }
+        if (!tv.href) kids.push(miss);
+        if (tv.warn) kids.push(h('span', { class: 'warn', text: tv.warn }));
+        if (tv.later) kids.push(h('div', { class: 'tile small' }, [h('span', { class: 'nm', text: tv.later.text }), tv.later.hold ? h('span', { class: 'hold', text: tv.later.hold }) : null]));
+        return h('div', { class: 'tiles' }, kids);
     }
 
     /** Every second: the countdowns, and the dock follows the fight card. */

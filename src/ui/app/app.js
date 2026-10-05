@@ -8,6 +8,7 @@
 import { h, t, fill } from '../dom.js';
 import { APP_CSS } from '../styles.js';
 import { countdown } from '../../core/bars.js';
+import { tabTitle, TAB_TITLE } from '../../core/tabtitle.js';
 import { clock, statusStrip, planRunWords } from './common.js';
 import { renderHome } from './home.js';
 import { renderPlan } from './plan.js';
@@ -63,7 +64,7 @@ export class PiApp {
     }
 
     mount() {
-        document.title = 'Pumping Iron';
+        document.title = TAB_TITLE;
         // Our own page (GitHub Pages): the display font may load here, never on torn.com.
         if (!document.querySelector('link[data-pi-font]')) document.head.appendChild(h('link', { rel: 'stylesheet', href: FONT_URL, 'data-pi-font': '1' }));
         for (const el of document.body.children) if (el.id !== 'pi-app') el.style.display = 'none';
@@ -217,6 +218,9 @@ export class PiApp {
         if (!this.root) return;
         const now = Date.now();
         const ctx = this.lastTickCtx || null;
+        // Round 9 (pick 4B): the tab's title counts down the last ten minutes to the next step, then says "Now".
+        const title = tabTitle(ctx ? ctx.model : null, now, { paused: Boolean(ctx && ctx.paused) });
+        if (document.title !== title) document.title = title;
         for (const el of this.root.querySelectorAll('[data-cd]')) {
             const at = Number(el.getAttribute('data-cd'));
             el.textContent = (el.getAttribute('data-cd-prefix') || '') + countdown(at - now);

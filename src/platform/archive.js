@@ -256,6 +256,29 @@ export async function drainArchives(now = Date.now()) {
     });
 }
 
+/** As pageSet, resolving once it is stored (a restore reloads the page right after). */
+export async function pageSetDone(key, value) {
+    await loadArchives();
+    const gone = value === null || value === undefined;
+    if (mem.idb) {
+        if (gone) delete mem.page[key];
+        else mem.page[key] = value;
+        await idbUpdate(pageKey(key), () => (gone ? null : value));
+        return;
+    }
+    if (gone) gmDel(key);
+    else gmSet(key, value);
+}
+
+/** Forget the webpage's older part of some histories, resolving once it is gone (a restore writes them whole). */
+export async function clearArchivedDone(keys) {
+    await loadArchives();
+    for (const k of keys) {
+        delete mem.arch[k];
+        if (mem.idb) await idbUpdate(archKey(k), () => null);
+    }
+}
+
 /** Forget the webpage's copy of some keys (Settings › Your data). */
 export function clearArchived(keys) {
     for (const k of keys) {

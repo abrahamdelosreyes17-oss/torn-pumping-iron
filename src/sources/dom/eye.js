@@ -68,6 +68,23 @@ export function readChainBar(doc = document) {
     return { value: String(v.textContent || '').trim(), time: t ? String(t.textContent || '').trim() : '' };
 }
 
+/**
+ * The loadout you wear, as Torn's items page names it: the text of #loadoutsRoot begins "Loadout #2", then the worn
+ * gear's slots [check live: that is all that was read of its markup (2026-10-05); nothing else of it is relied on].
+ * Read only: one text is looked at. Torn's own "Loadouts" button in that box is never clicked, its menu never opened.
+ * `sig` is the box's text as one line, only to notice that it changed (another loadout, another piece).
+ * null whenever the text does not begin that way (no box, other words, a number that is no loadout's).
+ * @returns {{n: number, sig: string}|null}
+ */
+export function readLoadout(doc = document) {
+    const root = doc.getElementById('loadoutsRoot');
+    if (!root) return null;
+    const text = String(root.textContent || '').replace(/\s+/g, ' ').trim();
+    const m = text.match(/^Loadout ?# ?(\d{1,2})(?!\d)/i);
+    if (!m || !(Number(m[1]) >= 1)) return null;
+    return { n: Number(m[1]), sig: text.slice(0, 600) };
+}
+
 /** The player the mini-profile popup is showing. */
 export function miniProfileId(doc = document) {
     const root = doc.getElementById('profile-mini-root');

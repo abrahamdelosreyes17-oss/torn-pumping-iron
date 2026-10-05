@@ -10,7 +10,7 @@ import { parse } from './db.js';
  * Chain pings are for people who chain: off until switched on. `price` is
  * a price watch (/watch); `watch` is Torn Eye's watch list (players).
  */
-export const KIND_DEFAULTS = { drug: true, drugready: true, booster: true, energy: true, refill: true, jump: true, landed: true, price: true, watch: true, war: true, chain: false, stale: true };
+export const KIND_DEFAULTS = { drug: true, drugready: true, booster: true, energy: true, nerve: true, refill: true, jump: true, landed: true, price: true, watch: true, war: true, chain: false, stale: true };
 
 /**
  * warPerHour: war pings have their own cap (a war can be busy), apart from
@@ -30,12 +30,45 @@ export const PLAN_MAX_S = 48 * 3600;
 
 export function settingsOf(row) {
     const s = parse(row && row.settings, {});
-    return { ...DEFAULT_SETTINGS, ...s, kinds: { ...(s.kinds || {}) }, mute: { ...(s.mute || {}) } };
+    return { ...DEFAULT_SETTINGS, ...s, kinds: { ...(s.kinds || {}) }, kindsAt: { ...(s.kindsAt || {}) }, mute: { ...(s.mute || {}) } };
 }
 
 export function kindsOn(row) {
     const rules = parse(row && row.rules, {});
     return { ...KIND_DEFAULTS, ...(rules && typeof rules === 'object' ? rules : {}), ...settingsOf(row).kinds };
+}
+
+/** The userscript's ticks as stored in users.rules: the kinds this build knows, true or false, nothing else. */
+export function cleanRules(v) {
+    const out = {};
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return out;
+    for (const k of Object.keys(KIND_DEFAULTS)) if (typeof v[k] === 'boolean') out[k] = v[k];
+    return out;
+}
+
+/**
+ * The latest change wins. A /settings change in Discord (settings.kinds, made at settings.kindsAt) wins over the
+ * synced ticks until the userscript has seen it: its next sync says when each tick was last set by hand or taken
+ * over from Discord (`rulesAt`, unix s), and a kind whose time there is not older than the Discord change is the
+ * ticks' again. Returns true when a Discord change was dropped (the settings need saving).
+ */
+export function settleKinds(st, rulesAt) {
+    const seen = rulesAt && typeof rulesAt === 'object' && !Array.isArray(rulesAt) ? rulesAt : {};
+    let dropped = false;
+    for (const k of Object.keys(st.kinds)) {
+        if (!(k in seen) || !(Number(seen[k]) >= (Number(st.kindsAt[k]) || 0))) continue;
+        delete st.kinds[k];
+        delete st.kindsAt[k];
+        dropped = true;
+    }
+    return dropped;
+}
+
+/** The /settings changes the userscript has not taken over yet: {kind: {on, at}} for the sync answer. */
+export function kindsSet(st) {
+    const out = {};
+    for (const [k, on] of Object.entries(st.kinds)) if (k in KIND_DEFAULTS) out[k] = { on: Boolean(on), at: Number(st.kindsAt[k]) || 0 };
+    return out;
 }
 
 /** Is this kind muted by /snooze right now? */

@@ -19,7 +19,7 @@ import { makeTsClient, fetchSpyUser } from './api/tornstats.js';
 import { estimatePlayer } from './core/eye/estimate.js';
 import { forecast, respectFor, fairFight, bssOf, DEFAULT_GEAR } from './core/eye/fight.js';
 import { bandOf, chipFigures } from './core/eye/bands.js';
-import { gearSummary, myGear, mergeGear, sameGear } from './core/eye/gear.js';
+import { gearSummary, myGear, mergeGear, sameGear, loadoutOf, loadoutRows, withLoadout, loadoutLook, loadoutAnswer } from './core/eye/gear.js';
 import { lifeFromLevel, targetParams, needsRefetch, inFfRange, selectTargets, listRowAsFfs, TARGETS_PER_MINUTE, statusesToAsk, mergeStatuses, STATUS_RETRY_MS, OWN_HIT_MS, findEdges, fallbackEdges, askPlan, pickZone, nextAsk, noteAnswer, cutTargets, goneNow, dropHits, ownHits, ACTIVE_MAX, LIST_MAX, ASK_LIMIT, TARGET_ASKS_MAX } from './core/eye/targets.js';
 import { trackFlights, warBandOf } from './core/eye/war.js';
 import { makePause } from './core/slices.js';
@@ -45,6 +45,12 @@ export const WAR_ASK_KEY = 'eyeWarAsk';
 export const EYE_CHAIN_KEY = 'eyeChain';
 /** GM storage: the list the Torn Eye tab shows, in its order (core/eye/targets.js nextTable), for the attack page's Next button. */
 export const EYE_NEXT_KEY = 'eyeNext';
+/**
+ * GM storage: your loadouts as they were worn with Torn's items page open ({n: {n, at, gear: {dmg, acc, armour,
+ * dmgBonus}, weapon, armour}}, core/eye/gear.js withLoadout), for the fight card's "Your loadouts against it". Small
+ * (a few lines a loadout), and GM so the items page that learns one and the attack page that shows it agree at once.
+ */
+export const LOADOUTS_KEY = 'eyeLoadouts';
 
 const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(), timer: null, listeners: [], mem: new Map(), fc: new Map(), flushing: null, again: false, todo: new Map(), working: false, idling: false, side: null };
 
@@ -208,7 +214,7 @@ export async function clearEye() {
     await idbSet('eye', eye.cache).catch(() => {});
     set('myAttacks', null);
     pageSet(TARGETS_KEY, null);
-    for (const k of [WATCH_KEY, 'eyeWarAuto', WAR_BANDS_KEY, WAR_ASK_KEY, EYE_CHAIN_KEY, EYE_NEXT_KEY]) set(k, null);
+    for (const k of [WATCH_KEY, 'eyeWarAuto', WAR_BANDS_KEY, WAR_ASK_KEY, EYE_CHAIN_KEY, EYE_NEXT_KEY, LOADOUTS_KEY]) set(k, null);
     pageSet(WATCH_STATE_KEY, null);
     pageSet(FLIGHTS_KEY, null);
     statusRun.map = {};
@@ -315,6 +321,44 @@ async function myEquipment() {
     } catch {
         return statics.equipment || null;
     }
+}
+
+const loadoutRun = { run: null, busy: false };
+
+/**
+ * Torn's items page names the loadout you wear (round 9, sources/dom/eye.js readLoadout); called with each look at
+ * it, once a second. When core/eye/gear.js loadoutLook says so, your gear is read from the API (what you wear now:
+ * one /user/equipment call through the shared Torn client; visible tab, a key, not while Torn Trading runs) and kept
+ * under that number, onto what is stored at that moment (another tab may have learned another loadout). The same read
+ * is what the fight uses as your gear from then on. Nothing is asked of Torn's page and nothing on it is clicked.
+ * @param {{n: number, sig: string}|null} seen
+ * @param {function} [clock] - the time now (tests)
+ * @returns {Promise<boolean>} whether a loadout was kept
+ */
+export async function lookLoadout(seen, clock = Date.now) {
+    const step = loadoutLook(loadoutRun.run, seen, clock());
+    loadoutRun.run = step.run;
+    if (!step.read || loadoutRun.busy) return false;
+    if (!isVisible() || isPaused() || !getKey(K.apiKey) || get(K.apiKeyDead, false)) return false;
+    const { n, sig } = step.run;
+    loadoutRun.busy = true;
+    let eq = null;
+    try {
+        eq = await fetchEquipment(tornClient(), { fresh: true });
+    } catch {
+        // tried again later (LOADOUT_RETRY_MS)
+    } finally {
+        loadoutRun.busy = false;
+    }
+    const at = clock();
+    const done = loadoutAnswer(loadoutRun.run || step.run, sig, Boolean(eq), at);
+    loadoutRun.run = done.run;
+    if (!eq) return false;
+    // What you wear now, whatever its number: the fight's "your gear" (it was read on the webpage only, every 6 h).
+    set(K.userStatic, { ...(get(K.userStatic, {}) || {}), equipment: eq, equipmentAt: at });
+    if (done.keep) set(LOADOUTS_KEY, withLoadout(get(LOADOUTS_KEY, null), n, loadoutOf(eq), at));
+    notify();
+    return done.keep;
 }
 
 /**
@@ -553,6 +597,36 @@ export function sharedView(id, extra = {}, now = Date.now()) {
     if (!b) return null;
     const f = b.win === null ? null : { pWin: b.win / 100, keep: b.keep === null ? null : b.keep / 100, turns: null };
     return { id, name: extra.name || null, level: extra.level || null, life: extra.life || null, est: null, forecast: f, plain: null, withGear: null, gear: null, band: b.band, respect: null, ours: null, figures: chipFigures(f, null, null), source: 'war mode', status: null, pending: false, shared: { at: b.at } };
+}
+
+/**
+ * "Your loadouts against it" on the fight card (round 9, his pick B): each loadout of yours the app knows (the one on
+ * you, and the ones worn before with Torn's items page open) in the same fight that gives "With their gear": the same
+ * estimate, life, stats and seed, their seen gear, only your gear changed. The row of the one on you IS that line's
+ * fight. Only for the attack page's card (one player), never for a list.
+ * @returns {object|null} core/eye/gear.js loadoutRows(); null until their gear was seen, or when no gear of yours is known
+ */
+export function eyeLoadouts(id, extra = {}) {
+    const m = pi.model;
+    const v = eyeView(id, extra);
+    if (!v || !v.est || !v.withGear || !v.gear) return null;
+    const gThem = gearSummary(v.gear.items);
+    if (!gThem) return null;
+    const { meStats, statics, myLife, meKey } = yourSide(m);
+    const me = { ...meStats, life: myLife };
+    const target = { id, life: v.life, bss: v.est.bss, stats: v.est.stats };
+    const base = 'lo|' + id + '|' + JSON.stringify([v.est.bss, v.est.stats, v.life, myLife, meKey, v.gear.seenAt]);
+    const fight = (gear, isWorn) => {
+        if (isWorn) return v.withGear;
+        const key = base + JSON.stringify([gear.dmg, gear.acc, gear.armour, gear.dmgBonus]);
+        let f = eye.fc.get(key);
+        if (!f) {
+            f = forecast({ me, target, gearMe: gear, gearThem: gThem });
+            eye.fc.set(key, f);
+        }
+        return f;
+    };
+    return loadoutRows({ worn: loadoutOf(statics.equipment), stored: getShared(LOADOUTS_KEY, null), fight });
 }
 
 /** Work between two breaks while queued fights are worked out: a click or a scroll never waits longer. */

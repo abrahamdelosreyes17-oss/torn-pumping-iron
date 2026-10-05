@@ -18,10 +18,12 @@ import { STAT_LABEL } from '../core/gain.js';
 export const WORKER_SETUP_URL = 'https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron/blob/main/worker/SETUP.md';
 
 export class WorkerError extends Error {
-    constructor(message, { http = null } = {}) {
+    /** `reason`: the service's own word for what went wrong (a failed test ping: dm_refused, no_route, discord_error), when it gave one. */
+    constructor(message, { http = null, reason = null } = {}) {
         super(message);
         this.name = 'WorkerError';
         this.http = http;
+        this.reason = reason;
     }
 }
 
@@ -80,7 +82,7 @@ async function workerCall(base, path, { method = 'GET', secret = null, invite = 
     } catch {
         data = null;
     }
-    if (!res.ok || !data || data.ok === false) throw new WorkerError((data && data.error) || 'Your Worker answered ' + res.status + '.', { http: res.status });
+    if (!res.ok || !data || data.ok === false) throw new WorkerError((data && data.error) || 'Your Worker answered ' + res.status + '.', { http: res.status, reason: data && typeof data.reason === 'string' ? data.reason : null });
     return data;
 }
 
@@ -90,9 +92,11 @@ export function workerHealth(base, opts) {
 
 /**
  * Store the plan (and on first connect the key, webhook and Discord id).
- * @param {object} o - {base, secret, invite?, plan, tornKey?, webhookUrl?, discordId?, rules?, war?, watch?}
+ * @param {object} o - {base, secret, invite?, plan, tornKey?, webhookUrl?, discordId?, rules?, rulesAt?, war?, watch?}
+ *   `rules` are the ping ticks ({kind: bool}); `rulesAt` when each was set by hand (unix s). An older service keeps
+ *   the kinds it knows and ignores the rest.
  */
-export function workerSync({ base, secret, invite = null, plan, tornKey, webhookUrl, discordId, rules, ackIds, targets, factionId, playerId, war, watch, fetchImpl }) {
+export function workerSync({ base, secret, invite = null, plan, tornKey, webhookUrl, discordId, rules, rulesAt, ackIds, targets, factionId, playerId, war, watch, fetchImpl }) {
     const body = { plan };
     if (war !== undefined) body.war = war;
     if (watch !== undefined) body.watch = watch;
@@ -104,6 +108,7 @@ export function workerSync({ base, secret, invite = null, plan, tornKey, webhook
     if (webhookUrl !== undefined) body.webhookUrl = webhookUrl;
     if (discordId !== undefined) body.discordId = discordId;
     if (rules !== undefined) body.rules = rules;
+    if (rulesAt !== undefined) body.rulesAt = rulesAt;
     return workerCall(base, '/plan', { method: 'PUT', secret, invite, body, fetchImpl });
 }
 

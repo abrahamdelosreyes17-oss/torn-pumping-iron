@@ -20,12 +20,14 @@ export const STEP_LEAD_S = 2 * 60;
 export const ENERGY_LEAD_S = 90;
 /** The same lead for the booster cooldown. */
 export const BOOSTER_LEAD_S = 90;
+/** And for the nerve bar. */
+export const NERVE_LEAD_S = 90;
 
 const clock = (s) => new Date(s * 1000).toISOString().slice(11, 16);
 const clockS = (s) => new Date(s * 1000).toISOString().slice(11, 19);
 
 const TORN = 'https://www.torn.com/';
-export const LINKS = { items: TORN + 'item.php', gym: TORN + 'gym.php', points: TORN + 'points.php', travel: TORN + 'travelagency.php' };
+export const LINKS = { items: TORN + 'item.php', gym: TORN + 'gym.php', points: TORN + 'points.php', travel: TORN + 'travelagency.php', crimes: TORN + 'page.php?sid=crimes' };
 
 const DRUG_STEP = (s) => s.kind === 'xanax' || s.kind === 'stack' || s.kind === 'hold';
 const withTrain = (s) => s.label + (s.train ? ', then ' + s.train : '');
@@ -55,7 +57,23 @@ export function nextPrev(prev, state, nowS) {
     const zeroAt = drug === 0 ? (prev && Number(prev.drug) === 0 && prev.drugZeroAt ? Number(prev.drugZeroAt) : nowS) : null;
     // The "drug unused" nudge sent for this ready spell (one per spell, even after its sent row is cleaned up).
     const nudged = zeroAt !== null && prev && Number(prev.drugNudged) === zeroAt ? zeroAt : null;
-    return { at: nowS, drug, booster: Number(cd.booster) || 0, travel: Number(state && state.travel && state.travel.time_left) || 0, drugZeroAt: zeroAt, drugNudged: nudged, fill: energyFill(prev, state, nowS) };
+    // The nerve bar's fill, and the fill its ping went out for (one ping per fill, however long the bar stays full).
+    // A bar already full the first time it is read counts as pinged: nobody saw it fill.
+    const nfill = nerveFill(prev, state, nowS);
+    const nervePinged = nfill !== null && ((nerveFull(state) && !nerveKnown(prev)) || (prev && Number(prev.nervePinged) === nfill)) ? nfill : null;
+    return { at: nowS, drug, booster: Number(cd.booster) || 0, travel: Number(state && state.travel && state.travel.time_left) || 0, drugZeroAt: zeroAt, drugNudged: nudged, fill: energyFill(prev, state, nowS), nfill, nervePinged };
+}
+
+/**
+ * When a bar fills (or filled), on Torn's 5-minute ticks. Full now: the fill the last read expected or saw (`was`,
+ * for at most `keepS`), else the tick just past. Filling: now + Torn's full_time. Null when neither is known.
+ */
+function barFill(bar, was, nowS, keepS) {
+    const b = bar || {};
+    if (!(Number(b.maximum) > 0)) return null;
+    if (Number(b.current) >= Number(b.maximum)) return was > 0 && was <= nowS + 60 && nowS - was < keepS ? was : Math.floor(nowS / 300) * 300;
+    const inS = Number(b.full_time) || 0;
+    return inS > 0 ? Math.round((nowS + inS) / 300) * 300 : null;
 }
 
 /**
@@ -66,14 +84,25 @@ export function nextPrev(prev, state, nowS) {
  * Null when neither is known.
  */
 export function energyFill(prev, state, nowS) {
-    const e = (state && state.bars && state.bars.energy) || {};
-    if (!(Number(e.maximum) > 0)) return null;
-    if (Number(e.current) >= Number(e.maximum)) {
-        const was = prev ? Number(prev.fill) : NaN;
-        return was > 0 && was <= nowS + 60 && nowS - was < 2 * DAY_S ? was : Math.floor(nowS / 300) * 300;
-    }
-    const inS = Number(e.full_time) || 0;
-    return inS > 0 ? Math.round((nowS + inS) / 300) * 300 : null;
+    return barFill(state && state.bars && state.bars.energy, prev ? Number(prev.fill) : NaN, nowS, 2 * DAY_S);
+}
+
+/**
+ * The same for the nerve bar (the nerve ping's id). A fill is kept for as long as the bar stays full: nerve can sit
+ * full for weeks, and its ping comes once per fill, not once every time the fill is forgotten.
+ */
+export function nerveFill(prev, state, nowS) {
+    return barFill(state && state.bars && state.bars.nerve, prev ? Number(prev.nfill) : NaN, nowS, Infinity);
+}
+
+function nerveFull(state) {
+    const n = (state && state.bars && state.bars.nerve) || {};
+    return Number(n.maximum) > 0 && Number(n.current) >= Number(n.maximum);
+}
+
+/** Did the last read know the nerve bar (a read by a build with the nerve ping)? */
+function nerveKnown(prev) {
+    return Boolean(prev && Number(prev.nfill) > 0);
 }
 
 /** A read this old (or older) is not "the last read" any more: a paused key, a skipped day. Its transitions are not pinged. */
@@ -116,20 +145,36 @@ export function overdosed(plan, nowS) {
 }
 
 /**
+ * The skipped kinds the player ticked back on by hand while stacking or overdosed (the userscript's ping ticks,
+ * synced with the flag as `plan.chain.keep` / `plan.overdose.keep`): those go out all the same. An older
+ * userscript sends no `keep`, so nothing changes for it.
+ */
+export function chainKept(plan, nowS) {
+    const flag = overdosed(plan, nowS) ? plan.overdose : stackingChain(plan) ? plan.chain : null;
+    return flag && Array.isArray(flag.keep) ? flag.keep.filter((k) => CHAIN_SKIPPED.includes(k)) : [];
+}
+
+/** Is this ping silent while stacking for a chain or overdosed? ("step" pings are jump pings too.) */
+export function chainSilent(kind, kept) {
+    return CHAIN_SKIPPED.includes(kind) && !kept.includes(kind === 'step' ? 'jump' : kind);
+}
+
+/**
  * @param {object} state - Torn's answer to /v2/user?selections=bars,cooldowns,refills,travel
  * @param {object} plan - {type, steps:[{at (s), kind, label, train, strict, tick (s)}], noRefill?, chain?: {since (s)}}
  * @param {number} nowS - unix seconds
- * @param {object} [rules] - {drug, drugready, booster, energy, refill, jump, landed, stale} booleans (default all on)
+ * @param {object} [rules] - {drug, drugready, booster, energy, nerve, refill, jump, landed, stale} booleans (default all on)
  * @param {object} [ctx] - {prev: nextPrev() of the last read (+ staleFor), planStale: bool, planAge: s, planAt: s}
  * @returns {{id, kind, title, text, link, step, skip?}[]}
  */
 export function dueAlerts(state, plan, nowS, rules = {}, ctx = {}) {
-    const on = { drug: true, drugready: true, booster: true, energy: true, refill: true, jump: true, landed: true, stale: true, ...rules };
+    const on = { drug: true, drugready: true, booster: true, energy: true, nerve: true, refill: true, jump: true, landed: true, stale: true, ...rules };
     const prev = ctx.prev || null;
     // Stacking for a chain: no training steps to name (an older sync's steps included) and no energy or training kinds.
     const chain = stackingChain(plan);
     const od = overdosed(plan, nowS) ? plan.overdose : null;
-    if (od) plan = { type: 'overdose', overdose: od, steps: [], noRefill: true };
+    const kept = chainKept(plan, nowS);
+    if (od) plan = { type: 'overdose', overdose: od, steps: [], noRefill: !kept.includes('refill') };
     else if (chain) plan = { type: 'chain', chain: plan.chain, steps: [] };
     // A plan not synced for 12 h: pings from Torn's own state, strict jump steps still ahead
     // (a 1.0.1 client syncs only when its steps change), and one "out of date" per synced plan.
@@ -164,7 +209,20 @@ export function dueAlerts(state, plan, nowS, rules = {}, ctx = {}) {
         const fullAt = energyFill(prev, state, nowS);
         const hours = nowS > fullAt ? Math.floor((nowS - fullAt) / 3600) : 0;
         const inS = Math.max(1, fullAt - nowS);
-        out.push({ id: 'energy:' + Math.round(fullAt / 300) + ':' + hours, kind: 'energy', link: LINKS.gym, title: full ? 'Energy is full' : 'Energy full in ' + inS + ' s (' + clockS(fullAt) + ' TCT)', text: step && step.train ? 'Train ' + step.train : 'Train your energy so none is wasted', step: step || null, skip: false, fullAt: full ? nowS : fullAt });
+        out.push({ id: 'energy:' + Math.round(fullAt / 300) + ':' + hours, kind: 'energy', link: LINKS.gym, title: full ? 'Energy is full' : 'Energy full in ' + inS + ' s (' + clockS(fullAt) + ' TCT)', text: step && step.train ? 'Train ' + step.train : chain && !od ? 'You are stacking for a chain (this ping is ticked on in Pumping Iron)' : 'Train your energy so none is wasted', step: step || null, skip: false, fullAt: full ? nowS : fullAt });
+    }
+
+    // Nerve full (the owner: "ping when nerve is full"), ahead of time like energy. One ping per fill and no hourly
+    // repeat: prev.nervePinged remembers the fill (its sent row is cleaned up after 2 days; nerve can sit full for
+    // weeks). A bar already full at the first read is not pinged: only a fill that was seen coming.
+    const n = bars.nerve || {};
+    const nFull = nerveFull(state);
+    const nFullIn = nFull ? 0 : Number(n.full_time) || 0;
+    if (on.nerve && Number(n.maximum) > 0 && (nFull ? nerveKnown(prev) : nFullIn > 0 && nFullIn <= NERVE_LEAD_S)) {
+        const fullAt = nerveFill(prev, state, nowS);
+        if (!(prev && Number(prev.nervePinged) === fullAt)) {
+            out.push({ id: 'nerve:' + Math.round(fullAt / 300), kind: 'nerve', link: LINKS.crimes, title: nFull ? 'Nerve is full' : 'Nerve full in ' + Math.max(1, fullAt - nowS) + ' s (' + clockS(fullAt) + ' TCT)', text: 'Do a crime so none is wasted', step: null, fullAt: nFull ? nowS : fullAt });
+        }
     }
 
     // Refill unused, two hours before Torn midnight (UTC).
@@ -230,7 +288,7 @@ export function dueAlerts(state, plan, nowS, rules = {}, ctx = {}) {
     }
 
     if (traveling) for (const a of out) a.text += ' (you’re flying)';
-    return chain || od ? out.filter((a) => !CHAIN_SKIPPED.includes(a.kind)) : out;
+    return chain || od ? out.filter((a) => !chainSilent(a.kind, kept)) : out;
 }
 
 /**
@@ -247,6 +305,8 @@ export function resolvedBy(kind, state, nowS, body = {}) {
     if (kind === 'booster') return Number(cd.booster) > 0 && !(Number(body.readyAt) > nowS);
     // A ping sent ahead of full isn't closed by energy still filling: only once the fill time has passed.
     if (kind === 'energy') return Number(e.maximum) > 0 && Number(e.current) < Number(e.maximum) && !(Number(body.fullAt) > nowS);
+    // The same for nerve: closed once a crime has spent some.
+    if (kind === 'nerve') return Number(bars.nerve && bars.nerve.maximum) > 0 && Number(bars.nerve.current) < Number(bars.nerve.maximum) && !(Number(body.fullAt) > nowS);
     if (kind === 'refill') return Boolean(state && state.refills && state.refills.energy === true);
     if (kind === 'jump' || kind === 'step' || kind === 'landed') return Boolean(body.step && nowS > Number(body.step.at) + 15 * 60);
     return false;

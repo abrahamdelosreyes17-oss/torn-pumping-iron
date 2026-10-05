@@ -132,3 +132,50 @@ The Worker key now needs (user `profile` is new in 1.2.0, for the watch list): u
 - `ackIds` sent back after a sync that returned acks; a skip ack re-times the plan; a done ack never marks a step done.
 - `targets`, `war` and `watch` sent at most every 5 minutes and only when changed; never the FFScouter key or the TornStats key in any Worker body; the main Torn key only in the `PUT /plan` right after a Discord login (and when it changes), never on the manual form (extend `test/worker-client.test.js`).
 - Log in with Discord: `/login/start` only on a click; `/login/status` polled every 3 s while waiting, visible or not, stopping at `expiresAt` or any state but `open`; `elsewhere` shown with its text; Cancel calls `/login/cancel`.
+
+## 7. Why a ping did not arrive, and the ping ticks (after 1.5.3)
+
+A friend "did not receive an alert from the discord bot": Discord refused the bot's DM (his DMs were off), Settings said Working and the test ping said "Your Worker answered 502.". Everything below is optional both ways: a Worker of 1.5.3 or older stores `plan` as it is, ignores the new fields and answers none of them (the userscript then knows it is an older one by the missing `kinds`); an older userscript ignores the new answer fields.
+
+`PUT /plan`, new request fields:
+
+```json
+{
+  "plan": {"type": "steady", "steps": [...], "chain": {"since": 1790678882, "keep": ["energy"]}},
+  "rules": {"drug": true, "drugready": true, "booster": true, "energy": true, "nerve": true, "refill": true, "jump": true, "landed": true, "price": true, "watch": true, "war": true, "chain": false, "stale": true},
+  "rulesAt": {"booster": 1790678881}
+}
+```
+
+- `rules`: the ping ticks of Settings › Discord pings, every kind on or off. Unknown kinds and values that are not `true`/`false` are dropped. A war of your faction is already in them (`war` and `chain` on); stacking and an overdose are not (the Worker silences those kinds itself from `plan.chain` / `plan.overdose`).
+- `rulesAt`: unix seconds each tick was set by hand (or taken over from `/settings`). A `/settings kind:` change made at or before that time is dropped: the latest change wins.
+- `plan.chain.keep` / `plan.overdose.keep`: kinds among `energy`, `refill`, `jump` that were ticked back on by hand while stacking or overdosed: those go out.
+
+`PUT /plan`, new answer fields:
+
+```json
+{
+  "tornRead": {"ok": false, "at": 1790675000, "travel": true, "since": 1790678000, "code": 17, "error": "Torn’s API is down (Torn error 17)."},
+  "delivery": {"ok": false, "via": null, "reason": "dm_refused", "dmRefusedAt": 1790678300, "webhook": false},
+  "kinds": {"drug": true, "nerve": true, "chain": false},
+  "kindsSet": {"energy": {"on": false, "at": 1790678400}}
+}
+```
+
+- `tornRead`: the Worker's own read of Torn. `ok` true, false, or null (not read yet); `at` the last good read (unix s, or null); `travel` false when the key can't read travel (no Landed ping); while failing, `since`, Torn's `code` (0 when it was not a Torn error) and `error` in words.
+- `delivery`: where pings go now. `via` is `dm`, `channel` or null; `reason` is null, `dm_refused` (Discord refused the bot's DM and there is no webhook) or `no_route` (no linked account and no webhook); `dmRefusedAt` unix s of the last refused DM or null (it can be set while `via` is `channel`: pings then go to the channel); `webhook` whether one is saved.
+- `kinds`: every kind as the Worker has it on or off (defaults, then `rules`, then `/settings`).
+- `kindsSet`: the `/settings kind:` changes still in force, each with its time (0 for one made on a Worker of 1.5.3 or older). The userscript takes each over as a hand-set tick of that time unless its own tick is later, and the next sync's `rulesAt` then drops it here.
+
+`POST /test` answers:
+
+| Status | Body | When |
+|---|---|---|
+| 200 | `{"ok": true, "via": "dm"}` or `"via": "hook"`, with `"dmRefused": true` when the DM was refused and it went to the channel | it went out |
+| 409 | `{"ok": false, "reason": "dm_refused", "error": "…"}` | Discord refused the DM and no webhook is saved |
+| 400 | `{"ok": false, "reason": "no_route", "error": "…"}` | no linked account and no webhook |
+| 502 | `{"ok": false, "reason": "discord_error", "error": "…", "discordStatus": 500, "discordCode": null}` | Discord answered another error |
+
+`error` is in words an older userscript can show as it is. A Worker of 1.5.3 or older answers a bare `502 {"ok": false}`: the userscript then says the usual cause (DMs off) and that a new login ends the 6-hour rest.
+
+New kind: `nerve` (Nerve full; on by default; `worker/BOT.md`). After a deploy, register the slash commands again (`npm run register:guild` or `register:global`) so `/settings` and `/snooze` list it. No new D1 column and no new secret.

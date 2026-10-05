@@ -31,6 +31,7 @@ export const MARK_CSS = `
 .pi-pill.pi-solid { background: var(--b); color: #101214; border: 0; }
 .pi-pill.pi-dark { background: #101214; color: #c5cad0; border: 1px solid #3a4046; text-transform: none; letter-spacing: 0; font-weight: 600; }
 .pi-pill.pi-dark.pi-c-grey { border-color: #6c737a; color: #d6d9dc; }
+.pi-pill.pi-dark.pi-c-chalk { border-color: #efebe2; color: #efebe2; }
 `;
 
 /** Our page CSS, once per page (torn.com: no outside fonts). */
@@ -72,14 +73,16 @@ export function ringRect(r, o, pad = RING_PAD, viewW = Infinity) {
  * @param {{x, y}} o - our layer's (0, 0) on screen
  * @param {number} w - the pill's natural width
  * @param {number} ht - its height
+ * `edge` 'bottom': straddling the box's bottom border instead (a grey gym box's second line).
  * @returns {{left, top, maxWidth}}
  */
-export function pillSpot(r, o, w, ht, { pad = RING_PAD, align = 'center', inset = PILL_INSET, viewW = Infinity } = {}) {
+export function pillSpot(r, o, w, ht, { pad = RING_PAD, align = 'center', inset = PILL_INSET, viewW = Infinity, edge = 'top' } = {}) {
     const maxWidth = Math.max(24, Math.min(r.width - 8, viewW - 2 * VIEW_EDGE));
     const ww = Math.min(w, maxWidth);
     let x = align === 'left' ? r.left + Math.min(inset, Math.max(4, r.width - ww - 4)) : r.left + (r.width - ww) / 2;
     x = Math.min(Math.max(x, VIEW_EDGE), viewW - VIEW_EDGE - ww);
-    return { left: Math.round(x - o.x), top: Math.round(r.top - pad - ht / 2 - o.y), maxWidth: Math.round(maxWidth) };
+    const y = edge === 'bottom' ? r.top + r.height + pad - ht / 2 : r.top - pad - ht / 2;
+    return { left: Math.round(x - o.x), top: Math.round(y - o.y), maxWidth: Math.round(maxWidth) };
 }
 
 /* ---------------------------------------------------------- our layer */
@@ -120,10 +123,10 @@ function addRing(target, cls, { pad = RING_PAD, title = null, data = {} } = {}) 
     return el;
 }
 
-function addPill(target, cls, text, { title = null, align = 'center', pad = RING_PAD, data = {} } = {}) {
+function addPill(target, cls, text, { title = null, align = 'center', pad = RING_PAD, data = {}, edge = 'top' } = {}) {
     const el = h('div', { class: 'pi-pill ' + cls, title: title || text, ...data }, [h('span', { text })]);
     marksLayer().appendChild(el);
-    ml.items.push({ el, target, kind: 'pill', pad, align });
+    ml.items.push({ el, target, kind: 'pill', pad, align, edge });
     return el;
 }
 
@@ -156,7 +159,7 @@ export function placeMarks(doc = document) {
             s.width = b.width + 'px';
             s.height = b.height + 'px';
         } else {
-            const p = pillSpot(r, o, w, ht, { pad: it.pad, align: it.align, viewW });
+            const p = pillSpot(r, o, w, ht, { pad: it.pad, align: it.align, viewW, edge: it.edge });
             s.left = p.left + 'px';
             s.top = p.top + 'px';
             s.maxWidth = p.maxWidth + 'px';
@@ -222,6 +225,8 @@ export function gymNotes(plan, { hint = null } = {}) {
     if (st.kind === 'kept' && plan.line) out.push([plan.line.head, plan.line.text].filter(Boolean).join(' · '));
     // The next gym and how far it is ("Force Training in 7,300 E, DEX 6.4 there").
     if ((st.kind === 'right' || st.kind === 'done' || st.kind === 'idle') && plan.line && plan.line.src) out.push('Next gym: ' + plan.line.src);
+    // Round 9 (pick 3B): a stat outside the session that another gym of yours trains better, with both gains.
+    for (const [stat, q] of Object.entries(plan.perStat || {})) if (q && q.better && q.lines) out.push(String(stat).toUpperCase() + ' · ' + q.lines.map((l, i) => (i ? l : l.charAt(0).toLowerCase() + l.slice(1))).join(' · '));
     const parts = plan.parts || [];
     if (parts.length > 1 || parts.some((x) => x.state === 'done')) {
         out.push(parts.map((x) => (x.state === 'done' ? '✓ ' : '') + x.gymName + ': ' + String(x.stat).toUpperCase() + ' × ' + x.trains + (x.state === 'current' && x.done > 0 ? ' (' + x.left + ' left)' : '')).join(' → '));
@@ -273,6 +278,9 @@ export function drawGymMarks(plan, boxes, buttons = [], { motion = true } = {}) 
             // Never dims or covers Torn's boxes (round 6): a small dark pill on its top border, the full words on hover.
             addPill(box.li, 'pi-dark', p.tag, { title: p.text, data });
         }
+        // Round 9 (pick 3B): a box the session leaves alone says what a train gives here, or the gym of yours that gives
+        // more (chalk), on its bottom border. Still grey and quiet: no ring, no Fill.
+        if (p.foot && p.kind !== 'train' && p.kind !== 'wait') addPill(box.li, 'pi-dark' + (p.better ? ' pi-c-chalk' : ''), p.foot, { title: [p.text].concat(p.lines || []).filter(Boolean).join(' · '), data: { ...data, 'data-pi-kind': 'gain' }, edge: 'bottom' });
     }
     placeMarks();
     return { nextGymShown };

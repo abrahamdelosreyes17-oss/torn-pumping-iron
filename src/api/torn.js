@@ -60,8 +60,13 @@ export async function fetchProperty(client) {
     return (d && d.property) || null;
 }
 
-export async function fetchEquipment(client) {
-    const d = await client.get('v2/user/equipment');
+/**
+ * What you wear now. `fresh` (the loadout just changed on Torn's items page): asked with the time, so neither this
+ * client's 5 s of reuse nor Torn's own cache answers with the gear from before [check live: Torn's v2 documents
+ * `timestamp` as "bypass cache"; an answer that still lags is read a second time by its caller].
+ */
+export async function fetchEquipment(client, { fresh = false } = {}) {
+    const d = await client.get('v2/user/equipment', fresh ? { timestamp: Math.floor(Date.now() / 1000) } : {});
     return { equipment: (d && d.equipment) || [], clothing: (d && d.clothing) || [] };
 }
 

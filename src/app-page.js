@@ -8,8 +8,9 @@ import { gmOnChange } from './platform/gm.js';
 import { K, get, getShared, set, del, getKey, setKey, getSettings, setSettings, getPlan, setPlan, clearGroup, DATA_GROUPS, getPrices, PRICE_LISTINGS_KEPT, loadLocalPrices, localPrices, setLocalPrices, clearLocalPrices } from './platform/store.js';
 import { pi, tornClient, refresh, onModel, isVisible, nudgeFeed, TORN_PER_MINUTE, beatFocus, apiFocus, createPlan, recalibratePlan, followStrategy, followPath, cancelPlan, onPlanProgress, startStacking, resumeTraining, overdoseDone, booksReport } from './runtime.js';
 import { ledgerShape } from './core/ledger.js';
-import { forgetSavedPlan } from './platform/plan-store.js';
-import { archived, pageGet, loadArchives, drainArchives, clearArchived, archivesReady } from './platform/archive.js';
+import { forgetSavedPlan, loadSavedPlan, saveSavedPlan } from './platform/plan-store.js';
+import { buildBackup, restoreOps, backupFileName } from './core/backup.js';
+import { archived, pageGet, loadArchives, drainArchives, clearArchived, archivesReady, pageSetDone, clearArchivedDone, ARCHIVES } from './platform/archive.js';
 import { PiApp } from './ui/app/app.js';
 import { fetchKeyInfo, fetchItemMarket, fetchPointsMarket, fetchFactionMembers, fetchFactionWars, fetchFactionChain, keyIsEnough } from './api/torn.js';
 import { chainFromApi, sharedChain } from './core/eye/chain.js';
@@ -21,9 +22,11 @@ import { W3bClient, fetchW3bListings } from './api/w3b.js';
 import { checkFfsKey } from './api/ffscouter.js';
 import { renderEye, readsTargetStatuses } from './ui/app/eye-tab.js';
 import { wantPlayers, eyeView, warmFights, fightsPending, onEye, gearCount, clearEye, sharedFfsClient, resetFfsClient, importTargets, refillTargets, dropHitTargets, storedTargets, TARGETS_KEY, WAR_BANDS_KEY, WAR_ASK_KEY, EYE_CHAIN_KEY, EYE_NEXT_KEY, rememberFlights, flightsSeen, getWatch, watchStates, toggleWatch, setWatchTag, dismissWatchOffer, watchOffersNow, pollWatch, pumpStatuses, statusRead, onStatus, loadStatuses, attacksAfterOpen } from './eye-service.js';
-import { discordState, discordRaw, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId, linkDiscord, setTargetsForSync, setEyeForSync, loginDiscord, cancelLogin, resumeLogin } from './discord.js';
+import { discordState, discordRaw, connectDiscord, testDiscord, forgetDiscord, linkedDiscordId, linkDiscord, setTargetsForSync, setEyeForSync, loginDiscord, cancelLogin, resumeLogin, syncTicksSoon } from './discord.js';
+import { pingsNow, setPing } from './pings.js';
+import { discordView, discordReport } from './core/discord-state.js';
 import { saveFullKey, forgetFullKey, refreshMoneyLog } from './income.js';
-import { WORKER_SETUP_URL } from './api/worker.js';
+import { WORKER_SETUP_URL, DEFAULT_WORKER } from './api/worker.js';
 import { tabWindow } from './platform/tab-window.js';
 import { listingsFromItemMarket, listingsFromW3b, listingsFromPoints, slimPriceRow } from './core/market.js';
 import { recordPrice, average7, dailyLows, readPriceHistory } from './core/history.js';
@@ -641,7 +644,10 @@ function reportData() {
             plan: { pickBy: plan.pickBy, strategy: plan.strategy, strategyPicked: Boolean(plan.strategyPicked), build: plan.build, goal: plan.goal || null, specialUse: plan.specialUse || 0, following: m ? m.strategy : null },
             runs: planRuns(),
             diagnostics: diagnostics(),
-            keys: { torn: Boolean(getKey(K.apiKey)), tornRefused: Boolean(get(K.apiKeyDead, false)), full: Boolean(getKey(K.fullKey)), ffscouter: Boolean(getKey(K.ffsKey)), tornstats: Boolean(getKey(K.tsKey)), discord: Boolean(discordRaw()) },
+            keys: { torn: Boolean(getKey(K.apiKey)), tornRefused: Boolean(get(K.apiKeyDead, false)), full: Boolean(getKey(K.fullKey)), ffscouter: Boolean(getKey(K.ffsKey)), tornstats: Boolean(getKey(K.tsKey)), discord: Boolean(discordState()) },
+            // Discord pings: connected or not, what the service said about delivery and its Torn read, the ticks.
+            // Never the secret, the login id, the Discord id or name (core/discord-state.js).
+            discord: discordReport(discordRaw(), { defaultBase: DEFAULT_WORKER, ticks: pingsNow(pi.model) }),
             paused: isPaused(),
         },
         env: { userAgent: nav.userAgent || '', screen: typeof window !== 'undefined' && window.screen ? window.screen.width + 'x' + window.screen.height : '', cores: nav.hardwareConcurrency || null, memoryGB: nav.deviceMemory || null, pageHeapMB: mem },
@@ -714,7 +720,7 @@ function getCtx() {
         keyProblem: keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: statics.keyInfo || null }),
         planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
         fullKey: fullKeyView(),
-        sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (pageGet(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), readLines(pageGet(K.planLine, null)).map((l) => l.at).join(','), JSON.stringify(get(K.stacking, null)), JSON.stringify(get(K.overdose, null))].join('|'),
+        sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (pageGet(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), readLines(pageGet(K.planLine, null)).map((l) => l.at).join(','), JSON.stringify(get(K.stacking, null)), JSON.stringify(get(K.overdose, null)), JSON.stringify(get(K.pings, null))].join('|'),
         setSettings: (p) => {
             setSettings(p);
             refresh();
@@ -809,6 +815,35 @@ function getCtx() {
         diagnostics,
         logError,
         // Settings › Report a problem: the zip's data, read when the section is drawn or the button pressed.
+        // Settings › Back up and restore (round 9, pick 5B): the file is made and read here; nothing is sent.
+        backup: {
+            lastAt: () => get('lastBackupAt', null),
+            make: async (withKeys) => {
+                const now = Date.now();
+                // The webpage's older history must be in memory first, or the file would hold only the recent part.
+                await loadArchives();
+                const savedPlan = await loadSavedPlan().catch(() => null);
+                // Histories whole: Tampermonkey's recent part with the webpage's older part.
+                const b = buildBackup({ read: { gm: (k) => (ARCHIVES[k] ? archived(k, null) : get(k, null)), page: (k) => pageGet(k, null), key: (k) => getKey(k) }, savedPlan, withKeys: Boolean(withKeys), version: PI_BUILD_VERSION, now });
+                set('lastBackupAt', now);
+                logAction('Backup downloaded' + (b.hasKeys ? ' (with keys)' : ''));
+                return { name: backupFileName(now, b.hasKeys), text: JSON.stringify(b), hasKeys: b.hasKeys };
+            },
+            restore: async (backup) => {
+                const ops = restoreOps(backup);
+                // The file holds each history whole: this browser's older part goes first, or the two would mix.
+                await clearArchivedDone([...ops.gmSet.map((x) => x[0]), ...ops.gmDel].filter((k) => ARCHIVES[k]));
+                for (const [k, v] of ops.gmSet) set(k, v);
+                for (const k of ops.gmDel) del(k);
+                for (const [k, v] of ops.pageSet) await pageSetDone(k, v);
+                for (const [k, v] of ops.keys) setKey(k, v);
+                if (ops.savedPlan) await saveSavedPlan(ops.savedPlan);
+                else await forgetSavedPlan();
+                logAction('Backup restored');
+            },
+            // Everything is read again from the stores.
+            reload: () => setTimeout(() => location.reload(), 600),
+        },
         report: {
             data: reportData,
             clearLog: () => {
@@ -826,6 +861,16 @@ function getCtx() {
             login: (o) => loginDiscord(pi.model, o),
             cancel: cancelLogin,
             setupUrl: WORKER_SETUP_URL,
+            // The state in words (Working, Not reaching you…) with what to do, and the ping ticks.
+            view: () => discordView(discordRaw()),
+            ticks: () => pingsNow(pi.model),
+            setTick: (kind, on) => {
+                setPing(kind, on);
+                logAction('Discord ping ' + kind + ' ticked ' + (on ? 'on' : 'off'));
+                // Sent now (a few seconds apart at most), so the bot follows what the ticks show.
+                syncTicksSoon(() => pi.model);
+                page.app.render(true);
+            },
         },
         // The Ledger tab: your books, and a read of the money log now (it is read by itself every 6 hours).
         // The plan's own recalibration, once a day: its last try (the plan card says when, or why it failed).

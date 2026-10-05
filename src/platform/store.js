@@ -69,6 +69,9 @@ export const K = {
     // The plan's own recalibration, once a Torn day (round 8): the last try {day, at, ok (null while it runs), error}.
     // GM, so two open tabs of the webpage do not both run it.
     autoRecal: 'autoRecal',
+    // Which Discord pings are ticked on (Settings › Discord pings, core/pings.js): {hand: {kind: {on, at}}, war}.
+    // GM, so the sync from any tab sends the same ticks.
+    pings: 'pingTicks',
 };
 
 /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */

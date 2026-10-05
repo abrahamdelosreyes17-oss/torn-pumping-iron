@@ -435,6 +435,33 @@ export function keptWhy(k) {
     return 'kept for ' + (k.war || 'the enemy faction') + ' · Settings › Keep for war days';
 }
 
+/**
+ * A stat the session doesn't train (round 9, the owner's pick 3B, mockups/round9/companion.html §3): what one train of
+ * it gives in this gym, and the gym of yours that gives more for the same energy. The box stays grey and quiet: no
+ * outline, no Fill, and nothing switches gyms for you.
+ * @param {string} stat
+ * @param {object} o - {value, happy, gym: the gym you're in, best: your best open gym for the stat, perk, locked}
+ * @returns {{lines:string[], foot:string, better:{id, name, dots}|null, gain:{here:number, there:number}}|null}
+ */
+export function offPlanLines(stat, { value, happy, gym, best = null, perk = 1, locked = false } = {}) {
+    if (!gym || !(value > 0)) return null;
+    const h = Math.max(0, Number(happy) || 0);
+    const hereDots = locked ? 0 : gym.dots[stat] || 0;
+    const here = hereDots > 0 ? gainPerTrain(stat, value, h, hereDots, gym.energy, perk) : 0;
+    const better = best && best.id !== gym.id && best.dots[stat] > hereDots ? best : null;
+    // The other gym at this gym's energy a train (gyms take 5, 10, 25 or 50): the same energy, so the two compare.
+    const perE = better ? gainPerTrain(stat, value, h, better.dots[stat], better.energy, perk) / better.energy : 0;
+    const there = better ? perE * (here > 0 ? gym.energy : better.energy) : 0;
+    if (!(here > 0) && !better) return null;
+    const lines = [];
+    if (better) lines.push((here > 0 ? 'Better at ' : 'Trained at ') + better.name + ' · ' + better.dots[stat] + ' dots');
+    const unit = better && here > 0 && better.energy !== gym.energy ? ' for ' + gym.energy + ' energy' : ' a train';
+    if (here > 0) lines.push('about ' + fmtSigned(Math.round(here)) + unit + ' here' + (better ? ', ' + fmtSigned(Math.round(there)) + ' there' : ''));
+    else lines.push('about ' + fmtSigned(Math.round(there)) + ' a train there');
+    const foot = better ? (here > 0 ? 'Better at ' : 'Trained at ') + better.name : fmtSigned(Math.round(here)) + ' a train';
+    return { lines, foot, better: better ? { id: better.id, name: better.name, dots: better.dots[stat] } : null, gain: { here: Math.round(here), there: Math.round(there) } };
+}
+
 /** "EDVD × 5, then the Ecstasy, then train it all" */
 function eatOrder(boost) {
     const parts = [];
@@ -544,6 +571,16 @@ export function planGymPage(m, page = {}, session = null, now = m.now) {
             const w = greyWord(k, mine, open, locked);
             perStat[k] = { kind: open.length ? 'next' : mine.length ? 'done' : w.text === 'Not trained here' ? 'none' : w.text.startsWith('Next') ? 'next' : 'skip', text: w.text, tag: w.tag };
         }
+    }
+
+    // Round 9 (pick 3B): a box the session leaves alone also says what a train gives here, and where it gives more.
+    const happyNow = reads0.happy && Number.isFinite(reads0.happy.current) ? reads0.happy.current : m.strip.happy ? m.strip.happy.current : 0;
+    for (const k of STATS) {
+        const p = perStat[k];
+        if (!(p.kind === 'skip' || p.kind === 'none' || (p.kind === 'next' && p.tag === 'tomorrow'))) continue;
+        const box = boxes.get(k);
+        const more = offPlanLines(k, { value: (reading.stats && reading.stats[k]) || stats[k], happy: happyNow, gym, best: m.pc.best ? m.pc.best[k] : null, perk: m.pc.perks && m.pc.perks.mult ? m.pc.perks.mult[k] : 1, locked: (box && box.locked) || !(gym.dots[k] > 0) });
+        if (more) Object.assign(p, more);
     }
 
     const target = cur ? gymById(cur.gymId, table) : null;

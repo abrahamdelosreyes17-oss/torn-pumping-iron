@@ -225,6 +225,21 @@ const clippedPills = (page) => page.evaluate(() => [...document.querySelectorAll
     ok((await clippedPills(page)).length === 0, 'gym: no pill is cut short (' + (await clippedPills(page)).join(' | ') + ')');
     const sess = await page.evaluate(() => JSON.parse(_store['pumpingIron.v1.gymSession'] || 'null'));
     ok(sess && sess.parts && sess.parts.length === 1 && sess.spent.dex === 100, 'gym: the session snapshot counts the 100 energy spent on DEX (' + JSON.stringify(sess && sess.spent) + ')');
+    // Round 9 (the owner's pick 3B): a box the session leaves alone says what a train gives here, or the gym of yours
+    // that gives more, on its bottom border. Still quiet: no ring on it, nothing on the stat being trained.
+    {
+        const marks = await layerMarks(page);
+        const gains = marks.filter((x) => x.kind === 'gain');
+        const box = async (k) => statRect(page, { str: 'strength', def: 'defense', spd: 'speed', dex: 'dexterity' }[k]);
+        let onBottom = gains.length > 0;
+        for (const g of gains) { const r = await box(g.stat); if (Math.abs((g.r.top + g.r.bottom) / 2 - (r.bottom + 3)) > 1.5 || g.r.left < r.left || g.r.right > r.right) onBottom = false; }
+        ok(gains.length === 3 && gains.every((g) => /^[+][0-9,]+ a train$|^(Better|Trained) at .+$/.test(g.text)) && !gains.some((g) => g.stat === 'dex'), 'gym, the other three boxes: what a train gives here, or the better gym (' + gains.map((g) => g.stat + ': ' + g.text).join(' | ') + ')');
+        ok(onBottom && gains.every((g) => g.pe === 'none'), 'gym, the other three boxes: the line sits on the box’s bottom border, inside its width, and never takes the pointer');
+        ok(!marks.some((x) => /pi-ring/.test(x.cls) && x.stat && x.stat !== 'dex'), 'gym, the other three boxes: no outline, only the session’s stat is ringed');
+        const better = gains.filter((g) => /^Better at /.test(g.text));
+        const notes = await page.evaluate(() => [...document.getElementById('pi-overlay').shadowRoot.querySelectorAll('.note')].map((n) => n.textContent));
+        ok(better.every((g) => notes.some((n) => new RegExp('^' + g.stat.toUpperCase() + ' · better at .+ dots · about [+][0-9,]+ .+ here, [+][0-9,]+ there$').test(n))), 'gym, a better gym for a stat outside the session: the panel says where and both gains (' + notes.filter((n) => /better at/.test(n)).join(' | ') + ')');
+    }
     ok(errors.length === 0, 'gym: no page errors ' + JSON.stringify(errors));
     ok(tornHits() === 0, 'gym: nothing loaded from torn.com');
     await page.screenshot({ path: resolve(shots, 'torn-gym-friend.png'), fullPage: true });
@@ -409,6 +424,25 @@ const clippedPills = (page) => page.evaluate(() => [...document.querySelectorAll
     await page.close();
 }
 
+/* The panel's tiles (round 9, pick 1B): the step's items. */
+const panelTiles = (page) => page.evaluate(() => {
+    const sr = document.getElementById('pi-overlay').shadowRoot;
+    const box = sr.querySelector('.tiles');
+    if (!box) return { lbl: null, tiles: [], warn: null, later: null, inside: true, buttons: 0 };
+    const wr = sr.querySelector('.wrap').getBoundingClientRect();
+    const txt = (el) => (el ? el.textContent.replace(/\s+/g, ' ').trim() : '');
+    return {
+        lbl: txt(box.querySelector('.lbl')),
+        tiles: [...box.querySelectorAll('.tile:not(.small)')].map((t) => { const b = t.querySelector('.tb'); return { nm: txt(t.querySelector('.nm')), st: txt(t.querySelector('.st')), hold: txt(t.querySelector('.hold')), low: Boolean(t.querySelector('.hold.lowc')), off: t.classList.contains('off'), tone: [...t.classList].find((c) => c.startsWith('t-')) || '', show: b ? b.tagName + ':' + (b.getAttribute('href') || '') : '', go: Boolean(b && b.classList.contains('go')) }; }),
+        warn: txt(box.querySelector('.warn')) || null,
+        later: txt(box.querySelector('.tile.small')) || null,
+        miss: txt(box.querySelector('[role="status"]')),
+        inside: [...box.querySelectorAll('.tile')].every((t) => { const r = t.getBoundingClientRect(); return r.left >= wr.left && r.right <= wr.right + 0.5; }),
+        // Nothing of ours uses an item: the only words on a tile's button are "Show".
+        buttons: [...box.querySelectorAll('button, a')].filter((b) => txt(b) !== 'Show').length,
+    };
+});
+
 /* Our listing marks: the pill texts, the shown ones only. */
 const listingPills = (page) => page.evaluate(() => [...document.querySelectorAll('#pi-marks-layer .pi-pill[data-pi-listing]')].filter((p) => getComputedStyle(p).display !== 'none').map((p) => p.textContent.replace(/\s+/g, ' ').trim()));
 
@@ -424,6 +458,40 @@ const listingPills = (page) => page.evaluate(() => [...document.querySelectorAll
         return shown.length > 0 && shown.every((p) => { const r = p.getBoundingClientRect(); return r.top >= ul.top - 14 && r.bottom <= ul.bottom + 4; });
     });
     ok(onlyVisible, 'items: only the list that shows is marked');
+    // Round 9 (pick 1B): on the items page a tile's Show scrolls to Torn's own row; it asks Torn nothing and clicks nothing.
+    {
+        const wide = await open('page=items&fixture=items', { width: 1900 });
+        const before = await panelTiles(wide.page);
+        const t0 = before.tiles[0] || {};
+        ok(t0.nm === 'Xanax' && /^Drug cooldown · [\d:hm ]+ left$/.test(t0.st) && t0.off && t0.tone === 't-amber' && !t0.go, 'items, the panel’s tile: the drug cooldown still runs, so the tile is greyed with its countdown (' + JSON.stringify(t0) + ')');
+        ok(t0.show === 'BUTTON:', 'items, the panel’s tile: Show is a button here, not a link away (' + t0.show + ')');
+        const calls = await wide.page.evaluate(() => window.__calls.length);
+        const clicked = await wide.page.evaluate(() => {
+            let clicks = 0;
+            const count = (e) => { if (!e.composedPath().some((n) => n.id === 'pi-overlay')) clicks++; };
+            document.addEventListener('click', count, true);
+            const row = document.querySelector('ul.items-cont[aria-expanded="true"] li[data-item="206"]');
+            let scrolled = 0;
+            row.scrollIntoView = () => { scrolled++; };
+            document.getElementById('pi-overlay').shadowRoot.querySelector('.tile .tb').click();
+            document.removeEventListener('click', count, true);
+            return { scrolled, clicks };
+        });
+        const after = await panelTiles(wide.page);
+        ok(clicked.scrolled === 1 && clicked.clicks === 0 && after.miss === '', 'items, Show: Torn’s Xanax row is scrolled to, nothing on Torn’s page is clicked (' + JSON.stringify(clicked) + ')');
+        ok((await wide.page.evaluate(() => window.__calls.length)) === calls && wide.tornHits() === 0, 'items, Show: no request, to Torn or to anyone');
+        // The row is on another of Torn's tabs: the tile says which, and does nothing else.
+        const missed = await wide.page.evaluate(() => {
+            for (const li of document.querySelectorAll('ul.items-cont li[data-item="206"]')) li.remove();
+            const sr = document.getElementById('pi-overlay').shadowRoot;
+            sr.querySelector('.tile .tb').click();
+            return sr.querySelector('.tiles [role="status"]').textContent;
+        });
+        ok(missed === 'Its row isn’t on this tab: open Torn’s Drugs tab.', 'items, Show with the row on another tab: the tile says which tab (' + missed + ')');
+        await wide.page.screenshot({ path: resolve(shots, 'torn-items-tiles.png') });
+        ok(wide.errors.length === 0, 'items, the panel’s tiles: no page errors ' + JSON.stringify(wide.errors.slice(0, 2)));
+        await wide.page.close();
+    }
     ok(errors.length === 0, 'items: no page errors');
     await page.close();
 }
@@ -553,6 +621,14 @@ const listingPills = (page) => page.evaluate(() => [...document.querySelectorAll
     ok(due.ring === '1' && due.plates === 1 && due.rings === 1 && due.anim === 'pi-ring-in' && due.inside, 'panel, a step due: the header\'s plate rings, the panel\'s one ring, inside the panel (' + JSON.stringify({ ring: due.ring, rings: due.rings, anim: due.anim, inside: due.inside }) + ')');
     ok(due.ctas.join('|') === 'Open Items|Pumping Iron ↗' && due.go === 'https://www.torn.com/item.php', 'panel, a step due: the button follows the action of the moment ("Open Items" for the Xanax), the webpage beside it (' + due.ctas.join('|') + ')');
     ok(due.mid !== null && due.mid <= 1, 'panel: the button text is centred (' + due.mid + ' px off)');
+    // Round 9 (the owner's pick 1B): the step's items as tiles in the panel, on every Torn page. Reads only: Show is a
+    // link to Torn's items page.
+    const tiles = await panelTiles(page);
+    const t0 = tiles.tiles[0] || {};
+    ok(tiles.lbl === 'For this step' && tiles.tiles.length === 1 && t0.nm === 'Xanax' && /^Ready · energy \d+ → \d+$/.test(t0.st) && t0.tone === 't-green' && !t0.off, 'panel tiles, a step due: the Xanax is ready, with the energy it gives (' + JSON.stringify(t0) + ')');
+    ok(t0.show === 'A:https://www.torn.com/item.php' && t0.go, 'panel tiles: Show is a link to Torn’s items page, the tile’s one button (' + t0.show + ')');
+    ok(/^you hold 1 · the plan takes \d+ before Fri$/.test(t0.hold) && t0.low && /^Buy \d+ more before Friday$/.test(tiles.warn || ''), 'panel tiles, running low: what you hold against the Buy list’s three days, and how many to buy (' + t0.hold + ' | ' + tiles.warn + ')');
+    ok(tiles.inside && tiles.buttons === 0, 'panel tiles: inside the panel, and no button of ours that uses an item (' + JSON.stringify([tiles.inside, tiles.buttons]) + ')');
     await page.screenshot({ path: resolve(shots, 'torn-panel-due.png') });
     // Folded to one tag: the ring is still there.
     await page.keyboard.press('Alt+Backquote');
@@ -1006,6 +1082,93 @@ const chainCard = (page) => page.evaluate(() => {
     // No list handed over by the Torn Eye tab yet: the Next row says so, with a plain button to the list.
     const nolist = await page.evaluate(() => { const b = document.querySelector('#pi-eyecard .pi-nextbox'); const a = b && b.querySelector('a'); return b ? { text: b.textContent.replace(/\s+/g, ' ').trim(), alt: a.classList.contains('pi-alt'), href: a.getAttribute('href') } : null; });
     ok(nolist && /^Open the Torn Eye list\s?Your Torn Eye list is not here yet: open it once\.$/.test(nolist.text) && nolist.alt && /app\.html#eye$/.test(nolist.href), 'next: no list handed over yet, said plainly, with a button to the list (' + JSON.stringify(nolist) + ')');
+    await page.close();
+}
+
+/* Round 9 (his pick B, mockups/round9/companion.html §2): "Your loadouts against it" on the fight card. A loadout is
+   learned on Torn's items page: its number from the text of #loadoutsRoot (a stand-in here: "Loadout #2", the worn
+   slots and Torn's own "Loadouts" button, which is never clicked), its gear from the API (one /user/equipment call).
+   The attack page then lists the loadouts kept, best first, each against their seen gear. */
+{
+    const it = await open('page=items&fixture=items&ffs=1&who=owner', { wait: 5000 });
+    const standIn = (n, slots) => it.page.evaluate(({ n, slots }) => {
+        let box = document.getElementById('loadoutsRoot');
+        if (!box) {
+            box = document.createElement('div');
+            box.id = 'loadoutsRoot';
+            document.querySelector('.content-wrapper').prepend(box);
+            window.__loadoutClicks = 0;
+        }
+        box.innerHTML = '<div><span>Loadout #' + n + '</span><button type="button" aria-label="Loadouts">v</button></div><ul>' + slots.map((s) => '<li>' + s + '</li>').join('') + '</ul>';
+        box.querySelector('button').addEventListener('click', () => { window.__loadoutClicks++; });
+        window.__loadoutHtml = box.innerHTML;
+    }, { n, slots });
+    const eqCalls = () => it.page.evaluate(() => window.__calls.filter((c) => /\/v2\/user\/equipment/.test(c)).length);
+    const kept = () => it.page.evaluate(() => JSON.parse(_store['pumpingIron.v1.eyeLoadouts'] || 'null'));
+    ok((await eqCalls()) === 0 && (await kept()) === null, 'loadouts: an items page that names no loadout asks nothing and keeps nothing');
+    await standIn(2, ['Primary Minigun', 'Secondary', 'Melee']);
+    await it.page.waitForTimeout(1500);
+    ok((await eqCalls()) === 0, 'loadouts: the box just seen: not read before it stood still');
+    await it.page.waitForTimeout(4500);
+    const k1 = await kept();
+    ok((await eqCalls()) === 1 && k1 && Object.keys(k1).join() === '2' && k1[2].weapon === 'Minigun' && k1[2].gear && k1[2].gear.dmg === 71.2, 'loadouts: the loadout worn is kept under its number, from one read of your gear (' + (await eqCalls()) + ' calls, ' + JSON.stringify(k1) + ')');
+    await it.page.waitForTimeout(3000);
+    ok((await eqCalls()) === 1, 'loadouts: standing on the items page asks nothing more');
+    // You switch on Torn's own menu (the stand-in's text changes): the new number is read in its turn.
+    await standIn(3, ['Primary Minigun', 'Secondary', 'Melee Kodachi']);
+    await it.page.waitForTimeout(6000);
+    const k2 = await kept();
+    ok((await eqCalls()) === 2 && k2 && Object.keys(k2).join() === '2,3', 'loadouts: another loadout worn: kept under its own number, the first one stays (' + (await eqCalls()) + ' calls, ' + JSON.stringify(k2 && Object.keys(k2)) + ')');
+    const box = await it.page.evaluate(() => ({ clicks: window.__loadoutClicks, same: document.getElementById('loadoutsRoot').innerHTML === window.__loadoutHtml, ours: document.querySelectorAll('#loadoutsRoot [class*="pi-"], #loadoutsRoot [data-pi]').length }));
+    ok(box.clicks === 0 && box.same && box.ours === 0, 'loadouts: Torn’s Loadouts button is never clicked, its box is left as it was (' + JSON.stringify(box) + ')');
+    ok(it.tornHits() === 0 && it.errors.length === 0, 'loadouts: nothing asked of torn.com, no page errors ' + JSON.stringify(it.errors));
+    const store = await it.page.evaluate(() => ({ ..._store }));
+    await it.page.close();
+
+    // The attack page next: what the items page kept (2 is the Minigun on you), and two more worn some days ago.
+    const at0 = Date.parse('2026-09-29T10:48:00Z');
+    const more = { ...k1, 1: { n: 1, at: at0 - 3 * 86400000, gear: { dmg: 76.5, acc: 63.1, armour: 52.4, dmgBonus: 0 }, weapon: 'Kodachi', armour: 'Dune' }, 4: { n: 4, at: at0 - 12 * 86400000, gear: { dmg: 20.3, acc: 40.2, armour: 25, dmgBonus: 0 }, weapon: 'BT MP9', armour: '' } };
+    const { page, errors } = await open('page=attack&user2ID=424242&fixture=attack&ffs=1&who=owner', { wait: 6000, width: 1600, seed: { ...store, 'pumpingIron.v1.eyeLoadouts': JSON.stringify(more) } });
+    await tornLayout(page);
+    const cardText = () => page.evaluate(() => { const c = document.getElementById('pi-eyecard'); return c ? c.textContent.replace(/\s+/g, ' ').trim() : ''; });
+    const unseen = await cardText();
+    ok(/Not seen yet · attack once to read it/.test(unseen) && !/Your loadouts/.test(unseen), 'loadouts: their gear not seen yet, the card is as before (' + unseen.slice(0, 160) + ')');
+    await page.evaluate(() => fetch('fixtures/attackData.json?sid=attackData').then((r) => r.json()));
+    await page.waitForTimeout(1500);
+    const lo = await page.evaluate(() => {
+        const c = document.getElementById('pi-eyecard');
+        const b = c && c.querySelector('[data-pi-loadouts]');
+        if (!b) return null;
+        const cr = c.getBoundingClientRect();
+        const cells = [...b.querySelectorAll('.pi-lot > span')];
+        const rows = [];
+        for (let i = 0; i < cells.length; i += 3) rows.push({ name: cells[i].textContent.replace(/\s+/g, ' ').trim(), nums: cells[i + 1].textContent.trim(), tag: cells[i + 2].textContent.trim() });
+        const warn = (c.querySelector('.pi-warnline') || {}).textContent || '';
+        return { text: b.textContent.replace(/\s+/g, ' ').trim(), rows, warn, inside: cells.every((x) => { const r = x.getBoundingClientRect(); return r.left >= cr.left && r.right <= cr.right + 0.5; }), after: Boolean(c.querySelector('.pi-warnline').compareDocumentPosition(b) & 4), pressable: b.querySelectorAll('button, a, input, select, [role="button"], [tabindex]').length, cardBottom: cr.bottom, scrolls: c.scrollHeight > c.clientHeight + 1, vh: innerHeight };
+    });
+    ok(lo && /^Your loadouts against it\s?win · HP kept/.test(lo.text) && lo.rows.length === 3, 'loadouts: the block under their gear, a row per loadout known (' + JSON.stringify(lo && lo.rows) + ')');
+    const onYou = lo && lo.rows.find((r) => /on you/.test(r.tag));
+    const w = lo && lo.warn.match(/win (\d+)% · HP kept ~(\d+)%/);
+    ok(onYou && /^2 · Minigun/.test(onYou.name) && w && onYou.nums === w[1] + '% · ' + w[2] + '%', 'loadouts: the one on you carries its number and the very numbers of "With their gear" (' + JSON.stringify(onYou) + ' / ' + (lo && lo.warn) + ')');
+    ok(lo && /best/.test(lo.rows[0].tag) && lo.rows.filter((r) => /best/.test(r.tag)).length === 1 && lo.rows.every((r, i) => i === 0 || parseInt(r.nums, 10) <= parseInt(lo.rows[i - 1].nums, 10)), 'loadouts: best first, one row marked best');
+    ok(lo && lo.rows.some((r) => /^1 · Kodachi ?Dune armour · seen 3 d ago$/.test(r.name)) && lo.rows.some((r) => /^4 · BT MP9 ?No armour · seen 12 d ago$/.test(r.name)), 'loadouts: a remembered loadout says its armour and when it was seen');
+    ok(lo && /(Change it on Torn’s loadout menu before you start the fight\.|The one on you does best against it\.)$/.test(lo.text), 'loadouts: the line under the rows (' + (lo && lo.text.slice(-70)) + ')');
+    ok(lo && lo.after && lo.inside && lo.pressable === 0, 'loadouts: after the amber line, inside the card, nothing in it to press (' + JSON.stringify(lo && { after: lo.after, inside: lo.inside, pressable: lo.pressable }) + ')');
+    await page.waitForTimeout(1400);
+    const cardR = await rectOf(page, '#pi-eyecard');
+    const under = await panelRect(page);
+    ok(cardR && cardR.bottom <= 900 && under && under.top >= cardR.bottom - 1 && under.bottom <= 900, 'loadouts: the card still fits the window, the panel’s line on screen under it (card bottom ' + Math.round(cardR && cardR.bottom) + ', panel ' + JSON.stringify(under) + ')');
+    ok((await glows(page)) <= 1 && errors.length === 0, 'loadouts: at most one thing glows, no page errors ' + JSON.stringify(errors));
+    await page.screenshot({ path: resolve(shots, 'torn-eye-attack-loadouts.png') });
+    // Only the one on you is known: its one row, and how the others get here.
+    const solo = await open('page=attack&user2ID=424242&fixture=attack&ffs=1&who=owner', { wait: 6000, width: 1600, seed: { ...store, 'pumpingIron.v1.eyeLoadouts': JSON.stringify({}) } });
+    await tornLayout(solo.page);
+    await solo.page.evaluate(() => fetch('fixtures/attackData.json?sid=attackData').then((r) => r.json()));
+    await solo.page.waitForTimeout(1500);
+    const one = await solo.page.evaluate(() => { const b = document.querySelector('#pi-eyecard [data-pi-loadouts]'); return b ? b.textContent.replace(/\s+/g, ' ').trim() : null; });
+    ok(one && /^Your loadouts against it\s?win · HP kept\s?Minigun\s?No armour\s?\d+% · \d+%\s?on you\s?Your other loadouts show here once you have worn them with Torn’s items page open\.$/.test(one), 'loadouts: only the one on you known: one row, and how the others get here (' + one + ')');
+    await solo.page.screenshot({ path: resolve(shots, 'torn-eye-attack-loadouts-one.png') });
+    await solo.page.close();
     await page.close();
 }
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Pumping Iron
 // @namespace    torn-pumping-iron
-// @version      1.5.3
+// @version      1.6.0
 // @description  Gym planner and fight scout for Torn: what to take, what to train, what to buy, who you can beat. Reads the API and the page you're on; never acts for you.
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
@@ -48,8 +48,8 @@
 (function (Math, Number, Object, Array, JSON, Date, Set, Map, WeakMap, WeakSet, Promise, String, Boolean, Error, Infinity, NaN, undefined) {
     'use strict';
 
-    const PI_BUILD_VERSION = '1.5.3';
-    const PI_BUILD_HASH = 'a7a50a890dfe';
+    const PI_BUILD_VERSION = '1.6.0';
+    const PI_BUILD_HASH = 'da16102ab5ff';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -1768,6 +1768,9 @@
         // The plan's own recalibration, once a Torn day (round 8): the last try {day, at, ok (null while it runs), error}.
         // GM, so two open tabs of the webpage do not both run it.
         autoRecal: 'autoRecal',
+        // Which Discord pings are ticked on (Settings › Discord pings, core/pings.js): {hand: {kind: {on, at}}, war}.
+        // GM, so the sync from any tab sends the same ticks.
+        pings: 'pingTicks',
     };
 
     /** Torn Eye colour bands (ENGINE-SPEC §10), user-settable. */
@@ -6339,6 +6342,178 @@
         );
     }
 
+    /* ===== src/core/discord-state.js ===== */
+    /*
+     * What Settings › Discord pings says about the service, in words, and what the problem report carries about it.
+     * Pure: it reads the stored record (K.worker) as the sync answer and the last test ping left it.
+     *
+     * A friend "did not receive an alert from the discord bot": Discord refused the bot's DM (his DMs were off), the
+     * tag said Working, the test ping said "Your Worker answered 502." and his report held `discord: true`. So: the
+     * tag never says Working when the bot is known not to reach you, every state says what to do, and the report
+     * says which state it is. An older service tells less (no `delivery`, no `tornRead`): then only what the test
+     * ping showed is said.
+     */
+
+    /** Turning the bot's DMs on, in Discord. */
+    const DM_STEPS = ['In Discord, open the server the bot is in.', 'Click the server name, then Privacy Settings.', 'Turn Direct Messages on.'];
+
+    const DS_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    /** "10:48 UTC", with the day when it is not today. */
+    function discordWhen(ms, now = Date.now()) {
+        if (!(ms > 0)) return 'never';
+        const d = new Date(ms);
+        const clock = d.toISOString().slice(11, 16) + ' UTC';
+        return d.toISOString().slice(0, 10) === new Date(now).toISOString().slice(0, 10) ? clock : d.getUTCDate() + ' ' + DS_MONTHS[d.getUTCMonth()] + ' ' + clock;
+    }
+
+    /** Is this record a connected service (logged in with Discord, or your own service set up)? */
+    const dsConnected = (w) => Boolean(w && w.base && w.secret && (w.discordName || w.connectedAt));
+
+    /** Torn refused the service's key: pings are paused until a new key is sent. (A record of 1.5.3 or older has only the text.) */
+    const dsPaused = (w) => w.paused === true || (w.paused === undefined && /paused pings/.test(String(w.lastError || '')));
+
+    /** The last sync did not get through (a record of 1.5.3 or older: any other error text). */
+    function dsSyncFail(w) {
+        if (w.syncFail && w.syncFail.text) return w.syncFail;
+        return w.paused === undefined && w.lastError && !dsPaused(w) ? { at: null, text: String(w.lastError) } : null;
+    }
+
+    /**
+     * The state of a connected service.
+     * @param {object} w - the stored record
+     * @returns {{key: string, tone: 'ok'|'bad'|'off', tag: string, title: string|null, text: string|null, steps: string[], notes: string[]}|null}
+     *   key: paused | waiting | dm_refused | test_failed | no_route | torn | sync | ok. Null when nothing is connected.
+     */
+    function discordView(w, now = Date.now()) {
+        if (!dsConnected(w)) return null;
+        const own = !w.discordName;
+        const out = (key, tone, tag, title = null, text = null, steps = [], notes = []) => ({ key, tone, tag, title, text, steps, notes });
+        if (dsPaused(w)) return out('paused', 'bad', 'Paused', 'Pings are paused', String(w.pauseText || w.lastError || 'Torn refused the key on the service.') + (own ? '' : ' Save a working Torn key above; it goes to the service by itself.'));
+        const d = w.delivery || null;
+        const tf = w.testFail || null;
+        const again = 'Then press Send a test ping here.';
+        // The service says so (or, an older one: the last test ping did).
+        if (d ? d.reason === 'dm_refused' : tf && tf.reason === 'dm_refused') {
+            const at = d && d.dmRefusedAt ? ' Last refused ' + discordWhen(d.dmRefusedAt * 1000, now) + '.' : '';
+            return out('dm_refused', 'bad', 'Not reaching you', 'Discord refuses the bot’s DMs', 'No ping can reach you until Direct Messages from the server are on.' + at, [...DM_STEPS, again]);
+        }
+        if (d ? d.reason === 'no_route' : tf && tf.reason === 'no_route') {
+            return out('no_route', 'bad', 'Not reaching you', 'Nothing to deliver through', own ? 'Your service has no channel webhook and no linked Discord account. Press Edit and save a webhook, or get a link code for the bot.' : 'The service has no Discord account linked for this browser. Press Disconnect, then Log in with Discord again.');
+        }
+        // An older service answers a failed test with a bare 502: it does not say why. A refused DM is the usual cause,
+        // and that service then tries no DM for 6 hours, the test ping included; a new login starts afresh.
+        if (!d && tf && tf.reason === 'unknown') {
+            const steps = own ? [...DM_STEPS, 'Check the channel webhook saved on your service, if you use one.', 'Then press Send a test ping here (after a refused DM the bot waits 6 hours; Forget and Connect again ends the wait).'] : [...DM_STEPS, 'Then press Disconnect here and Log in with Discord again (after a refused DM the bot waits 6 hours; a new login ends the wait).', 'Then press Send a test ping.'];
+            return out('test_failed', 'bad', 'Not reaching you', 'The test ping did not arrive', 'Most likely Discord refuses the bot’s DMs: Direct Messages from the server are off.', steps);
+        }
+        const sf = dsSyncFail(w);
+        if (!w.ready) {
+            // Never synced: nothing known yet. A failed first sync says why.
+            return out('waiting', 'bad', own ? 'Needs the webhook and key' : 'Not pinging yet', null, sf ? 'The first sync did not get through (' + sf.text.replace(/\.$/, '') + '). It tries again within a minute.' : own ? 'Your service needs a Torn key and a webhook (or a linked Discord account) before it pings.' : 'Waiting for the first sync (open Home once).');
+        }
+        const tr = w.tornRead || null;
+        if (tr && tr.ok === false) {
+            const fix = Number(tr.code) === 16 ? (own ? ' Paste a Limited Torn key for your service.' : ' Save a Limited Torn key above; it goes to the service by itself.') : ' Nothing to do here: pings start again by themselves when Torn answers.';
+            return out('torn', 'bad', 'Not reading Torn', 'The service can’t read your Torn timers', String(tr.error || 'Torn answers it with an error.') + (tr.since ? ' Since ' + discordWhen(tr.since * 1000, now) + '.' : '') + fix);
+        }
+        if (sf) return out('sync', 'bad', 'Last sync failed', 'The last sync did not get through', sf.text.replace(/\.$/, '') + '. It tries again within a minute; pings still come from the plan sent before.');
+        const notes = [];
+        const steps = [];
+        if (d && d.via === 'channel' && d.dmRefusedAt) {
+            notes.push('Discord refuses the bot’s DMs, so pings go to your channel (no buttons there). For DMs:');
+            steps.push(...DM_STEPS, again);
+        }
+        if (tr && tr.ok && tr.travel === false) notes.push('The key on the service can’t read travel, so the Landed ping does not come.');
+        return out('ok', 'ok', 'Working', null, null, steps, notes);
+    }
+
+    /** What a test ping that went out says. */
+    function testSentWords(r, own = false) {
+        if (r && r.via === 'hook') return r.dmRefused ? 'Sent to your channel. Discord refused the bot’s DM.' : 'Sent. Check your channel.';
+        return own ? 'Sent. Check Discord.' : 'Sent. Check your Discord DMs.';
+    }
+
+    /**
+     * Why a test ping failed, from the service's answer.
+     * @param {{http: number|null, reason: string|null, message: string}} e
+     * @returns {{reason: string, text: string}} reason: dm_refused | no_route | discord_error | unknown (a bare 502) | forgotten | error
+     */
+    function testFailOf(e) {
+        const http = Number(e && e.http) || null;
+        const message = String((e && e.message) || e || 'failed');
+        const known = e && ['dm_refused', 'no_route', 'discord_error'].includes(e.reason) ? e.reason : null;
+        if (known === 'dm_refused') return { reason: known, text: 'Discord refused the bot’s DM. What to do is above.' };
+        if (known) return { reason: known, text: message };
+        // An older service: no reason, and no words of its own ("Your Worker answered 502.").
+        if (http === 502 && /answered 502/.test(message)) return { reason: 'unknown', text: 'The test ping did not arrive. What to try is above.' };
+        if (http === 403) return { reason: 'forgotten', text: message };
+        return { reason: 'error', text: message };
+    }
+
+    const dsIso = (ms) => (ms > 0 ? new Date(ms).toISOString() : null);
+
+    /**
+     * The Discord state for the problem report (state.json). Never the secret, the login id, the Discord id, the
+     * Discord name or the service's address.
+     * @param {object|null} raw - the stored record, connected or not
+     * @param {object} [o] - {now, defaultBase, ticks: pingTicks()}
+     */
+    function discordReport(raw, { now = Date.now(), defaultBase = null, ticks = null } = {}) {
+        const w = raw && raw.base && raw.secret ? raw : null;
+        const hide = [w && w.secret, w && w.login && w.login.id, w && w.discordId, w && w.discordName, w && w.base].filter((x) => x && String(x).length >= 3).map(String);
+        const clean = (text) => {
+            if (text === null || text === undefined) return null;
+            let s = String(text);
+            for (const x of hide) s = s.split(x).join('[hidden]');
+            return s.slice(0, 300);
+        };
+        const tickList = ticks ? Object.fromEntries(Object.entries(ticks).map(([k, t]) => [k, { on: t.on, byHand: t.hand, ...(t.mode ? { movedBy: t.mode } : {}) }])) : null;
+        if (!w) return { connected: false, ticks: tickList };
+        const view = discordView(w, now);
+        const d = w.delivery || null;
+        const tr = w.tornRead || null;
+        const sf = view ? dsSyncFail(w) : null;
+        return {
+            connected: Boolean(view),
+            state: view ? view.key : w.login ? 'logging in' : 'not connected',
+            tag: view ? view.tag : null,
+            via: w.discordName ? 'Discord login' : w.connectedAt ? 'own service set up by hand' : null,
+            service: defaultBase && w.base === defaultBase ? 'the Pumping Iron service' : 'another service (own)',
+            login: w.login ? { since: dsIso(w.login.at) } : null,
+            connectedAt: dsIso(w.connectedAt),
+            lastSync: dsIso(w.lastSync),
+            lastAnswer: dsIso(w.answerAt),
+            lastError: clean(w.lastError),
+            syncFail: sf ? { since: dsIso(sf.at), text: clean(sf.text) } : null,
+            paused: view ? dsPaused(w) : null,
+            ready: Boolean(w.ready),
+            linked: Boolean(w.linked),
+            bot: Boolean(w.bot),
+            keySent: w.discordName ? Boolean(w.keyTag) : null,
+            // What the service said in its last answer; null when it is an older one that does not say.
+            serviceTells: Boolean(d || tr || w.kinds),
+            delivery: d ? { ok: Boolean(d.ok), via: d.via || null, reason: d.reason || null, dmRefused: Boolean(d.dmRefusedAt), dmRefusedAt: dsIso((Number(d.dmRefusedAt) || 0) * 1000), webhook: Boolean(d.webhook) } : null,
+            tornRead: tr ? { ok: tr.ok === undefined ? null : tr.ok, lastGood: dsIso((Number(tr.at) || 0) * 1000), travel: tr.travel !== false, failingSince: dsIso((Number(tr.since) || 0) * 1000), code: tr.code === undefined ? null : tr.code, error: clean(tr.error) } : null,
+            lastTest: w.testFail ? { ok: false, at: dsIso(w.testFail.at), reason: w.testFail.reason, http: w.testFail.http || null, text: clean(w.testFail.text) } : w.testOkAt ? { ok: true, at: dsIso(w.testOkAt), via: w.testVia || null } : null,
+            knowsNerve: w.kinds ? Object.prototype.hasOwnProperty.call(w.kinds, 'nerve') : null,
+            ticks: tickList,
+        };
+    }
+
+    /** One line for the report's IN SHORT block. */
+    function discordShort(rep) {
+        if (!rep || !rep.connected) return rep && rep.state === 'logging in' ? 'a login is under way (not connected yet)' : 'not connected';
+        const off = rep.ticks ? Object.entries(rep.ticks).filter(([, t]) => !t.on).map(([k]) => k) : [];
+        const parts = [rep.tag + ' (' + rep.state + ')', rep.via === 'Discord login' ? 'logged in with Discord' : 'own service', 'last sync ' + (rep.lastSync ? rep.lastSync.slice(0, 16).replace('T', ' ') + ' UTC' : 'never')];
+        if (rep.delivery) parts.push(rep.delivery.dmRefused ? 'DMs refused since ' + String(rep.delivery.dmRefusedAt).slice(0, 16).replace('T', ' ') + ' UTC' + (rep.delivery.webhook ? ', a webhook is saved' : ', no webhook') : 'pings go by ' + (rep.delivery.via || 'nothing'));
+        else parts.push('an older service: it does not say where pings go');
+        if (rep.tornRead && rep.tornRead.ok === false) parts.push('the service’s Torn read is failing (' + (rep.tornRead.code === null ? '?' : rep.tornRead.code) + ')');
+        if (rep.lastTest && !rep.lastTest.ok) parts.push('last test ping failed (' + rep.lastTest.reason + ')');
+        if (off.length) parts.push('ticked off: ' + off.join(', '));
+        return parts.join(' · ');
+    }
+
     /* ===== src/core/report.js ===== */
     /*
      * Settings › Report a problem (round 7; the pattern is Torn Trading's
@@ -6349,6 +6524,7 @@
      * log. Nothing is sent anywhere: the zip is downloaded, and you send it.
      * No API key, player id or name is in it. Pure.
      */
+
 
 
 
@@ -6458,7 +6634,7 @@
      * @param {string} r.expected
      * @param {Array<{name: string, data: Uint8Array}>} r.shots
      * @param {object[]} r.log - the problem log
-     * @param {object} r.state - {version, build, settings, plan, runs, diagnostics, keys: which are saved (yes/no only)}
+     * @param {object} r.state - {version, build, settings, plan, runs, diagnostics, keys: which are saved (yes/no only), discord: core/discord-state.js discordReport()}
      * @param {object|null} r.player - {stats, happyMax, energyMax, gymId, unlocked, build, perks: {mult, lines, unknown}, job}
      * @param {object|null} r.saved - the whole saved plan (summarised here)
      * @param {object[]} [r.learning] - the learning export's files (core/learndata.js exportFiles): gym samples, gym log, fights, model
@@ -6489,13 +6665,15 @@
             player ? '  happy maximum ' + fmt(player.happyMax || 0) + ' · energy maximum ' + (player.energyMax || '?') + ' · gym ' + (player.gymId || '?') + ' · build ' + (player.build || '?') : null,
             saved ? '  plan: ' + saved.months + (saved.months === 1 ? ' month, ' : ' months, ') + (saved.rec ? saved.rec.recommended : '?') + ' recommended' : '  plan: none saved',
             (state.runs || []).length ? '  last plan run: ' + state.runs.slice(-1).map((x) => (x.kind === 'replan' ? 'Recalibrate' : 'Create plan') + ' ' + (x.months || '?') + (x.months === 1 ? ' month, ' : ' months, ') + (x.ms / 1000).toFixed(1) + ' s' + (x.hiddenMs > 0 ? ' (' + (x.hiddenMs / 1000).toFixed(1) + ' s of it with the tab not in front)' : '') + (x.ok ? '' : ' - ' + (x.error || 'failed')))[0] : null,
+            // A friend's report said only "discord: true" while Discord refused every DM: the state is said here.
+            state.discord ? '  Discord pings: ' + discordShort(state.discord) : null,
             '',
             'ATTACHED',
             shots.length ? shots.map((s, i) => '  screenshots/' + (i + 1) + '-' + safe(s.name)).join('\n') : '  no screenshots',
             '  problem-log.txt - ' + errors.length + ' errors and ' + (log.length - errors.length) + ' other lines, the last 7 days, every tab',
             '  player.json - stats, happy and energy maximum, gym, gyms unlocked, build, the perks read (and the lines not understood)',
             '  plan.json - the saved plan in short: every plan\'s stats and cost, the path, what it was made from',
-            '  state.json - version, settings (no keys), the last plan runs with their time, diagnostics',
+            '  state.json - version, settings (no keys), the last plan runs with their time, diagnostics, Discord pings (what the service said, the ping ticks; no login, no Discord name)',
             '  stats-history.json - your stats at each day\'s last read',
             '  learning/ - your trains from Torn\'s log, the sessions the app saw, fights, what it learned',
             '  money-log-fields.json - your money log by log type: titles and the NAMES of the fields, never an amount',
@@ -6531,7 +6709,7 @@
             gymLog ? 'Your trains from Torn’s log (' + gymLog + ' lines) and what the app learned' : 'What the app learned from your trains',
             moneyTypes ? 'Your money log by type (' + moneyTypes + ' types): titles and field names only, never an amount' : 'Money log fields: none read (needs the Full key)',
             ledgerLines ? 'Your books by account (' + ledgerLines + ' lines): counts and field names only, never an amount' : null,
-            'Version and settings: no API key, no player id or name',
+            'Version, settings and the state of Discord pings: no API key, no player id or name, no Discord login or name',
         ].filter(Boolean);
     }
 
@@ -6598,8 +6776,13 @@
         return (d && d.property) || null;
     }
 
-    async function fetchEquipment(client) {
-        const d = await client.get('v2/user/equipment');
+    /**
+     * What you wear now. `fresh` (the loadout just changed on Torn's items page): asked with the time, so neither this
+     * client's 5 s of reuse nor Torn's own cache answers with the gear from before [check live: Torn's v2 documents
+     * `timestamp` as "bypass cache"; an answer that still lags is read a second time by its caller].
+     */
+    async function fetchEquipment(client, { fresh = false } = {}) {
+        const d = await client.get('v2/user/equipment', fresh ? { timestamp: Math.floor(Date.now() / 1000) } : {});
         return { equipment: (d && d.equipment) || [], clothing: (d && d.clothing) || [] };
     }
 
@@ -11968,6 +12151,29 @@
         });
     }
 
+    /** As pageSet, resolving once it is stored (a restore reloads the page right after). */
+    async function pageSetDone(key, value) {
+        await loadArchives();
+        const gone = value === null || value === undefined;
+        if (mem.idb) {
+            if (gone) delete mem.page[key];
+            else mem.page[key] = value;
+            await idbUpdate(pageKey(key), () => (gone ? null : value));
+            return;
+        }
+        if (gone) gmDel(key);
+        else gmSet(key, value);
+    }
+
+    /** Forget the webpage's older part of some histories, resolving once it is gone (a restore writes them whole). */
+    async function clearArchivedDone(keys) {
+        await loadArchives();
+        for (const k of keys) {
+            delete mem.arch[k];
+            if (mem.idb) await idbUpdate(archKey(k), () => null);
+        }
+    }
+
     /** Forget the webpage's copy of some keys (Settings › Your data). */
     function clearArchived(keys) {
         for (const k of keys) {
@@ -12733,7 +12939,11 @@
     /** kind: 'error' (something failed), 'action' (what you did), 'note'. */
     function logProblem(kind, what, detail = null) {
         plog.pending.push({ at: Date.now(), kind, where: plogWhere(), what: logText(what), ...(detail ? { detail: logText(detail) } : {}) });
-        if (!plog.timer && typeof setTimeout === 'function') plog.timer = setTimeout(flushProblemLog, PLOG_FLUSH_MS);
+        if (!plog.timer && typeof setTimeout === 'function') {
+            plog.timer = setTimeout(flushProblemLog, PLOG_FLUSH_MS);
+            // Under node (the tests) the timer must not hold the process open; a browser's timer is a number.
+            if (plog.timer && typeof plog.timer.unref === 'function') plog.timer.unref();
+        }
     }
 
     const logAction = (what, detail = null) => logProblem('action', what, detail);
@@ -13271,6 +13481,33 @@
         return 'kept for ' + (k.war || 'the enemy faction') + ' · Settings › Keep for war days';
     }
 
+    /**
+     * A stat the session doesn't train (round 9, the owner's pick 3B, mockups/round9/companion.html §3): what one train of
+     * it gives in this gym, and the gym of yours that gives more for the same energy. The box stays grey and quiet: no
+     * outline, no Fill, and nothing switches gyms for you.
+     * @param {string} stat
+     * @param {object} o - {value, happy, gym: the gym you're in, best: your best open gym for the stat, perk, locked}
+     * @returns {{lines:string[], foot:string, better:{id, name, dots}|null, gain:{here:number, there:number}}|null}
+     */
+    function offPlanLines(stat, { value, happy, gym, best = null, perk = 1, locked = false } = {}) {
+        if (!gym || !(value > 0)) return null;
+        const h = Math.max(0, Number(happy) || 0);
+        const hereDots = locked ? 0 : gym.dots[stat] || 0;
+        const here = hereDots > 0 ? gainPerTrain(stat, value, h, hereDots, gym.energy, perk) : 0;
+        const better = best && best.id !== gym.id && best.dots[stat] > hereDots ? best : null;
+        // The other gym at this gym's energy a train (gyms take 5, 10, 25 or 50): the same energy, so the two compare.
+        const perE = better ? gainPerTrain(stat, value, h, better.dots[stat], better.energy, perk) / better.energy : 0;
+        const there = better ? perE * (here > 0 ? gym.energy : better.energy) : 0;
+        if (!(here > 0) && !better) return null;
+        const lines = [];
+        if (better) lines.push((here > 0 ? 'Better at ' : 'Trained at ') + better.name + ' · ' + better.dots[stat] + ' dots');
+        const unit = better && here > 0 && better.energy !== gym.energy ? ' for ' + gym.energy + ' energy' : ' a train';
+        if (here > 0) lines.push('about ' + fmtSigned(Math.round(here)) + unit + ' here' + (better ? ', ' + fmtSigned(Math.round(there)) + ' there' : ''));
+        else lines.push('about ' + fmtSigned(Math.round(there)) + ' a train there');
+        const foot = better ? (here > 0 ? 'Better at ' : 'Trained at ') + better.name : fmtSigned(Math.round(here)) + ' a train';
+        return { lines, foot, better: better ? { id: better.id, name: better.name, dots: better.dots[stat] } : null, gain: { here: Math.round(here), there: Math.round(there) } };
+    }
+
     /** "EDVD × 5, then the Ecstasy, then train it all" */
     function eatOrder(boost) {
         const parts = [];
@@ -13380,6 +13617,16 @@
                 const w = greyWord(k, mine, open, locked);
                 perStat[k] = { kind: open.length ? 'next' : mine.length ? 'done' : w.text === 'Not trained here' ? 'none' : w.text.startsWith('Next') ? 'next' : 'skip', text: w.text, tag: w.tag };
             }
+        }
+
+        // Round 9 (pick 3B): a box the session leaves alone also says what a train gives here, and where it gives more.
+        const happyNow = reads0.happy && Number.isFinite(reads0.happy.current) ? reads0.happy.current : m.strip.happy ? m.strip.happy.current : 0;
+        for (const k of STATS) {
+            const p = perStat[k];
+            if (!(p.kind === 'skip' || p.kind === 'none' || (p.kind === 'next' && p.tag === 'tomorrow'))) continue;
+            const box = boxes.get(k);
+            const more = offPlanLines(k, { value: (reading.stats && reading.stats[k]) || stats[k], happy: happyNow, gym, best: m.pc.best ? m.pc.best[k] : null, perk: m.pc.perks && m.pc.perks.mult ? m.pc.perks.mult[k] : 1, locked: (box && box.locked) || !(gym.dots[k] > 0) });
+            if (more) Object.assign(p, more);
         }
 
         const target = cur ? gymById(cur.gymId, table) : null;
@@ -14544,10 +14791,12 @@
     const WORKER_SETUP_URL = 'https://github.com/abrahamdelosreyes17-oss/torn-pumping-iron/blob/main/worker/SETUP.md';
 
     class WorkerError extends Error {
-        constructor(message, { http = null } = {}) {
+        /** `reason`: the service's own word for what went wrong (a failed test ping: dm_refused, no_route, discord_error), when it gave one. */
+        constructor(message, { http = null, reason = null } = {}) {
             super(message);
             this.name = 'WorkerError';
             this.http = http;
+            this.reason = reason;
         }
     }
 
@@ -14606,7 +14855,7 @@
         } catch {
             data = null;
         }
-        if (!res.ok || !data || data.ok === false) throw new WorkerError((data && data.error) || 'Your Worker answered ' + res.status + '.', { http: res.status });
+        if (!res.ok || !data || data.ok === false) throw new WorkerError((data && data.error) || 'Your Worker answered ' + res.status + '.', { http: res.status, reason: data && typeof data.reason === 'string' ? data.reason : null });
         return data;
     }
 
@@ -14616,9 +14865,11 @@
 
     /**
      * Store the plan (and on first connect the key, webhook and Discord id).
-     * @param {object} o - {base, secret, invite?, plan, tornKey?, webhookUrl?, discordId?, rules?, war?, watch?}
+     * @param {object} o - {base, secret, invite?, plan, tornKey?, webhookUrl?, discordId?, rules?, rulesAt?, war?, watch?}
+     *   `rules` are the ping ticks ({kind: bool}); `rulesAt` when each was set by hand (unix s). An older service keeps
+     *   the kinds it knows and ignores the rest.
      */
-    function workerSync({ base, secret, invite = null, plan, tornKey, webhookUrl, discordId, rules, ackIds, targets, factionId, playerId, war, watch, fetchImpl }) {
+    function workerSync({ base, secret, invite = null, plan, tornKey, webhookUrl, discordId, rules, rulesAt, ackIds, targets, factionId, playerId, war, watch, fetchImpl }) {
         const body = { plan };
         if (war !== undefined) body.war = war;
         if (watch !== undefined) body.watch = watch;
@@ -14630,6 +14881,7 @@
         if (webhookUrl !== undefined) body.webhookUrl = webhookUrl;
         if (discordId !== undefined) body.discordId = discordId;
         if (rules !== undefined) body.rules = rules;
+        if (rulesAt !== undefined) body.rulesAt = rulesAt;
         return workerCall(base, '/plan', { method: 'PUT', secret, invite, body, fetchImpl });
     }
 
@@ -14664,6 +14916,237 @@
         return workerCall(base, '/login/cancel', { method: 'POST', secret, body: { id }, fetchImpl });
     }
 
+    /* ===== src/core/pings.js ===== */
+    /*
+     * Which Discord pings are ticked on (Settings › Discord pings). Pure: the storage and the sync are in src/pings.js
+     * and src/discord.js.
+     *
+     * A tick is on or off by default (the service's own defaults), or set by hand: {on, at}. Two modes move ticks by
+     * themselves: stacking for a chain (or an overdose) turns the energy and training ticks off, and a war of your
+     * faction turns the war ticks on. Nothing is stored for a mode: when it ends the ticks are what they were. A tick
+     * set by hand AFTER the mode came on wins over it, and is what stays afterwards.
+     *
+     * The bot's /settings in Discord can switch a kind too: the service tells the change with its time and the ticks
+     * take it over as a hand change of that time, unless a tick here was set later (the latest change wins).
+     */
+
+    /** The service's defaults (worker/src/settings.js KIND_DEFAULTS; a test keeps the two the same). */
+    const PING_DEFAULTS = { drug: true, drugready: true, booster: true, energy: true, nerve: true, refill: true, jump: true, landed: true, price: true, watch: true, war: true, chain: false, stale: true };
+
+    /** Every ping in plain words, grouped as Settings lists them. */
+    const PING_GROUPS = [
+        {
+            title: 'Cooldowns',
+            kinds: [
+                ['drug', 'Drug cooldown ending', '5 min before it ends'],
+                ['drugready', 'Drug ready and unused', 'once, after 15 min'],
+                ['booster', 'Booster cooldown ending', 'about a minute before'],
+            ],
+        },
+        {
+            title: 'Bars',
+            kinds: [
+                ['energy', 'Energy full', 'about a minute before, then hourly while full'],
+                ['nerve', 'Nerve full', 'about a minute before, once'],
+                ['refill', 'Daily refill unused', '2 h before Torn midnight'],
+            ],
+        },
+        {
+            title: 'Your plan',
+            kinds: [
+                ['jump', 'Jump steps', '5 min before each tick'],
+                ['landed', 'Landed with a step waiting', 'back in Torn'],
+                ['stale', 'Plan out of date', 'not synced for 12 h'],
+            ],
+        },
+        {
+            title: 'Players and prices',
+            kinds: [
+                ['war', 'War targets', 'enemies you can beat, a few minutes ahead'],
+                ['chain', 'Chain about to drop', '10+ hits, under a minute left'],
+                ['watch', 'Watch list', 'players you watch in Torn Eye'],
+                ['price', 'Price watch', 'an item at your price (/watch in Discord)'],
+            ],
+        },
+    ];
+
+    const PING_KINDS = PING_GROUPS.flatMap((g) => g.kinds.map(([kind]) => kind));
+
+    /** Stacking for a chain, or overdosed: these ticks go off by themselves (the bot's own rule: no energy or training pings). */
+    const CHAIN_OFF = ['energy', 'refill', 'jump'];
+    /** A war of your faction: these ticks go on by themselves. */
+    const WAR_ON = ['war', 'chain'];
+
+    /** Why a tick moved by itself, next to it. */
+    const MODE_NOTE = {
+        chain: 'off while you are stacking · back on Resume',
+        overdose: 'off while you are overdosed · back when it is over',
+        war: 'on while your faction is at war · back off after it',
+    };
+
+    const pingStoreEmpty = () => ({ hand: {}, war: null });
+
+    /** The stored ticks, made safe to read. */
+    function pingStore(raw) {
+        const s = raw && typeof raw === 'object' ? raw : {};
+        const hand = {};
+        for (const k of PING_KINDS) {
+            const h = s.hand && s.hand[k];
+            if (h && typeof h.on === 'boolean') hand[k] = { on: h.on, at: Number(h.at) || 0 };
+        }
+        const war = s.war && s.war.key ? { key: String(s.war.key), since: Number(s.war.since) || 0 } : null;
+        return { ...pingStoreEmpty(), hand, war };
+    }
+
+    /**
+     * The ticks as they are now.
+     * @param {object} store - pingStore()
+     * @param {object} [modes] - {chain: ms since "I'm stacking" | null, overdose: ms | null, war: ms since the war was seen | null}
+     * @returns {Object<string, {on: boolean, base: boolean, hand: boolean, mode: 'chain'|'overdose'|'war'|null}>} `mode` only when it moved the tick
+     */
+    function pingTicks(store, modes = {}) {
+        const st = pingStore(store);
+        // One of the two at a time, as the plan sync has it: an overdose first.
+        const offMode = modes.overdose ? 'overdose' : modes.chain ? 'chain' : null;
+        const offSince = offMode ? Number(modes[offMode]) : null;
+        const out = {};
+        for (const k of PING_KINDS) {
+            const h = st.hand[k] || null;
+            const base = h ? h.on : PING_DEFAULTS[k];
+            let on = base;
+            let mode = null;
+            if (offMode && CHAIN_OFF.includes(k) && !(h && h.at > offSince)) {
+                on = false;
+                mode = offMode;
+            }
+            if (modes.war && WAR_ON.includes(k) && !(h && h.at > Number(modes.war))) {
+                on = true;
+                mode = 'war';
+            }
+            out[k] = { on, base, hand: Boolean(h), mode: on !== base ? mode : null };
+        }
+        return out;
+    }
+
+    /**
+     * What the sync sends.
+     * - `rules`: every kind, on or off. The war mode is in them (the service knows no war mode); stacking and an
+     *   overdose are NOT: the service silences those kinds itself from the plan's flag, and brings them back by itself
+     *   when an overdose runs out with this browser closed.
+     * - `keep`: the stacking kinds ticked back on by hand during it (the plan's flag carries them).
+     * - `rulesAt`: when each hand-set tick was set (unix s), so the service knows which /settings changes it has seen.
+     */
+    function pingSync(store, modes = {}) {
+        const st = pingStore(store);
+        const ticks = pingTicks(st, modes);
+        const rules = {};
+        const keep = [];
+        for (const k of PING_KINDS) {
+            const t = ticks[k];
+            const stacked = t.mode === 'chain' || t.mode === 'overdose';
+            rules[k] = stacked ? t.base : t.on;
+            if (CHAIN_OFF.includes(k) && (modes.chain || modes.overdose) && t.on) keep.push(k);
+        }
+        const rulesAt = {};
+        for (const [k, h] of Object.entries(st.hand)) rulesAt[k] = Math.floor(h.at / 1000);
+        return { rules, rulesAt, keep };
+    }
+
+    /** A tick set by hand. */
+    function setTick(store, kind, on, now = Date.now()) {
+        const st = pingStore(store);
+        if (!PING_KINDS.includes(kind)) return st;
+        return { ...st, hand: { ...st.hand, [kind]: { on: Boolean(on), at: now } } };
+    }
+
+    /**
+     * The /settings changes made in Discord that the service tells (`kindsSet`: {kind: {on, at (unix s)}}): each is
+     * taken over as a hand change of that time, unless the tick here was set later. Returns the same store when
+     * nothing changed.
+     */
+    function adoptKinds(store, kindsSet) {
+        const st = pingStore(store);
+        if (!kindsSet || typeof kindsSet !== 'object') return st;
+        let hand = st.hand;
+        for (const k of PING_KINDS) {
+            const c = kindsSet[k];
+            if (!c || typeof c.on !== 'boolean') continue;
+            const at = (Number(c.at) || 0) * 1000;
+            const h = st.hand[k];
+            if (h && h.at >= at) continue;
+            hand = { ...hand, [k]: { on: c.on, at } };
+        }
+        return hand === st.hand ? st : { ...st, hand };
+    }
+
+    /** The war the ticks follow: kept with the time it was first seen, dropped when it is over. */
+    function warSeen(store, warKey, now = Date.now()) {
+        const st = pingStore(store);
+        if (!warKey) return st.war ? { ...st, war: null } : st;
+        return st.war && st.war.key === warKey ? st : { ...st, war: { key: warKey, since: now } };
+    }
+
+    /* ===== src/pings.js ===== */
+    /*
+     * The Discord ping ticks in this browser (core/pings.js has the rules): stored in GM so every tab syncs the same
+     * ticks, read with the modes that move them (stacking, an overdose, a war of your faction).
+     */
+
+
+
+
+
+
+    const pingsRead = () => pingStore(get(K.pings, null));
+
+    function pingsWrite(next, was) {
+        if (JSON.stringify(next) === JSON.stringify(was)) return false;
+        set(K.pings, next);
+        return true;
+    }
+
+    /**
+     * The modes on now. A war of your faction that has begun (as Torn Eye's War mode has it) is noted with the time
+     * it was first seen, so a tick set by hand before it gives way and one set during it stays.
+     * @param {object} m - the model (stacking, overdose)
+     * @returns {{chain: number|null, overdose: number|null, war: number|null}} since when, in ms
+     */
+    function pingModes(m, now = Date.now()) {
+        const was = pingsRead();
+        const enemy = warOnNow(now, get(K.userStatic, {}) || {});
+        const st = warSeen(was, enemy && warBegun(enemy, Math.floor(now / 1000)) ? warKeyOf(enemy) : null, now);
+        pingsWrite(st, was);
+        return {
+            chain: m && m.stacking ? Number(m.stacking.since) || 1 : null,
+            overdose: m && m.overdose ? Number(m.overdose.at) || 1 : null,
+            war: st.war ? st.war.since || 1 : null,
+        };
+    }
+
+    /** The ticks as Settings shows them: {kind: {on, base, hand, mode}}. */
+    function pingsNow(m, now = Date.now()) {
+        const modes = pingModes(m, now);
+        return pingTicks(pingsRead(), modes);
+    }
+
+    /** What the plan sync sends: {rules, rulesAt, keep}. */
+    function pingsForSync(m, now = Date.now()) {
+        const modes = pingModes(m, now);
+        return pingSync(pingsRead(), modes);
+    }
+
+    /** A tick set by hand in Settings. */
+    function setPing(kind, on, now = Date.now()) {
+        const was = pingsRead();
+        return pingsWrite(setTick(was, kind, on, now), was);
+    }
+
+    /** The service's answer: /settings changes made in Discord are taken over. True when a tick changed. */
+    function adoptPings(kindsSet) {
+        const was = pingsRead();
+        return pingsWrite(adoptKinds(was, kindsSet), was);
+    }
+
     /* ===== src/discord.js ===== */
     /*
      * Settings › Discord (Log in with Discord) and the plan sync. The plan's
@@ -14682,6 +15165,9 @@
 
 
 
+
+
+
     /** Set by the runtime: a Discord skip redraws this tab's model. */
     let onSkippedChange = null;
     function onSkipped(fn) {
@@ -14689,6 +15175,9 @@
     }
 
     const SYNC_MIN_MS = 60 * 1000;
+
+    /** A changed ping tick goes sooner than that, but not on every click of a row of ticks. */
+    const TICK_SYNC_MIN_MS = 5 * 1000;
 
     /** Sync at least this often while a tab is visible (a plan not synced for 12 h is "out of date" on the Worker). */
     const SYNC_EVERY_MS = 10 * 60 * 1000;
@@ -14767,6 +15256,41 @@
         return r && r.paused ? 'Your Worker paused pings: ' + (r.lastError || 'Torn refused its key') + '. Paste a new key for it.' : null;
     }
 
+    /**
+     * What the service's sync answer says, kept for Settings and the problem report (core/discord-state.js). An older
+     * service sends no `delivery`, `tornRead` or `kinds`: those stay null, and Settings says only what it knows.
+     */
+    function answered(r, now = Date.now()) {
+        const d = r.delivery && typeof r.delivery === 'object' ? r.delivery : null;
+        const tr = r.tornRead && typeof r.tornRead === 'object' ? r.tornRead : null;
+        return {
+            lastError: pausedText(r),
+            paused: Boolean(r.paused),
+            pauseText: pausedText(r),
+            syncFail: null,
+            answerAt: now,
+            ready: Boolean(r.ready),
+            linked: Boolean(r.linked),
+            bot: Boolean(r.bot),
+            delivery: d ? { ok: Boolean(d.ok), via: d.via || null, reason: d.reason || null, dmRefusedAt: Number(d.dmRefusedAt) || null, webhook: Boolean(d.webhook) } : null,
+            tornRead: tr ? { ok: tr.ok === true ? true : tr.ok === false ? false : null, at: Number(tr.at) || null, travel: tr.travel !== false, since: Number(tr.since) || null, code: tr.code === undefined ? null : tr.code, error: tr.error ? String(tr.error).slice(0, 200) : null } : null,
+            kinds: r.kinds && typeof r.kinds === 'object' ? r.kinds : null,
+        };
+    }
+
+    /** A change for the worse in what the service says goes to the problem log, once (not at every sync). */
+    function logAnswer(was, now) {
+        const v0 = discordView(was);
+        const v1 = discordView(now);
+        if (!v1 || (v0 && v0.key === v1.key)) return;
+        if (v1.key === 'ok') {
+            if (v0 && v0.key !== 'waiting') logNote('Discord pings work again', 'was: ' + v0.tag);
+            return;
+        }
+        if (v1.key === 'waiting') return;
+        logProblem('error', 'Discord pings: ' + (v1.title || v1.tag), v1.text);
+    }
+
     /** What's stored about the service, connected or not (a login may be under way). */
     function discordRaw() {
         const w = get(K.worker, null);
@@ -14784,12 +15308,14 @@
      * seconds) and no steps, so the bot sends nothing about energy or training (worker/src/alerts.js) and /today lists
      * nothing until Resume. Not the jump plan's stack (`type: 'jump'`): that one is part of a training plan.
      */
-    function planPayload(m) {
+    function planPayload(m, keep = []) {
         if (!m || !m.ready) return null;
         // type 'jump' + noRefill: a Worker from before round 7 ignores chain but still holds back the energy-full and refill pings.
         // Overdosed (the one stored state, m.overdose): no steps either, and the bot says "Overdosed · fly to Switzerland" once.
-        if (m.overdose) return { type: 'jump', noRefill: true, steps: [], overdose: { at: Math.floor(m.overdose.at / 1000), until: Math.floor(m.overdose.until / 1000) } };
-        if (m.stacking) return { type: 'jump', noRefill: true, steps: [], chain: { since: Math.floor(m.stacking.since / 1000) } };
+        // `keep`: the energy and training pings ticked back on by hand during it (Settings › Discord pings); the bot sends those.
+        const kept = keep && keep.length ? { keep: [...keep] } : {};
+        if (m.overdose) return { type: 'jump', noRefill: true, steps: [], overdose: { at: Math.floor(m.overdose.at / 1000), until: Math.floor(m.overdose.until / 1000), ...kept } };
+        if (m.stacking) return { type: 'jump', noRefill: true, steps: [], chain: { since: Math.floor(m.stacking.since / 1000), ...kept } };
         return { type: m.steps.some((s) => s.kind === 'stack' || s.kind === 'jump') ? 'jump' : 'steady', steps: stepsForWorker(m.upcoming || m.steps), ...(m.noRefill ? { noRefill: true } : {}) };
     }
 
@@ -14820,12 +15346,14 @@
             }
         }
         const secret = prev && prev.base === base ? prev.secret : newSecret();
-        const body = { base, secret, invite: f.invite || null, plan: planPayload(model) };
+        const ticks = pingsForSync(model);
+        const body = { base, secret, invite: f.invite || null, plan: planPayload(model, ticks.keep), rules: ticks.rules, rulesAt: ticks.rulesAt };
         if (f.webhookUrl) body.webhookUrl = f.webhookUrl.trim();
         if (f.tornKey) body.tornKey = f.tornKey.trim();
         if (f.discordId) body.discordId = String(f.discordId).replace(/\D/g, '');
         const r = await workerSync(body);
-        set(K.worker, { base, secret, discordId: body.discordId || (prev && prev.discordId) || null, connectedAt: Date.now(), lastSync: Date.now(), lastSig: null, ready: Boolean(r.ready) || Boolean(prev && prev.ready), linked: Boolean(r.linked), bot: Boolean(r.bot), lastError: pausedText(r) });
+        set(K.worker, { base, secret, discordId: body.discordId || (prev && prev.discordId) || null, connectedAt: Date.now(), lastSync: Date.now(), lastSig: null, ...answered(r), ready: Boolean(r.ready) || Boolean(prev && prev.ready) });
+        adoptPings(r.kindsSet);
         return r;
     }
 
@@ -14864,7 +15392,13 @@
         const prev = discordRaw();
         const base = workerBase(baseIn || (prev && prev.base) || DEFAULT_WORKER);
         const secret = prev && prev.base === base ? prev.secret : newSecret();
-        const start = await workerLoginStart({ base, secret });
+        let start;
+        try {
+            start = await workerLoginStart({ base, secret });
+        } catch (e) {
+            logProblem('error', 'Discord login could not start', String((e && e.message) || e) + (e && e.http ? ' [http ' + e.http + ']' : ''));
+            throw e;
+        }
         // Only an address on the service itself is opened (it sends you on to discord.com).
         let url = null;
         try {
@@ -14918,29 +15452,34 @@
             try {
                 st = await workerLoginStatus({ base, secret, id });
             } catch (e) {
-                if (e && e.http === 404) return finishLogin(false, LOGIN_FAIL.expired);
+                if (e && e.http === 404) return finishLogin(false, LOGIN_FAIL.expired, 'expired');
                 continue; // A blip: ask again.
             }
             if (st.state === 'open') continue;
-            if (st.state !== 'done') return finishLogin(false, LOGIN_FAIL[st.state] || LOGIN_FAIL.failed);
+            if (st.state !== 'done') return finishLogin(false, LOGIN_FAIL[st.state] || LOGIN_FAIL.failed, String(st.state || 'failed'));
             // In. Saved first: if the first sync fails, the next minute's sync sends the plan and the key (no keyTag yet).
-            set(K.worker, { ...(discordRaw() || {}), base, secret, login: null, discordName: st.name || null, keyTag: null, connectedAt: Date.now(), lastSync: 0, lastSig: null, lastError: null });
+            // A new login starts afresh: what the service said before, and a failed test ping, are forgotten.
+            set(K.worker, { ...(discordRaw() || {}), base, secret, login: null, discordName: st.name || null, keyTag: null, connectedAt: Date.now(), lastSync: 0, lastSig: null, lastError: null, paused: false, pauseText: null, syncFail: null, delivery: null, tornRead: null, kinds: null, testFail: null, testOkAt: null });
             const key = getKey(K.apiKey);
             const statics = get(K.userStatic, {}) || {};
             const ki = statics.keyInfo || {};
-            const body = { base, secret, plan: planPayload(model) };
+            const ticks = pingsForSync(model);
+            const body = { base, secret, plan: planPayload(model, ticks.keep), rules: ticks.rules, rulesAt: ticks.rulesAt };
             if (key) body.tornKey = key;
             if (ki.userId) body.playerId = ki.userId;
             if (ki.factionId !== undefined) body.factionId = ki.factionId || null;
             try {
                 const r = await workerSync(body);
-                set(K.worker, { ...(discordRaw() || {}), linked: Boolean(r.linked), bot: Boolean(r.bot), ready: Boolean(r.ready), keyTag: keyTag(key), lastSync: Date.now(), lastError: pausedText(r) });
+                set(K.worker, { ...(discordRaw() || {}), ...answered(r), keyTag: keyTag(key), lastSync: Date.now() });
+                adoptPings(r.kindsSet);
             } catch (e) {
-                set(K.worker, { ...(discordRaw() || {}), lastError: 'First sync failed (' + String((e && e.message) || e) + '); it tries again within a minute.' });
+                const text = String((e && e.message) || e);
+                set(K.worker, { ...(discordRaw() || {}), lastError: 'First sync failed (' + text + '); it tries again within a minute.', syncFail: { at: Date.now(), text, http: (e && e.http) || null } });
+                logProblem('error', 'Discord: the first sync after the login failed', text + (e && e.http ? ' [http ' + e.http + ']' : ''));
             }
             return { ok: true, name: st.name || null, text: 'Connected as ' + (st.name || 'you') + '. Pings come as DMs from the Pumping Iron bot.' };
         }
-        return finishLogin(false, LOGIN_FAIL.expired);
+        return finishLogin(false, LOGIN_FAIL.expired, 'expired');
     }
 
     /** A login that didn't finish: the browser secret stays (the next try reuses it), nothing is connected. */
@@ -14949,8 +15488,10 @@
         if (w) set(K.worker, { ...w, login: null });
     }
 
-    function finishLogin(ok, text) {
+    function finishLogin(ok, text, state = null) {
         endLogin();
+        // How a login ended, when not well: not_member, denied, full, elsewhere, expired, failed.
+        if (!ok) logProblem('error', 'Discord login ended: ' + (state || 'failed'), text);
         return { ok, text };
     }
 
@@ -14980,10 +15521,41 @@
         return { code: String(r.code || ''), expiresAt: Number(r.expiresAt) || Math.floor(Date.now() / 1000) + 600 };
     }
 
+    /**
+     * Send a test ping. What came of it is kept (Settings says what to do, the report says what happened): a failure
+     * with the service's reason, and what it means for where pings go now.
+     * @returns {Promise<{ok: true, via: string|null, dmRefused?: boolean, text: string}>} throws an Error with words for the player
+     */
     async function testDiscord() {
         const w = discordState();
         if (!w) throw new Error('Connect your Worker first.');
-        return workerTest({ base: w.base, secret: w.secret });
+        const nowS = () => Math.floor(Date.now() / 1000);
+        const keep = (patch) => {
+            const cur = get(K.worker, null);
+            if (cur && cur.secret === w.secret) set(K.worker, { ...cur, ...patch(cur) });
+        };
+        let r;
+        try {
+            r = await workerTest({ base: w.base, secret: w.secret });
+        } catch (e) {
+            const fail = testFailOf(e);
+            logProblem('error', 'Discord test ping failed: ' + fail.reason, String((e && e.message) || e) + (e && e.http ? ' [http ' + e.http + ']' : ''));
+            keep((cur) => ({
+                testFail: { at: Date.now(), reason: fail.reason, http: (e && e.http) || null, text: String((e && e.message) || e) },
+                // A service that tells where pings go: a refused DM is known at once, not at the next sync.
+                ...(cur.delivery && fail.reason === 'dm_refused' ? { delivery: { ...cur.delivery, ok: false, via: null, reason: 'dm_refused', dmRefusedAt: nowS() } } : {}),
+            }));
+            throw new Error(fail.text);
+        }
+        const viaHook = r.via === 'hook';
+        if (r.dmRefused) logProblem('error', 'Discord test ping: the bot’s DM was refused', 'it went to the channel webhook instead');
+        keep((cur) => ({
+            testFail: null,
+            testOkAt: Date.now(),
+            testVia: r.via || null,
+            ...(cur.delivery ? { delivery: viaHook ? { ...cur.delivery, ok: true, via: 'channel', reason: null, webhook: true, ...(r.dmRefused ? { dmRefusedAt: nowS() } : {}) } : { ...cur.delivery, ok: true, via: 'dm', reason: null, dmRefusedAt: null } } : {}),
+        }));
+        return { ...r, text: testSentWords(r, !w.discordName) };
     }
 
     async function forgetDiscord() {
@@ -15007,10 +15579,13 @@
         const w = discordState();
         // While Torn Trading runs the plan is only the last read moving on the clock: don't send it.
         if (!w || !isVisible() || isPaused()) return false;
-        const plan = planPayload(m);
+        // The ping ticks (Settings › Discord pings) go with every sync: which kinds are on, and when each was set by hand.
+        const ticks = pingsForSync(m, now);
+        const plan = planPayload(m, ticks.keep);
         if (!plan) return false;
-        // "I'm stacking" and Resume change it too.
-        const sig = JSON.stringify([plan.chain ? plan.chain.since : 0, plan.overdose ? plan.overdose.at : 0, plan.steps.map((s) => [s.kind, s.label, Math.round(s.at / 300)])]);
+        const ticksSig = JSON.stringify([ticks.rules, ticks.rulesAt, ticks.keep]);
+        // "I'm stacking" and Resume change it too; so does a tick.
+        const sig = JSON.stringify([plan.chain ? plan.chain.since : 0, plan.overdose ? plan.overdose.at : 0, plan.steps.map((s) => [s.kind, s.label, Math.round(s.at / 300)]), ticksSig]);
         const pendingAcks = w.pendingAcks || [];
         const targetsDue = sync.targets && sync.targetsSig !== w.targetsSig && now - (w.targetsAt || 0) >= TARGETS_EVERY_MS;
         // Logged in with Discord: a new main key goes along once (the service pauses pings on a refused key until then).
@@ -15024,10 +15599,12 @@
         // "I'm stacking" and Resume go at once, not behind the one-a-minute gate (a ping could slip out in that minute).
         // An overdose seen (or over) goes at once too.
         const chainFlip = (plan.chain ? plan.chain.since : 0) !== (w.lastChain || 0) || (plan.overdose ? plan.overdose.at : 0) !== (w.lastOverdose || 0);
-        if (!due || (!chainFlip && now - (w.lastSync || 0) < SYNC_MIN_MS)) return false;
+        // A tick changed (by hand, or a mode moved it): a few seconds on, not a minute, so the bot follows what Settings shows.
+        const tickFlip = w.lastTicks !== undefined && ticksSig !== w.lastTicks && now - (w.lastSync || 0) >= TICK_SYNC_MIN_MS;
+        if (!due || (!chainFlip && !tickFlip && now - (w.lastSync || 0) < SYNC_MIN_MS)) return false;
         const statics = get(K.userStatic, {}) || {};
         const ki = statics.keyInfo || {};
-        const body = { base: w.base, secret: w.secret, plan, ackIds: pendingAcks };
+        const body = { base: w.base, secret: w.secret, plan, ackIds: pendingAcks, rules: ticks.rules, rulesAt: ticks.rulesAt };
         if (ki.userId) body.playerId = ki.userId;
         if (ki.factionId !== undefined) body.factionId = ki.factionId || null;
         if (targetsDue) body.targets = sync.targets;
@@ -15036,11 +15613,16 @@
             body.war = eye.war;
             body.watch = eye.watch;
         }
-        set(K.worker, { ...w, lastSync: now, lastSig: sig, lastChain: plan.chain ? plan.chain.since : 0, lastOverdose: plan.overdose ? plan.overdose.at : 0, pendingAcks: [], ...(targetsDue ? { targetsSig: sync.targetsSig, targetsAt: now } : {}), ...(keyDue ? { keyTag: tag } : {}), ...(eyeDue ? { eyeSig: eye.sig } : {}) });
+        set(K.worker, { ...w, lastSync: now, lastSig: sig, lastTicks: ticksSig, lastChain: plan.chain ? plan.chain.since : 0, lastOverdose: plan.overdose ? plan.overdose.at : 0, pendingAcks: [], ...(targetsDue ? { targetsSig: sync.targetsSig, targetsAt: now } : {}), ...(keyDue ? { keyTag: tag } : {}), ...(eyeDue ? { eyeSig: eye.sig } : {}) });
         workerSync(body)
             .then((r) => {
                 const acked = applyAcks(r.acks, Date.now());
-                set(K.worker, { ...(get(K.worker, {}) || {}), lastError: pausedText(r), ready: Boolean(r.ready), linked: Boolean(r.linked), bot: Boolean(r.bot), pendingAcks: acked });
+                const was = get(K.worker, {}) || {};
+                const next = { ...was, ...answered(r), pendingAcks: acked };
+                set(K.worker, next);
+                logAnswer(was, next);
+                // A kind switched with /settings in Discord: the ticks take it over (the next sync tells the service it was seen).
+                adoptPings(r.kindsSet);
             })
             // Failed: the plan counts as unsent (next minute tries again); the acks wait too.
             .catch((e) => {
@@ -15048,11 +15630,157 @@
                 const cur = get(K.worker, null);
                 if (e && e.http === 403 && cur && cur.secret === w.secret && !cur.login && (cur.discordName || cur.connectedAt)) {
                     set(K.worker, { base: w.base, secret: w.secret, login: null, lastError: 'The Pumping Iron service no longer knows this browser (/unlink, or 30 days without a sync). ' + (cur.discordName ? 'Log in with Discord again.' : 'Connect your service again.') });
+                    logProblem('error', 'Discord: the service no longer knows this browser', 'disconnected here · ' + String((e && e.message) || e));
                     return;
                 }
-                set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks, lastSig: w.lastSig, ...(keyDue ? { keyTag: w.keyTag } : {}), ...(eyeDue ? { eyeSig: w.eyeSig } : {}) });
+                // In the problem log once per distinct error, not every minute it lasts.
+                const text = String((e && e.message) || e);
+                const before = (cur && cur.syncFail) || null;
+                if (!before || before.text !== text) logProblem('error', 'Discord sync failed: ' + text, e && e.http ? 'http ' + e.http : null);
+                set(K.worker, { ...(cur || {}), lastError: text, syncFail: before && before.text === text ? before : { at: Date.now(), text, http: (e && e.http) || null }, pendingAcks, lastSig: w.lastSig, lastTicks: w.lastTicks, ...(keyDue ? { keyTag: w.keyTag } : {}), ...(eyeDue ? { eyeSig: w.eyeSig } : {}) });
             });
         return true;
+    }
+
+    let tickSyncTimer = null;
+
+    /**
+     * A ping tick was changed by hand: synced now, or a few seconds on when a sync has just gone (so the bot follows
+     * what the ticks show without waiting for the next read of Torn).
+     * @param {Function} model - () => the model, read again when the timer runs
+     */
+    function syncTicksSoon(model, wait = TICK_SYNC_MIN_MS + 250) {
+        if (maybeSyncPlan(model())) return true;
+        clearTimeout(tickSyncTimer);
+        tickSyncTimer = setTimeout(() => maybeSyncPlan(model()), wait);
+        if (tickSyncTimer && typeof tickSyncTimer.unref === 'function') tickSyncTimer.unref();
+        return false;
+    }
+
+    /* ===== src/core/backup.js ===== */
+    /*
+     * Back up and restore (round 9, the owner's pick 5B, mockups/round9/companion.html §5): one file with your settings,
+     * build and plan, progress history, the Torn Eye list and what the gym learned; your API keys only when you tick it.
+     * Never in the file: the Discord login (K.worker), the money log (read again from Torn) and anything a Torn page keeps
+     * for itself (the gear Torn Eye saw is in torn.com's own storage, which the webpage cannot read).
+     *
+     * Pure: the page reads its stores into `read`, and applies the list of writes `restoreOps` gives back.
+     */
+
+    const BACKUP_APP = 'torn-pumping-iron';
+    const BACKUP_FORMAT = 1;
+
+    /** Tampermonkey values in the file, by the card's words. Histories are read whole (the webpage's older part included). */
+    const BACKUP_GM = {
+        // The Discord ping ticks are settings too (which pings the bot sends); the login is not.
+        settings: ['settings', 'pingTicks'],
+        plan: ['plan', 'planNow', 'unlockedGyms', 'gymProgress', 'xanaxCds'],
+        progress: ['statsHistory', 'dayLog', 'dayTotals', 'receipts'],
+        eye: ['myAttacks', 'eyeWatch', 'eyeWarBands', 'eyeWarAsk', 'eyeWarAuto', 'eyeLoadouts'],
+        learning: ['calibration', 'learned', 'eyePredictions'],
+    };
+    /** The webpage's own data (its IndexedDB). */
+    const BACKUP_PAGE = { progress: ['planLine'], eye: ['eyeTargets'], learning: ['learnLog', 'fightLog'] };
+    /** Only with the tick. */
+    const BACKUP_KEYS = ['apiKey', 'fullKey', 'ffsKey', 'tsKey'];
+    /** Never written to a file and never taken from one, whatever the file says. */
+    const BACKUP_NEVER = ['worker', 'moneyLog', 'keyInfo', 'apiKeyDead', 'fullKeyState', 'ffsState', 'leader', 'devUnlocked'];
+
+    const BACKUP_GM_ALL = Object.values(BACKUP_GM).flat();
+    const BACKUP_PAGE_ALL = Object.values(BACKUP_PAGE).flat();
+
+    const backupStamp = (ms) => new Date(ms).toISOString().slice(0, 16).replace(/[-:]/g, '').replace('T', '-');
+
+    /** The file's name says when keys are inside. */
+    function backupFileName(now, withKeys = false) {
+        return 'pumping-iron-backup-' + backupStamp(now) + (withKeys ? '-WITH-KEYS' : '') + '.json';
+    }
+
+    const backupHas = (v) => v !== null && v !== undefined && v !== '';
+
+    /**
+     * @param {object} o
+     * @param {{gm:function(string):*, page:function(string):*, key:function(string):string}} o.read - this browser's stores
+     * @param {object|null} o.savedPlan - the whole saved plan (platform/plan-store.js)
+     * @param {boolean} o.withKeys - the tick "Put my API keys in the file"
+     * @returns {object} the file, as an object
+     */
+    function buildBackup({ read, savedPlan = null, withKeys = false, version = '', now = Date.now() }) {
+        const gm = {};
+        for (const k of BACKUP_GM_ALL) {
+            const v = read.gm(k);
+            if (backupHas(v)) gm[k] = v;
+        }
+        const page = {};
+        for (const k of BACKUP_PAGE_ALL) {
+            const v = read.page(k);
+            if (backupHas(v)) page[k] = v;
+        }
+        const out = { app: BACKUP_APP, kind: 'backup', format: BACKUP_FORMAT, version, at: now, hasKeys: false, gm, page, savedPlan: savedPlan || null };
+        if (withKeys) {
+            const keys = {};
+            for (const k of BACKUP_KEYS) {
+                const v = String(read.key(k) || '').trim();
+                if (v) keys[k] = v;
+            }
+            out.keys = keys;
+            out.hasKeys = Object.keys(keys).length > 0;
+        }
+        return out;
+    }
+
+    /** "Sat 3 Oct" (UTC, as Torn's clock). */
+    function backupDay(ms) {
+        const d = new Date(ms);
+        return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getUTCDay()] + ' ' + d.getUTCDate() + ' ' + ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()];
+    }
+
+    /**
+     * Read a file's text: is it one of ours, and what is in it.
+     * @returns {{ok:true, backup:object, at:number, day:string, version:string, hasKeys:boolean, parts:string[]}|{ok:false, error:string}}
+     */
+    function readBackup(text) {
+        let b;
+        try {
+            b = JSON.parse(String(text || ''));
+        } catch {
+            return { ok: false, error: 'That file is not a Pumping Iron backup (it is not JSON).' };
+        }
+        if (!b || typeof b !== 'object' || b.app !== BACKUP_APP || b.kind !== 'backup') return { ok: false, error: 'That file is not a Pumping Iron backup.' };
+        if (!(Number(b.format) >= 1) || Number(b.format) > BACKUP_FORMAT) return { ok: false, error: 'That backup was made by a newer Pumping Iron (format ' + b.format + '). Update the script first.' };
+        if (!Number.isFinite(b.at)) return { ok: false, error: 'That backup has no date: it was not finished.' };
+        const gm = b.gm && typeof b.gm === 'object' ? b.gm : {};
+        const page = b.page && typeof b.page === 'object' ? b.page : {};
+        const inFile = (group) => (BACKUP_GM[group] || []).some((k) => backupHas(gm[k])) || (BACKUP_PAGE[group] || []).some((k) => backupHas(page[k]));
+        const parts = [];
+        if (inFile('settings')) parts.push('settings');
+        if (inFile('plan') || b.savedPlan) parts.push('your build and plan');
+        if (inFile('progress')) parts.push('progress history');
+        if (inFile('eye')) parts.push('the Torn Eye list');
+        if (inFile('learning')) parts.push('what the gym learned');
+        const keys = b.keys && typeof b.keys === 'object' ? BACKUP_KEYS.filter((k) => typeof b.keys[k] === 'string' && b.keys[k].trim()) : [];
+        if (keys.length) parts.push(keys.length + ' API key' + (keys.length === 1 ? '' : 's'));
+        return { ok: true, backup: b, at: b.at, day: backupDay(b.at), version: String(b.version || ''), hasKeys: keys.length > 0, parts };
+    }
+
+    /**
+     * The writes a restore makes: everything the backup's kinds hold is replaced (a value the file lacks is removed), and
+     * nothing else is touched. Keys are written only when the file has them; the Discord login never.
+     * @returns {{gmSet:[string, *][], gmDel:string[], pageSet:[string, *][], keys:[string, string][], savedPlan:object|null}}
+     */
+    function restoreOps(backup) {
+        const gm = backup && backup.gm && typeof backup.gm === 'object' ? backup.gm : {};
+        const page = backup && backup.page && typeof backup.page === 'object' ? backup.page : {};
+        const ops = { gmSet: [], gmDel: [], pageSet: [], keys: [], savedPlan: (backup && backup.savedPlan) || null };
+        for (const k of BACKUP_GM_ALL) {
+            if (BACKUP_NEVER.includes(k)) continue;
+            if (backupHas(gm[k])) ops.gmSet.push([k, gm[k]]);
+            else ops.gmDel.push(k);
+        }
+        for (const k of BACKUP_PAGE_ALL) if (!BACKUP_NEVER.includes(k)) ops.pageSet.push([k, backupHas(page[k]) ? page[k] : null]);
+        const keys = backup && backup.keys && typeof backup.keys === 'object' ? backup.keys : {};
+        for (const k of BACKUP_KEYS) if (typeof keys[k] === 'string' && keys[k].trim()) ops.keys.push([k, keys[k].trim()]);
+        return ops;
     }
 
     /* ===== src/ui/dom.js ===== */
@@ -15351,6 +16079,12 @@
     .tos td { padding: 8px 0; border-top: 1px solid var(--line); }
     .check { display: inline-flex; align-items: center; gap: 8px; }
     .check input { accent-color: var(--chalk); width: 15px; height: 15px; margin: 0; }
+    /* Settings › Discord pings: the ticks, a list per group, each with what it is in a few muted words */
+    .pingset { display: flex; flex-direction: column; gap: 16px; margin-top: 12px; }
+    .pinggroup { display: flex; flex-direction: column; gap: 8px; }
+    .pinggroup .check { flex-wrap: wrap; row-gap: 2px; }
+    .pinggroup .check .why { color: var(--warn); font-size: 13px; flex-basis: 100%; padding-left: 23px; }
+    .warnb ol.steps-list { color: var(--text); }
 
     /* charts */
     .chart { width: 100%; display: block; }
@@ -15735,6 +16469,37 @@
     .chainc .bonus { grid-column: 2 / 4; color: var(--muted); font-size: 13px; }
     .chainc .bonus b { color: var(--text); font-weight: 600; }
     `;
+
+    /* ===== src/core/tabtitle.js ===== */
+    /*
+     * The webpage's tab title (round 9, the owner's pick 4B, mockups/round9/companion.html §4): plain "Pumping Iron" until
+     * the last ten minutes before the plan's next step, then the countdown and the step, then "Now" once it is due.
+     * Only on our own webpage: on Torn's pages the title is never touched (Torn's rule for pages not in front).
+     */
+
+
+
+    const TAB_TITLE = 'Pumping Iron';
+    /** The countdown shows this long before a step. */
+    const TITLE_LEAD_MS = 10 * 60e3;
+
+    /**
+     * @param {object|null} m - the model (m.next: the step Home shows; m.stacking, m.overdose, m.away: no step to do)
+     * @param {number} now
+     * @param {{paused?: boolean}} [o] - paused: Torn Trading has the turn (the plan is not read)
+     * @returns {string}
+     */
+    function tabTitle(m, now = Date.now(), { paused = false } = {}) {
+        if (!m || !m.ready || paused || m.stacking || m.overdose || m.away) return TAB_TITLE;
+        const step = m.next || (m.steps || [])[0] || null;
+        if (!step || !Number.isFinite(step.at)) return TAB_TITLE;
+        const name = String(step.label || '').split(' · ')[0];
+        if (!name) return TAB_TITLE;
+        const left = step.at - now;
+        if (left <= 0) return 'Now · ' + name + ' · ' + TAB_TITLE;
+        if (left <= TITLE_LEAD_MS) return countdown(left) + ' · ' + name + ' · ' + TAB_TITLE;
+        return TAB_TITLE;
+    }
 
     /* ===== src/ui/app/common.js ===== */
     /*
@@ -20045,6 +20810,115 @@
     /** For tests: the form's state. */
     const reportForm = reportFormState;
 
+    /* ===== src/ui/app/backup-card.js ===== */
+    /*
+     * Settings › Back up and restore (round 9, the owner's pick 5B, mockups/round9/companion.html §5): one file to carry
+     * to another browser or keep before a reinstall. The API keys go in only with the tick, and the file's name then says
+     * so. A restore shows what the file holds and asks before it replaces anything. Nothing is sent by this page.
+     */
+
+
+
+
+    /** The card's own state (a chosen file is not part of the page's `ui`: it is compared on every redraw). */
+    const backupCardState = { withKeys: false, picked: null, status: '', error: '', busy: false };
+
+    function saveBackupFile(name, text) {
+        const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+        const a = h('a', { href: url, download: name, style: 'display:none' });
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+            URL.revokeObjectURL(url);
+            a.remove();
+        }, 10000);
+    }
+
+    const backupClock = (ms) => backupDay(ms) + ', ' + new Date(ms).toISOString().slice(11, 16) + ' TCT';
+
+    /** The Settings card. */
+    function backupSection(m, ctx) {
+        const b = ctx.backup;
+        if (!b) return null;
+        const st = backupCardState;
+        const say = (o) => {
+            Object.assign(st, { status: '', error: '' }, o);
+            ctx.rerender();
+        };
+        const download = async () => {
+            if (st.busy) return;
+            st.busy = true;
+            try {
+                const f = await b.make(st.withKeys);
+                saveBackupFile(f.name, f.text);
+                say({ busy: false, withKeys: false, status: 'Saved ' + f.name + ' to your downloads.' + (f.hasKeys ? ' Your API keys are in it: keep it to yourself.' : '') });
+            } catch (error) {
+                say({ busy: false, error: 'The backup could not be made: ' + String((error && error.message) || error) });
+            }
+        };
+        const file = h('input', { type: 'file', accept: '.json,application/json', style: 'display:none', 'aria-label': 'Backup file' });
+        file.addEventListener('change', () => {
+            const f = (file.files || [])[0];
+            file.value = '';
+            if (!f) return;
+            f.text()
+                .then((text) => {
+                    const r = readBackup(text);
+                    say(r.ok ? { picked: { ...r, name: f.name } } : { picked: null, error: r.error });
+                })
+                .catch(() => say({ picked: null, error: 'That file could not be read.' }));
+        });
+        const restore = async () => {
+            if (st.busy || !st.picked) return;
+            st.busy = true;
+            const day = st.picked.day;
+            try {
+                await b.restore(st.picked.backup);
+                say({ busy: false, picked: null, status: 'Restored the backup of ' + day + '. Reloading…' });
+                b.reload();
+            } catch (error) {
+                say({ busy: false, error: 'The restore stopped: ' + String((error && error.message) || error) });
+            }
+        };
+        const last = b.lastAt();
+        const picked = st.picked;
+        return h('div', { class: 'sec', 'data-card': 'backup' }, [
+            h('div', {}, [h('h3', { text: 'Back up and restore' }), null]),
+            h('div', { class: 'secbody' }, [
+                h('p', { text: 'One file with what Pumping Iron has saved in this browser. Load it in another browser, or after a reinstall.' }),
+                h('div', { class: 'row', style: 'flex-wrap:wrap' }, [
+                    h('button', { class: 'btn primary', type: 'button', disabled: st.busy, onclick: download, text: 'Download backup' }),
+                    h('button', { class: 'btn', type: 'button', disabled: st.busy, onclick: () => file.click(), text: 'Restore from a file…' }),
+                    file,
+                ]),
+                h('label', { class: 'check' }, [
+                    h('input', { type: 'checkbox', checked: st.withKeys, onchange: (e) => say({ withKeys: e.target.checked, status: st.status }) }),
+                    h('span', {}, ['Put my API keys in the file ', h('span', { style: 'color:var(--warn)', text: '· anyone with the file can use them' })]),
+                ]),
+                picked
+                    ? h('div', { class: 'warnb', role: 'alert' }, [
+                          h('b', { text: 'Replace what this browser has with the backup of ' + picked.day + '?' }),
+                          h('p', { text: picked.name + (picked.version ? ' · made by ' + picked.version : '') + ' · holds ' + (picked.parts.length ? picked.parts.join(', ') : 'nothing') + '.' + (picked.hasKeys ? '' : ' Your keys here stay as they are.') + ' The Discord login is never changed.' }),
+                          h('div', { class: 'acts' }, [
+                              h('button', { class: 'btn primary sm', type: 'button', disabled: st.busy || !picked.parts.length, onclick: restore, text: 'Replace with this backup' }),
+                              h('button', { class: 'btn sm', type: 'button', disabled: st.busy, onclick: () => say({ picked: null }), text: 'Cancel' }),
+                          ]),
+                      ])
+                    : null,
+                st.error ? h('p', { class: 'bad', role: 'alert', style: 'color:var(--bad)', text: st.error }) : null,
+                st.status ? h('p', { class: 'muted', role: 'status', text: st.status }) : null,
+                h('dl', { class: 'facts' }, [
+                    h('dt', { text: 'In the file' }),
+                    h('dd', { text: 'Settings · your build and plan · progress history · the Torn Eye list · what the gym learned · your ticks on the Ledger' }),
+                    h('dt', { text: 'Never' }),
+                    h('dd', { text: 'The Discord login · the money log (read again from Torn) · the gear Torn Eye saw (Torn’s pages keep it)' }),
+                    h('dt', { text: 'Last backup' }),
+                    h('dd', { class: 'num', text: last ? backupClock(last) : 'never' }),
+                ]),
+            ]),
+        ]);
+    }
+
     /* ===== src/ui/app/settings.js ===== */
     /*
      * Settings (mockups/round3/X-settings.html): keys and data, ordered by use,
@@ -20053,6 +20927,8 @@
      * learning data for everyone, the developer key unlocks the rest);
      * Diagnostics against Torn Trading's limits (the two take turns).
      */
+
+
 
 
 
@@ -20203,6 +21079,44 @@
         return box;
     }
 
+    /** The state of the service in words (core/discord-state.js): what is wrong, and the steps that fix it. */
+    function discordStateRows(view) {
+        if (!view) return [];
+        const steps = view.steps.length ? h('ol', { class: 'steps-list' }, view.steps.map((s) => h('li', { text: s }))) : null;
+        const rows = [];
+        if (view.title) rows.push(h('div', { class: 'warnb', 'data-discord': view.key }, [h('b', { text: view.title }), view.text ? h('p', { text: view.text }) : null, steps]));
+        else if (view.text) rows.push(h('p', { class: 'muted', text: view.text }));
+        for (const n of view.notes) rows.push(h('p', { class: 'muted', text: n }));
+        if (!view.title && steps) rows.push(steps);
+        return rows;
+    }
+
+    /**
+     * Which pings the bot sends: a tick each, closed until opened (the owner: "what pings can it send we can tick on
+     * and off as we want (collasable in the discord setting)"). Stacking, an overdose and a war move ticks by
+     * themselves, and the tick says so; a tick set by hand during one stays as set.
+     */
+    function pingTicksBlock(ctx) {
+        const d = ctx.discord;
+        const ticks = d.ticks();
+        const st = d.state();
+        // A service that answered without saying which kinds it knows is an older one: it has no nerve ping.
+        const noNerve = Boolean(st && st.answerAt && !(st.kinds && Object.prototype.hasOwnProperty.call(st.kinds, 'nerve')));
+        const off = PING_KINDS.filter((k) => !ticks[k].on).length;
+        const row = ([kind, label, hint]) => {
+            const tk = ticks[kind];
+            const why = tk.mode ? MODE_NOTE[tk.mode] : kind === 'nerve' && noNerve ? 'the service is older · no nerve pings yet' : null;
+            return h('label', { class: 'check', 'data-ping': kind }, [h('input', { type: 'checkbox', checked: tk.on, onchange: (e) => d.setTick(kind, e.target.checked) }), label, h('span', { class: 'muted', text: '· ' + hint }), why ? h('span', { class: 'why', text: why }) : null]);
+        };
+        return h('details', { class: 'dis pings', open: Boolean(ctx.ui.pingsOpen), ontoggle: (e) => { ctx.ui.pingsOpen = e.target.open; } }, [
+            h('summary', { text: 'Which pings the bot sends' + (off ? ' · ' + off + ' off' : '') }),
+            h('div', { class: 'pingset' }, [
+                ...PING_GROUPS.map((g) => h('div', { class: 'pinggroup' }, [t('lab', g.title), ...g.kinds.map(row)])),
+                h('p', { class: 'muted', text: 'A change here reaches the bot within a minute. /settings in Discord switches the same kinds; the latest change wins.' }),
+            ]),
+        ]);
+    }
+
     /** Settings › Discord: one button (Log in with Discord); connected, one line; the old form under Advanced. */
     function discordSection(ctx) {
         const d = ctx.discord;
@@ -20234,17 +21148,19 @@
         // "Back to Log in with Discord" (discordAdvanced === false) shows the login view even when an own service is set up.
         if (ctx.ui.discordAdvanced === false || (!ctx.ui.discordAdvanced && !ownService)) {
             if (connected) {
+                // The result is kept (the test changes what is known about the service, and that redraws the section).
                 const test = async () => {
                     say('', 'Sending…');
                     try {
-                        await d.test();
-                        say('ok', 'Sent. Check your Discord DMs.');
+                        const r = await d.test();
+                        ctx.ui.discordResult = { ok: true, text: (r && r.text) || 'Sent. Check your Discord DMs.' };
                     } catch (e) {
-                        say('bad', String((e && e.message) || e));
+                        ctx.ui.discordResult = { ok: false, text: String((e && e.message) || e) };
                     }
+                    ctx.rerender();
                 };
-                const tag = st.lastError ? stateTag('bad', 'Paused') : st.ready ? stateTag('ok', 'Working') : stateTag('bad', 'Not pinging yet');
-                return settingsSection('Discord pings', tag, [
+                const view = d.view();
+                return settingsSection('Discord pings', stateTag(view.tone, view.tag), [
                     h('div', { class: 'row', style: 'flex-wrap:wrap' }, [
                         h('span', {}, ['Connected as ', h('b', { class: 'white', text: st.discordName })]),
                         h('span', { class: 'muted num', text: '· last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') }),
@@ -20252,11 +21168,11 @@
                         h('button', { class: 'btn sm', type: 'button', onclick: test, text: 'Send a test ping' }),
                         confirmButton(ctx, 'discord-forget', 'Disconnect', async () => { try { await d.forget(); } finally { ctx.ui.discordResult = { ok: true, text: 'Disconnected: the service forgot your key, plan and pings.' }; ctx.rerender(); } }),
                     ]),
-                    st.lastError ? h('div', { class: 'warnb' }, [h('b', { text: 'Pings are paused' }), h('p', { text: st.lastError + ' Save a working Torn key above; it goes to the service by itself.' })]) : null,
-                    !st.ready && !st.lastError ? h('p', { class: 'muted', text: 'Waiting for the first sync (open Home once).' }) : null,
+                    ...discordStateRows(view),
                     h('p', { class: 'muted', text: 'DMs from the Pumping Iron bot when a step is due, with Done / Snooze / Skip. In the server: /timers, /next, /war, /settings.' }),
                     msg,
                     result,
+                    pingTicksBlock(ctx),
                     h('details', { class: 'dis' }, [h('summary', { text: 'How your Torn key is used there' }), tosTable(TOS_TORN)]),
                 ]);
             }
@@ -20280,21 +21196,23 @@
     /** Advanced: your own Cloudflare Worker (SETUP.md), the webhook, a link code. */
     function advancedDiscordSection(ctx, st) {
         const d = ctx.discord;
+        // The state in words, only for a service that is set up (a login under way or a forgotten one has none).
+        const view = d.view();
+        const shown = ctx.ui.discordResult ? h('span', { class: 'msg ' + (ctx.ui.discordResult.ok ? 'ok' : 'bad'), text: ctx.ui.discordResult.text }) : null;
+        const testNow = async (say) => {
+            say('', 'Sending…');
+            try {
+                const r = await d.test();
+                ctx.ui.discordResult = { ok: true, text: (r && r.text) || 'Sent. Check Discord.' };
+            } catch (e) {
+                ctx.ui.discordResult = { ok: false, text: String((e && e.message) || e) };
+            }
+            ctx.rerender();
+        };
         // Working: one line (owner). Edit opens the full form again.
-        if (st && st.ready && !st.lastError && !ctx.ui.discordEdit) {
+        if (st && view && view.key === 'ok' && !ctx.ui.discordEdit) {
             const msg1 = h('span', { class: 'msg' });
-            const test = async () => {
-                msg1.className = 'msg';
-                msg1.textContent = 'Sending…';
-                try {
-                    await d.test();
-                    msg1.className = 'msg ok';
-                    msg1.textContent = 'Sent. Check Discord.';
-                } catch (e) {
-                    msg1.className = 'msg bad';
-                    msg1.textContent = String((e && e.message) || e);
-                }
-            };
+            const test = () => testNow((tone, text) => { msg1.className = 'msg' + (tone ? ' ' + tone : ''); msg1.textContent = text; });
             return settingsSection('Discord pings', stateTag('ok', 'Working'), [
                 h('div', { class: 'row', style: 'flex-wrap:wrap' }, [
                     h('span', { class: 'muted num', text: 'Your service · last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') + (st.linked ? ' · linked to the bot' : '') }),
@@ -20302,11 +21220,14 @@
                     h('button', { class: 'btn sm', type: 'button', onclick: test, text: 'Send a test ping' }),
                     h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.discordEdit = true; ctx.rerender(); }, text: 'Edit' }),
                 ]),
+                ...discordStateRows(view),
                 st.bot && !st.linked ? linkRow(ctx) : null,
                 msg1,
+                shown,
+                pingTicksBlock(ctx),
             ]);
         }
-        const tag = !st ? stateTag('off', 'Not set up yet') : st.lastError ? stateTag('bad', 'Last sync failed') : st.ready ? stateTag('ok', 'Connected') : stateTag('bad', 'Needs the webhook and key');
+        const tag = !st || !view ? stateTag('off', 'Not set up yet') : stateTag(view.tone, view.tag);
         const f = {};
         const field = (key, label, attrs) => h('label', { class: 'field', style: 'flex:1;min-width:220px' }, [t('lab', label), (f[key] = h('input', { class: 'inp', ...attrs }))]);
         const keyAttrs = keyInputAttrs();
@@ -20343,10 +21264,13 @@
             h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('base', 'Service address' + (st ? '' : ' (needed)'), { placeholder: 'https://pumping-iron.you.workers.dev', value: st ? st.base : '', onblur: (e) => { const v = e.target.value.trim(); if (!v) return; try { workerBase(v); msg.className = 'msg'; msg.textContent = 'Your Worker key and webhook will be stored on ' + new URL(v).hostname + '.'; } catch (err) { msg.className = 'msg bad'; msg.textContent = String(err.message || err); } } }), field('invite', 'Invite code' + (st ? ' (first time only)' : ' (needed the first time)'), { placeholder: 'from SETUP.md', ...keyAttrs, class: secretCls })]),
             h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('hook', 'Discord webhook', { placeholder: st ? 'Saved on your Worker · paste to change' : 'https://discord.com/api/webhooks/…', ...keyAttrs, class: secretCls }), field('key', 'Torn key for your service' + (st ? '' : ' (needed)'), { placeholder: st ? 'Saved on your service · paste to change' : 'Your Torn key (Limited)', ...keyAttrs, class: secretCls })]),
             h('div', { class: 'row', style: 'max-width:760px' }, [field('discordId', 'Your Discord user id', { placeholder: 'Blank: the one linked in Torn', value: st && st.discordId ? st.discordId : '', inputmode: 'numeric' })]),
-            h('div', { class: 'row' }, [h('button', { class: 'btn primary', type: 'button', onclick: connect, text: st ? 'Save' : 'Connect' }), h('button', { class: 'btn', type: 'button', disabled: !st, onclick: () => run(() => d.test(), 'Test ping sent. Check your channel.'), text: 'Send a test ping' }), st ? confirmButton(ctx, 'discord-forget', 'Forget', () => run(async () => { await d.forget(); ctx.rerender(); }, 'Forgotten here and on your Worker.')) : null, h('a', { href: d.setupUrl, target: '_blank', rel: 'noopener', text: 'Set it up (10 minutes)' })]),
+            h('div', { class: 'row' }, [h('button', { class: 'btn primary', type: 'button', onclick: connect, text: st ? 'Save' : 'Connect' }), h('button', { class: 'btn', type: 'button', disabled: !st, onclick: () => testNow((tone, text) => { msg.className = 'msg' + (tone ? ' ' + tone : ''); msg.textContent = text; }), text: 'Send a test ping' }), st ? confirmButton(ctx, 'discord-forget', 'Forget', () => run(async () => { await d.forget(); ctx.rerender(); }, 'Forgotten here and on your Worker.')) : null, h('a', { href: d.setupUrl, target: '_blank', rel: 'noopener', text: 'Set it up (10 minutes)' })]),
             msg,
-            st ? h('p', { class: 'num', text: 'Last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') + (st.lastError ? ' · ' + st.lastError : '') + (st.bot ? ' · the bot is set up: DMs with Done / Snooze / Skip, /plan, /timers' : '') }) : null,
+            shown,
+            ...discordStateRows(view),
+            st ? h('p', { class: 'num', text: 'Last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') + (st.lastError && !view ? ' · ' + st.lastError : '') + (st.bot ? ' · the bot is set up: DMs with Done / Snooze / Skip, /plan, /timers' : '') }) : null,
             st && st.bot && !st.linked ? linkRow(ctx) : null,
+            view ? pingTicksBlock(ctx) : null,
             st && st.ready ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.discordEdit = false; ctx.rerender(); }, text: 'Done' }) : null,
             h('details', { class: 'dis' }, [h('summary', { text: 'How the Worker’s key is used' }), tosTable(TOS_WORKER), h('p', { style: 'margin-top:6px', text: 'Your own service: the key you paste here is stored encrypted on your Cloudflare Worker.' })]),
             h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.discordAdvanced = false; ctx.rerender(); }, text: 'Back to Log in with Discord' }),
@@ -20419,6 +21343,7 @@
         const diagSec = h('div', {}, [sectionHead('Diagnostics', null, null, 'h3'), h('dl', { class: 'facts num' }, [h('dt', { text: 'Torn API, last minute' }), h('dd', { text: d.torn + ' of ' + (d.tornMax || 85) + (d.focus ? ' · first: ' + d.focus : '') }), h('dt', { text: 'FFScouter, last minute' }), h('dd', { text: d.ffs + ' of 60' }), h('dt', { text: 'TornW3B, last minute' }), h('dd', { text: d.w3b + ' of 80' }), h('dt', { text: 'Last error' }), h('dd', { text: d.lastError || 'none' }), h('dt', { text: 'Perk lines not understood' }), h('dd', { text: String(d.unknownPerks) }), h('dt', { text: 'Version' }), h('dd', { text: d.version })])]);
         const devSec = developerSection(m, ctx);
         const reportSec = reportSection(m, ctx);
+        const backupSec = backupSection(m, ctx);
 
         const dataRows = [
             ['keys', 'Keys', 'Torn, Full, FFScouter, TornStats, Discord service', 'Forget keys'],
@@ -20434,7 +21359,7 @@
             h('div', {}, [sectionHead('What it never does', null, null, 'h3'), headsList([{ tone: 'plain', text: 'Train, buy, use or attack', sub: 'Fill only types a number' }, { tone: 'plain', text: 'Load a Torn page by itself' }, { tone: 'plain', text: 'Ping from a Torn tab', sub: 'only your Discord service does' }])]),
         ];
         // One card per section, ordered by use.
-        return { main: [tornSec, fullSec, discordSec, ffsSec, tsSec, overlaySec, displaySec, reportSec, devSec].filter(Boolean), pane };
+        return { main: [tornSec, fullSec, discordSec, ffsSec, tsSec, overlaySec, displaySec, backupSec, reportSec, devSec].filter(Boolean), pane };
     }
 
     /* ===== src/ui/app/ledger-tab.js ===== */
@@ -20759,6 +21684,7 @@
 
 
 
+
     const APP_TABS = [
         ['home', 'Home'],
         ['plan', 'Plan'],
@@ -20806,7 +21732,7 @@
         }
 
         mount() {
-            document.title = 'Pumping Iron';
+            document.title = TAB_TITLE;
             // Our own page (GitHub Pages): the display font may load here, never on torn.com.
             if (!document.querySelector('link[data-pi-font]')) document.head.appendChild(h('link', { rel: 'stylesheet', href: FONT_URL, 'data-pi-font': '1' }));
             for (const el of document.body.children) if (el.id !== 'pi-app') el.style.display = 'none';
@@ -20960,6 +21886,9 @@
             if (!this.root) return;
             const now = Date.now();
             const ctx = this.lastTickCtx || null;
+            // Round 9 (pick 4B): the tab's title counts down the last ten minutes to the next step, then says "Now".
+            const title = tabTitle(ctx ? ctx.model : null, now, { paused: Boolean(ctx && ctx.paused) });
+            if (document.title !== title) document.title = title;
             for (const el of this.root.querySelectorAll('[data-cd]')) {
                 const at = Number(el.getAttribute('data-cd'));
                 el.textContent = (el.getAttribute('data-cd-prefix') || '') + countdown(at - now);
@@ -23221,26 +24150,31 @@
         return out;
     }
 
-    /** What the sim uses from a set of items: {dmg, acc, armour, dmgBonus, text}. */
-    function gearSummary(items) {
+    /** The pieces the sim reads of a set of items: the weapons and armour with a number, the best weapon, the armour sets' names. */
+    function gearParts(items) {
         const list = items || [];
         const weapons = list.filter((i) => WEAPON_SLOTS.includes(String(i.slot)) && i.dmg > 0);
         const armours = list.filter((i) => ARMOUR_SLOTS.includes(String(i.slot)) && i.armour > 0);
-        if (!weapons.length && !armours.length) return null;
         const best = weapons.reduce((a, w) => (!a || w.dmg > a.dmg ? w : a), null);
+        return { weapons, armours, best, sets: [...new Set(armours.map((a) => a.name.split(' ')[0]))] };
+    }
+
+    /** What the sim uses from a set of items: {dmg, acc, armour, dmgBonus, text}. */
+    function gearSummary(items) {
+        const { weapons, armours, best, sets } = gearParts(items);
+        if (!weapons.length && !armours.length) return null;
         const dmgBonus = best ? best.bonuses.filter((b) => DAMAGE_BONUSES.test(b.title) && !/deadeye/i.test(b.title)).reduce((a, b) => a + b.value, 0) : 0;
         const armour = armours.length ? armours.reduce((a, x) => a + x.armour, 0) / Math.max(armours.length, 5) : DEFAULT_GEAR.armour;
         const words = [];
         if (best) words.push(best.name + (best.bonuses.length ? ' · ' + best.bonuses.map((b) => b.title + ' ' + b.value + '%').join(', ') : ''));
-        const sets = [...new Set(armours.map((a) => a.name.split(' ')[0]))];
         if (sets.length) words.push(sets.join('/') + ' armour');
         return { dmg: best ? best.dmg : DEFAULT_GEAR.dmg, acc: best ? best.acc : DEFAULT_GEAR.acc, armour, dmgBonus, text: words.join(' · ') };
     }
 
-    /** Your own gear from /v2/user/equipment. */
-    function myGear(equipment) {
+    /** /v2/user/equipment's pieces as the sim's items (every weapon in a weapon slot, every armour piece in an armour slot). */
+    function equipmentItems(equipment) {
         const list = (equipment && equipment.equipment) || [];
-        const items = list.map((e) => ({
+        return list.map((e) => ({
             slot: e.type === 'Weapon' || e.sub_type === 'Primary' || e.sub_type === 'Secondary' || e.sub_type === 'Melee' ? '1' : e.type === 'Armor' || e.type === 'Defensive' ? '4' : String(e.slot || ''),
             name: e.name || '',
             dmg: numOr(e.stats && e.stats.damage),
@@ -23248,7 +24182,11 @@
             armour: numOr(e.stats && (e.stats.armor ?? e.stats.armour)),
             bonuses: (e.bonuses || []).map((b) => ({ title: String(b.title || ''), value: numOr(b.value) })),
         }));
-        return gearSummary(items) || DEFAULT_GEAR;
+    }
+
+    /** Your own gear from /v2/user/equipment. */
+    function myGear(equipment) {
+        return gearSummary(equipmentItems(equipment)) || DEFAULT_GEAR;
     }
 
     /* ------------------------------------------------ round 8: the loadout on the fight card (torn-eye.html §5, his pick B) */
@@ -23282,6 +24220,154 @@
         const weapon = hasWeapon ? 'their best weapon (' + one(g.dmg) + ' damage, ' + one(g.acc) + ' accuracy' + (g.dmgBonus ? ', +' + g.dmgBonus + '%' : '') + ')' : 'a usual weapon (none was seen)';
         const armour = hasArmour ? 'their armour on average (' + one(g.armour) + ')' : 'a usual armour (no armour value was seen)';
         return 'The fight counts ' + weapon + ' and ' + armour + '.';
+    }
+
+    /* ------------------------------------- round 9: your loadouts against their gear (companion.html §2, his pick B) */
+
+    /*
+     * Torn's API has no saved loadouts, only what you wear now (/v2/user/equipment). Torn's items page names the loadout
+     * worn ("Loadout #2"). So a loadout is learned when it is worn with that page open: its number from the page, its
+     * gear from the API, kept per number with the time. What is kept is what the fight reads (gearSummary's four numbers)
+     * and two names for the card. Nothing here asks or clicks anything.
+     */
+
+    /** The highest loadout number kept [check live: how many loadouts Torn has was not read]. */
+    const LOADOUT_MAX_N = 20;
+
+    /** Rows on the fight card (292 px wide, the training panel under it): the best, the one on you and two more. */
+    const LOADOUT_ROWS = 4;
+
+    /**
+     * What you wear (/v2/user/equipment) as a loadout: the gear the fight reads, its main weapon and its armour's name.
+     * @returns {{gear: {dmg, acc, armour, dmgBonus}, weapon: string, armour: string}|null} null: never read, or nothing worn
+     */
+    function loadoutOf(equipment) {
+        const items = equipmentItems(equipment);
+        const g = gearSummary(items);
+        if (!g) return null;
+        const { best, sets } = gearParts(items);
+        return { gear: { dmg: g.dmg, acc: g.acc, armour: g.armour, dmgBonus: g.dmgBonus }, weapon: best ? best.name : '', armour: sets.join('/') };
+    }
+
+    /** Is this the same loadout as far as the card and the fight can tell (the same names and the same four numbers)? */
+    function sameLoadout(a, b) {
+        const sig = (x) => (x && x.gear ? [x.weapon || '', x.armour || '', x.gear.dmg, x.gear.acc, x.gear.armour, x.gear.dmgBonus || 0].join('|') : null);
+        const s = sig(a);
+        return s !== null && s === sig(b);
+    }
+
+    function loadoutNumber(n) {
+        const v = Number(n);
+        return Number.isInteger(v) && v >= 1 && v <= LOADOUT_MAX_N ? v : null;
+    }
+
+    /** The kept loadouts ({n: {n, at, gear, weapon, armour}}) as a list by number; a record that is not one is left out. */
+    function loadoutList(stored) {
+        const out = [];
+        for (const rec of Object.values(stored && typeof stored === 'object' ? stored : {})) {
+            const n = rec && loadoutNumber(rec.n);
+            const g = rec && rec.gear;
+            if (!n || !g || !Number.isFinite(g.dmg) || !Number.isFinite(g.acc) || !Number.isFinite(g.armour)) continue;
+            out.push({ n, at: Number(rec.at) || 0, gear: { dmg: g.dmg, acc: g.acc, armour: g.armour, dmgBonus: Number(g.dmgBonus) || 0 }, weapon: String(rec.weapon || ''), armour: String(rec.armour || '') });
+        }
+        return out.sort((a, b) => a.n - b.n);
+    }
+
+    /**
+     * A reading of the loadout worn, kept under its number: it replaces what that number held (you changed the loadout),
+     * and no other number is touched. `loadout` null (nothing is worn under that number now): the number is forgotten.
+     * @param {object|null} stored - what is kept now, read just before the write (another tab may have written)
+     * @returns {object} the new {n: record}
+     */
+    function withLoadout(stored, n, loadout, at) {
+        const out = Object.fromEntries(loadoutList(stored).map((l) => [l.n, l]));
+        const num = loadoutNumber(n);
+        if (!num) return out;
+        if (loadout && loadout.gear) out[num] = { n: num, at, gear: loadout.gear, weapon: loadout.weapon || '', armour: loadout.armour || '' };
+        else delete out[num];
+        return out;
+    }
+
+    /**
+     * The rows of "Your loadouts against it", best first: every loadout kept and the one on you, each with the fight
+     * card's own forecast against their seen gear. The one on you is the kept loadout that is this gear (its number is
+     * then known), else a row without a number. At most `max` rows: the best, the one on you, then the next best.
+     * @param {object} o
+     * @param {object|null} o.worn - loadoutOf(what you wear now); null when it was never read
+     * @param {object|null} o.stored - the kept loadouts
+     * @param {function} o.fight - (gear, isWorn) => {pWin, keep}
+     * @returns {{rows: {n, weapon, armour, pWin, keep, best, worn, seenAt}[], known: number, more: number}|null}
+     *   known: how many loadouts there are to compare; more: how many of them are not shown. null: none is known.
+     */
+    function loadoutRows({ worn = null, stored = null, fight, max = LOADOUT_ROWS }) {
+        const kept = loadoutList(stored);
+        const on = worn && worn.gear ? worn : null;
+        // Two kept loadouts with the same gear: the one read last is the one on you.
+        const mine = on ? kept.filter((l) => sameLoadout(l, on)).sort((a, b) => b.at - a.at)[0] || null : null;
+        const all = kept.map((l) => ({ n: l.n, weapon: l.weapon, armour: l.armour, gear: l === mine ? on.gear : l.gear, worn: l === mine, seenAt: l === mine ? null : l.at }));
+        if (on && !mine) all.push({ n: null, weapon: on.weapon || '', armour: on.armour || '', gear: on.gear, worn: true, seenAt: null });
+        if (!all.length) return null;
+        for (const r of all) {
+            const f = fight(r.gear, r.worn) || {};
+            r.pWin = Number.isFinite(f.pWin) ? f.pWin : 0;
+            r.keep = Number.isFinite(f.keep) ? f.keep : null;
+        }
+        // Best first: the win chance, then HP kept; a tie goes to the one on you (nothing to change), then the lower number.
+        all.sort((a, b) => b.pWin - a.pWin || (b.keep ?? -1) - (a.keep ?? -1) || Number(b.worn) - Number(a.worn) || (a.n ?? 99) - (b.n ?? 99));
+        if (all.length > 1) all[0].best = true;
+        const shown = [];
+        for (const r of all) if (r.best || r.worn) shown.push(r);
+        for (const r of all) if (shown.length < max && !shown.includes(r)) shown.push(r);
+        const rows = all.filter((r) => shown.includes(r)).map((r) => ({ n: r.n, weapon: r.weapon, armour: r.armour, pWin: r.pWin, keep: r.keep, best: Boolean(r.best), worn: r.worn, seenAt: r.seenAt }));
+        return { rows, known: all.length, more: all.length - rows.length };
+    }
+
+    /*
+     * When your gear is read on Torn's items page (pure; eye-service.js makes the read). The box that names the loadout
+     * (#loadoutsRoot) is looked at once a second; its text is the mark of what you wear. Your gear is read from the API
+     * once that text has stood still for LOADOUT_SETTLE_MS (a switch on Torn's own menu has gone through by then), and only
+     * for a text not read yet: opening the items page costs one call, standing on it none. A text that changed while you
+     * stood on the page (you switched, or changed a piece) is read once more LOADOUT_CONFIRM_MS later, in case Torn's
+     * answer still held the gear from before. A text that never stands still is never read.
+     */
+
+    /** [calibrate] The box must say the same for this long before your gear is read under its number. */
+    const LOADOUT_SETTLE_MS = 3000;
+    /** [calibrate] After a change seen on the page: the second read, this long after the first. */
+    const LOADOUT_CONFIRM_MS = 40 * 1000;
+    /** A read that failed is tried again after this long. */
+    const LOADOUT_RETRY_MS = 60 * 1000;
+
+    /**
+     * One look at the box.
+     * @param {object|null} run - what the last look left
+     * @param {{n: number, sig: string}|null} seen - the number and the text read now (null: no box, or no number in it)
+     * @returns {{run: object, read: boolean}} read: ask the API for your gear now
+     */
+    function loadoutLook(run, seen, now) {
+        const r = run || { n: null, sig: null, since: 0, readSig: null, confirmAt: 0, tryAt: 0, reads: 0 };
+        const n = seen ? loadoutNumber(seen.n) : null;
+        if (!n) return { run: { ...r, n: null, sig: null }, read: false };
+        const sig = String(seen.sig || n);
+        if (sig !== r.sig) return { run: { ...r, n, sig, since: now }, read: false };
+        if (now - r.since < LOADOUT_SETTLE_MS || now < r.tryAt) return { run: r, read: false };
+        return { run: r, read: r.readSig !== r.sig || (r.confirmAt > 0 && now >= r.confirmAt) };
+    }
+
+    /**
+     * The read came back.
+     * @param {object} run - the run now
+     * @param {string} sig - the text the read was made for
+     * @param {boolean} ok - Torn answered
+     * @returns {{run: object, keep: boolean}} keep: the box still says what it said (the answer is that loadout's)
+     */
+    function loadoutAnswer(run, sig, ok, now) {
+        if (!ok) return { run: { ...run, tryAt: now + LOADOUT_RETRY_MS }, keep: false };
+        // The box moved on while Torn answered (another switch): the look that follows reads it again.
+        if (run.sig !== sig) return { run, keep: false };
+        const first = run.readSig !== sig;
+        // The page's first read needs no second one; a change seen on the page does.
+        return { run: { ...run, readSig: sig, reads: run.reads + 1, confirmAt: first && run.reads > 0 ? now + LOADOUT_CONFIRM_MS : 0 }, keep: true };
     }
 
     /* ===== src/eye-service.js ===== */
@@ -23332,6 +24418,12 @@
     const EYE_CHAIN_KEY = 'eyeChain';
     /** GM storage: the list the Torn Eye tab shows, in its order (core/eye/targets.js nextTable), for the attack page's Next button. */
     const EYE_NEXT_KEY = 'eyeNext';
+    /**
+     * GM storage: your loadouts as they were worn with Torn's items page open ({n: {n, at, gear: {dmg, acc, armour,
+     * dmgBonus}, weapon, armour}}, core/eye/gear.js withLoadout), for the fight card's "Your loadouts against it". Small
+     * (a few lines a loadout), and GM so the items page that learns one and the attack page that shows it agree at once.
+     */
+    const LOADOUTS_KEY = 'eyeLoadouts';
 
     const eye = { cache: null, loading: null, ffs: null, ts: null, pending: new Set(), timer: null, listeners: [], mem: new Map(), fc: new Map(), flushing: null, again: false, todo: new Map(), working: false, idling: false, side: null };
 
@@ -23495,7 +24587,7 @@
         await idbSet('eye', eye.cache).catch(() => {});
         set('myAttacks', null);
         pageSet(TARGETS_KEY, null);
-        for (const k of [WATCH_KEY, 'eyeWarAuto', WAR_BANDS_KEY, WAR_ASK_KEY, EYE_CHAIN_KEY, EYE_NEXT_KEY]) set(k, null);
+        for (const k of [WATCH_KEY, 'eyeWarAuto', WAR_BANDS_KEY, WAR_ASK_KEY, EYE_CHAIN_KEY, EYE_NEXT_KEY, LOADOUTS_KEY]) set(k, null);
         pageSet(WATCH_STATE_KEY, null);
         pageSet(FLIGHTS_KEY, null);
         statusRun.map = {};
@@ -23602,6 +24694,44 @@
         } catch {
             return statics.equipment || null;
         }
+    }
+
+    const loadoutRun = { run: null, busy: false };
+
+    /**
+     * Torn's items page names the loadout you wear (round 9, sources/dom/eye.js readLoadout); called with each look at
+     * it, once a second. When core/eye/gear.js loadoutLook says so, your gear is read from the API (what you wear now:
+     * one /user/equipment call through the shared Torn client; visible tab, a key, not while Torn Trading runs) and kept
+     * under that number, onto what is stored at that moment (another tab may have learned another loadout). The same read
+     * is what the fight uses as your gear from then on. Nothing is asked of Torn's page and nothing on it is clicked.
+     * @param {{n: number, sig: string}|null} seen
+     * @param {function} [clock] - the time now (tests)
+     * @returns {Promise<boolean>} whether a loadout was kept
+     */
+    async function lookLoadout(seen, clock = Date.now) {
+        const step = loadoutLook(loadoutRun.run, seen, clock());
+        loadoutRun.run = step.run;
+        if (!step.read || loadoutRun.busy) return false;
+        if (!isVisible() || isPaused() || !getKey(K.apiKey) || get(K.apiKeyDead, false)) return false;
+        const { n, sig } = step.run;
+        loadoutRun.busy = true;
+        let eq = null;
+        try {
+            eq = await fetchEquipment(tornClient(), { fresh: true });
+        } catch {
+            // tried again later (LOADOUT_RETRY_MS)
+        } finally {
+            loadoutRun.busy = false;
+        }
+        const at = clock();
+        const done = loadoutAnswer(loadoutRun.run || step.run, sig, Boolean(eq), at);
+        loadoutRun.run = done.run;
+        if (!eq) return false;
+        // What you wear now, whatever its number: the fight's "your gear" (it was read on the webpage only, every 6 h).
+        set(K.userStatic, { ...(get(K.userStatic, {}) || {}), equipment: eq, equipmentAt: at });
+        if (done.keep) set(LOADOUTS_KEY, withLoadout(get(LOADOUTS_KEY, null), n, loadoutOf(eq), at));
+        notify();
+        return done.keep;
     }
 
     /**
@@ -23840,6 +24970,36 @@
         if (!b) return null;
         const f = b.win === null ? null : { pWin: b.win / 100, keep: b.keep === null ? null : b.keep / 100, turns: null };
         return { id, name: extra.name || null, level: extra.level || null, life: extra.life || null, est: null, forecast: f, plain: null, withGear: null, gear: null, band: b.band, respect: null, ours: null, figures: chipFigures(f, null, null), source: 'war mode', status: null, pending: false, shared: { at: b.at } };
+    }
+
+    /**
+     * "Your loadouts against it" on the fight card (round 9, his pick B): each loadout of yours the app knows (the one on
+     * you, and the ones worn before with Torn's items page open) in the same fight that gives "With their gear": the same
+     * estimate, life, stats and seed, their seen gear, only your gear changed. The row of the one on you IS that line's
+     * fight. Only for the attack page's card (one player), never for a list.
+     * @returns {object|null} core/eye/gear.js loadoutRows(); null until their gear was seen, or when no gear of yours is known
+     */
+    function eyeLoadouts(id, extra = {}) {
+        const m = pi.model;
+        const v = eyeView(id, extra);
+        if (!v || !v.est || !v.withGear || !v.gear) return null;
+        const gThem = gearSummary(v.gear.items);
+        if (!gThem) return null;
+        const { meStats, statics, myLife, meKey } = yourSide(m);
+        const me = { ...meStats, life: myLife };
+        const target = { id, life: v.life, bss: v.est.bss, stats: v.est.stats };
+        const base = 'lo|' + id + '|' + JSON.stringify([v.est.bss, v.est.stats, v.life, myLife, meKey, v.gear.seenAt]);
+        const fight = (gear, isWorn) => {
+            if (isWorn) return v.withGear;
+            const key = base + JSON.stringify([gear.dmg, gear.acc, gear.armour, gear.dmgBonus]);
+            let f = eye.fc.get(key);
+            if (!f) {
+                f = forecast({ me, target, gearMe: gear, gearThem: gThem });
+                eye.fc.set(key, f);
+            }
+            return f;
+        };
+        return loadoutRows({ worn: loadoutOf(statics.equipment), stored: getShared(LOADOUTS_KEY, null), fight });
     }
 
     /** Work between two breaks while queued fights are worked out: a click or a scroll never waits longer. */
@@ -24628,6 +25788,9 @@
 
 
 
+
+
+
     /** What Settings shows about the Full key (never the key itself). */
     function fullKeyView() {
         const st = get(K.fullKeyState, null) || {};
@@ -25228,7 +26391,10 @@
                 plan: { pickBy: plan.pickBy, strategy: plan.strategy, strategyPicked: Boolean(plan.strategyPicked), build: plan.build, goal: plan.goal || null, specialUse: plan.specialUse || 0, following: m ? m.strategy : null },
                 runs: planRuns(),
                 diagnostics: diagnostics(),
-                keys: { torn: Boolean(getKey(K.apiKey)), tornRefused: Boolean(get(K.apiKeyDead, false)), full: Boolean(getKey(K.fullKey)), ffscouter: Boolean(getKey(K.ffsKey)), tornstats: Boolean(getKey(K.tsKey)), discord: Boolean(discordRaw()) },
+                keys: { torn: Boolean(getKey(K.apiKey)), tornRefused: Boolean(get(K.apiKeyDead, false)), full: Boolean(getKey(K.fullKey)), ffscouter: Boolean(getKey(K.ffsKey)), tornstats: Boolean(getKey(K.tsKey)), discord: Boolean(discordState()) },
+                // Discord pings: connected or not, what the service said about delivery and its Torn read, the ticks.
+                // Never the secret, the login id, the Discord id or name (core/discord-state.js).
+                discord: discordReport(discordRaw(), { defaultBase: DEFAULT_WORKER, ticks: pingsNow(pi.model) }),
                 paused: isPaused(),
             },
             env: { userAgent: nav.userAgent || '', screen: typeof window !== 'undefined' && window.screen ? window.screen.width + 'x' + window.screen.height : '', cores: nav.hardwareConcurrency || null, memoryGB: nav.deviceMemory || null, pageHeapMB: mem },
@@ -25301,7 +26467,7 @@
             keyProblem: keyProblem({ hasKey: Boolean(getKey(K.apiKey)), dead: Boolean(get(K.apiKeyDead, false)), stateError: get(K.stateError, null), keyInfo: statics.keyInfo || null }),
             planLine: S.short + ' · ' + ((pi.model && pi.model.build && pi.model.build.name) || 'Balanced') + (plan.createdAt ? ', since ' + new Date(plan.createdAt).toISOString().slice(0, 10) : ''),
             fullKey: fullKeyView(),
-            sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (pageGet(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), readLines(pageGet(K.planLine, null)).map((l) => l.at).join(','), JSON.stringify(get(K.stacking, null)), JSON.stringify(get(K.overdose, null))].join('|'),
+            sig: [JSON.stringify(settings), JSON.stringify(plan), JSON.stringify(get(K.worker, null)), JSON.stringify(get(K.fullKeyState, null)), (pageGet(K.moneyLog, null) || {}).at || 0, getKey(K.fullKey) ? 1 : 0, Object.values(prices).map((p) => p.at).join(','), statics.perksAt || 0, statics.inventoryAt || 0, statics.keyInfoAt || 0, getKey(K.apiKey) ? 1 : 0, get(K.apiKeyDead, false) ? 1 : 0, getKey(K.ffsKey) ? 1 : 0, getKey(K.tsKey) ? 1 : 0, JSON.stringify(get(K.stateError, null)), readLines(pageGet(K.planLine, null)).map((l) => l.at).join(','), JSON.stringify(get(K.stacking, null)), JSON.stringify(get(K.overdose, null)), JSON.stringify(get(K.pings, null))].join('|'),
             setSettings: (p) => {
                 setSettings(p);
                 refresh();
@@ -25396,6 +26562,35 @@
             diagnostics,
             logError,
             // Settings › Report a problem: the zip's data, read when the section is drawn or the button pressed.
+            // Settings › Back up and restore (round 9, pick 5B): the file is made and read here; nothing is sent.
+            backup: {
+                lastAt: () => get('lastBackupAt', null),
+                make: async (withKeys) => {
+                    const now = Date.now();
+                    // The webpage's older history must be in memory first, or the file would hold only the recent part.
+                    await loadArchives();
+                    const savedPlan = await loadSavedPlan().catch(() => null);
+                    // Histories whole: Tampermonkey's recent part with the webpage's older part.
+                    const b = buildBackup({ read: { gm: (k) => (ARCHIVES[k] ? archived(k, null) : get(k, null)), page: (k) => pageGet(k, null), key: (k) => getKey(k) }, savedPlan, withKeys: Boolean(withKeys), version: PI_BUILD_VERSION, now });
+                    set('lastBackupAt', now);
+                    logAction('Backup downloaded' + (b.hasKeys ? ' (with keys)' : ''));
+                    return { name: backupFileName(now, b.hasKeys), text: JSON.stringify(b), hasKeys: b.hasKeys };
+                },
+                restore: async (backup) => {
+                    const ops = restoreOps(backup);
+                    // The file holds each history whole: this browser's older part goes first, or the two would mix.
+                    await clearArchivedDone([...ops.gmSet.map((x) => x[0]), ...ops.gmDel].filter((k) => ARCHIVES[k]));
+                    for (const [k, v] of ops.gmSet) set(k, v);
+                    for (const k of ops.gmDel) del(k);
+                    for (const [k, v] of ops.pageSet) await pageSetDone(k, v);
+                    for (const [k, v] of ops.keys) setKey(k, v);
+                    if (ops.savedPlan) await saveSavedPlan(ops.savedPlan);
+                    else await forgetSavedPlan();
+                    logAction('Backup restored');
+                },
+                // Everything is read again from the stores.
+                reload: () => setTimeout(() => location.reload(), 600),
+            },
             report: {
                 data: reportData,
                 clearLog: () => {
@@ -25413,6 +26608,16 @@
                 login: (o) => loginDiscord(pi.model, o),
                 cancel: cancelLogin,
                 setupUrl: WORKER_SETUP_URL,
+                // The state in words (Working, Not reaching you…) with what to do, and the ping ticks.
+                view: () => discordView(discordRaw()),
+                ticks: () => pingsNow(pi.model),
+                setTick: (kind, on) => {
+                    setPing(kind, on);
+                    logAction('Discord ping ' + kind + ' ticked ' + (on ? 'on' : 'off'));
+                    // Sent now (a few seconds apart at most), so the bot follows what the ticks show.
+                    syncTicksSoon(() => pi.model);
+                    page.app.render(true);
+                },
             },
             // The Ledger tab: your books, and a read of the money log now (it is read by itself every 6 hours).
             // The plan's own recalibration, once a day: its last try (the plan card says when, or why it failed).
@@ -25755,6 +26960,26 @@
     .note { font-size: 12px; color: #c5cad0; }
     .cta:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
     .warn { color: #e8a33d; font-size: 12px; font-weight: 700; }
+    /* Round 9 (the owner's pick 1B): the step's items as tiles. Greyed when a use would not work or would waste something;
+       Show goes to Torn's own row (nothing here uses an item). */
+    .tiles { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid #262a2e; }
+    .tile { --t: #9aa1a8; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; align-items: center; padding: 8px 10px; border-radius: 8px; background: #181b1e; border: 1px solid color-mix(in srgb, var(--t) 55%, #2c3136); }
+    .tile.t-green { --t: #3fbf5a; }
+    .tile.t-amber { --t: #e8a33d; }
+    .tile.t-red { --t: #ff6b5e; }
+    .tile .nm { grid-column: 1; font-weight: 700; color: #fff; overflow-wrap: anywhere; }
+    .tile .st { grid-column: 1; font-size: 12px; font-weight: 600; color: var(--t); font-variant-numeric: tabular-nums; }
+    .tile .hold { grid-column: 1; font-size: 12px; color: #9aa1a8; }
+    .tile .hold.lowc { color: #ff6b5e; font-weight: 600; }
+    .tile .tb { grid-row: 1 / span 3; grid-column: 2; display: block; height: 30px; padding: 0 12px; border-radius: 6px; border: 1px solid #3a4046; background: transparent; color: #e3e5e8; font: 600 12px/28px 'Segoe UI', system-ui, sans-serif; white-space: nowrap; text-decoration: none; cursor: pointer; }
+    .tile .tb.go { background: #efebe2; color: #15171a; border-color: #efebe2; font-weight: 700; }
+    .tile .tb:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+    .tile.off .nm, .tile.off .st { opacity: .6; }
+    .tile.small { padding: 5px 10px; background: transparent; border-color: #2c3136; }
+    .tile.small .nm { font-weight: 600; font-size: 12px; color: #c5cad0; }
+    .wrap.fit-narrow .tile { padding: 6px 8px; }
+    .wrap.fit-narrow .tile .st, .wrap.fit-narrow .tile .hold { font-size: 11px; }
+    .wrap.fit-narrow .tile .tb { padding: 0 8px; }
     /* Sized to the free space beside Torn's page (fitTier): narrower with smaller type, then one tag, then the smallest. */
     .wrap.fit-narrow .body { padding: 8px 10px 10px; gap: 6px; }
     .wrap.fit-narrow .sub, .wrap.fit-narrow .later, .wrap.fit-narrow .prail .pr1, .wrap.fit-narrow .row2 { font-size: 11px; }
@@ -25930,16 +27155,18 @@
          * @param {function} [o.dockIfShared] - () => Element|null: dock under it only when it sits in the panel's margin (the profile card)
          * @param {function} [o.avoidColumn] - () => {left, right}|null: a column it never shares (Torn Eye's list tags)
          * @param {function} [o.onFill] - the gym page's Fill N (types into Torn's reps box)
+         * @param {function} [o.onShow] - (itemId) => boolean: on Torn's items page, scroll to the item's own row (false: not on the open tab)
          * @param {function} [o.ride] - (spot: {x, y, width}|null) => px: a card that rides on top of the panel (Torn Eye's
          *   chain counter) is told where the panel would sit and answers the height to leave for it; null: the panel is
          *   folded under a card, off, or in the corner
          */
-        constructor({ onOpen, loadPos, savePos, loadCollapsed, saveCollapsed, pageRect, avoidRect = () => null, dockTo = () => null, dockIfShared = () => null, avoidColumn = () => null, onFill = () => {}, ride = null }) {
+        constructor({ onOpen, loadPos, savePos, loadCollapsed, saveCollapsed, pageRect, avoidRect = () => null, dockTo = () => null, dockIfShared = () => null, avoidColumn = () => null, onFill = () => {}, onShow = () => false, ride = null }) {
             this.onOpen = onOpen;
             this.ride = ride;
             this.lift = 0;
             this.rideSpot = null;
             this.onFill = onFill;
+            this.onShow = onShow;
             this.loadPos = loadPos;
             this.savePos = savePos;
             this.loadCollapsed = loadCollapsed;
@@ -26173,6 +27400,8 @@
          *   ring: there is an action to do now (the plate's one ring; never while paused); still: Settings › Animations
          *   is off (the ring is drawn, not moving)
          *   checklist: the step's actions in order [{text, done, next}], as a small rail (next: the one to do now)
+         *   tiles: the step's items (core/steptiles.js) {tiles:[{id, name, status, cdAt, after, tone, ok, show, hold, low, tab}],
+         *   warn, later:{text, hold}|null, href}: href is Torn's items page (none when you are on it: Show scrolls to the row)
          */
         update(v) {
             const wasOff = this.off;
@@ -26205,6 +27434,7 @@
             if (v.checklist && v.checklist.length) kids.push(h('div', { class: 'prail' }, v.checklist.map((c) => h('div', { class: 'pr1' + (c.done ? ' done' : c.next ? ' now' : '') }, [h('span', { class: 'pn' }, [c.done ? tickMark() : h('span', { class: 'pd' })]), h('span', { text: c.text })]))));
             if (v.notes) for (const n of v.notes) kids.push(h('span', { class: 'note', text: n }));
             if (v.warn) kids.push(h('span', { class: 'warn', text: v.warn }));
+            if (v.tiles && v.tiles.tiles && v.tiles.tiles.length) kids.push(this.tilesEl(v.tiles, now));
             if (v.seen) {
                 const s = v.seen;
                 if (s.count > 0) {
@@ -26230,6 +27460,31 @@
                 this.placed = true;
                 this.placeSoon();
             }
+        }
+
+        /** The step's items (round 9, pick 1B). Show is a link to Torn's items page, or on that page a scroll to the row. */
+        tilesEl(tv, now) {
+            const miss = h('span', { class: 'sub', role: 'status' });
+            const showBtn = (t) => {
+                if (!t.show) return null;
+                const cls = 'tb' + (t.ok ? ' go' : '');
+                const label = 'Show ' + t.name + ' on Torn’s items page';
+                if (tv.href) return h('a', { class: cls, href: tv.href, title: label, 'aria-label': label, text: 'Show' });
+                const onclick = (e) => {
+                    e.preventDefault();
+                    miss.textContent = this.onShow(t.id) ? '' : t.tab ? 'Its row isn’t on this tab: open Torn’s ' + t.tab + ' tab.' : 'Its row isn’t on this tab.';
+                };
+                return h('button', { class: cls, type: 'button', title: label, 'aria-label': label, onclick, text: 'Show' });
+            };
+            const kids = [h('span', { class: 'lbl', text: 'For this step' })];
+            for (const t of tv.tiles) {
+                const st = h('span', { class: 'st' }, [t.status, t.cdAt ? h('span', { 'data-cd': String(t.cdAt), text: countdown(t.cdAt - now) }) : null, t.after || null]);
+                kids.push(h('div', { class: 'tile t-' + t.tone + (t.ok ? '' : ' off'), 'data-item': String(t.id) }, [h('span', { class: 'nm', text: t.name }), showBtn(t), st, t.hold ? h('span', { class: 'hold' + (t.low ? ' lowc' : ''), text: t.hold }) : null]));
+            }
+            if (!tv.href) kids.push(miss);
+            if (tv.warn) kids.push(h('span', { class: 'warn', text: tv.warn }));
+            if (tv.later) kids.push(h('div', { class: 'tile small' }, [h('span', { class: 'nm', text: tv.later.text }), tv.later.hold ? h('span', { class: 'hold', text: tv.later.hold }) : null]));
+            return h('div', { class: 'tiles' }, kids);
         }
 
         /** Every second: the countdowns, and the dock follows the fight card. */
@@ -26298,6 +27553,7 @@
     .pi-pill.pi-solid { background: var(--b); color: #101214; border: 0; }
     .pi-pill.pi-dark { background: #101214; color: #c5cad0; border: 1px solid #3a4046; text-transform: none; letter-spacing: 0; font-weight: 600; }
     .pi-pill.pi-dark.pi-c-grey { border-color: #6c737a; color: #d6d9dc; }
+    .pi-pill.pi-dark.pi-c-chalk { border-color: #efebe2; color: #efebe2; }
     `;
 
     /** Our page CSS, once per page (torn.com: no outside fonts). */
@@ -26339,14 +27595,16 @@
      * @param {{x, y}} o - our layer's (0, 0) on screen
      * @param {number} w - the pill's natural width
      * @param {number} ht - its height
+     * `edge` 'bottom': straddling the box's bottom border instead (a grey gym box's second line).
      * @returns {{left, top, maxWidth}}
      */
-    function pillSpot(r, o, w, ht, { pad = RING_PAD, align = 'center', inset = PILL_INSET, viewW = Infinity } = {}) {
+    function pillSpot(r, o, w, ht, { pad = RING_PAD, align = 'center', inset = PILL_INSET, viewW = Infinity, edge = 'top' } = {}) {
         const maxWidth = Math.max(24, Math.min(r.width - 8, viewW - 2 * VIEW_EDGE));
         const ww = Math.min(w, maxWidth);
         let x = align === 'left' ? r.left + Math.min(inset, Math.max(4, r.width - ww - 4)) : r.left + (r.width - ww) / 2;
         x = Math.min(Math.max(x, VIEW_EDGE), viewW - VIEW_EDGE - ww);
-        return { left: Math.round(x - o.x), top: Math.round(r.top - pad - ht / 2 - o.y), maxWidth: Math.round(maxWidth) };
+        const y = edge === 'bottom' ? r.top + r.height + pad - ht / 2 : r.top - pad - ht / 2;
+        return { left: Math.round(x - o.x), top: Math.round(y - o.y), maxWidth: Math.round(maxWidth) };
     }
 
     /* ---------------------------------------------------------- our layer */
@@ -26387,10 +27645,10 @@
         return el;
     }
 
-    function addPill(target, cls, text, { title = null, align = 'center', pad = RING_PAD, data = {} } = {}) {
+    function addPill(target, cls, text, { title = null, align = 'center', pad = RING_PAD, data = {}, edge = 'top' } = {}) {
         const el = h('div', { class: 'pi-pill ' + cls, title: title || text, ...data }, [h('span', { text })]);
         marksLayer().appendChild(el);
-        ml.items.push({ el, target, kind: 'pill', pad, align });
+        ml.items.push({ el, target, kind: 'pill', pad, align, edge });
         return el;
     }
 
@@ -26423,7 +27681,7 @@
                 s.width = b.width + 'px';
                 s.height = b.height + 'px';
             } else {
-                const p = pillSpot(r, o, w, ht, { pad: it.pad, align: it.align, viewW });
+                const p = pillSpot(r, o, w, ht, { pad: it.pad, align: it.align, viewW, edge: it.edge });
                 s.left = p.left + 'px';
                 s.top = p.top + 'px';
                 s.maxWidth = p.maxWidth + 'px';
@@ -26489,6 +27747,8 @@
         if (st.kind === 'kept' && plan.line) out.push([plan.line.head, plan.line.text].filter(Boolean).join(' · '));
         // The next gym and how far it is ("Force Training in 7,300 E, DEX 6.4 there").
         if ((st.kind === 'right' || st.kind === 'done' || st.kind === 'idle') && plan.line && plan.line.src) out.push('Next gym: ' + plan.line.src);
+        // Round 9 (pick 3B): a stat outside the session that another gym of yours trains better, with both gains.
+        for (const [stat, q] of Object.entries(plan.perStat || {})) if (q && q.better && q.lines) out.push(String(stat).toUpperCase() + ' · ' + q.lines.map((l, i) => (i ? l : l.charAt(0).toLowerCase() + l.slice(1))).join(' · '));
         const parts = plan.parts || [];
         if (parts.length > 1 || parts.some((x) => x.state === 'done')) {
             out.push(parts.map((x) => (x.state === 'done' ? '✓ ' : '') + x.gymName + ': ' + String(x.stat).toUpperCase() + ' × ' + x.trains + (x.state === 'current' && x.done > 0 ? ' (' + x.left + ' left)' : '')).join(' → '));
@@ -26540,6 +27800,9 @@
                 // Never dims or covers Torn's boxes (round 6): a small dark pill on its top border, the full words on hover.
                 addPill(box.li, 'pi-dark', p.tag, { title: p.text, data });
             }
+            // Round 9 (pick 3B): a box the session leaves alone says what a train gives here, or the gym of yours that gives
+            // more (chalk), on its bottom border. Still grey and quiet: no ring, no Fill.
+            if (p.foot && p.kind !== 'train' && p.kind !== 'wait') addPill(box.li, 'pi-dark' + (p.better ? ' pi-c-chalk' : ''), p.foot, { title: [p.text].concat(p.lines || []).filter(Boolean).join(' · '), data: { ...data, 'data-pi-kind': 'gain' }, edge: 'bottom' });
         }
         placeMarks();
         return { nextGymShown };
@@ -26770,6 +28033,136 @@
         return out;
     }
 
+    /* ===== src/core/steptiles.js ===== */
+    /*
+     * The panel's tiles for the step of the moment (round 9, the owner's pick 1B, mockups/round9/companion.html §1): each
+     * item the step takes, whether using it now would work, how many you hold and whether the plan's next days need more.
+     * Pure: the caller reads the bars, the cooldowns, what you hold and the Buy list. Nothing here acts on Torn: the
+     * tile's "Show" goes to Torn's own row, where Torn's own Use is pressed.
+     */
+
+
+
+
+
+
+    const TILE_DAY_MS = 24 * 3600e3;
+    const TILE_HOUR_MS = 3600e3;
+    const TILE_WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+    /** The tab of Torn's items page an item sits on (the "Show" button's hint when its row isn't on the open tab). */
+    const TORN_TAB = { Drug: 'Drugs', Booster: 'Boosters', Candy: 'Candy', 'Energy Drink': 'Energy Drinks', Special: 'Special' };
+
+    function tornTabOf(id) {
+        const it = ITEMS[id];
+        return it ? TORN_TAB[it.category] || null : null;
+    }
+
+    /** "today" for a one-day Buy window, else the first Torn day after it: {long: 'before Thursday', short: 'before Thu'}. */
+    function windowWords(now, days) {
+        if (!(days > 1)) return { long: 'today', short: 'today' };
+        const day = TILE_WEEKDAYS[new Date(tornDayStart(now) + days * TILE_DAY_MS).getUTCDay()];
+        return { long: 'before ' + day, short: 'before ' + day.slice(0, 3) };
+    }
+
+    /** The step's items as one row an id (the console jump lists its console twice: the plays, and the one to buy). */
+    function tileItemsOf(step) {
+        const by = new Map();
+        for (const it of (step && step.items) || []) {
+            if (it.id === POINTS || !ITEMS[it.id]) continue;
+            const qty = Math.max(0, Number(it.qty) || 0);
+            const uses = Math.max(0, Number(it.uses) || 0);
+            if (!qty && !uses) continue;
+            const row = by.get(it.id) || { id: it.id, qty: 0, uses: 0 };
+            row.qty += qty;
+            row.uses += uses;
+            by.set(it.id, row);
+        }
+        return [...by.values()];
+    }
+
+    function tileJoinAnd(list) {
+        return list.length <= 1 ? list.join('') : list.slice(0, -1).join(', ') + ' and ' + list[list.length - 1];
+    }
+
+    /**
+     * @param {object} step - plan.js step {kind, items:[{id, qty, uses}], parts}
+     * @param {object} o
+     * @param {object|null} o.inventory - {[itemId]: held}; null until Torn's answer about what you hold is in
+     * @param {{current, max}|null} o.energy - the energy bar now
+     * @param {number} o.drugLeft - ms of drug cooldown left
+     * @param {number} o.boosterLeft - ms of booster cooldown left
+     * @param {number} o.capH - the booster cooldown's cap, hours
+     * @param {number} o.cdMult - the consumable cooldown cut (candy, cans)
+     * @param {{id, need, have, buy}[]} o.needs - the Buy list's rows for its window (market.js needList)
+     * @param {number} o.windowDays - that window, days
+     * @param {object[]} o.rest - the steps after this one
+     * @param {{boosters:boolean, drug:boolean}} o.done - a boost under way: what the bars say is already in
+     * @param {boolean} o.boost - a jump or a daily boost (the drug goes in after the boosters)
+     * @returns {{tiles:{id, name, status, cdAt, after, tone, ok, done, show, hold, low, tab}[], warn:string|null, later:{text, hold}|null}|null}
+     */
+    function stepTiles(step, { inventory = null, energy = null, drugLeft = 0, boosterLeft = 0, capH = BOOSTER_CAP_H, cdMult = 1, needs = [], windowDays = 1, rest = [], done = {}, boost = false, now = Date.now() } = {}) {
+        const items = tileItemsOf(step);
+        if (!items.length) return null;
+        const by = windowWords(now, windowDays);
+        const heldOf = (id) => (inventory ? Math.max(0, Math.floor(Number(inventory[id]) || 0)) : null);
+        const hasBoosters = items.some((x) => ITEMS[x.id].kind !== 'drug');
+        const trains = Boolean(step.parts && step.parts.length);
+        const cdAt = (left) => Math.round((now + left) / 1000) * 1000;
+        const buys = [];
+        const tiles = items.map((x) => {
+            const it = ITEMS[x.id];
+            const held = heldOf(x.id);
+            const t = { id: x.id, name: itemName(x.id) + (x.qty > 1 ? ' × ' + x.qty : ''), status: 'Ready', cdAt: null, after: '', tone: 'green', ok: true, done: false, show: held !== 0, hold: '', low: false, tab: tornTabOf(x.id) };
+            const stop = (status, tone = 'amber') => Object.assign(t, { status, tone, ok: false });
+            const isDone = it.kind === 'drug' ? Boolean(done.drug) : Boolean(done.boosters);
+            if (isDone) {
+                Object.assign(t, { status: it.kind === 'drug' ? 'Taken' : 'Eaten', tone: 'grey', ok: false, done: true, show: false });
+            } else if (held !== null && x.qty > 0 && held < x.qty) {
+                stop(held ? 'You hold ' + held + ' of ' + x.qty : 'None held', 'red');
+            } else if (it.kind === 'drug') {
+                const over = it.energy && energy && Number.isFinite(energy.current) ? energy.current + it.energy * Math.max(1, x.qty) - ENERGY_CAP : 0;
+                if (drugLeft > 0) Object.assign(stop('Drug cooldown · '), { cdAt: cdAt(drugLeft), after: ' left' });
+                else if (boost && hasBoosters && !done.boosters) stop('After the boosters', 'grey');
+                // A stack keeps its energy ("don't train"): the plan takes the Xanax anyway, so the tile only says the loss.
+                else if (over > 0 && !trains) Object.assign(t, { status: 'Loses ' + fmtInt(over) + ' energy over ' + fmtInt(ENERGY_CAP), tone: 'amber' });
+                else if (over > 0) stop('Would lose ' + fmtInt(over) + ' energy · train first');
+                else if (it.energy && energy && Number.isFinite(energy.current)) t.status = 'Ready · energy ' + fmtInt(energy.current) + ' → ' + fmtInt(energy.current + it.energy * Math.max(1, x.qty));
+            } else if (it.kind === 'booster') {
+                const fit = boostersThatFit(x.id, capH, boosterLeft / TILE_HOUR_MS, cdMult);
+                const gives = it.toMax && energy ? Math.max(0, energy.max - energy.current) : (it.energy || 0) * x.qty;
+                const over = gives && energy && Number.isFinite(energy.current) ? energy.current + gives - ENERGY_CAP : 0;
+                if (fit <= 0) Object.assign(stop('Booster cooldown full · room in '), { cdAt: cdAt(boosterLeft - capH * TILE_HOUR_MS) });
+                else if (fit < x.qty) Object.assign(t, { status: 'Only ' + fit + ' of ' + x.qty + ' fit the booster cooldown', tone: 'amber' });
+                else if (over > 0) stop('Would lose ' + fmtInt(over) + ' energy · train first');
+                else if (gives && energy) t.status = 'Ready · energy ' + fmtInt(energy.current) + ' → ' + fmtInt(energy.current + gives);
+                else if (x.qty > 1) t.status = 'Ready · all ' + x.qty + ' fit the booster cooldown';
+            }
+            if (held !== null) {
+                const need = (needs || []).find((n) => n.id === x.id && n.buy > 0);
+                if (need && !t.done) {
+                    t.hold = 'you hold ' + fmtInt(held) + ' · the plan takes ' + fmtInt(need.need) + ' ' + by.short;
+                    t.low = true;
+                    buys.push({ name: itemName(x.id), buy: need.buy });
+                } else t.hold = 'you hold ' + fmtInt(held);
+            }
+            return t;
+        });
+        const warn = buys.length ? 'Buy ' + (buys.length === 1 ? fmtInt(buys[0].buy) + ' more' : tileJoinAnd(buys.map((b) => fmtInt(b.buy) + ' more ' + b.name))) + ' ' + by.long : null;
+        // What the rest of the Torn day takes, on one small line (so a missing Ecstasy shows before its hour).
+        const dayEnd = tornDayStart(now) + TILE_DAY_MS;
+        const laterBy = new Map();
+        for (const s of rest || []) {
+            if (!(s.at < dayEnd)) continue;
+            for (const x of tileItemsOf(s)) if (x.qty > 0) laterBy.set(x.id, (laterBy.get(x.id) || 0) + x.qty);
+        }
+        const laterIds = [...laterBy.keys()];
+        const later = laterIds.length
+            ? { text: 'Later today · ' + laterIds.map((id) => itemName(id) + (laterBy.get(id) > 1 ? ' × ' + laterBy.get(id) : '')).join(', '), hold: inventory ? 'you hold ' + tileJoinAnd(laterIds.map((id) => fmtInt(heldOf(id)))) : '' }
+            : null;
+        return { tiles, warn, later };
+    }
+
     /* ===== src/platform/page-hook.js ===== */
     /*
      * Reading the attack page's `page.php?sid=attackData` answer, read-only
@@ -26910,6 +28303,23 @@
         if (!v) return null;
         const t = bar.querySelector('[class*="bar-timeleft___"]');
         return { value: String(v.textContent || '').trim(), time: t ? String(t.textContent || '').trim() : '' };
+    }
+
+    /**
+     * The loadout you wear, as Torn's items page names it: the text of #loadoutsRoot begins "Loadout #2", then the worn
+     * gear's slots [check live: that is all that was read of its markup (2026-10-05); nothing else of it is relied on].
+     * Read only: one text is looked at. Torn's own "Loadouts" button in that box is never clicked, its menu never opened.
+     * `sig` is the box's text as one line, only to notice that it changed (another loadout, another piece).
+     * null whenever the text does not begin that way (no box, other words, a number that is no loadout's).
+     * @returns {{n: number, sig: string}|null}
+     */
+    function readLoadout(doc = document) {
+        const root = doc.getElementById('loadoutsRoot');
+        if (!root) return null;
+        const text = String(root.textContent || '').replace(/\s+/g, ' ').trim();
+        const m = text.match(/^Loadout ?# ?(\d{1,2})(?!\d)/i);
+        if (!m || !(Number(m[1]) >= 1)) return null;
+        return { n: Number(m[1]), sig: text.slice(0, 600) };
     }
 
     /** The player the mini-profile popup is showing. */
@@ -27056,6 +28466,12 @@
     .pi-card .pi-nogear { color: #c9cdd2; font-size: 13px; }
     .pi-card .pi-nogear b { color: #fff; font-weight: 700; }
     .pi-card.pi-mid .pi-nogear, .pi-card.pi-mid .pi-gh b { font-size: 11px; }
+    .pi-card .pi-lot { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px 10px; align-items: center; font-size: 12px; }
+    .pi-card .pi-lot .pi-ln { color: #fff; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+    .pi-card .pi-lot .pi-ln small { display: block; color: #9aa1a8; font-size: 11px; font-weight: 400; }
+    .pi-card .pi-lot .pi-lk { color: #fff; font-weight: 700; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .pi-card .pi-lot .pi-lw { color: #9aa1a8; font-size: 11px; white-space: nowrap; }
+    .pi-card .pi-lot .pi-ln.pi-best { color: #9bdc8a; }
 
     .pi-eye .pi-watch { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
     .pi-eye .pi-watch button, .pi-eye .pi-watch select, .pi-eye .pi-watch input { height: 24px; border-radius: 5px; border: 1px solid color-mix(in srgb, #efebe2 45%, transparent); background: #1c1f22; color: #fff; font: 700 11px ${EYE_FONT}; padding: 0 9px; cursor: pointer; margin: 0; }
@@ -27546,6 +28962,38 @@
         return h('div', { class: 'pi-gear', 'data-pi-gear': 'seen' }, kids);
     }
 
+    /** Under the rows when one loadout is all the app knows: how the others get here. */
+    const EYE_LOADOUTS_HOW = 'Your other loadouts show here once you have worn them with Torn’s items page open.';
+    /** Under the rows when another loadout does better than the one on you. */
+    const EYE_LOADOUTS_CHANGE = 'Change it on Torn’s loadout menu before you start the fight.';
+    /** Under the rows when the one on you is the best of them: nothing to change. */
+    const EYE_LOADOUTS_KEEP = 'The one on you does best against it.';
+
+    /**
+     * "Your loadouts against it" on the fight card (round 9, mockups/round9/companion.html §2, the owner's pick B): one
+     * row per loadout of yours the app knows, best first: its number and main weapon, its armour under it (and when it
+     * was last seen on you, for one you are not wearing), win and HP kept against this player's seen gear, then "best"
+     * and "on you". Words only: nothing here is a button, the loadout is changed on Torn's own menu by hand.
+     * @param {object} lo - core/eye/gear.js loadoutRows(): {rows, known, more}
+     */
+    function eyeLoadoutBlock(lo, { now = Date.now() } = {}) {
+        const pct = (v) => Math.round((v || 0) * 100) + '%';
+        const cells = [];
+        for (const r of lo.rows) {
+            const under = (r.armour ? r.armour + ' armour' : 'No armour') + (r.seenAt ? ' · ' + eyeSeenText(r.seenAt, now) : '');
+            cells.push(h('span', { class: 'pi-ln' + (r.best ? ' pi-best' : '') }, [(r.n ? r.n + ' · ' : '') + (r.weapon || 'No weapon'), h('small', { text: under })]));
+            cells.push(h('span', { class: 'pi-lk', text: pct(r.pWin) + ' · ' + pct(r.keep) }));
+            cells.push(h('span', { class: 'pi-lw', text: [r.best ? 'best' : '', r.worn ? 'on you' : ''].filter(Boolean).join(' · ') }));
+        }
+        const onYou = lo.rows.find((r) => r.worn);
+        const foot = lo.known === 1 && onYou ? EYE_LOADOUTS_HOW : onYou && onYou.best ? EYE_LOADOUTS_KEEP : EYE_LOADOUTS_CHANGE;
+        return h('div', { class: 'pi-gear', 'data-pi-loadouts': String(lo.rows.length) }, [
+            h('div', { class: 'pi-gh' }, [h('b', { text: 'Your loadouts against it' }), h('span', { text: 'win · HP kept' })]),
+            h('div', { class: 'pi-lot' }, cells),
+            h('div', { class: 'pi-src', text: foot + (lo.more > 0 ? ' ' + lo.more + ' more not shown.' : '') }),
+        ]);
+    }
+
     /**
      * The Next button (round 8, mockups/round8/torn-eye.html §4, the owner's pick A): the first row of the fight card. It
      * opens the attack page of the next player in your Torn Eye list, in the list's own order, skipping who is not ready
@@ -27578,7 +29026,8 @@
      * likely build. The training panel docks under it (#pi-eyecard), so its foot is left free.
      * @param {object|null} v - eyeView()
      * @param {'full'|'mid'|'small'} mode
-     * @param {object} s - {gearVisible, gearSaved, watch: {watching, tag, full, toggle}, next: eyeNextBox()'s n}
+     * @param {object} s - {gearVisible, gearSaved, watch: {watching, tag, full, toggle}, next: eyeNextBox()'s n,
+     *   loadouts: eyeLoadoutBlock()'s lo (your loadouts against their seen gear; none: the card as before)}
      */
     function eyeFightCard(v, mode, s = {}) {
         const { el, bd } = eyeCardShell(v, mode, { who: eyeWhoText(v, mode), hover: mode === 'small' });
@@ -27602,6 +29051,8 @@
         if (f && f.turns) bd.appendChild(h('div', { class: 'pi-muted', text: 'About ' + f.turns + ' turns' }));
         bd.appendChild(eyeGearBlock(v, mode, { shown: Boolean(s.gearVisible) }));
         if (v.withGear && mode === 'full') bd.appendChild(h('div', { class: 'pi-warnline', text: 'With their gear: win ' + Math.round(v.withGear.pWin * 100) + '% · HP kept ~' + Math.round((v.withGear.keep || 0) * 100) + '%' }));
+        // Round 9 (his pick B): your loadouts against that gear, only once it was seen and on the full card.
+        if (v.withGear && mode === 'full' && s.loadouts && s.loadouts.rows && s.loadouts.rows.length) bd.appendChild(eyeLoadoutBlock(s.loadouts));
         const p = v.plain || f;
         if (mode === 'full' && p && p.perBuild && !p.exact) {
             const rows = Object.entries(p.perBuild).sort((a, b) => (b[1].keep || 0) - (a[1].keep || 0)).slice(0, 3);
@@ -28292,7 +29743,9 @@
             ep.sig.attack = '';
         } else {
             const ws = watchState(id);
-            const next = eyeFightCard(v, spot.mode, { ...ep.attack, next: eyeNextNow(id), watch: { ...ws, full: getWatch().list.length >= WATCH_MAX && !ws.watching, toggle: () => toggleFor(id) } });
+            // Your loadouts against their gear (round 9): worked out for the full card only, once their gear was seen.
+            const loadouts = spot.mode === 'full' && v && v.withGear ? eyeLoadouts(id, ep.extras.get(id) || {}) : null;
+            const next = eyeFightCard(v, spot.mode, { ...ep.attack, loadouts, next: eyeNextNow(id), watch: { ...ws, full: getWatch().list.length >= WATCH_MAX && !ws.watching, toggle: () => toggleFor(id) } });
             let card = old;
             if (!card || ep.sig.attack !== next.outerHTML) {
                 ep.sig.attack = next.outerHTML;
@@ -28429,6 +29882,10 @@
             gmOnChange(EYE_NEXT_KEY, () => {
                 if (!isPaused() && getSettings().eyeChips && isVisible() && detectPage(location.href) === PAGE_ATTACK) drawAttack();
             });
+            // Torn's items page in another tab learned a loadout (you changed it there): the card's rows follow.
+            gmOnChange(LOADOUTS_KEY, () => {
+                if (!isPaused() && getSettings().eyeChips && isVisible() && detectPage(location.href) === PAGE_ATTACK) drawAttack();
+            });
         }
         // Owner (round 6): on Torn's pages Torn Eye asks only about the player you're viewing (their profile) or
         // attacking. Faction and war lists, mini-profiles and the watch list show what is already known; the list sweeps,
@@ -28490,6 +29947,9 @@
             const pg = detectPage(location.href);
             // The chain counter (any Torn page in chain mode, the war page always): its clocks, and Torn's bar read again.
             if (drawChain() && pg === PAGE_ATTACK) drawAttack();
+            // Torn's items page names the loadout you wear (round 9): one look at that text; your gear is then read from
+            // the API and kept under its number (eye-service.js lookLoadout). Nothing on Torn's page is clicked or opened.
+            if (pg === PAGE_ITEMS) lookLoadout(readLoadout()).catch(() => {});
             if (pg !== PAGE_FACTION && pg !== PAGE_PROFILE && pg !== PAGE_ATTACK) return;
             if (pg === PAGE_FACTION) {
                 // Round 7 review: the status text carries Torn's hospital clock, so a signature of it changed every second
@@ -28548,6 +30008,7 @@
      * Reads only the page the user opened; types into Torn's reps box only on
      * a Fill click; never clicks Torn's buttons; nothing from a hidden tab.
      */
+
 
 
 
@@ -28637,6 +30098,50 @@
         return null;
     }
 
+    /** The Buy list's rows for its window (the Buy tab's own list: what the plan takes, less what you hold). */
+    function buyNeeds(m, s = getSettings(), statics = get(K.userStatic, {}) || {}) {
+        return needList(needsForWindow(m, m.compare, { ...getPlan(), strategy: m.strategy || getPlan().strategy }, s.buyWindow || 'three', m.planDays || s.horizonDays), statics.inventory || {});
+    }
+
+    /**
+     * The step's items as tiles (round 9, the owner's pick 1B; core/steptiles.js): would a use work now, how many you
+     * hold, and what the Buy list's window still needs. Read from the bars, the cooldowns and Torn's answer about what you
+     * hold: nothing is used for you. Show goes to Torn's items page, or on it to the item's own row.
+     */
+    function stepTilesView(m, step, rest, reads, boost, page, now) {
+        const s = getSettings();
+        const statics = get(K.userStatic, {}) || {};
+        let needs = [];
+        try {
+            needs = buyNeeds(m, s, statics);
+        } catch (e) {
+            needs = [];
+        }
+        const t = stepTiles(step, {
+            inventory: statics.inventory || null,
+            energy: reads.energy ? { current: reads.energy.current, max: reads.energy.max } : null,
+            drugLeft: reads.drugLeft,
+            boosterLeft: reads.boosterLeft,
+            capH: boosterCapOf(m.pc || {}, s),
+            cdMult: (m.pc && m.pc.perks && m.pc.perks.consumableCdMult) || 1,
+            needs,
+            windowDays: WINDOWS[s.buyWindow || 'three'] || 1,
+            rest,
+            done: boost ? { boosters: boost.eaten, drug: boost.drugIn } : {},
+            boost: isBoostStep(step),
+            now,
+        });
+        return t ? { ...t, href: page === PAGE_ITEMS ? null : itemsUrl() } : null;
+    }
+
+    /** On Torn's items page: scroll to the item's own row (the tile's Show). False when it isn't on the open tab. */
+    function showItemRow(id) {
+        const row = readItemRows().find((r) => r.itemId === Number(id));
+        if (!row || !row.el || typeof row.el.scrollIntoView !== 'function') return false;
+        row.el.scrollIntoView({ block: 'center', behavior: getSettings().motion === false ? 'auto' : 'smooth' });
+        return true;
+    }
+
     function overlayView(m, page) {
         const s = getSettings();
         const relevant = [PAGE_GYM, PAGE_ITEMS, PAGE_BAZAAR, PAGE_ITEM_MARKET, PAGE_POINTS].includes(page);
@@ -28694,6 +30199,8 @@
             if (next.strict && next.warnAt !== null && now >= next.warnAt) v.warn = 'Strict: ' + (next.note || 'on the tick');
             // The one button follows the action of the moment; with nothing due it is the webpage's alone.
             v.action = ps.acting ? stepAction(next, page, boost) : null;
+            const tiles = stepTilesView(m, next, live.rest, reads, boost, page, now);
+            if (tiles) v.tiles = tiles;
         } else {
             v.pillText = 'Done for today';
             v.cardStep = 'Nothing left today';
@@ -28930,7 +30437,7 @@
         const s = getSettings();
         const statics = get(K.userStatic, {}) || {};
         const prices = getPrices();
-        const needs = needList(needsForWindow(m, m.compare, { ...getPlan(), strategy: m.strategy || getPlan().strategy }, s.buyWindow || 'three', m.planDays || s.horizonDays), statics.inventory || {});
+        const needs = buyNeeds(m, s, statics);
         // The same list as the Buy tab: its type ticks, and a city shop you ticked joins the listings.
         const show = shownTypes(s, [...new Set(needs.map((n) => typeOf(n.id)))]);
         const ic = itemContext(statics, s, m.now);
@@ -29029,6 +30536,8 @@
             avoidColumn: eyeColumn,
             // Fill N on the gym page: types into Torn's reps box on your click (never TRAIN).
             onFill: fillNow,
+            // A tile's Show on the items page: scrolls to Torn's own row (on other pages it is a link to the items page).
+            onShow: showItemRow,
             // Torn Eye's chain counter rides on top of the panel (round 8): the panel starts under it.
             ride: eyeRideChain,
         });
@@ -29049,6 +30558,9 @@
                 lastView = vs;
                 tp.overlay.update(view);
             }
+            // A tile's cooldown that ends before the next model: the view is worked out again then ("Ready").
+            const ends = view.tiles ? view.tiles.tiles.map((t) => t.cdAt).filter(Boolean) : [];
+            tp.tileDue = ends.length ? Math.min(...ends) : null;
         };
         // The paused card follows where Torn Trading is still seen (another tab reloaded or closed) without a new model.
         const showPaused = (m) => {
@@ -29092,6 +30604,10 @@
         setInterval(() => {
             tp.overlay.tick();
             if (isVisible() && isPaused()) showPaused(tp.model);
+            if (tp.tileDue && Date.now() >= tp.tileDue && isVisible() && !isPaused()) {
+                tp.tileDue = null;
+                tp.showView(tp.model);
+            }
             // Our marks follow Torn's page (lists that load or grow, images): once a second they are placed again, and a
             // listing Torn replaced is marked again on the new one (nothing of ours is inside Torn's page to notice it).
             if (isVisible() && !isPaused() && marksCount()) {

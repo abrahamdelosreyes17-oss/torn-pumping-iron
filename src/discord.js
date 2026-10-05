@@ -14,6 +14,9 @@ import { fetchDiscord } from './api/torn.js';
 import { workerBase, newSecret, stepsForWorker, workerSync, workerTest, workerForget, workerLink, workerLoginStart, workerLoginStatus, workerLoginCancel, DEFAULT_WORKER } from './api/worker.js';
 import { gmOpenTab } from './platform/gm.js';
 import { normBand } from './core/eye/bands.js';
+import { pingsForSync, adoptPings } from './pings.js';
+import { discordView, testFailOf, testSentWords } from './core/discord-state.js';
+import { logProblem, logNote } from './problem-log.js';
 
 /** Set by the runtime: a Discord skip redraws this tab's model. */
 let onSkippedChange = null;
@@ -22,6 +25,9 @@ export function onSkipped(fn) {
 }
 
 export const SYNC_MIN_MS = 60 * 1000;
+
+/** A changed ping tick goes sooner than that, but not on every click of a row of ticks. */
+export const TICK_SYNC_MIN_MS = 5 * 1000;
 
 /** Sync at least this often while a tab is visible (a plan not synced for 12 h is "out of date" on the Worker). */
 export const SYNC_EVERY_MS = 10 * 60 * 1000;
@@ -100,6 +106,41 @@ function pausedText(r) {
     return r && r.paused ? 'Your Worker paused pings: ' + (r.lastError || 'Torn refused its key') + '. Paste a new key for it.' : null;
 }
 
+/**
+ * What the service's sync answer says, kept for Settings and the problem report (core/discord-state.js). An older
+ * service sends no `delivery`, `tornRead` or `kinds`: those stay null, and Settings says only what it knows.
+ */
+function answered(r, now = Date.now()) {
+    const d = r.delivery && typeof r.delivery === 'object' ? r.delivery : null;
+    const tr = r.tornRead && typeof r.tornRead === 'object' ? r.tornRead : null;
+    return {
+        lastError: pausedText(r),
+        paused: Boolean(r.paused),
+        pauseText: pausedText(r),
+        syncFail: null,
+        answerAt: now,
+        ready: Boolean(r.ready),
+        linked: Boolean(r.linked),
+        bot: Boolean(r.bot),
+        delivery: d ? { ok: Boolean(d.ok), via: d.via || null, reason: d.reason || null, dmRefusedAt: Number(d.dmRefusedAt) || null, webhook: Boolean(d.webhook) } : null,
+        tornRead: tr ? { ok: tr.ok === true ? true : tr.ok === false ? false : null, at: Number(tr.at) || null, travel: tr.travel !== false, since: Number(tr.since) || null, code: tr.code === undefined ? null : tr.code, error: tr.error ? String(tr.error).slice(0, 200) : null } : null,
+        kinds: r.kinds && typeof r.kinds === 'object' ? r.kinds : null,
+    };
+}
+
+/** A change for the worse in what the service says goes to the problem log, once (not at every sync). */
+function logAnswer(was, now) {
+    const v0 = discordView(was);
+    const v1 = discordView(now);
+    if (!v1 || (v0 && v0.key === v1.key)) return;
+    if (v1.key === 'ok') {
+        if (v0 && v0.key !== 'waiting') logNote('Discord pings work again', 'was: ' + v0.tag);
+        return;
+    }
+    if (v1.key === 'waiting') return;
+    logProblem('error', 'Discord pings: ' + (v1.title || v1.tag), v1.text);
+}
+
 /** What's stored about the service, connected or not (a login may be under way). */
 export function discordRaw() {
     const w = get(K.worker, null);
@@ -117,12 +158,14 @@ export function discordState() {
  * seconds) and no steps, so the bot sends nothing about energy or training (worker/src/alerts.js) and /today lists
  * nothing until Resume. Not the jump plan's stack (`type: 'jump'`): that one is part of a training plan.
  */
-export function planPayload(m) {
+export function planPayload(m, keep = []) {
     if (!m || !m.ready) return null;
     // type 'jump' + noRefill: a Worker from before round 7 ignores chain but still holds back the energy-full and refill pings.
     // Overdosed (the one stored state, m.overdose): no steps either, and the bot says "Overdosed · fly to Switzerland" once.
-    if (m.overdose) return { type: 'jump', noRefill: true, steps: [], overdose: { at: Math.floor(m.overdose.at / 1000), until: Math.floor(m.overdose.until / 1000) } };
-    if (m.stacking) return { type: 'jump', noRefill: true, steps: [], chain: { since: Math.floor(m.stacking.since / 1000) } };
+    // `keep`: the energy and training pings ticked back on by hand during it (Settings › Discord pings); the bot sends those.
+    const kept = keep && keep.length ? { keep: [...keep] } : {};
+    if (m.overdose) return { type: 'jump', noRefill: true, steps: [], overdose: { at: Math.floor(m.overdose.at / 1000), until: Math.floor(m.overdose.until / 1000), ...kept } };
+    if (m.stacking) return { type: 'jump', noRefill: true, steps: [], chain: { since: Math.floor(m.stacking.since / 1000), ...kept } };
     return { type: m.steps.some((s) => s.kind === 'stack' || s.kind === 'jump') ? 'jump' : 'steady', steps: stepsForWorker(m.upcoming || m.steps), ...(m.noRefill ? { noRefill: true } : {}) };
 }
 
@@ -153,12 +196,14 @@ export async function connectDiscord(f, model) {
         }
     }
     const secret = prev && prev.base === base ? prev.secret : newSecret();
-    const body = { base, secret, invite: f.invite || null, plan: planPayload(model) };
+    const ticks = pingsForSync(model);
+    const body = { base, secret, invite: f.invite || null, plan: planPayload(model, ticks.keep), rules: ticks.rules, rulesAt: ticks.rulesAt };
     if (f.webhookUrl) body.webhookUrl = f.webhookUrl.trim();
     if (f.tornKey) body.tornKey = f.tornKey.trim();
     if (f.discordId) body.discordId = String(f.discordId).replace(/\D/g, '');
     const r = await workerSync(body);
-    set(K.worker, { base, secret, discordId: body.discordId || (prev && prev.discordId) || null, connectedAt: Date.now(), lastSync: Date.now(), lastSig: null, ready: Boolean(r.ready) || Boolean(prev && prev.ready), linked: Boolean(r.linked), bot: Boolean(r.bot), lastError: pausedText(r) });
+    set(K.worker, { base, secret, discordId: body.discordId || (prev && prev.discordId) || null, connectedAt: Date.now(), lastSync: Date.now(), lastSig: null, ...answered(r), ready: Boolean(r.ready) || Boolean(prev && prev.ready) });
+    adoptPings(r.kindsSet);
     return r;
 }
 
@@ -197,7 +242,13 @@ export async function loginDiscord(model, { onUpdate = () => {}, base: baseIn = 
     const prev = discordRaw();
     const base = workerBase(baseIn || (prev && prev.base) || DEFAULT_WORKER);
     const secret = prev && prev.base === base ? prev.secret : newSecret();
-    const start = await workerLoginStart({ base, secret });
+    let start;
+    try {
+        start = await workerLoginStart({ base, secret });
+    } catch (e) {
+        logProblem('error', 'Discord login could not start', String((e && e.message) || e) + (e && e.http ? ' [http ' + e.http + ']' : ''));
+        throw e;
+    }
     // Only an address on the service itself is opened (it sends you on to discord.com).
     let url = null;
     try {
@@ -251,29 +302,34 @@ async function pollLoginOnce(model, { sleep }) {
         try {
             st = await workerLoginStatus({ base, secret, id });
         } catch (e) {
-            if (e && e.http === 404) return finishLogin(false, LOGIN_FAIL.expired);
+            if (e && e.http === 404) return finishLogin(false, LOGIN_FAIL.expired, 'expired');
             continue; // A blip: ask again.
         }
         if (st.state === 'open') continue;
-        if (st.state !== 'done') return finishLogin(false, LOGIN_FAIL[st.state] || LOGIN_FAIL.failed);
+        if (st.state !== 'done') return finishLogin(false, LOGIN_FAIL[st.state] || LOGIN_FAIL.failed, String(st.state || 'failed'));
         // In. Saved first: if the first sync fails, the next minute's sync sends the plan and the key (no keyTag yet).
-        set(K.worker, { ...(discordRaw() || {}), base, secret, login: null, discordName: st.name || null, keyTag: null, connectedAt: Date.now(), lastSync: 0, lastSig: null, lastError: null });
+        // A new login starts afresh: what the service said before, and a failed test ping, are forgotten.
+        set(K.worker, { ...(discordRaw() || {}), base, secret, login: null, discordName: st.name || null, keyTag: null, connectedAt: Date.now(), lastSync: 0, lastSig: null, lastError: null, paused: false, pauseText: null, syncFail: null, delivery: null, tornRead: null, kinds: null, testFail: null, testOkAt: null });
         const key = getKey(K.apiKey);
         const statics = get(K.userStatic, {}) || {};
         const ki = statics.keyInfo || {};
-        const body = { base, secret, plan: planPayload(model) };
+        const ticks = pingsForSync(model);
+        const body = { base, secret, plan: planPayload(model, ticks.keep), rules: ticks.rules, rulesAt: ticks.rulesAt };
         if (key) body.tornKey = key;
         if (ki.userId) body.playerId = ki.userId;
         if (ki.factionId !== undefined) body.factionId = ki.factionId || null;
         try {
             const r = await workerSync(body);
-            set(K.worker, { ...(discordRaw() || {}), linked: Boolean(r.linked), bot: Boolean(r.bot), ready: Boolean(r.ready), keyTag: keyTag(key), lastSync: Date.now(), lastError: pausedText(r) });
+            set(K.worker, { ...(discordRaw() || {}), ...answered(r), keyTag: keyTag(key), lastSync: Date.now() });
+            adoptPings(r.kindsSet);
         } catch (e) {
-            set(K.worker, { ...(discordRaw() || {}), lastError: 'First sync failed (' + String((e && e.message) || e) + '); it tries again within a minute.' });
+            const text = String((e && e.message) || e);
+            set(K.worker, { ...(discordRaw() || {}), lastError: 'First sync failed (' + text + '); it tries again within a minute.', syncFail: { at: Date.now(), text, http: (e && e.http) || null } });
+            logProblem('error', 'Discord: the first sync after the login failed', text + (e && e.http ? ' [http ' + e.http + ']' : ''));
         }
         return { ok: true, name: st.name || null, text: 'Connected as ' + (st.name || 'you') + '. Pings come as DMs from the Pumping Iron bot.' };
     }
-    return finishLogin(false, LOGIN_FAIL.expired);
+    return finishLogin(false, LOGIN_FAIL.expired, 'expired');
 }
 
 /** A login that didn't finish: the browser secret stays (the next try reuses it), nothing is connected. */
@@ -282,8 +338,10 @@ function endLogin() {
     if (w) set(K.worker, { ...w, login: null });
 }
 
-function finishLogin(ok, text) {
+function finishLogin(ok, text, state = null) {
     endLogin();
+    // How a login ended, when not well: not_member, denied, full, elsewhere, expired, failed.
+    if (!ok) logProblem('error', 'Discord login ended: ' + (state || 'failed'), text);
     return { ok, text };
 }
 
@@ -313,10 +371,41 @@ export async function linkDiscord() {
     return { code: String(r.code || ''), expiresAt: Number(r.expiresAt) || Math.floor(Date.now() / 1000) + 600 };
 }
 
+/**
+ * Send a test ping. What came of it is kept (Settings says what to do, the report says what happened): a failure
+ * with the service's reason, and what it means for where pings go now.
+ * @returns {Promise<{ok: true, via: string|null, dmRefused?: boolean, text: string}>} throws an Error with words for the player
+ */
 export async function testDiscord() {
     const w = discordState();
     if (!w) throw new Error('Connect your Worker first.');
-    return workerTest({ base: w.base, secret: w.secret });
+    const nowS = () => Math.floor(Date.now() / 1000);
+    const keep = (patch) => {
+        const cur = get(K.worker, null);
+        if (cur && cur.secret === w.secret) set(K.worker, { ...cur, ...patch(cur) });
+    };
+    let r;
+    try {
+        r = await workerTest({ base: w.base, secret: w.secret });
+    } catch (e) {
+        const fail = testFailOf(e);
+        logProblem('error', 'Discord test ping failed: ' + fail.reason, String((e && e.message) || e) + (e && e.http ? ' [http ' + e.http + ']' : ''));
+        keep((cur) => ({
+            testFail: { at: Date.now(), reason: fail.reason, http: (e && e.http) || null, text: String((e && e.message) || e) },
+            // A service that tells where pings go: a refused DM is known at once, not at the next sync.
+            ...(cur.delivery && fail.reason === 'dm_refused' ? { delivery: { ...cur.delivery, ok: false, via: null, reason: 'dm_refused', dmRefusedAt: nowS() } } : {}),
+        }));
+        throw new Error(fail.text);
+    }
+    const viaHook = r.via === 'hook';
+    if (r.dmRefused) logProblem('error', 'Discord test ping: the bot’s DM was refused', 'it went to the channel webhook instead');
+    keep((cur) => ({
+        testFail: null,
+        testOkAt: Date.now(),
+        testVia: r.via || null,
+        ...(cur.delivery ? { delivery: viaHook ? { ...cur.delivery, ok: true, via: 'channel', reason: null, webhook: true, ...(r.dmRefused ? { dmRefusedAt: nowS() } : {}) } : { ...cur.delivery, ok: true, via: 'dm', reason: null, dmRefusedAt: null } } : {}),
+    }));
+    return { ...r, text: testSentWords(r, !w.discordName) };
 }
 
 export async function forgetDiscord() {
@@ -340,10 +429,13 @@ export function maybeSyncPlan(m, now = Date.now()) {
     const w = discordState();
     // While Torn Trading runs the plan is only the last read moving on the clock: don't send it.
     if (!w || !isVisible() || isPaused()) return false;
-    const plan = planPayload(m);
+    // The ping ticks (Settings › Discord pings) go with every sync: which kinds are on, and when each was set by hand.
+    const ticks = pingsForSync(m, now);
+    const plan = planPayload(m, ticks.keep);
     if (!plan) return false;
-    // "I'm stacking" and Resume change it too.
-    const sig = JSON.stringify([plan.chain ? plan.chain.since : 0, plan.overdose ? plan.overdose.at : 0, plan.steps.map((s) => [s.kind, s.label, Math.round(s.at / 300)])]);
+    const ticksSig = JSON.stringify([ticks.rules, ticks.rulesAt, ticks.keep]);
+    // "I'm stacking" and Resume change it too; so does a tick.
+    const sig = JSON.stringify([plan.chain ? plan.chain.since : 0, plan.overdose ? plan.overdose.at : 0, plan.steps.map((s) => [s.kind, s.label, Math.round(s.at / 300)]), ticksSig]);
     const pendingAcks = w.pendingAcks || [];
     const targetsDue = sync.targets && sync.targetsSig !== w.targetsSig && now - (w.targetsAt || 0) >= TARGETS_EVERY_MS;
     // Logged in with Discord: a new main key goes along once (the service pauses pings on a refused key until then).
@@ -357,10 +449,12 @@ export function maybeSyncPlan(m, now = Date.now()) {
     // "I'm stacking" and Resume go at once, not behind the one-a-minute gate (a ping could slip out in that minute).
     // An overdose seen (or over) goes at once too.
     const chainFlip = (plan.chain ? plan.chain.since : 0) !== (w.lastChain || 0) || (plan.overdose ? plan.overdose.at : 0) !== (w.lastOverdose || 0);
-    if (!due || (!chainFlip && now - (w.lastSync || 0) < SYNC_MIN_MS)) return false;
+    // A tick changed (by hand, or a mode moved it): a few seconds on, not a minute, so the bot follows what Settings shows.
+    const tickFlip = w.lastTicks !== undefined && ticksSig !== w.lastTicks && now - (w.lastSync || 0) >= TICK_SYNC_MIN_MS;
+    if (!due || (!chainFlip && !tickFlip && now - (w.lastSync || 0) < SYNC_MIN_MS)) return false;
     const statics = get(K.userStatic, {}) || {};
     const ki = statics.keyInfo || {};
-    const body = { base: w.base, secret: w.secret, plan, ackIds: pendingAcks };
+    const body = { base: w.base, secret: w.secret, plan, ackIds: pendingAcks, rules: ticks.rules, rulesAt: ticks.rulesAt };
     if (ki.userId) body.playerId = ki.userId;
     if (ki.factionId !== undefined) body.factionId = ki.factionId || null;
     if (targetsDue) body.targets = sync.targets;
@@ -369,11 +463,16 @@ export function maybeSyncPlan(m, now = Date.now()) {
         body.war = eye.war;
         body.watch = eye.watch;
     }
-    set(K.worker, { ...w, lastSync: now, lastSig: sig, lastChain: plan.chain ? plan.chain.since : 0, lastOverdose: plan.overdose ? plan.overdose.at : 0, pendingAcks: [], ...(targetsDue ? { targetsSig: sync.targetsSig, targetsAt: now } : {}), ...(keyDue ? { keyTag: tag } : {}), ...(eyeDue ? { eyeSig: eye.sig } : {}) });
+    set(K.worker, { ...w, lastSync: now, lastSig: sig, lastTicks: ticksSig, lastChain: plan.chain ? plan.chain.since : 0, lastOverdose: plan.overdose ? plan.overdose.at : 0, pendingAcks: [], ...(targetsDue ? { targetsSig: sync.targetsSig, targetsAt: now } : {}), ...(keyDue ? { keyTag: tag } : {}), ...(eyeDue ? { eyeSig: eye.sig } : {}) });
     workerSync(body)
         .then((r) => {
             const acked = applyAcks(r.acks, Date.now());
-            set(K.worker, { ...(get(K.worker, {}) || {}), lastError: pausedText(r), ready: Boolean(r.ready), linked: Boolean(r.linked), bot: Boolean(r.bot), pendingAcks: acked });
+            const was = get(K.worker, {}) || {};
+            const next = { ...was, ...answered(r), pendingAcks: acked };
+            set(K.worker, next);
+            logAnswer(was, next);
+            // A kind switched with /settings in Discord: the ticks take it over (the next sync tells the service it was seen).
+            adoptPings(r.kindsSet);
         })
         // Failed: the plan counts as unsent (next minute tries again); the acks wait too.
         .catch((e) => {
@@ -381,9 +480,29 @@ export function maybeSyncPlan(m, now = Date.now()) {
             const cur = get(K.worker, null);
             if (e && e.http === 403 && cur && cur.secret === w.secret && !cur.login && (cur.discordName || cur.connectedAt)) {
                 set(K.worker, { base: w.base, secret: w.secret, login: null, lastError: 'The Pumping Iron service no longer knows this browser (/unlink, or 30 days without a sync). ' + (cur.discordName ? 'Log in with Discord again.' : 'Connect your service again.') });
+                logProblem('error', 'Discord: the service no longer knows this browser', 'disconnected here · ' + String((e && e.message) || e));
                 return;
             }
-            set(K.worker, { ...(get(K.worker, {}) || {}), lastError: String((e && e.message) || e), pendingAcks, lastSig: w.lastSig, ...(keyDue ? { keyTag: w.keyTag } : {}), ...(eyeDue ? { eyeSig: w.eyeSig } : {}) });
+            // In the problem log once per distinct error, not every minute it lasts.
+            const text = String((e && e.message) || e);
+            const before = (cur && cur.syncFail) || null;
+            if (!before || before.text !== text) logProblem('error', 'Discord sync failed: ' + text, e && e.http ? 'http ' + e.http : null);
+            set(K.worker, { ...(cur || {}), lastError: text, syncFail: before && before.text === text ? before : { at: Date.now(), text, http: (e && e.http) || null }, pendingAcks, lastSig: w.lastSig, lastTicks: w.lastTicks, ...(keyDue ? { keyTag: w.keyTag } : {}), ...(eyeDue ? { eyeSig: w.eyeSig } : {}) });
         });
     return true;
+}
+
+let tickSyncTimer = null;
+
+/**
+ * A ping tick was changed by hand: synced now, or a few seconds on when a sync has just gone (so the bot follows
+ * what the ticks show without waiting for the next read of Torn).
+ * @param {Function} model - () => the model, read again when the timer runs
+ */
+export function syncTicksSoon(model, wait = TICK_SYNC_MIN_MS + 250) {
+    if (maybeSyncPlan(model())) return true;
+    clearTimeout(tickSyncTimer);
+    tickSyncTimer = setTimeout(() => maybeSyncPlan(model()), wait);
+    if (tickSyncTimer && typeof tickSyncTimer.unref === 'function') tickSyncTimer.unref();
+    return false;
 }

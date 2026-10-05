@@ -12,6 +12,8 @@ import { fetchMoneyLog } from '../src/api/torn.js';
 import { ledgerOf, ledgerShape, ledgerBooking, LEDGER_TYPES } from '../src/core/ledger.js';
 import { exportFiles } from '../src/core/learndata.js';
 import { makeZip, readZip } from '../src/core/zip.js';
+import { discordReport } from '../src/core/discord-state.js';
+import { pingTicks, setTick } from '../src/core/pings.js';
 
 const T = Date.parse('2026-10-03T12:00:00Z');
 
@@ -174,6 +176,64 @@ test('report zip: the words, the log, the stats, the plan in short, the runs wit
     assert.equal(JSON.parse(files.find((f) => f.name === 'ledger.json').data).lines, 33);
     assert.match(txt, /ledger\.json - your books: how many lines each account and log type holds and the field booked, never an amount\n/);
     for (const secret of ['1234567', '2000000000', '2345678']) assert.ok(!files.some((f) => typeof f.data === 'string' && f.data.includes(secret)), 'a money log value got into the zip: ' + secret);
+});
+
+/*
+ * A friend "did not receive an alert from the discord bot": Discord refused the bot's DMs, and all his report held
+ * about Discord was `discord: true`. The report now says the state; never the secret, the login id, the Discord id,
+ * the Discord name or the service's address.
+ */
+const DSECRET = 'f00d'.repeat(16);
+const DLOGIN = 'a1b2c3d4'.repeat(6);
+const DID = '112233445566778899';
+const DNAME = 'FriendOfTheOwner';
+const DBASE = 'https://pumping-iron.pumping-iron-worker.workers.dev';
+const WORKER = {
+    base: DBASE, secret: DSECRET, discordName: DNAME, discordId: DID, login: null, keyTag: 'x1', connectedAt: T - 5 * DAY, lastSync: T - 60e3, answerAt: T - 60e3,
+    lastError: null, paused: false, pauseText: null, syncFail: null, ready: true, linked: true, bot: true,
+    delivery: { ok: false, via: null, reason: 'dm_refused', dmRefusedAt: (T - 3600e3) / 1000, webhook: false },
+    tornRead: { ok: true, at: (T - 60e3) / 1000, travel: false },
+    kinds: { drug: true, nerve: true },
+    testFail: { at: T - 30e3, reason: 'dm_refused', http: 409, text: 'Discord refused the DM to ' + DNAME + ' (' + DID + ').' },
+};
+
+test('report zip: the Discord state in words and in state.json, never the secret, the login id, the Discord id or name', () => {
+    const ticks = pingTicks(setTick(null, 'booster', false, T - DAY), { chain: T - 3600e3 });
+    const rep = discordReport(WORKER, { now: T, defaultBase: DBASE, ticks });
+    assert.deepEqual(
+        { connected: rep.connected, state: rep.state, tag: rep.tag, via: rep.via, service: rep.service, login: rep.login, lastSync: rep.lastSync, ready: rep.ready, linked: rep.linked, bot: rep.bot, keySent: rep.keySent, paused: rep.paused, serviceTells: rep.serviceTells, knowsNerve: rep.knowsNerve },
+        { connected: true, state: 'dm_refused', tag: 'Not reaching you', via: 'Discord login', service: 'the Pumping Iron service', login: null, lastSync: '2026-10-03T11:59:00.000Z', ready: true, linked: true, bot: true, keySent: true, paused: false, serviceTells: true, knowsNerve: true },
+    );
+    assert.deepEqual(rep.delivery, { ok: false, via: null, reason: 'dm_refused', dmRefused: true, dmRefusedAt: '2026-10-03T11:00:00.000Z', webhook: false });
+    assert.deepEqual(rep.tornRead, { ok: true, lastGood: '2026-10-03T11:59:00.000Z', travel: false, failingSince: null, code: null, error: null });
+    assert.deepEqual(rep.lastTest, { ok: false, at: '2026-10-03T11:59:30.000Z', reason: 'dm_refused', http: 409, text: 'Discord refused the DM to [hidden] ([hidden]).' });
+    assert.deepEqual(rep.ticks.booster, { on: false, byHand: true });
+    assert.deepEqual(rep.ticks.energy, { on: false, byHand: false, movedBy: 'chain' });
+    assert.deepEqual(rep.ticks.nerve, { on: true, byHand: false });
+
+    const files = reportFiles({ happened: 'No ping', expected: 'A ping', state: { version: '1.5.4', keys: { discord: true }, discord: rep }, now: T });
+    assert.match(files[0].data, /IN SHORT\n[\s\S]*\n {2}Discord pings: Not reaching you \(dm_refused\) · logged in with Discord · last sync 2026-10-03 11:59 UTC · DMs refused since 2026-10-03 11:00 UTC, no webhook · last test ping failed \(dm_refused\) · ticked off: booster, energy, refill, jump, chain\n\nATTACHED/);
+    assert.deepEqual(JSON.parse(files.find((f) => f.name === 'state.json').data).discord, rep);
+    for (const secret of [DSECRET, DLOGIN, DID, DNAME, 'workers.dev']) assert.ok(!files.some((f) => typeof f.data === 'string' && f.data.includes(secret)), 'it got into the zip: ' + secret);
+
+    // A login under way: not connected, since when; the login id stays out.
+    const under = discordReport({ base: DBASE, secret: DSECRET, login: { id: DLOGIN, at: T - 120e3 }, lastError: 'login ' + DLOGIN + ' open' }, { now: T, defaultBase: DBASE });
+    assert.deepEqual([under.connected, under.state, under.login, under.lastError], [false, 'logging in', { since: '2026-10-03T11:58:00.000Z' }, 'login [hidden] open']);
+    assert.match(reportFiles({ state: { discord: under }, now: T })[0].data, / {2}Discord pings: a login is under way \(not connected yet\)\n/);
+    assert.ok(!JSON.stringify(under).includes(DLOGIN) && !JSON.stringify(under).includes(DSECRET));
+
+    // Nothing set up; and your own service that is older (it says nothing about delivery), its Torn read failing told by a newer one.
+    assert.deepEqual(discordReport(null, { now: T }), { connected: false, ticks: null });
+    assert.match(reportFiles({ state: { discord: discordReport(null, { now: T }) }, now: T })[0].data, / {2}Discord pings: not connected\n/);
+    const own = discordReport({ base: 'https://mine.someone.workers.dev', secret: DSECRET, connectedAt: T - DAY, lastSync: T - 600e3, ready: true, lastError: 'Could not reach https://mine.someone.workers.dev', syncFail: { at: T - 300e3, text: 'Could not reach your Worker.' } }, { now: T, defaultBase: DBASE });
+    assert.deepEqual([own.state, own.via, own.service, own.keySent, own.serviceTells, own.delivery, own.knowsNerve, own.lastError], ['sync', 'own service set up by hand', 'another service (own)', null, false, null, null, 'Could not reach [hidden]']);
+    assert.deepEqual(own.syncFail, { since: '2026-10-03T11:55:00.000Z', text: 'Could not reach your Worker.' });
+    assert.match(reportFiles({ state: { discord: own }, now: T })[0].data, /Discord pings: Last sync failed \(sync\) · own service · last sync 2026-10-03 11:50 UTC · an older service: it does not say where pings go\n/);
+    const torn = discordReport({ ...WORKER, delivery: { ok: true, via: 'dm', reason: null, dmRefusedAt: null, webhook: false }, testFail: null, tornRead: { ok: false, at: (T - 7200e3) / 1000, travel: true, since: (T - 3600e3) / 1000, code: 16, error: 'The key can’t read this (Torn error 16).' } }, { now: T, defaultBase: DBASE });
+    assert.deepEqual(torn.tornRead, { ok: false, lastGood: '2026-10-03T10:00:00.000Z', travel: true, failingSince: '2026-10-03T11:00:00.000Z', code: 16, error: 'The key can’t read this (Torn error 16).' });
+    assert.match(reportFiles({ state: { discord: torn }, now: T })[0].data, /Discord pings: Not reading Torn \(torn\) · logged in with Discord · last sync 2026-10-03 11:59 UTC · pings go by dm · the service’s Torn read is failing \(16\)\n/);
+    // No report of Discord (an older caller): no line.
+    assert.ok(!/Discord pings:/.test(reportFiles({ now: T })[0].data));
 });
 
 test('report zip: an empty report still works (nothing read yet, no plan)', () => {

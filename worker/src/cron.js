@@ -7,11 +7,11 @@
  * message is only sent when there's room left to record it.
  */
 
-import { dueAlerts, resolvedBy, nextPrev, stackingChain, overdosed, CHAIN_SKIPPED } from './alerts.js';
+import { dueAlerts, resolvedBy, nextPrev, stackingChain, overdosed, chainKept, chainSilent } from './alerts.js';
 import { Q, parse, meterDb, ensureSchema, forgetUser, FORGET, QUERY_BUDGET } from './db.js';
 import { LOGIN_TTL_S } from './login.js';
 import { guard, BudgetError } from './net.js';
-import { userState, pauseUser, TornError } from './torn.js';
+import { readState, readFailed, pauseUser, TornError, NO_TRAVEL_RECHECK_S, ACCESS_LEVEL } from './torn.js';
 import { deliver, canDeliver, bodyOf, editAlertMessage, PER_MESSAGE, NO_SNOOZE } from './deliver.js';
 import { warTick, chainTick, eyeTick, EYE_PER_RUN, EYE_CYCLE } from './war.js';
 import { targetsOf, warListOf, watchListOf } from './cmd-torn.js';
@@ -87,17 +87,21 @@ export function watchDue(row, nowS) {
  * Send the new alerts, grouped; record each in `sent` with its message.
  * With a metered database, a message goes out only when there is room to
  * record it (a message sent but not recorded would be sent again).
+ * `last` is deliver()'s answer for the last message tried (the test ping tells the browser why nothing arrived).
+ * @param {object} [o] - {force: true}: the DM is tried even inside the rest after a refused one (the test ping)
  */
-export async function sendAlerts(env, f, db, user, alerts, nowS) {
+export async function sendAlerts(env, f, db, user, alerts, nowS, o = {}) {
     let sent = 0;
     let messages = 0;
+    let last = null;
     const ids = [];
     const sorted = [...alerts].sort((a, b) => (a.id < b.id ? -1 : 1));
     for (const group of chunks(sorted, PER_MESSAGE)) {
         // Room for: the rows, a DM channel save, a watch mark each, the user's minute.
         if (typeof db.left === 'function' && db.left() < group.length * 2 + 2) throw new BudgetError();
         const rows = group.map((a) => ({ user: user.id, alert: a.id, at: nowS, state: 'sent', until: null, body: { title: a.title, text: a.text, kind: a.kind, link: a.link || null, step: a.step && a.skip !== false ? { at: a.step.at, kind: a.step.kind, label: a.step.label } : null, ...(a.attack ? { attack: a.attack } : {}), ...(a.event ? { event: a.event } : {}), ...(a.fullAt ? { fullAt: a.fullAt } : {}), ...(a.readyAt ? { readyAt: a.readyAt } : {}) } }));
-        const d = await deliver(env, f, db, user, rows, nowS);
+        const d = await deliver(env, f, db, user, rows, nowS, o);
+        last = d;
         // Discord refused the message itself (400): record it as failed instead of retrying it every minute.
         if (!d.ok && d.bad) {
             for (const r of rows) await db.prepare(Q.sentPut).bind(user.id, r.alert, nowS, 'resolved', null, null, null, JSON.stringify(r.body), 'failed').run();
@@ -109,7 +113,7 @@ export async function sendAlerts(env, f, db, user, alerts, nowS) {
         messages++;
         ids.push(...rows.map((r) => r.alert));
     }
-    return { sent, messages, ids };
+    return { sent, messages, ids, last };
 }
 
 /** Messages (not pings: a grouped message counts once) sent since a time. */
@@ -158,17 +162,27 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
         await db.prepare(Q.userPause).bind(e.message, row.id).run();
         return { sent: 0, error: String(e.message) };
     }
+    const prev = parse(row.prev, null);
+    // A key that can't read travel (Torn error 16) is asked without it, once a day with it again.
+    const knownNoTravel = Boolean(prev && prev.noTravel && nowS - (Number(prev.noTravelAt) || 0) < NO_TRAVEL_RECHECK_S);
+    // A key that could read neither last minute (error 16 twice) is asked the smaller read only, not both again.
+    const tooLimited = Boolean(prev && prev.fail && Number(prev.fail.code) === ACCESS_LEVEL);
     let state;
+    let noTravel;
     try {
-        state = await userState(f, key);
+        ({ state, noTravel } = await readState(f, key, { noTravel: knownNoTravel || tooLimited }));
     } catch (e) {
         if (!(e instanceof TornError)) throw e;
         if (e.dead) await pauseUser(db, row.id, e);
-        else await touch(db, row, nowS);
+        else {
+            // Not a pause (Torn has hiccups): the failure is kept with the last good read, so the sync answer can say
+            // "the service can't read your Torn timers" once it has failed a few minutes in a row.
+            row.prev = JSON.stringify(readFailed(prev, e, nowS));
+            await touch(db, row, nowS);
+        }
         return { sent: 0, error: 'Torn error ' + e.code };
     }
     const st = settingsOf(row);
-    const prev = parse(row.prev, null);
     const on = kindsOn(row);
     const planAt = Number(row.plan_at || row.updated) || 0;
     const plan = parse(row.plan, null);
@@ -228,7 +242,7 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
     // Muted kinds wait (not recorded: they come if still due when the mute ends).
     fresh = fresh.filter((a) => !muted(st, a.kind, nowS));
     // Stacking for a chain: a snoozed energy or training ping waits too (after Resume it comes if Torn still shows it due).
-    if (stackingChain(plan) || overdosed(plan, nowS)) fresh = fresh.filter((a) => !CHAIN_SKIPPED.includes(a.kind));
+    if (stackingChain(plan) || overdosed(plan, nowS)) fresh = fresh.filter((a) => !chainSilent(a.kind, chainKept(plan, nowS)));
     // Quiet hours and caps: strict jump steps still go through. War pings have their own cap.
     const normal = rows.filter((r) => !isWarRow(r));
     const room = Math.min(st.perHour - messagesSince(normal, nowS - 3600), st.perDay - messagesSince(normal, nowS - DAY_S));
@@ -243,11 +257,18 @@ export async function runUser(env, row, nowS, fetchImpl = fetch, db = env.DB) {
 
     // What this read saw, saved right away: an aborted run later can't replay a transition.
     const next = nextPrev(prev, state, nowS);
+    if (noTravel) {
+        next.noTravel = true;
+        next.noTravelAt = knownNoTravel ? Number(prev.noTravelAt) : nowS;
+    }
     next.watchAt = watching ? nowS : (prev && prev.watchAt) || null;
     next.staleFor = out.ids.some((id) => id.startsWith('stale:')) ? planAt : (prev && prev.staleFor) || null;
     // The "drug unused" nudge for this ready spell went (now or before): not again once its row is cleaned up.
     const ready = alerts.find((a) => a.kind === 'drugready');
     if (ready && next.drugZeroAt !== null && (seen.has(ready.id) || out.ids.includes(ready.id))) next.drugNudged = next.drugZeroAt;
+    // The same for the nerve ping and its fill: one per fill, however long the bar then stays full.
+    const nerve = alerts.find((a) => a.kind === 'nerve');
+    if (nerve && next.nfill !== null && (seen.has(nerve.id) || out.ids.includes(nerve.id))) next.nervePinged = next.nfill;
     const oldWar = row.war || null;
     row.prev = JSON.stringify(next);
     await db.prepare(Q.userRan).bind(nowS, row.prev, oldWar, row.id).run();

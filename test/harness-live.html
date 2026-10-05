@@ -198,9 +198,45 @@ CANNED['/v2/user/log'] = (u) => ({ log: u.searchParams.get('cat') === '17' ? MON
 CANNED['/v2/user/equipment'] = () => ({ equipment: [{ type: 'Weapon', sub_type: 'Primary', name: 'Minigun', stats: { damage: 71.2, accuracy: 51 }, bonuses: [] }], clothing: [] });
 const profileOf = (id) => ({ profile: { id: Number(id), name: 'P' + id, level: 60, rank: 'Supreme Hitman', life: { current: 7300, maximum: 7300 }, status: { state: 'Okay', description: 'Okay' } } });
 
+// &discord=ok|refused|old: logged in with Discord, and the service (workers.dev) answers a sync and a test ping as
+// the one of this release does (ok: pings arrive; refused: Discord refuses the bot's DM until a check sets
+// window.__dmFixed), or as the one in use before it (old: no word on delivery, a bare 502 on a failed test ping).
+// What the script sent is in window.__workerBodies ([{path, method, body}]).
+const DISCORD = Q.get('discord');
+const KINDS_NEW = { drug: true, drugready: true, booster: true, energy: true, nerve: true, refill: true, jump: true, landed: true, price: true, watch: true, war: true, chain: false, stale: true };
+window.__workerBodies = [];
+function serviceAnswer(u, o) {
+  let sent = null;
+  try { sent = o.data ? JSON.parse(o.data) : null; } catch { sent = null; }
+  window.__workerBodies.push({ path: u.pathname, method: o.method || 'GET', body: sent });
+  const refused = DISCORD === 'refused' && !window.__dmFixed;
+  if (u.pathname === '/test') {
+    if (DISCORD === 'old') return { status: 502, body: { ok: false } };
+    if (refused) return { status: 409, body: { ok: false, reason: 'dm_refused', error: 'Discord refused the bot’s DM (Direct Messages from the server are off).' } };
+    return { status: 200, body: { ok: true, via: 'dm' } };
+  }
+  if (u.pathname === '/plan' && o.method === 'PUT') {
+    if (DISCORD === 'old') return { status: 200, body: { ok: true, ready: true, linked: true, bot: true } };
+    return { status: 200, body: { ok: true, ready: true, linked: true, bot: true, tornRead: { ok: true, at: Math.floor(Date.now() / 1000), travel: true }, delivery: refused ? { ok: false, via: null, reason: 'dm_refused', dmRefusedAt: NOW_S - 600, webhook: false } : { ok: true, via: 'dm', reason: null, dmRefusedAt: null, webhook: false }, kinds: { ...KINDS_NEW, ...((sent && sent.rules) || {}) }, kindsSet: {} } };
+  }
+  return { status: 200, body: { ok: true } };
+}
+if (DISCORD) {
+  _store['pumpingIron.v1.worker'] = JSON.stringify({
+    base: 'https://pumping-iron.pumping-iron-worker.workers.dev', secret: 'harness0secret0harness0secret0harness0secret0harness0secret0abcd', login: null, discordName: 'DiscordFriend77', discordId: '112233445566778899', keyTag: null,
+    connectedAt: now - 3600e3, lastSync: now - 60e3, lastSig: null, lastError: null, paused: false, pauseText: null, syncFail: null, answerAt: now - 60e3, ready: true, linked: true, bot: true,
+    ...(DISCORD === 'old' ? { delivery: null, tornRead: null, kinds: null } : { tornRead: { ok: true, at: NOW_S - 60, travel: true }, kinds: KINDS_NEW, delivery: DISCORD === 'refused' ? { ok: false, via: null, reason: 'dm_refused', dmRefusedAt: NOW_S - 600, webhook: false } : { ok: true, via: 'dm', reason: null, dmRefusedAt: null, webhook: false } }),
+  });
+}
+
 window.GM_xmlhttpRequest = (o) => {
   const u = new URL(o.url);
   window.__calls.push(u.hostname + u.pathname + (u.searchParams.get('selections') ? '?selections=' + u.searchParams.get('selections') : '') + (u.searchParams.get('cat') ? '?cat=' + u.searchParams.get('cat') : ''));
+  if (DISCORD && /\.workers\.dev$/.test(u.hostname)) {
+    const a = serviceAnswer(u, o);
+    setTimeout(() => o.onload({ status: a.status, responseText: JSON.stringify(a.body) }), 20);
+    return;
+  }
   setTimeout(() => {
     let body;
     if (Q.get('dead') && u.hostname === 'api.torn.com') body = { error: { code: 2, error: 'Incorrect key' } };

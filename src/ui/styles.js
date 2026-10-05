@@ -225,6 +225,12 @@ details.dis[open] > summary::before { content: "▾ "; }
 .tos td { padding: 8px 0; border-top: 1px solid var(--line); }
 .check { display: inline-flex; align-items: center; gap: 8px; }
 .check input { accent-color: var(--chalk); width: 15px; height: 15px; margin: 0; }
+/* Settings › Discord pings: the ticks, a list per group, each with what it is in a few muted words */
+.pingset { display: flex; flex-direction: column; gap: 16px; margin-top: 12px; }
+.pinggroup { display: flex; flex-direction: column; gap: 8px; }
+.pinggroup .check { flex-wrap: wrap; row-gap: 2px; }
+.pinggroup .check .why { color: var(--warn); font-size: 13px; flex-basis: 100%; padding-left: 23px; }
+.warnb ol.steps-list { color: var(--text); }
 
 /* charts */
 .chart { width: 100%; display: block; }

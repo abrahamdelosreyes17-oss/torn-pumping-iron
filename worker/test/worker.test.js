@@ -94,7 +94,9 @@ test('PUT /plan: the first sync needs the invite code; the secret is stored hash
     assert.equal(r.status, 403);
     r = await handle(req('PUT', '/plan', { invite: 'letmein', body: { tornKey: KEY, webhookUrl: HOOK, discordId: DISCORD, plan } }), env);
     assert.equal(r.status, 200);
-    assert.deepEqual(await r.json(), { ok: true, created: true, acks: [], ready: true, paused: false, lastError: null, linked: false, bot: false });
+    // What an older userscript reads is unchanged; the newer fields ride along (r12-*.test.js).
+    const first = await r.json();
+    for (const [k, v] of Object.entries({ ok: true, created: true, acks: [], ready: true, paused: false, lastError: null, linked: false, bot: false })) assert.deepEqual(first[k], v, k);
     const [id] = env.DB.users.keys();
     assert.notEqual(id, SECRET);
     assert.equal(id.length, 64, 'sha-256 hex');

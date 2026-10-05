@@ -8,10 +8,12 @@
  *
  * Routes:
  *   GET  /health          → {ok}
- *   PUT  /plan            (Authorization: Bearer <secret>) store {tornKey?, discordId, webhookUrl, plan, rules,
- *                         targets?, war?, watch?, factionId?, playerId?, ackIds?}; answers {ready, paused, lastError, linked, bot, acks}
+ *   PUT  /plan            (Authorization: Bearer <secret>) store {tornKey?, discordId, webhookUrl, plan, rules?, rulesAt?,
+ *                         targets?, war?, watch?, factionId?, playerId?, ackIds?}; answers {ready, paused, lastError, linked, bot, acks,
+ *                         tornRead, delivery, kinds, kindsSet}
  *                         the first PUT for a secret needs X-Invite: <INVITE_CODE> (or a finished Discord login)
- *   POST /test            (Authorization: Bearer <secret>) send a test ping
+ *   POST /test            (Authorization: Bearer <secret>) send a test ping (the DM is always tried); answers {ok, via, dmRefused?},
+ *                         or why nothing arrived: {ok: false, reason: dm_refused (409) | discord_error (502) | no_route (400), error}
  *   DELETE /plan          (Authorization: Bearer <secret>) forget this user
  *   POST /link            (Authorization: Bearer <secret>) a one-time code for /link in Discord (10 min)
  *   POST /login/start     (Authorization: Bearer <secret>) → {id, url, expiresAt}: "Log in with Discord" (login.js)
@@ -23,7 +25,8 @@
 
 import { isDiscordWebhook, LINKS } from './alerts.js';
 import { runCron, sendAlerts } from './cron.js';
-import { canDeliver, hookUrl } from './deliver.js';
+import { canDeliver, hookUrl, deliveryState } from './deliver.js';
+import { settingsOf, kindsOn, cleanRules, settleKinds, kindsSet } from './settings.js';
 import { pendingAcks } from './buttons.js';
 import { sealKey, openKey, isSealed } from './keys.js';
 import { cleanTargets, cleanWarList, cleanWatch } from './cmd-torn.js';
@@ -34,10 +37,11 @@ export const MAX_BODY = 64000;
 
 /** People one Worker serves (a leaked invite can't fill it); MAX_USERS in wrangler.toml [vars] changes it. */
 export const DEFAULT_MAX_USERS = 10;
-import { Q, SCHEMA, ensureSchema, ackDeleteMany, forgetUser, MAX_ACK_IDS } from './db.js';
+import { Q, SCHEMA, parse, ensureSchema, ackDeleteMany, forgetUser, MAX_ACK_IDS } from './db.js';
+import { tornReadOf } from './torn.js';
 import { guard, readLimited } from './net.js';
 import { interactionsRoute } from './interactions.js';
-import { newLinkCode } from './cmd-core.js';
+import { newLinkCode, saveSettings } from './cmd-core.js';
 
 export { SCHEMA };
 
@@ -126,7 +130,8 @@ async function putPlan(req, env) {
     const linked = Boolean(row && Number(row.linked));
     const discordId = !linked && body.discordId !== undefined ? String(body.discordId || '').replace(/\D/g, '') : row ? row.discord_id : '';
     const plan = body.plan !== undefined ? JSON.stringify(body.plan || null) : row ? row.plan : 'null';
-    const rules = body.rules !== undefined ? JSON.stringify(body.rules || {}) : row ? row.rules : '{}';
+    // The ping ticks (Settings › Discord pings in the userscript): known kinds, true or false.
+    const rules = body.rules !== undefined ? JSON.stringify(cleanRules(body.rules)) : row ? row.rules : '{}';
     // A pause for a dead key stays until a new key is sent (plan syncs alone must not undo it).
     const newKey = sentKey !== null && (!row || sentKey !== oldKey);
     const paused = newKey ? 0 : row ? Number(row.paused) || 0 : 0;
@@ -145,11 +150,40 @@ async function putPlan(req, env) {
     const watchList = listOrKeep(body.watch, cleanWatch, row && row.watch_list);
     if (row) await env.DB.prepare(Q.userSync).bind(tornKey, discordId, hook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId, warList, watchList, id).run();
     else await env.DB.prepare(Q.userInsert).bind(id, tornKey, discordId, hook, plan, rules, paused, lastError, nowS, planAt, targets, factionId, playerId, warList, watchList).run();
+    // A new key: what the old one could not read (travel) and its failed reads are forgotten; the next minute asks afresh.
+    let prevText = row ? row.prev || null : null;
+    const mem = newKey && prevText ? parse(prevText, null) : null;
+    if (mem && (mem.noTravel || mem.fail)) {
+        for (const k of ['noTravel', 'noTravelAt', 'fail']) delete mem[k];
+        prevText = JSON.stringify(mem);
+        await env.DB.prepare(Q.userRan).bind(Number(row.ran) || 0, prevText, row.war || null, id).run();
+    }
+    // The latest change wins: a /settings kind change in Discord gives way once the ticks have seen it (settleKinds).
+    const after = { ...(row || {}), id, torn_key: tornKey, discord_id: discordId, webhook: hook, rules };
+    const st = settingsOf(after);
+    if (row && body.rules !== undefined && settleKinds(st, body.rulesAt)) await saveSettings(env, after, st);
     // Acks (Done / Skip in Discord): the userscript says which it applied; the rest go back to it.
     const ackIds = Array.isArray(body.ackIds) ? body.ackIds.filter((a) => typeof a === 'string' && a.length <= 120).slice(0, MAX_ACK_IDS) : [];
     if (ackIds.length) await env.DB.prepare(ackDeleteMany(ackIds.length)).bind(id, ...ackIds).run();
     const acks = await pendingAcks(env.DB, id);
-    return json({ ok: true, created: !row, acks, ready: Boolean(tornKey && (webhook || (linked && env.BOT_TOKEN))), paused: Boolean(paused), lastError, linked, bot: Boolean(env.BOT_TOKEN && env.DISCORD_PUBLIC_KEY) });
+    return json({
+        ok: true,
+        created: !row,
+        acks,
+        ready: Boolean(tornKey && (webhook || (linked && env.BOT_TOKEN))),
+        paused: Boolean(paused),
+        lastError,
+        linked,
+        bot: Boolean(env.BOT_TOKEN && env.DISCORD_PUBLIC_KEY),
+        // The Worker's own read of Torn (cron.js): is it working, since when not, can the key read travel.
+        tornRead: tornReadOf(prevText),
+        // Where pings go now, and why not when nothing can arrive (deliver.js).
+        delivery: deliveryState(env, after),
+        // Which ping kinds are on (this build's kinds: a browser that sees no `nerve` here knows the service is older),
+        // and the /settings changes made in Discord that its ticks have not taken over yet.
+        kinds: kindsOn(after),
+        kindsSet: kindsSet(st),
+    });
 }
 
 async function linkCode(req, env) {
@@ -164,13 +198,27 @@ async function testPing(req, env, fetchImpl) {
     const { row, error } = await userFor(req, env);
     if (error) return error;
     if (!row) return json({ ok: false, error: 'Unknown secret' }, 403);
-    if (!canDeliver(env, row)) return json({ ok: false, error: 'No webhook saved and Discord not linked' }, 400);
+    if (!canDeliver(env, row)) return json({ ok: false, reason: 'no_route', error: TEST_WORDS.no_route }, 400);
     const nowS = Math.floor(Date.now() / 1000);
     // A step of kind "test": its Skip button can be tried; the userscript ignores that ack.
     const alert = { id: 'test:' + nowS, kind: 'test', link: LINKS.items, title: 'Test ping from Pumping Iron', text: 'Pings will look like this: "Drug cooldown ends in 5 min · Xanax #2, then DEX × 27".', step: { at: nowS + 300, kind: 'test', label: 'Test step' } };
-    const { sent } = await sendAlerts(env, guard(fetchImpl), env.DB, row, [alert], nowS);
-    return json({ ok: sent > 0 }, sent > 0 ? 200 : 502);
+    // The DM is always tried, also inside the 6-hour rest after a refused one: the player has just changed
+    // something in Discord and wants to know if it worked (a DM that arrives ends the rest).
+    const { sent, last } = await sendAlerts(env, guard(fetchImpl), env.DB, row, [alert], nowS, { force: true });
+    const d = last || {};
+    if (sent > 0) return json({ ok: true, via: d.via || null, ...(d.dmRefused ? { dmRefused: true } : {}) });
+    // Why nothing arrived, for the browser to say in words: `reason` for the script, `error` for a person.
+    if (d.why === 'dm_refused') return json({ ok: false, reason: 'dm_refused', error: TEST_WORDS.dm_refused }, 409);
+    if (d.why === 'no_route') return json({ ok: false, reason: 'no_route', error: TEST_WORDS.no_route }, 400);
+    const status = Number(d.status) || null;
+    return json({ ok: false, reason: 'discord_error', error: 'Discord answered an error' + (status ? ' (' + status + ')' : '') + '. Try again in a minute.', discordStatus: status, discordCode: d.code === undefined ? null : d.code, ...(d.dmRefused ? { dmRefused: true } : {}) }, 502);
 }
+
+/** What a failed test ping says (an older userscript shows `error` as it is). */
+export const TEST_WORDS = {
+    dm_refused: 'Discord refused the bot’s DM. In Discord, open the server the bot is in, click the server name, then Privacy Settings, and turn Direct Messages on. Then send a test ping again.',
+    no_route: 'Nothing to deliver through: no Discord account is linked and no channel webhook is saved.',
+};
 
 async function forget(req, env) {
     const { id, error } = await userFor(req, env);

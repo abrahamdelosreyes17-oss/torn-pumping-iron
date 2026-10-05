@@ -10,7 +10,15 @@ import { Q } from './db.js';
 export const TORN_API = 'https://api.torn.com/v2/';
 export const COMMENT = 'PumpingIronPings';
 export const TORN_URL = TORN_API + 'user?selections=bars,cooldowns,refills,travel&comment=' + COMMENT;
+/** The same read for a key that may not read travel (a custom key made without it): the pings need these three. */
+export const TORN_URL_NO_TRAVEL = TORN_API + 'user?selections=bars,cooldowns,refills&comment=' + COMMENT;
 export const DEAD_KEY_CODES = [2, 13, 18];
+/** Torn's "access level of this key is not high enough". */
+export const ACCESS_LEVEL = 16;
+/** A key that could not read travel is asked for it again this often (a new key is asked at once). */
+export const NO_TRAVEL_RECHECK_S = 24 * 3600;
+/** This many reads failed in a row (about as many minutes): the sync answer says the Worker can't read Torn. */
+export const READ_FAIL_RUNS = 3;
 
 export class TornError extends Error {
     constructor(code, message) {
@@ -58,7 +66,61 @@ export function tornErrorText(e) {
 
 /* ---------- The reads the bot makes ---------- */
 
-export const userState = (f, key) => tornGet(f, key, TORN_URL);
+export const userState = (f, key, { travel = true } = {}) => tornGet(f, key, travel ? TORN_URL : TORN_URL_NO_TRAVEL);
+
+/**
+ * The user's own state, as the userscript reads it (src/api/torn.js fetchUserState): a key without the travel read
+ * (Torn error 16) is asked again without it, so its pings work; only "back in Torn" can't go out for that user.
+ * `noTravel` (remembered by the caller in users.prev) skips the first ask, so Torn isn't asked twice a minute.
+ * @returns {Promise<{state: object, noTravel: boolean}>}
+ */
+export async function readState(f, key, { noTravel = false } = {}) {
+    if (!noTravel) {
+        try {
+            return { state: await userState(f, key), noTravel: false };
+        } catch (e) {
+            if (!(e instanceof TornError && e.code === ACCESS_LEVEL)) throw e;
+        }
+    }
+    return { state: await userState(f, key, { travel: false }), noTravel: true };
+}
+
+/** A failed read in plain words (the sync answer; Settings › Discord pings shows it). */
+export function readFailText(code, message = '') {
+    if (code === ACCESS_LEVEL) return 'The key on the service can’t read your bars and cooldowns (Torn error 16).';
+    if (code === 5) return 'Torn says too many requests for this key (Torn error 5).';
+    if (code === 8) return 'Torn has blocked the service’s address for a while (Torn error 8).';
+    if (code === 9 || code === 17) return 'Torn’s API is down (Torn error ' + code + ').';
+    if (code === 0) return 'Torn answered with something that is not JSON.';
+    return String(message || 'Torn error ' + code).replace(/\.+$/, '') + '.';
+}
+
+/**
+ * users.prev after a read that failed (not a dead key: that pauses): the last good read stays, with how many reads
+ * failed in a row, since when and why. One good read clears it (cron.js saves a new prev without `fail`).
+ */
+export function readFailed(prev, err, nowS) {
+    const p = prev && typeof prev === 'object' ? prev : {};
+    const was = p.fail && typeof p.fail === 'object' ? p.fail : null;
+    return { ...p, fail: { code: Number(err.code) || 0, text: String(err.message || '').slice(0, 160), since: was ? Number(was.since) || nowS : nowS, n: (was ? Number(was.n) || 0 : 0) + 1 } };
+}
+
+/**
+ * The Worker's own Torn read, for the sync answer: {ok (null: not read yet), at (the last good read), travel (false:
+ * the key can't read travel, so no "back in Torn" pings), and once READ_FAIL_RUNS reads failed in a row: since, code, error}.
+ */
+export function tornReadOf(prevText) {
+    let prev = null;
+    try {
+        prev = prevText ? JSON.parse(prevText) : null;
+    } catch {
+        prev = null;
+    }
+    if (!prev || typeof prev !== 'object') return { ok: null, at: null, travel: true };
+    const fail = prev.fail && typeof prev.fail === 'object' ? prev.fail : null;
+    const failing = Boolean(fail && Number(fail.n) >= READ_FAIL_RUNS);
+    return { ok: failing ? false : Number(prev.at) > 0 ? true : null, at: Number(prev.at) || null, travel: !prev.noTravel, ...(failing ? { since: Number(fail.since) || null, code: Number(fail.code) || 0, error: readFailText(Number(fail.code) || 0, fail.text) } : {}) };
+}
 export const itemMarket = (f, key, itemId) => tornGet(f, key, tornUrl('market/' + Number(itemId) + '/itemmarket'));
 export const playerBasic = (f, key, id) => tornGet(f, key, tornUrl('user/' + Number(id) + '/basic'));
 /** A watched player's status and last action (the watch list). */

@@ -129,6 +129,12 @@ export const EYE_CSS = `
 .pi-card .pi-nogear { color: #c9cdd2; font-size: 13px; }
 .pi-card .pi-nogear b { color: #fff; font-weight: 700; }
 .pi-card.pi-mid .pi-nogear, .pi-card.pi-mid .pi-gh b { font-size: 11px; }
+.pi-card .pi-lot { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px 10px; align-items: center; font-size: 12px; }
+.pi-card .pi-lot .pi-ln { color: #fff; font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.pi-card .pi-lot .pi-ln small { display: block; color: #9aa1a8; font-size: 11px; font-weight: 400; }
+.pi-card .pi-lot .pi-lk { color: #fff; font-weight: 700; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pi-card .pi-lot .pi-lw { color: #9aa1a8; font-size: 11px; white-space: nowrap; }
+.pi-card .pi-lot .pi-ln.pi-best { color: #9bdc8a; }
 
 .pi-eye .pi-watch { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
 .pi-eye .pi-watch button, .pi-eye .pi-watch select, .pi-eye .pi-watch input { height: 24px; border-radius: 5px; border: 1px solid color-mix(in srgb, #efebe2 45%, transparent); background: #1c1f22; color: #fff; font: 700 11px ${EYE_FONT}; padding: 0 9px; cursor: pointer; margin: 0; }
@@ -619,6 +625,38 @@ export function eyeGearBlock(v, mode = 'full', { shown = false, now = Date.now()
     return h('div', { class: 'pi-gear', 'data-pi-gear': 'seen' }, kids);
 }
 
+/** Under the rows when one loadout is all the app knows: how the others get here. */
+export const EYE_LOADOUTS_HOW = 'Your other loadouts show here once you have worn them with Torn’s items page open.';
+/** Under the rows when another loadout does better than the one on you. */
+export const EYE_LOADOUTS_CHANGE = 'Change it on Torn’s loadout menu before you start the fight.';
+/** Under the rows when the one on you is the best of them: nothing to change. */
+export const EYE_LOADOUTS_KEEP = 'The one on you does best against it.';
+
+/**
+ * "Your loadouts against it" on the fight card (round 9, mockups/round9/companion.html §2, the owner's pick B): one
+ * row per loadout of yours the app knows, best first: its number and main weapon, its armour under it (and when it
+ * was last seen on you, for one you are not wearing), win and HP kept against this player's seen gear, then "best"
+ * and "on you". Words only: nothing here is a button, the loadout is changed on Torn's own menu by hand.
+ * @param {object} lo - core/eye/gear.js loadoutRows(): {rows, known, more}
+ */
+export function eyeLoadoutBlock(lo, { now = Date.now() } = {}) {
+    const pct = (v) => Math.round((v || 0) * 100) + '%';
+    const cells = [];
+    for (const r of lo.rows) {
+        const under = (r.armour ? r.armour + ' armour' : 'No armour') + (r.seenAt ? ' · ' + eyeSeenText(r.seenAt, now) : '');
+        cells.push(h('span', { class: 'pi-ln' + (r.best ? ' pi-best' : '') }, [(r.n ? r.n + ' · ' : '') + (r.weapon || 'No weapon'), h('small', { text: under })]));
+        cells.push(h('span', { class: 'pi-lk', text: pct(r.pWin) + ' · ' + pct(r.keep) }));
+        cells.push(h('span', { class: 'pi-lw', text: [r.best ? 'best' : '', r.worn ? 'on you' : ''].filter(Boolean).join(' · ') }));
+    }
+    const onYou = lo.rows.find((r) => r.worn);
+    const foot = lo.known === 1 && onYou ? EYE_LOADOUTS_HOW : onYou && onYou.best ? EYE_LOADOUTS_KEEP : EYE_LOADOUTS_CHANGE;
+    return h('div', { class: 'pi-gear', 'data-pi-loadouts': String(lo.rows.length) }, [
+        h('div', { class: 'pi-gh' }, [h('b', { text: 'Your loadouts against it' }), h('span', { text: 'win · HP kept' })]),
+        h('div', { class: 'pi-lot' }, cells),
+        h('div', { class: 'pi-src', text: foot + (lo.more > 0 ? ' ' + lo.more + ' more not shown.' : '') }),
+    ]);
+}
+
 /**
  * The Next button (round 8, mockups/round8/torn-eye.html §4, the owner's pick A): the first row of the fight card. It
  * opens the attack page of the next player in your Torn Eye list, in the list's own order, skipping who is not ready
@@ -651,7 +689,8 @@ export function eyeNextBox(n, mode = 'full') {
  * likely build. The training panel docks under it (#pi-eyecard), so its foot is left free.
  * @param {object|null} v - eyeView()
  * @param {'full'|'mid'|'small'} mode
- * @param {object} s - {gearVisible, gearSaved, watch: {watching, tag, full, toggle}, next: eyeNextBox()'s n}
+ * @param {object} s - {gearVisible, gearSaved, watch: {watching, tag, full, toggle}, next: eyeNextBox()'s n,
+ *   loadouts: eyeLoadoutBlock()'s lo (your loadouts against their seen gear; none: the card as before)}
  */
 export function eyeFightCard(v, mode, s = {}) {
     const { el, bd } = eyeCardShell(v, mode, { who: eyeWhoText(v, mode), hover: mode === 'small' });
@@ -675,6 +714,8 @@ export function eyeFightCard(v, mode, s = {}) {
     if (f && f.turns) bd.appendChild(h('div', { class: 'pi-muted', text: 'About ' + f.turns + ' turns' }));
     bd.appendChild(eyeGearBlock(v, mode, { shown: Boolean(s.gearVisible) }));
     if (v.withGear && mode === 'full') bd.appendChild(h('div', { class: 'pi-warnline', text: 'With their gear: win ' + Math.round(v.withGear.pWin * 100) + '% · HP kept ~' + Math.round((v.withGear.keep || 0) * 100) + '%' }));
+    // Round 9 (his pick B): your loadouts against that gear, only once it was seen and on the full card.
+    if (v.withGear && mode === 'full' && s.loadouts && s.loadouts.rows && s.loadouts.rows.length) bd.appendChild(eyeLoadoutBlock(s.loadouts));
     const p = v.plain || f;
     if (mode === 'full' && p && p.perBuild && !p.exact) {
         const rows = Object.entries(p.perBuild).sort((a, b) => (b[1].keep || 0) - (a[1].keep || 0)).slice(0, 3);

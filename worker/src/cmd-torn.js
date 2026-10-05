@@ -8,7 +8,7 @@
 import { Q, parse } from './db.js';
 import { reply, defer, linkButton, row as actionRow } from './discord.js';
 import { keyFor, KeyError } from './keys.js';
-import { userState, playerBasic, factionWars, factionMembers, factionChain, pauseUser, tornErrorText, TornError } from './torn.js';
+import { readState, playerBasic, factionWars, factionMembers, factionChain, pauseUser, tornErrorText, TornError } from './torn.js';
 import { findWar, membersOf, playerNow, estimator, warPages, warGroups, chainText, BEATABLE, BAND_WORDS, normBand, MAX_WAR_MEMBERS, MAX_WATCH } from './war.js';
 import { bestPrice, buyMessage, itemName, MAX_WATCHES } from './market.js';
 import { ITEMS } from './commands.js';
@@ -243,7 +243,9 @@ export async function chainCmd(user, i, env, fetchImpl, ctx, nowS) {
 
 export async function timersCmd(user, i, env, fetchImpl, ctx, nowS) {
     return withTorn(user, i, env, fetchImpl, ctx, nowS, async (key) => {
-        const s = await userState(fetchImpl, key);
+        // A key without the travel read still answers (the minute's read remembers it in users.prev).
+        const mem = parse(user.prev, null);
+        const { state: s } = await readState(fetchImpl, key, { noTravel: Boolean(mem && mem.noTravel) });
         return { content: timersText(s, nowS), components: [actionRow([linkButton('Items', PAGES.items), linkButton('Gym', PAGES.gym)])] };
     });
 }

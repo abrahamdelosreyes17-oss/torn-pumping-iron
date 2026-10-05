@@ -13,10 +13,12 @@ import { FFS_SITE_URL, FFS_POLICY_URL } from '../../api/ffscouter.js';
 import { TS_TOS_URL } from '../../api/tornstats.js';
 import { W3B_SITE_URL, W3B_TERMS_URL } from '../../api/w3b.js';
 import { workerBase } from '../../api/worker.js';
+import { PING_GROUPS, PING_KINDS, MODE_NOTE } from '../../core/pings.js';
 import { apiKeyPageUrl } from '../../sources/route.js';
 import { sectionHead, headsList } from './common.js';
 import { developerSection, renderDeveloper } from './developer.js';
 import { reportSection } from './report.js';
+import { backupSection } from './backup-card.js';
 
 /** Torn's API ToS disclosure for the userscript's Torn key. */
 export const TOS_TORN = [
@@ -155,6 +157,44 @@ function linkRow(ctx) {
     return box;
 }
 
+/** The state of the service in words (core/discord-state.js): what is wrong, and the steps that fix it. */
+function discordStateRows(view) {
+    if (!view) return [];
+    const steps = view.steps.length ? h('ol', { class: 'steps-list' }, view.steps.map((s) => h('li', { text: s }))) : null;
+    const rows = [];
+    if (view.title) rows.push(h('div', { class: 'warnb', 'data-discord': view.key }, [h('b', { text: view.title }), view.text ? h('p', { text: view.text }) : null, steps]));
+    else if (view.text) rows.push(h('p', { class: 'muted', text: view.text }));
+    for (const n of view.notes) rows.push(h('p', { class: 'muted', text: n }));
+    if (!view.title && steps) rows.push(steps);
+    return rows;
+}
+
+/**
+ * Which pings the bot sends: a tick each, closed until opened (the owner: "what pings can it send we can tick on
+ * and off as we want (collasable in the discord setting)"). Stacking, an overdose and a war move ticks by
+ * themselves, and the tick says so; a tick set by hand during one stays as set.
+ */
+function pingTicksBlock(ctx) {
+    const d = ctx.discord;
+    const ticks = d.ticks();
+    const st = d.state();
+    // A service that answered without saying which kinds it knows is an older one: it has no nerve ping.
+    const noNerve = Boolean(st && st.answerAt && !(st.kinds && Object.prototype.hasOwnProperty.call(st.kinds, 'nerve')));
+    const off = PING_KINDS.filter((k) => !ticks[k].on).length;
+    const row = ([kind, label, hint]) => {
+        const tk = ticks[kind];
+        const why = tk.mode ? MODE_NOTE[tk.mode] : kind === 'nerve' && noNerve ? 'the service is older · no nerve pings yet' : null;
+        return h('label', { class: 'check', 'data-ping': kind }, [h('input', { type: 'checkbox', checked: tk.on, onchange: (e) => d.setTick(kind, e.target.checked) }), label, h('span', { class: 'muted', text: '· ' + hint }), why ? h('span', { class: 'why', text: why }) : null]);
+    };
+    return h('details', { class: 'dis pings', open: Boolean(ctx.ui.pingsOpen), ontoggle: (e) => { ctx.ui.pingsOpen = e.target.open; } }, [
+        h('summary', { text: 'Which pings the bot sends' + (off ? ' · ' + off + ' off' : '') }),
+        h('div', { class: 'pingset' }, [
+            ...PING_GROUPS.map((g) => h('div', { class: 'pinggroup' }, [t('lab', g.title), ...g.kinds.map(row)])),
+            h('p', { class: 'muted', text: 'A change here reaches the bot within a minute. /settings in Discord switches the same kinds; the latest change wins.' }),
+        ]),
+    ]);
+}
+
 /** Settings › Discord: one button (Log in with Discord); connected, one line; the old form under Advanced. */
 function discordSection(ctx) {
     const d = ctx.discord;
@@ -186,17 +226,19 @@ function discordSection(ctx) {
     // "Back to Log in with Discord" (discordAdvanced === false) shows the login view even when an own service is set up.
     if (ctx.ui.discordAdvanced === false || (!ctx.ui.discordAdvanced && !ownService)) {
         if (connected) {
+            // The result is kept (the test changes what is known about the service, and that redraws the section).
             const test = async () => {
                 say('', 'Sending…');
                 try {
-                    await d.test();
-                    say('ok', 'Sent. Check your Discord DMs.');
+                    const r = await d.test();
+                    ctx.ui.discordResult = { ok: true, text: (r && r.text) || 'Sent. Check your Discord DMs.' };
                 } catch (e) {
-                    say('bad', String((e && e.message) || e));
+                    ctx.ui.discordResult = { ok: false, text: String((e && e.message) || e) };
                 }
+                ctx.rerender();
             };
-            const tag = st.lastError ? stateTag('bad', 'Paused') : st.ready ? stateTag('ok', 'Working') : stateTag('bad', 'Not pinging yet');
-            return settingsSection('Discord pings', tag, [
+            const view = d.view();
+            return settingsSection('Discord pings', stateTag(view.tone, view.tag), [
                 h('div', { class: 'row', style: 'flex-wrap:wrap' }, [
                     h('span', {}, ['Connected as ', h('b', { class: 'white', text: st.discordName })]),
                     h('span', { class: 'muted num', text: '· last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') }),
@@ -204,11 +246,11 @@ function discordSection(ctx) {
                     h('button', { class: 'btn sm', type: 'button', onclick: test, text: 'Send a test ping' }),
                     confirmButton(ctx, 'discord-forget', 'Disconnect', async () => { try { await d.forget(); } finally { ctx.ui.discordResult = { ok: true, text: 'Disconnected: the service forgot your key, plan and pings.' }; ctx.rerender(); } }),
                 ]),
-                st.lastError ? h('div', { class: 'warnb' }, [h('b', { text: 'Pings are paused' }), h('p', { text: st.lastError + ' Save a working Torn key above; it goes to the service by itself.' })]) : null,
-                !st.ready && !st.lastError ? h('p', { class: 'muted', text: 'Waiting for the first sync (open Home once).' }) : null,
+                ...discordStateRows(view),
                 h('p', { class: 'muted', text: 'DMs from the Pumping Iron bot when a step is due, with Done / Snooze / Skip. In the server: /timers, /next, /war, /settings.' }),
                 msg,
                 result,
+                pingTicksBlock(ctx),
                 h('details', { class: 'dis' }, [h('summary', { text: 'How your Torn key is used there' }), tosTable(TOS_TORN)]),
             ]);
         }
@@ -232,21 +274,23 @@ function discordSection(ctx) {
 /** Advanced: your own Cloudflare Worker (SETUP.md), the webhook, a link code. */
 function advancedDiscordSection(ctx, st) {
     const d = ctx.discord;
+    // The state in words, only for a service that is set up (a login under way or a forgotten one has none).
+    const view = d.view();
+    const shown = ctx.ui.discordResult ? h('span', { class: 'msg ' + (ctx.ui.discordResult.ok ? 'ok' : 'bad'), text: ctx.ui.discordResult.text }) : null;
+    const testNow = async (say) => {
+        say('', 'Sending…');
+        try {
+            const r = await d.test();
+            ctx.ui.discordResult = { ok: true, text: (r && r.text) || 'Sent. Check Discord.' };
+        } catch (e) {
+            ctx.ui.discordResult = { ok: false, text: String((e && e.message) || e) };
+        }
+        ctx.rerender();
+    };
     // Working: one line (owner). Edit opens the full form again.
-    if (st && st.ready && !st.lastError && !ctx.ui.discordEdit) {
+    if (st && view && view.key === 'ok' && !ctx.ui.discordEdit) {
         const msg1 = h('span', { class: 'msg' });
-        const test = async () => {
-            msg1.className = 'msg';
-            msg1.textContent = 'Sending…';
-            try {
-                await d.test();
-                msg1.className = 'msg ok';
-                msg1.textContent = 'Sent. Check Discord.';
-            } catch (e) {
-                msg1.className = 'msg bad';
-                msg1.textContent = String((e && e.message) || e);
-            }
-        };
+        const test = () => testNow((tone, text) => { msg1.className = 'msg' + (tone ? ' ' + tone : ''); msg1.textContent = text; });
         return settingsSection('Discord pings', stateTag('ok', 'Working'), [
             h('div', { class: 'row', style: 'flex-wrap:wrap' }, [
                 h('span', { class: 'muted num', text: 'Your service · last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') + (st.linked ? ' · linked to the bot' : '') }),
@@ -254,11 +298,14 @@ function advancedDiscordSection(ctx, st) {
                 h('button', { class: 'btn sm', type: 'button', onclick: test, text: 'Send a test ping' }),
                 h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.discordEdit = true; ctx.rerender(); }, text: 'Edit' }),
             ]),
+            ...discordStateRows(view),
             st.bot && !st.linked ? linkRow(ctx) : null,
             msg1,
+            shown,
+            pingTicksBlock(ctx),
         ]);
     }
-    const tag = !st ? stateTag('off', 'Not set up yet') : st.lastError ? stateTag('bad', 'Last sync failed') : st.ready ? stateTag('ok', 'Connected') : stateTag('bad', 'Needs the webhook and key');
+    const tag = !st || !view ? stateTag('off', 'Not set up yet') : stateTag(view.tone, view.tag);
     const f = {};
     const field = (key, label, attrs) => h('label', { class: 'field', style: 'flex:1;min-width:220px' }, [t('lab', label), (f[key] = h('input', { class: 'inp', ...attrs }))]);
     const keyAttrs = keyInputAttrs();
@@ -295,10 +342,13 @@ function advancedDiscordSection(ctx, st) {
         h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('base', 'Service address' + (st ? '' : ' (needed)'), { placeholder: 'https://pumping-iron.you.workers.dev', value: st ? st.base : '', onblur: (e) => { const v = e.target.value.trim(); if (!v) return; try { workerBase(v); msg.className = 'msg'; msg.textContent = 'Your Worker key and webhook will be stored on ' + new URL(v).hostname + '.'; } catch (err) { msg.className = 'msg bad'; msg.textContent = String(err.message || err); } } }), field('invite', 'Invite code' + (st ? ' (first time only)' : ' (needed the first time)'), { placeholder: 'from SETUP.md', ...keyAttrs, class: secretCls })]),
         h('div', { class: 'row', style: 'flex-wrap:wrap;max-width:760px' }, [field('hook', 'Discord webhook', { placeholder: st ? 'Saved on your Worker · paste to change' : 'https://discord.com/api/webhooks/…', ...keyAttrs, class: secretCls }), field('key', 'Torn key for your service' + (st ? '' : ' (needed)'), { placeholder: st ? 'Saved on your service · paste to change' : 'Your Torn key (Limited)', ...keyAttrs, class: secretCls })]),
         h('div', { class: 'row', style: 'max-width:760px' }, [field('discordId', 'Your Discord user id', { placeholder: 'Blank: the one linked in Torn', value: st && st.discordId ? st.discordId : '', inputmode: 'numeric' })]),
-        h('div', { class: 'row' }, [h('button', { class: 'btn primary', type: 'button', onclick: connect, text: st ? 'Save' : 'Connect' }), h('button', { class: 'btn', type: 'button', disabled: !st, onclick: () => run(() => d.test(), 'Test ping sent. Check your channel.'), text: 'Send a test ping' }), st ? confirmButton(ctx, 'discord-forget', 'Forget', () => run(async () => { await d.forget(); ctx.rerender(); }, 'Forgotten here and on your Worker.')) : null, h('a', { href: d.setupUrl, target: '_blank', rel: 'noopener', text: 'Set it up (10 minutes)' })]),
+        h('div', { class: 'row' }, [h('button', { class: 'btn primary', type: 'button', onclick: connect, text: st ? 'Save' : 'Connect' }), h('button', { class: 'btn', type: 'button', disabled: !st, onclick: () => testNow((tone, text) => { msg.className = 'msg' + (tone ? ' ' + tone : ''); msg.textContent = text; }), text: 'Send a test ping' }), st ? confirmButton(ctx, 'discord-forget', 'Forget', () => run(async () => { await d.forget(); ctx.rerender(); }, 'Forgotten here and on your Worker.')) : null, h('a', { href: d.setupUrl, target: '_blank', rel: 'noopener', text: 'Set it up (10 minutes)' })]),
         msg,
-        st ? h('p', { class: 'num', text: 'Last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') + (st.lastError ? ' · ' + st.lastError : '') + (st.bot ? ' · the bot is set up: DMs with Done / Snooze / Skip, /plan, /timers' : '') }) : null,
+        shown,
+        ...discordStateRows(view),
+        st ? h('p', { class: 'num', text: 'Last sync ' + (st.lastSync ? new Date(st.lastSync).toISOString().slice(11, 16) + ' UTC' : 'never') + (st.lastError && !view ? ' · ' + st.lastError : '') + (st.bot ? ' · the bot is set up: DMs with Done / Snooze / Skip, /plan, /timers' : '') }) : null,
         st && st.bot && !st.linked ? linkRow(ctx) : null,
+        view ? pingTicksBlock(ctx) : null,
         st && st.ready ? h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.discordEdit = false; ctx.rerender(); }, text: 'Done' }) : null,
         h('details', { class: 'dis' }, [h('summary', { text: 'How the Worker’s key is used' }), tosTable(TOS_WORKER), h('p', { style: 'margin-top:6px', text: 'Your own service: the key you paste here is stored encrypted on your Cloudflare Worker.' })]),
         h('button', { class: 'btn sm ghost', type: 'button', onclick: () => { ctx.ui.discordAdvanced = false; ctx.rerender(); }, text: 'Back to Log in with Discord' }),
@@ -371,6 +421,7 @@ export function renderSettings(m, ctx) {
     const diagSec = h('div', {}, [sectionHead('Diagnostics', null, null, 'h3'), h('dl', { class: 'facts num' }, [h('dt', { text: 'Torn API, last minute' }), h('dd', { text: d.torn + ' of ' + (d.tornMax || 85) + (d.focus ? ' · first: ' + d.focus : '') }), h('dt', { text: 'FFScouter, last minute' }), h('dd', { text: d.ffs + ' of 60' }), h('dt', { text: 'TornW3B, last minute' }), h('dd', { text: d.w3b + ' of 80' }), h('dt', { text: 'Last error' }), h('dd', { text: d.lastError || 'none' }), h('dt', { text: 'Perk lines not understood' }), h('dd', { text: String(d.unknownPerks) }), h('dt', { text: 'Version' }), h('dd', { text: d.version })])]);
     const devSec = developerSection(m, ctx);
     const reportSec = reportSection(m, ctx);
+    const backupSec = backupSection(m, ctx);
 
     const dataRows = [
         ['keys', 'Keys', 'Torn, Full, FFScouter, TornStats, Discord service', 'Forget keys'],
@@ -386,6 +437,6 @@ export function renderSettings(m, ctx) {
         h('div', {}, [sectionHead('What it never does', null, null, 'h3'), headsList([{ tone: 'plain', text: 'Train, buy, use or attack', sub: 'Fill only types a number' }, { tone: 'plain', text: 'Load a Torn page by itself' }, { tone: 'plain', text: 'Ping from a Torn tab', sub: 'only your Discord service does' }])]),
     ];
     // One card per section, ordered by use.
-    return { main: [tornSec, fullSec, discordSec, ffsSec, tsSec, overlaySec, displaySec, reportSec, devSec].filter(Boolean), pane };
+    return { main: [tornSec, fullSec, discordSec, ffsSec, tsSec, overlaySec, displaySec, backupSec, reportSec, devSec].filter(Boolean), pane };
 }
 

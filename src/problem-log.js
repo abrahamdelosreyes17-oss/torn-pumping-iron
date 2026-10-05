@@ -30,7 +30,11 @@ function plogWhere() {
 /** kind: 'error' (something failed), 'action' (what you did), 'note'. */
 export function logProblem(kind, what, detail = null) {
     plog.pending.push({ at: Date.now(), kind, where: plogWhere(), what: logText(what), ...(detail ? { detail: logText(detail) } : {}) });
-    if (!plog.timer && typeof setTimeout === 'function') plog.timer = setTimeout(flushProblemLog, PLOG_FLUSH_MS);
+    if (!plog.timer && typeof setTimeout === 'function') {
+        plog.timer = setTimeout(flushProblemLog, PLOG_FLUSH_MS);
+        // Under node (the tests) the timer must not hold the process open; a browser's timer is a number.
+        if (plog.timer && typeof plog.timer.unref === 'function') plog.timer.unref();
+    }
 }
 
 export const logAction = (what, detail = null) => logProblem('action', what, detail);

@@ -23,6 +23,7 @@ export const KINDS = {
     drugready: 'Drug ready and unused',
     booster: 'Booster cooldown over',
     energy: 'Energy full',
+    nerve: 'Nerve full',
     refill: 'Refill unused',
     jump: 'Jump steps',
     landed: 'Back from travel',

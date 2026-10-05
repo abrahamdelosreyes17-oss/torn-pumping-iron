@@ -21,17 +21,17 @@ import { pi, onModel, isVisible } from './runtime.js';
 import { isPaused, onPauseChange } from './turns.js';
 import { installAttackHook } from './platform/page-hook.js';
 import { gmOnChange } from './platform/gm.js';
-import { wantPlayers, eyeView, sharedView, eyeReady, loadEyeCache, onEye, saveGear, getWatch, toggleWatch, setWatchTag, EYE_CHAIN_KEY, EYE_NEXT_KEY } from './eye-service.js';
+import { wantPlayers, eyeView, sharedView, eyeReady, loadEyeCache, onEye, saveGear, getWatch, toggleWatch, setWatchTag, eyeLoadouts, lookLoadout, EYE_CHAIN_KEY, EYE_NEXT_KEY, LOADOUTS_KEY } from './eye-service.js';
 import { WATCH_MAX } from './core/eye/watch.js';
 import { parseAttackData } from './core/eye/gear.js';
 import { sortWar, memberState } from './core/eye/war.js';
 import { chainFromBar, chainSide, sharedChain, CHAIN_FRESH_MS } from './core/eye/chain.js';
 import { nextTarget, ATTACK_OPENED_MS } from './core/eye/targets.js';
-import { profileLevel, profileAnchor, readFactionRows, readWarRows, miniProfileId, attackRoot, readChainBar, enemyFactionId } from './sources/dom/eye.js';
+import { profileLevel, profileAnchor, readFactionRows, readWarRows, miniProfileId, attackRoot, readChainBar, enemyFactionId, readLoadout } from './sources/dom/eye.js';
 import { ensureEyeCss, bindCard, eyeCardSpot, eyeRowSpot, eyeProfileCard, eyeFightCard, eyeMiniLine, eyeMiniSpot, eyeRowTag, eyeEdgeBar, eyeSummary, eyeSummaryTag, eyeStatusSeconds, eyeShown, eyeLayer, eyeLayerPart, eyeClearPart, eyeTickOut, eyeNextEarly, eyeRowsSig, eyeUntilMoved, eyeChainCard, eyeChainTick, EYE_CHAIN_LINES_W } from './ui/eye/eye-ui.js';
 import { ensureMarkCss } from './ui/marks/marks.js';
 import { fill } from './ui/dom.js';
-import { detectPage, profileIdOf, attackTargetOf, attackUrl, APP_PAGE_URL, PAGE_PROFILE, PAGE_FACTION, PAGE_ATTACK } from './sources/route.js';
+import { detectPage, profileIdOf, attackTargetOf, attackUrl, APP_PAGE_URL, PAGE_PROFILE, PAGE_FACTION, PAGE_ATTACK, PAGE_ITEMS } from './sources/route.js';
 
 const ep = { extras: new Map(), war: { prev: null, early: new Map() }, drawn: { war: null, faction: null }, attack: { gearVisible: false, gearSaved: false }, drawing: false, sig: {}, lists: {}, layoutSig: '', chain: { sig: '', spot: null } };
 
@@ -463,7 +463,9 @@ function drawAttack() {
         ep.sig.attack = '';
     } else {
         const ws = watchState(id);
-        const next = eyeFightCard(v, spot.mode, { ...ep.attack, next: eyeNextNow(id), watch: { ...ws, full: getWatch().list.length >= WATCH_MAX && !ws.watching, toggle: () => toggleFor(id) } });
+        // Your loadouts against their gear (round 9): worked out for the full card only, once their gear was seen.
+        const loadouts = spot.mode === 'full' && v && v.withGear ? eyeLoadouts(id, ep.extras.get(id) || {}) : null;
+        const next = eyeFightCard(v, spot.mode, { ...ep.attack, loadouts, next: eyeNextNow(id), watch: { ...ws, full: getWatch().list.length >= WATCH_MAX && !ws.watching, toggle: () => toggleFor(id) } });
         let card = old;
         if (!card || ep.sig.attack !== next.outerHTML) {
             ep.sig.attack = next.outerHTML;
@@ -600,6 +602,10 @@ export function bootEyePage() {
         gmOnChange(EYE_NEXT_KEY, () => {
             if (!isPaused() && getSettings().eyeChips && isVisible() && detectPage(location.href) === PAGE_ATTACK) drawAttack();
         });
+        // Torn's items page in another tab learned a loadout (you changed it there): the card's rows follow.
+        gmOnChange(LOADOUTS_KEY, () => {
+            if (!isPaused() && getSettings().eyeChips && isVisible() && detectPage(location.href) === PAGE_ATTACK) drawAttack();
+        });
     }
     // Owner (round 6): on Torn's pages Torn Eye asks only about the player you're viewing (their profile) or
     // attacking. Faction and war lists, mini-profiles and the watch list show what is already known; the list sweeps,
@@ -661,6 +667,9 @@ export function bootEyePage() {
         const pg = detectPage(location.href);
         // The chain counter (any Torn page in chain mode, the war page always): its clocks, and Torn's bar read again.
         if (drawChain() && pg === PAGE_ATTACK) drawAttack();
+        // Torn's items page names the loadout you wear (round 9): one look at that text; your gear is then read from
+        // the API and kept under its number (eye-service.js lookLoadout). Nothing on Torn's page is clicked or opened.
+        if (pg === PAGE_ITEMS) lookLoadout(readLoadout()).catch(() => {});
         if (pg !== PAGE_FACTION && pg !== PAGE_PROFILE && pg !== PAGE_ATTACK) return;
         if (pg === PAGE_FACTION) {
             // Round 7 review: the status text carries Torn's hospital clock, so a signature of it changed every second
