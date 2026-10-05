@@ -72,7 +72,8 @@ export function statementCard(b) {
         rows.push(
             h('tr', {}, [
                 h('td'),
-                h('td', {}, [l.title + ' ', h('small', { class: 'num', text: String(l.type) }), l.internal ? h('small', { text: ' · wallet ↔ vault, not added' }) : null]),
+                // Trading is one line whatever log types it came as: what was sold, less what was bought.
+                h('td', l.account === 'trading' ? { 'data-ledger-trading': '1' } : {}, [l.title + ' ', l.account === 'trading' ? h('small', { class: 'num', text: 'items bought and sold again · sold ' + fmtDollars(l.sold) + ' less bought ' + fmtDollars(l.bought) }) : h('small', { class: 'num', text: String(l.type) }), l.internal ? h('small', { text: ' · wallet ↔ vault, not added' }) : null]),
                 h('td', { class: 'r num', text: fmtInt(l.n) }),
                 h('td', { class: 'r num' + (l.total < 0 ? ' c-cost' : ''), text: ledgerFig(l.total) }),
                 h('td', { class: 'r num muted', text: daily ? ledgerFig(l.perDay) : '' }),
@@ -186,7 +187,7 @@ export function linesCard(b, ctx) {
             h('td', { class: e.known ? '' : 'c-warn', text: names[e.account] || e.account }),
             h('td', { class: 'r', text: e.amount > 0 ? fmtDollars(e.amount) : '' }),
             h('td', { class: 'r', text: e.amount < 0 ? fmtDollars(-e.amount) : '' }),
-            h('td', { class: 'r' }, [e.known && !e.internal && LEDGER_ACCOUNTS.find((a) => a.id === e.account).kind !== 'balance' ? h('label', { class: 'ledger-tick' }, [h('input', { type: 'checkbox', checked: e.oneOff, 'aria-label': 'Non-recurring', onchange: (ev) => tick(e, ev.target.checked) }), ' non-recurring']) : null]),
+            h('td', { class: 'r' }, [e.known && !e.internal && e.account !== 'trading' && LEDGER_ACCOUNTS.find((a) => a.id === e.account).kind !== 'balance' ? h('label', { class: 'ledger-tick' }, [h('input', { type: 'checkbox', checked: e.oneOff, 'aria-label': 'Non-recurring', onchange: (ev) => tick(e, ev.target.checked) }), ' non-recurring']) : null]),
         ]),
     );
     return h('div', {}, [
@@ -214,7 +215,7 @@ export function ledgerDayFacts(b, m, ctx) {
             ...(offer ? kv('A plan may spend', pick.name.toLowerCase(), fmtMoney(Math.round(offer.perDay)) + ' a day', 'white') : []),
         ]),
         offer ? h('p', { class: 'why ok', style: 'margin:16px 0 0', text: offer.why }) : null,
-        h('p', { class: 'muted', style: 'margin:12px 0 0;font-size:13px', text: 'The casino, gifts and sales are never counted on ahead: they reach the plan as cash, at the next recalibration.' }),
+        h('p', { class: 'muted', style: 'margin:12px 0 0;font-size:13px', text: 'The casino, gifts, sales and trading are never counted on ahead: they reach the plan as cash, at the next recalibration.' }),
         h('div', { style: 'margin-top:16px' }, [h('a', { class: 'btn sm', href: '#plan', onclick: (ev) => { ev.preventDefault(); ctx.go && ctx.go('plan'); }, text: 'Open Plan' })]),
     ]);
 }
@@ -251,7 +252,7 @@ export function nonRecurringFacts(b) {
         sectionHead('Non-recurring', meta([list.length ? list.length + (list.length === 1 ? ' line' : ' lines') + ', not counted · ' + (sum > 0 ? '+' : '') + fmtMoney(Math.round(sum)) + ' together' : 'none in these days']), null, 'h3'),
         ...list.slice(0, 8).map((e) => h('div', { class: 'ledger-one' }, [h('span', {}, [h('span', { class: 'white', text: e.title }), h('span', { class: 'muted', text: ' · ' + ledgerDay(e.at) + (e.ticked ? ' · your tick' : '') })]), h('b', { class: 'num ' + (e.amount < 0 ? 'c-cost' : 'white'), text: (e.amount > 0 ? '+' : '') + fmtMoney(Math.round(e.amount)) })])),
         list.length > 8 ? h('div', { class: 'note2', text: 'and ' + (list.length - 8) + ' more, in “Every line” under Non-recurring.' }) : null,
-        h('p', { class: 'muted', style: 'margin:12px 0 0;font-size:13px', text: 'Gifts, money sent, trades, auctions, and points and items sold are non-recurring by what they are, whatever their size. Untick a line in the list to count it as usual money.' }),
+        h('p', { class: 'muted', style: 'margin:12px 0 0;font-size:13px', text: 'Gifts, money sent, trades, auctions, and points and items sold are non-recurring by what they are, whatever their size. Untick a line in the list to count it as usual money. An item you bought and sold again in these days is Trading: one line in the statement, sales less purchases.' }),
     ]);
 }
 

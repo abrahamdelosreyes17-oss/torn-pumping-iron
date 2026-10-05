@@ -24,11 +24,15 @@ export const MONEY_LOG_CATS = [
 ];
 /** The stored row's shape: 2 = lines as Torn gave them, each once (round 7, R7.5). */
 export const MONEY_LOG_V = 2;
-/** Lines kept at most: a busy log's 30 days (470 lines a day) is about 14,000. */
-export const MONEY_LOG_MAX_LINES = 15000;
-/** Pages of 100 lines a category a read may walk back: the first read, and one that builds on the lines kept (two days away on a busy log still joins). */
+/** Lines kept at most: the busiest log seen (a trader, about 810 lines a day) is about 24,300 in 30 days; 15,000 stopped his books at 18 days. */
+export const MONEY_LOG_MAX_LINES = 30000;
+/**
+ * Pages of 100 lines a category a read may walk back: the first read, and one that builds on the lines kept. That
+ * one stops by itself where the last read ended, so the pages are only asked for after time away: 60 is a week of
+ * the trader's 700 outgoing lines a day (12 was 1.7 days: two days away and every line kept was dropped).
+ */
 export const MONEY_LOG_PAGES = 6;
-export const MONEY_LOG_PAGES_JOIN = 12;
+export const MONEY_LOG_PAGES_JOIN = 60;
 
 /** Save and check the Full key (Settings). */
 export async function saveFullKey(v) {

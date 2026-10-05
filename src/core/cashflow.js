@@ -9,7 +9,8 @@
  * cash (what the gym may use) and restricted cash (the bank, stocks held for
  * a benefit block, what is kept back for property upkeep not paid yet).
  * A plan counts on recurring income less committed costs; the casino, gifts
- * and sales reach it as cash, at the next recalibration.
+ * and sales reach it as cash, at the next recalibration. So does trading
+ * (session 12, his answer to question 21): one line, sales less purchases.
  */
 
 import { DAY } from './bars.js';
@@ -25,7 +26,7 @@ export const STATEMENT_SECTIONS = [
     { id: 'committed', name: 'Committed costs', what: 'what you must pay to keep what you have', accounts: ['committed'], daily: true },
     { id: 'spending', name: 'What you chose to spend it on', what: 'the gym competes with these', accounts: ['training', 'chosen'], daily: true },
     { id: 'uncontrollable', name: 'Uncontrollable gains and losses', what: 'outside your control: never counted on, a large one calls for a recalibration', accounts: ['uncontrollable'], daily: false },
-    { id: 'nonrecurring', name: 'Non-recurring', what: 'by what they are, whatever their size: never in a daily figure', accounts: ['nonrecurring'], daily: false },
+    { id: 'nonrecurring', name: 'Non-recurring', what: 'by what they are, whatever their size: never in a daily figure', accounts: ['nonrecurring', 'trading'], daily: false },
     { id: 'transfers', name: 'Transfers between your own accounts', what: 'your money changing place: never income, never spending', accounts: ['transfers'], daily: false },
 ];
 
@@ -77,6 +78,15 @@ export function cashflowOf({ ledger, liquid = null, bank = null, blocks = null, 
             .filter((t) => sec.accounts.includes(t.account) && (t.in || t.out))
             .map((t) => ({ type: t.type, title: t.title, account: t.account, n: t.n, days: t.days, internal: Boolean(t.internal), total: t.in - t.out, perDay: per(t.in - t.out) }))
             .sort((x, y) => Math.abs(y.total) - Math.abs(x.total));
+        // Trading is one line (the accountant, Q21): sales less purchases, whatever log types they came as.
+        const traded = ledger.types.filter((t) => t.account === 'trading' && sec.accounts.includes('trading'));
+        if (traded.length) {
+            const sold = traded.reduce((n, t) => n + t.in, 0);
+            const bought = traded.reduce((n, t) => n + t.out, 0);
+            const rest = lines.filter((l) => l.account !== 'trading');
+            rest.push({ type: '', title: 'Trading', account: 'trading', n: traded.reduce((n, t) => n + t.n, 0), days: Math.max(...traded.map((t) => t.days)), internal: false, total: sold - bought, perDay: per(sold - bought), sold, bought });
+            lines.splice(0, lines.length, ...rest.sort((x, y) => Math.abs(y.total) - Math.abs(x.total)));
+        }
         // A wallet ↔ vault line is listed, never added: your liquid money did not change.
         const total = lines.reduce((n, l) => n + (l.internal ? 0 : l.total), 0);
         return { id: sec.id, name: sec.name, what: sec.what, daily: sec.daily, lines, total, perDay: per(total) };

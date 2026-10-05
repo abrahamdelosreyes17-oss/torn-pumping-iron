@@ -509,6 +509,10 @@ if (!only.length || only.includes('auto')) {
     await o.page.waitForTimeout(600);
     const lg = await measure(o.page);
     for (const words of ['How your income was worked out', 'Recurring income', 'Committed costs', 'Disposable income', 'What you chose to spend it on', 'Uncontrollable gains and losses', 'Non-recurring', 'Transfers between your own accounts', 'Change in cash by the books', 'What you own', 'Total free cash', 'Restricted cash', 'By account', 'Every line', 'Download CSV', 'The account table', 'Export log', 'A plan may spend']) ok(lg.text.includes(words), 'ledger: says "' + words + '"');
+    // Session 12 (the accountant's Q21): an item bought and sold again is one line, "Trading", sales less purchases.
+    const trading = await o.page.evaluate(() => [...document.getElementById('pi-app').shadowRoot.querySelectorAll('[data-ledger-trading]')].map((td) => td.parentElement.textContent));
+    ok(trading.length === 1 && /Trading items bought and sold again · sold \$50,500,000 less bought \$50,000,000/.test(trading[0]) && /\$500,000/.test(trading[0]), 'ledger: Trading is one line, sales less purchases (' + trading.join(' | ') + ')');
+    ok(!/Item shop sell 4210|Bazaar buy 1225/.test(lg.text.slice(0, lg.text.indexOf('By account'))), 'ledger: the statement does not list a traded item by log type');
     ok(lg.small.length === 0, 'ledger: no text under 11px ' + JSON.stringify(lg.small.slice(0, 3)));
     ok(lg.hostScrollW <= lg.hostW + 1, 'ledger: no sideways scroll (' + lg.hostScrollW + ' in ' + lg.hostW + ')');
     ok(o.errors.length === 0, 'ledger: no page errors ' + JSON.stringify(o.errors.slice(0, 2)));

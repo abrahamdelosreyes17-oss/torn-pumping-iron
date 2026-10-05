@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Pumping Iron
 // @namespace    torn-pumping-iron
-// @version      1.5.2
+// @version      1.5.3
 // @description  Gym planner and fight scout for Torn: what to take, what to train, what to buy, who you can beat. Reads the API and the page you're on; never acts for you.
 // @author       abrahamdelosreyes17-oss
 // @match        https://www.torn.com/*
@@ -48,8 +48,8 @@
 (function (Math, Number, Object, Array, JSON, Date, Set, Map, WeakMap, WeakSet, Promise, String, Boolean, Error, Infinity, NaN, undefined) {
     'use strict';
 
-    const PI_BUILD_VERSION = '1.5.2';
-    const PI_BUILD_HASH = 'd9880d251173';
+    const PI_BUILD_VERSION = '1.5.3';
+    const PI_BUILD_HASH = 'a7a50a890dfe';
 
     /* ===== src/platform/gm.js ===== */
     /*
@@ -6069,6 +6069,10 @@
      * its nature; a gift, a trade payment, an auction or a sale of points is
      * non-recurring whatever its size; the casino, being mugged and what others
      * pay into your faction balance are outside your control and stand apart.
+     *
+     * Session 12, his answer to question 21 (buying to resell): an item both
+     * bought and sold inside the books' days is Trading, one account, sales
+     * less purchases; extra money, never counted on ahead.
      */
 
 
@@ -6087,6 +6091,7 @@
         { id: 'chosen', name: 'Other spending', kind: 'spend', what: 'items and ammo bought that are not for the gym' },
         { id: 'uncontrollable', name: 'Uncontrollable gains and losses', kind: 'apart', what: 'the casino, being mugged, what others pay into your faction balance' },
         { id: 'nonrecurring', name: 'Non-recurring', kind: 'apart', what: 'gifts, money sent, trades, auctions, points and items sold, a gain or loss on stocks sold' },
+        { id: 'trading', name: 'Trading', kind: 'apart', what: 'items you bought and sold again inside these days: sales less purchases' },
         { id: 'transfers', name: 'Transfers', kind: 'balance', what: 'the bank, stocks bought and sold, the faction vault, your vault' },
         { id: 'unsorted', name: 'Not sorted', kind: 'none', what: 'log types the table does not know yet' },
     ];
@@ -6104,7 +6109,8 @@
      *   amount(data): the money, positive (a roulette win is its payout less the stake, so it can be negative)
      *   sign: +1 into your wallet, −1 out of it
      *   internal: wallet ↔ vault, your liquid money is unchanged (left out of the reconciliation's flow)
-     *   items(data): the item ids a purchase is about (gym items go to Gym)
+     *   items(data): the item ids a purchase or a sale is about (gym items bought go to Gym; an item both bought and
+     *     sold inside the books' days goes to Trading, ledgerOf)
      *   gain(data): the part of the amount that is a realised gain or loss (a stock sale's profit): booked as
      *     non-recurring, the rest stays in the line's own account
      */
@@ -6138,10 +6144,10 @@
         4440: { title: 'Trade money outgoing', account: 'nonrecurring', sign: -1, amount: ledgerField('money') },
         4441: { title: 'Trade money incoming', account: 'nonrecurring', sign: 1, amount: ledgerField('money') },
         5011: { title: 'Points market sell', account: 'nonrecurring', sign: 1, amount: ledgerField('cost_total') },
-        // A sale is cash that is not certain to come again, as points sold are (Q8). Whether buying to resell is a
-        // business of its own is the accountant's to settle (docs/LEDGER-QUESTIONS.md, 21).
-        1226: { title: 'Bazaar sell', account: 'nonrecurring', sign: 1, amount: ledgerField('cost_total') },
-        4210: { title: 'Item shop sell', account: 'nonrecurring', sign: 1, amount: ledgerField('total_value') },
+        // A sale is cash that is not certain to come again, as points sold are (Q8). The sale of an item you also
+        // bought inside the books' days is Trading (Q21; ledgerOf).
+        1226: { title: 'Bazaar sell', account: 'nonrecurring', sign: 1, amount: ledgerField('cost_total'), items: (d) => (Array.isArray(d.items) ? d.items.map((x) => x && x.id) : []) },
+        4210: { title: 'Item shop sell', account: 'nonrecurring', sign: 1, amount: ledgerField('total_value'), items: (d) => [d.item] },
         // The whole bid leaves the wallet; what is over the winning price comes back as a cashier's check.
         4310: { title: 'Auction house item bid', account: 'nonrecurring', sign: -1, amount: ledgerField('bid_price') },
         5460: { title: 'Cashiers check withdraw', account: 'nonrecurring', sign: 1, amount: ledgerField('amount') },
@@ -6169,11 +6175,12 @@
     function ledgerEntry(line, isGymItem = null) {
         const spec = LEDGER_TYPES[line.type];
         const base = { id: String(line.id), at: line.at, type: line.type, title: (spec && spec.title) || line.title || 'Log type ' + line.type };
-        if (!spec) return { ...base, account: 'unsorted', amount: 0, gain: 0, known: false, internal: false };
+        if (!spec) return { ...base, account: 'unsorted', amount: 0, gain: 0, known: false, internal: false, items: [] };
         const data = line.data && typeof line.data === 'object' ? line.data : {};
         const ids = spec.items ? spec.items(data).filter((x) => x !== undefined && x !== null) : [];
-        const gym = Boolean(isGymItem && ids.length && ids.every((x) => isGymItem(x)));
-        return { ...base, account: gym ? 'training' : spec.account, amount: spec.sign * spec.amount(data), gain: spec.gain ? spec.gain(data) : 0, known: true, internal: Boolean(spec.internal) };
+        // Only a purchase is for the gym: a gym item sold is a sale.
+        const gym = Boolean(spec.sign < 0 && isGymItem && ids.length && ids.every((x) => isGymItem(x)));
+        return { ...base, account: gym ? 'training' : spec.account, amount: spec.sign * spec.amount(data), gain: spec.gain ? spec.gain(data) : 0, known: true, internal: Boolean(spec.internal), items: ids.map(Number) };
     }
 
     /**
@@ -6197,7 +6204,8 @@
      * @param {function} [o.isGymItem]
      * @param {object} [o.overrides] - {log id: true|false}: your tick. true: this line is non-recurring, whatever its
      *   type; false: a line non-recurring by its type counts as usual money (recurring income in, other spending out)
-     * @returns {{from, to, days, entries, accounts, types, oneOffs, unsorted}}
+     * @returns {{from, to, days, entries, accounts, types, oneOffs, unsorted}}; an entry's account is its type's, or
+     *   Gym for gym items bought, or Trading for an item both bought and sold inside the days
      */
     function ledgerOf(lines, { from, to, isGymItem = null, overrides = {} } = {}) {
         const seen = new Set();
@@ -6214,8 +6222,17 @@
                 if (tick && e.account !== 'nonrecurring') e.account = 'nonrecurring';
                 else if (!tick && e.account === 'nonrecurring') e.account = e.amount >= 0 ? 'recurring' : 'chosen';
             }
-            e.oneOff = e.account === 'nonrecurring';
             entries.push(e);
+        }
+        // Trading (the accountant, Q21): an item both bought and sold inside these days was bought to sell again. Its
+        // purchases and its sales are one account, whatever the order and whether it made or lost money. By Torn's item
+        // id: money from a trade carries none, so it stays a plain line. A line you ticked stays where your tick put it.
+        const bought = new Set();
+        const sold = new Set();
+        for (const e of entries) if (!e.ticked) for (const x of e.items) (LEDGER_TYPES[e.type].sign < 0 ? bought : sold).add(x);
+        for (const e of entries) {
+            if (!e.ticked && e.items.length && e.items.every((x) => bought.has(x) && sold.has(x))) e.account = 'trading';
+            e.oneOff = e.account === 'nonrecurring';
         }
         entries.sort((a, b) => b.at - a.at || (a.id < b.id ? -1 : 1));
         const days = Math.max(1, (to - from) / DAY);
@@ -10080,7 +10097,8 @@
      * cash (what the gym may use) and restricted cash (the bank, stocks held for
      * a benefit block, what is kept back for property upkeep not paid yet).
      * A plan counts on recurring income less committed costs; the casino, gifts
-     * and sales reach it as cash, at the next recalibration.
+     * and sales reach it as cash, at the next recalibration. So does trading
+     * (session 12, his answer to question 21): one line, sales less purchases.
      */
 
 
@@ -10096,7 +10114,7 @@
         { id: 'committed', name: 'Committed costs', what: 'what you must pay to keep what you have', accounts: ['committed'], daily: true },
         { id: 'spending', name: 'What you chose to spend it on', what: 'the gym competes with these', accounts: ['training', 'chosen'], daily: true },
         { id: 'uncontrollable', name: 'Uncontrollable gains and losses', what: 'outside your control: never counted on, a large one calls for a recalibration', accounts: ['uncontrollable'], daily: false },
-        { id: 'nonrecurring', name: 'Non-recurring', what: 'by what they are, whatever their size: never in a daily figure', accounts: ['nonrecurring'], daily: false },
+        { id: 'nonrecurring', name: 'Non-recurring', what: 'by what they are, whatever their size: never in a daily figure', accounts: ['nonrecurring', 'trading'], daily: false },
         { id: 'transfers', name: 'Transfers between your own accounts', what: 'your money changing place: never income, never spending', accounts: ['transfers'], daily: false },
     ];
 
@@ -10148,6 +10166,15 @@
                 .filter((t) => sec.accounts.includes(t.account) && (t.in || t.out))
                 .map((t) => ({ type: t.type, title: t.title, account: t.account, n: t.n, days: t.days, internal: Boolean(t.internal), total: t.in - t.out, perDay: per(t.in - t.out) }))
                 .sort((x, y) => Math.abs(y.total) - Math.abs(x.total));
+            // Trading is one line (the accountant, Q21): sales less purchases, whatever log types they came as.
+            const traded = ledger.types.filter((t) => t.account === 'trading' && sec.accounts.includes('trading'));
+            if (traded.length) {
+                const sold = traded.reduce((n, t) => n + t.in, 0);
+                const bought = traded.reduce((n, t) => n + t.out, 0);
+                const rest = lines.filter((l) => l.account !== 'trading');
+                rest.push({ type: '', title: 'Trading', account: 'trading', n: traded.reduce((n, t) => n + t.n, 0), days: Math.max(...traded.map((t) => t.days)), internal: false, total: sold - bought, perDay: per(sold - bought), sold, bought });
+                lines.splice(0, lines.length, ...rest.sort((x, y) => Math.abs(y.total) - Math.abs(x.total)));
+            }
             // A wallet ↔ vault line is listed, never added: your liquid money did not change.
             const total = lines.reduce((n, l) => n + (l.internal ? 0 : l.total), 0);
             return { id: sec.id, name: sec.name, what: sec.what, daily: sec.daily, lines, total, perDay: per(total) };
@@ -20485,7 +20512,8 @@
             rows.push(
                 h('tr', {}, [
                     h('td'),
-                    h('td', {}, [l.title + ' ', h('small', { class: 'num', text: String(l.type) }), l.internal ? h('small', { text: ' · wallet ↔ vault, not added' }) : null]),
+                    // Trading is one line whatever log types it came as: what was sold, less what was bought.
+                    h('td', l.account === 'trading' ? { 'data-ledger-trading': '1' } : {}, [l.title + ' ', l.account === 'trading' ? h('small', { class: 'num', text: 'items bought and sold again · sold ' + fmtDollars(l.sold) + ' less bought ' + fmtDollars(l.bought) }) : h('small', { class: 'num', text: String(l.type) }), l.internal ? h('small', { text: ' · wallet ↔ vault, not added' }) : null]),
                     h('td', { class: 'r num', text: fmtInt(l.n) }),
                     h('td', { class: 'r num' + (l.total < 0 ? ' c-cost' : ''), text: ledgerFig(l.total) }),
                     h('td', { class: 'r num muted', text: daily ? ledgerFig(l.perDay) : '' }),
@@ -20599,7 +20627,7 @@
                 h('td', { class: e.known ? '' : 'c-warn', text: names[e.account] || e.account }),
                 h('td', { class: 'r', text: e.amount > 0 ? fmtDollars(e.amount) : '' }),
                 h('td', { class: 'r', text: e.amount < 0 ? fmtDollars(-e.amount) : '' }),
-                h('td', { class: 'r' }, [e.known && !e.internal && LEDGER_ACCOUNTS.find((a) => a.id === e.account).kind !== 'balance' ? h('label', { class: 'ledger-tick' }, [h('input', { type: 'checkbox', checked: e.oneOff, 'aria-label': 'Non-recurring', onchange: (ev) => tick(e, ev.target.checked) }), ' non-recurring']) : null]),
+                h('td', { class: 'r' }, [e.known && !e.internal && e.account !== 'trading' && LEDGER_ACCOUNTS.find((a) => a.id === e.account).kind !== 'balance' ? h('label', { class: 'ledger-tick' }, [h('input', { type: 'checkbox', checked: e.oneOff, 'aria-label': 'Non-recurring', onchange: (ev) => tick(e, ev.target.checked) }), ' non-recurring']) : null]),
             ]),
         );
         return h('div', {}, [
@@ -20627,7 +20655,7 @@
                 ...(offer ? kv('A plan may spend', pick.name.toLowerCase(), fmtMoney(Math.round(offer.perDay)) + ' a day', 'white') : []),
             ]),
             offer ? h('p', { class: 'why ok', style: 'margin:16px 0 0', text: offer.why }) : null,
-            h('p', { class: 'muted', style: 'margin:12px 0 0;font-size:13px', text: 'The casino, gifts and sales are never counted on ahead: they reach the plan as cash, at the next recalibration.' }),
+            h('p', { class: 'muted', style: 'margin:12px 0 0;font-size:13px', text: 'The casino, gifts, sales and trading are never counted on ahead: they reach the plan as cash, at the next recalibration.' }),
             h('div', { style: 'margin-top:16px' }, [h('a', { class: 'btn sm', href: '#plan', onclick: (ev) => { ev.preventDefault(); ctx.go && ctx.go('plan'); }, text: 'Open Plan' })]),
         ]);
     }
@@ -20664,7 +20692,7 @@
             sectionHead('Non-recurring', meta([list.length ? list.length + (list.length === 1 ? ' line' : ' lines') + ', not counted · ' + (sum > 0 ? '+' : '') + fmtMoney(Math.round(sum)) + ' together' : 'none in these days']), null, 'h3'),
             ...list.slice(0, 8).map((e) => h('div', { class: 'ledger-one' }, [h('span', {}, [h('span', { class: 'white', text: e.title }), h('span', { class: 'muted', text: ' · ' + ledgerDay(e.at) + (e.ticked ? ' · your tick' : '') })]), h('b', { class: 'num ' + (e.amount < 0 ? 'c-cost' : 'white'), text: (e.amount > 0 ? '+' : '') + fmtMoney(Math.round(e.amount)) })])),
             list.length > 8 ? h('div', { class: 'note2', text: 'and ' + (list.length - 8) + ' more, in “Every line” under Non-recurring.' }) : null,
-            h('p', { class: 'muted', style: 'margin:12px 0 0;font-size:13px', text: 'Gifts, money sent, trades, auctions, and points and items sold are non-recurring by what they are, whatever their size. Untick a line in the list to count it as usual money.' }),
+            h('p', { class: 'muted', style: 'margin:12px 0 0;font-size:13px', text: 'Gifts, money sent, trades, auctions, and points and items sold are non-recurring by what they are, whatever their size. Untick a line in the list to count it as usual money. An item you bought and sold again in these days is Trading: one line in the statement, sales less purchases.' }),
         ]);
     }
 
@@ -24337,6 +24365,10 @@
      * start over, so the books covered 2 days, never 30. Now a read asks only
      * for what is newer than the last one and is joined to the lines kept: the
      * days the books cover grow with every read, up to 30. Pure.
+     *
+     * Session 12 (a trader's log: 700 outgoing lines a day): the read that
+     * builds on the lines kept walks back as far as a week of such a log, and
+     * 30 days of it fit in the lines kept (src/income.js).
      */
 
 
@@ -24416,11 +24448,15 @@
     ];
     /** The stored row's shape: 2 = lines as Torn gave them, each once (round 7, R7.5). */
     const MONEY_LOG_V = 2;
-    /** Lines kept at most: a busy log's 30 days (470 lines a day) is about 14,000. */
-    const MONEY_LOG_MAX_LINES = 15000;
-    /** Pages of 100 lines a category a read may walk back: the first read, and one that builds on the lines kept (two days away on a busy log still joins). */
+    /** Lines kept at most: the busiest log seen (a trader, about 810 lines a day) is about 24,300 in 30 days; 15,000 stopped his books at 18 days. */
+    const MONEY_LOG_MAX_LINES = 30000;
+    /**
+     * Pages of 100 lines a category a read may walk back: the first read, and one that builds on the lines kept. That
+     * one stops by itself where the last read ended, so the pages are only asked for after time away: 60 is a week of
+     * the trader's 700 outgoing lines a day (12 was 1.7 days: two days away and every line kept was dropped).
+     */
     const MONEY_LOG_PAGES = 6;
-    const MONEY_LOG_PAGES_JOIN = 12;
+    const MONEY_LOG_PAGES_JOIN = 60;
 
     /** Save and check the Full key (Settings). */
     async function saveFullKey(v) {

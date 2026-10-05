@@ -30,7 +30,7 @@ test('ledger: every type in the table has an account, a sign and an amount; the 
         assert.equal(typeof s.amount, 'function');
         assert.ok(s.title, id + ' has Torn’s title');
     }
-    assert.deepEqual([...ids], ['recurring', 'committed', 'training', 'chosen', 'uncontrollable', 'nonrecurring', 'transfers', 'unsorted']);
+    assert.deepEqual([...ids], ['recurring', 'committed', 'training', 'chosen', 'uncontrollable', 'nonrecurring', 'trading', 'transfers', 'unsorted']);
 });
 
 test('ledger: the amount is read from the type’s own field, signed by what it did to the wallet, and booked by what the line is', () => {
@@ -102,7 +102,7 @@ test('ledger: sales and money from a trade are non-recurring, shop and ammo buys
     assert.equal(ledgerEntry({ id: 's', type: 4200, at: T, data: { item: XANAX, quantity: 1, cost_each: 9, cost_total: 9, area: 1 } }, isGymItem).account, 'training');
 });
 
-test('ledger: a trader’s days sort to the last line; what was sold is not counted on, and the cash adds up', () => {
+test('ledger: a trader’s days sort to the last line; what was bought and sold again is Trading, none of it is counted on, and the cash adds up', () => {
     const l = book([
         ...pay(2, 1e6),
         line('buy', 1225, 1, { seller: 1, items: [{ id: 9999, uid: null, qty: 10 }], cost_each: 1000, cost_total: 10000 }),
@@ -112,8 +112,11 @@ test('ledger: a trader’s days sort to the last line; what was sold is not coun
     ]);
     assert.deepEqual(l.unsorted, []);
     assert.equal(l.accounts.recurring.in, 2e6, 'pay only');
-    assert.equal(l.accounts.chosen.out, 10000);
-    assert.equal(l.accounts.nonrecurring.in, 13400);
+    // Session 12 (the accountant's Q21): the item was bought and sold inside the days. Money from a trade names no item.
+    assert.equal(l.accounts.chosen.out, 0);
+    assert.equal(l.accounts.trading.out, 10000);
+    assert.equal(l.accounts.trading.in, 10200);
+    assert.equal(l.accounts.nonrecurring.in, 3200);
     assert.equal(l.entries.reduce((n, e) => n + e.amount, 0), 2e6 - 10000 + 13400);
 });
 

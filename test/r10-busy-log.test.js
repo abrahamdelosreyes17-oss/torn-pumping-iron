@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 
 import { fetchMoneyLog } from '../src/api/torn.js';
 import { mergeMoneyLog, moneyLogKept, moneyLogAskFrom } from '../src/core/moneylog.js';
+import { MONEY_LOG_MAX_LINES, MONEY_LOG_PAGES, MONEY_LOG_PAGES_JOIN } from '../src/income.js';
 
 const DAY = 86400;
 const NOW = 1790000000;
@@ -35,12 +36,12 @@ test('money log read: a log of 420 lines a day is complete for 2 days only (the 
 });
 
 /* The fix: the lines kept are built on, so the days grow with every read (core/moneylog.js; src/income.js does this with the stored row). */
-const MAX = 15000;
+const MAX = MONEY_LOG_MAX_LINES;
 /** A read at `nowS` on top of `kept`, the way refreshMoneyLog does it. */
-async function readAt(nowS, kept, maxLines = MAX) {
+async function readAt(nowS, kept, maxLines = MAX, log0 = LOG) {
     const since = (nowS - 30 * DAY) * 1000;
-    const at = { get: async (path, q) => ({ log: LOG[q.cat].filter((e) => e.timestamp >= q.from && e.timestamp <= (q.to || nowS)).slice(0, q.limit) }) };
-    const log = await fetchMoneyLog(at, { from: Math.floor(moneyLogAskFrom(kept, since) / 1000), categories: CATS, pages: kept ? 12 : 6 });
+    const at = { get: async (path, q) => ({ log: log0[q.cat].filter((e) => e.timestamp >= q.from && e.timestamp <= (q.to || nowS)).slice(0, q.limit) }) };
+    const log = await fetchMoneyLog(at, { from: Math.floor(moneyLogAskFrom(kept, since) / 1000), categories: CATS, pages: kept ? MONEY_LOG_PAGES_JOIN : MONEY_LOG_PAGES });
     return { v: 2, calls: log.calls, ...mergeMoneyLog(kept, log, { now: nowS * 1000, since, maxLines }) };
 }
 
@@ -66,15 +67,58 @@ test('money log kept between reads: the days the books cover grow with every rea
 });
 
 test('money log kept between reads: a read that cannot reach the last one starts over from what it covers; only the newest lines are kept', async () => {
-    const first = await readAt(NOW - 10 * DAY, null);
-    // Ten days away on this log is more than twelve pages a category: the old lines cannot be joined.
+    const first = await readAt(NOW - 25 * DAY, null);
+    // Twenty-five days away on this log is more pages than a read may walk back: the old lines cannot be joined.
     const late = await readAt(NOW, moneyLogKept(first, 2));
     assert.equal(late.joined, false);
-    assert.ok(late.days > 3.9 && late.days < 4.1, 'what twelve pages of the busiest category cover: ' + late.days.toFixed(2));
+    const most = (MONEY_LOG_PAGES_JOIN * 100) / 300;
+    assert.ok(late.days > most - 0.4 && late.days < most + 0.1, 'what the pages of the busiest category cover: ' + late.days.toFixed(2));
     assert.ok(late.lines.every((l) => l.at >= late.from));
     // The cap: the newest lines stay, and the books start where they start.
     const cut = await readAt(NOW, null, 500);
     assert.ok(cut.lines.length <= 500 && cut.lines.length > 400);
     assert.ok(cut.lines.every((l) => l.at >= cut.from) && cut.days < 1.3);
     assert.equal(moneyLogKept({ v: 1, lines: [{}], from: 1, at: 2 }, 2), null, 'an older row shape is read again from the start');
+});
+
+/*
+ * Session 12: a busier log yet (an "Export log" of 2026-10-05, a trader: both categories at exactly 600 lines, the
+ * 600 outgoing ones in 0.85 days, so about 700 outgoing and 110 incoming lines a day). Two faults at that volume:
+ * 15,000 lines kept were full at 18 days, and twelve pages a read were 1.7 days of it, so two days without the
+ * webpage open dropped every line kept.
+ */
+const TRADER = {
+    17: category(17, 110, 4210, 'Item shop sell', { item: 1, quantity: 1, value_each: 1, total_value: 1, area: 'x' }),
+    14: category(14, 700, 1225, 'Bazaar buy', { seller: 1, items: [{ id: 1, uid: null, qty: 1 }], cost_each: 1, cost_total: 1 }),
+};
+/** The made-up log reaches 30 days before NOW: a run of `days` ends at NOW. */
+async function traderRun(everyH, days) {
+    let row = await readAt(NOW - days * DAY, null, MAX, TRADER);
+    let startedOver = 0;
+    let most = 0;
+    for (let t = NOW - days * DAY + everyH * 3600; t <= NOW; t += everyH * 3600) {
+        row = await readAt(t, moneyLogKept(row, 2), MAX, TRADER);
+        if (!row.joined) startedOver++;
+        most = Math.max(most, row.calls);
+    }
+    return { row, startedOver, most };
+}
+
+test('money log, a trader’s 810 lines a day: two or three days without the webpage open still join, no line kept is dropped', async () => {
+    for (const everyH of [48, 72]) {
+        const { row, startedOver, most } = await traderRun(everyH, 24);
+        assert.equal(startedOver, 0, 'every ' + everyH + ' h: reads that started over');
+        // The first read covers 0.86 days (600 outgoing lines); 24 days of reads are added to it.
+        assert.ok(row.days > 24.7 && row.days < 25, 'every ' + everyH + ' h: ' + row.days.toFixed(2) + ' days');
+        assert.ok(most <= 26, 'three days of it is 21 pages and 4: at most ' + most + ' calls a read');
+        const want = TRADER[14].filter((e) => e.timestamp * 1000 >= row.from).length + TRADER[17].filter((e) => e.timestamp * 1000 >= row.from).length;
+        assert.equal(row.lines.length, want, 'every line of those days, none missing');
+    }
+});
+
+test('money log, a trader’s 810 lines a day: the lines kept hold the days read, past the 18 days that 15,000 lines were', async () => {
+    const { row } = await traderRun(24, 29);
+    assert.ok(row.lines.length > 24000 && row.lines.length <= MONEY_LOG_MAX_LINES, row.lines.length + ' lines kept');
+    assert.ok(row.days > 29.7, 'the books’ days: ' + row.days.toFixed(2));
+    assert.ok(30 * 810 <= MONEY_LOG_MAX_LINES, 'thirty days of it fit');
 });

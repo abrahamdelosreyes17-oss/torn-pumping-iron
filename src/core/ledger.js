@@ -14,6 +14,10 @@
  * its nature; a gift, a trade payment, an auction or a sale of points is
  * non-recurring whatever its size; the casino, being mugged and what others
  * pay into your faction balance are outside your control and stand apart.
+ *
+ * Session 12, his answer to question 21 (buying to resell): an item both
+ * bought and sold inside the books' days is Trading, one account, sales
+ * less purchases; extra money, never counted on ahead.
  */
 
 import { DAY } from './bars.js';
@@ -32,6 +36,7 @@ export const LEDGER_ACCOUNTS = [
     { id: 'chosen', name: 'Other spending', kind: 'spend', what: 'items and ammo bought that are not for the gym' },
     { id: 'uncontrollable', name: 'Uncontrollable gains and losses', kind: 'apart', what: 'the casino, being mugged, what others pay into your faction balance' },
     { id: 'nonrecurring', name: 'Non-recurring', kind: 'apart', what: 'gifts, money sent, trades, auctions, points and items sold, a gain or loss on stocks sold' },
+    { id: 'trading', name: 'Trading', kind: 'apart', what: 'items you bought and sold again inside these days: sales less purchases' },
     { id: 'transfers', name: 'Transfers', kind: 'balance', what: 'the bank, stocks bought and sold, the faction vault, your vault' },
     { id: 'unsorted', name: 'Not sorted', kind: 'none', what: 'log types the table does not know yet' },
 ];
@@ -49,7 +54,8 @@ const ledgerField = (k) => ledgerAmount([k], (d) => ledgerNum(d[k]));
  *   amount(data): the money, positive (a roulette win is its payout less the stake, so it can be negative)
  *   sign: +1 into your wallet, −1 out of it
  *   internal: wallet ↔ vault, your liquid money is unchanged (left out of the reconciliation's flow)
- *   items(data): the item ids a purchase is about (gym items go to Gym)
+ *   items(data): the item ids a purchase or a sale is about (gym items bought go to Gym; an item both bought and
+ *     sold inside the books' days goes to Trading, ledgerOf)
  *   gain(data): the part of the amount that is a realised gain or loss (a stock sale's profit): booked as
  *     non-recurring, the rest stays in the line's own account
  */
@@ -83,10 +89,10 @@ export const LEDGER_TYPES = {
     4440: { title: 'Trade money outgoing', account: 'nonrecurring', sign: -1, amount: ledgerField('money') },
     4441: { title: 'Trade money incoming', account: 'nonrecurring', sign: 1, amount: ledgerField('money') },
     5011: { title: 'Points market sell', account: 'nonrecurring', sign: 1, amount: ledgerField('cost_total') },
-    // A sale is cash that is not certain to come again, as points sold are (Q8). Whether buying to resell is a
-    // business of its own is the accountant's to settle (docs/LEDGER-QUESTIONS.md, 21).
-    1226: { title: 'Bazaar sell', account: 'nonrecurring', sign: 1, amount: ledgerField('cost_total') },
-    4210: { title: 'Item shop sell', account: 'nonrecurring', sign: 1, amount: ledgerField('total_value') },
+    // A sale is cash that is not certain to come again, as points sold are (Q8). The sale of an item you also
+    // bought inside the books' days is Trading (Q21; ledgerOf).
+    1226: { title: 'Bazaar sell', account: 'nonrecurring', sign: 1, amount: ledgerField('cost_total'), items: (d) => (Array.isArray(d.items) ? d.items.map((x) => x && x.id) : []) },
+    4210: { title: 'Item shop sell', account: 'nonrecurring', sign: 1, amount: ledgerField('total_value'), items: (d) => [d.item] },
     // The whole bid leaves the wallet; what is over the winning price comes back as a cashier's check.
     4310: { title: 'Auction house item bid', account: 'nonrecurring', sign: -1, amount: ledgerField('bid_price') },
     5460: { title: 'Cashiers check withdraw', account: 'nonrecurring', sign: 1, amount: ledgerField('amount') },
@@ -114,11 +120,12 @@ export function ledgerBooking(type) {
 export function ledgerEntry(line, isGymItem = null) {
     const spec = LEDGER_TYPES[line.type];
     const base = { id: String(line.id), at: line.at, type: line.type, title: (spec && spec.title) || line.title || 'Log type ' + line.type };
-    if (!spec) return { ...base, account: 'unsorted', amount: 0, gain: 0, known: false, internal: false };
+    if (!spec) return { ...base, account: 'unsorted', amount: 0, gain: 0, known: false, internal: false, items: [] };
     const data = line.data && typeof line.data === 'object' ? line.data : {};
     const ids = spec.items ? spec.items(data).filter((x) => x !== undefined && x !== null) : [];
-    const gym = Boolean(isGymItem && ids.length && ids.every((x) => isGymItem(x)));
-    return { ...base, account: gym ? 'training' : spec.account, amount: spec.sign * spec.amount(data), gain: spec.gain ? spec.gain(data) : 0, known: true, internal: Boolean(spec.internal) };
+    // Only a purchase is for the gym: a gym item sold is a sale.
+    const gym = Boolean(spec.sign < 0 && isGymItem && ids.length && ids.every((x) => isGymItem(x)));
+    return { ...base, account: gym ? 'training' : spec.account, amount: spec.sign * spec.amount(data), gain: spec.gain ? spec.gain(data) : 0, known: true, internal: Boolean(spec.internal), items: ids.map(Number) };
 }
 
 /**
@@ -142,7 +149,8 @@ export function ledgerParts(e) {
  * @param {function} [o.isGymItem]
  * @param {object} [o.overrides] - {log id: true|false}: your tick. true: this line is non-recurring, whatever its
  *   type; false: a line non-recurring by its type counts as usual money (recurring income in, other spending out)
- * @returns {{from, to, days, entries, accounts, types, oneOffs, unsorted}}
+ * @returns {{from, to, days, entries, accounts, types, oneOffs, unsorted}}; an entry's account is its type's, or
+ *   Gym for gym items bought, or Trading for an item both bought and sold inside the days
  */
 export function ledgerOf(lines, { from, to, isGymItem = null, overrides = {} } = {}) {
     const seen = new Set();
@@ -159,8 +167,17 @@ export function ledgerOf(lines, { from, to, isGymItem = null, overrides = {} } =
             if (tick && e.account !== 'nonrecurring') e.account = 'nonrecurring';
             else if (!tick && e.account === 'nonrecurring') e.account = e.amount >= 0 ? 'recurring' : 'chosen';
         }
-        e.oneOff = e.account === 'nonrecurring';
         entries.push(e);
+    }
+    // Trading (the accountant, Q21): an item both bought and sold inside these days was bought to sell again. Its
+    // purchases and its sales are one account, whatever the order and whether it made or lost money. By Torn's item
+    // id: money from a trade carries none, so it stays a plain line. A line you ticked stays where your tick put it.
+    const bought = new Set();
+    const sold = new Set();
+    for (const e of entries) if (!e.ticked) for (const x of e.items) (LEDGER_TYPES[e.type].sign < 0 ? bought : sold).add(x);
+    for (const e of entries) {
+        if (!e.ticked && e.items.length && e.items.every((x) => bought.has(x) && sold.has(x))) e.account = 'trading';
+        e.oneOff = e.account === 'nonrecurring';
     }
     entries.sort((a, b) => b.at - a.at || (a.id < b.id ? -1 : 1));
     const days = Math.max(1, (to - from) / DAY);

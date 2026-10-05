@@ -141,6 +141,28 @@ test('Ledger: every line, newest first; a filter by account, "Show all", a tick 
     assert.equal(linesCard(b, ctx).all((n) => n.tagName === 'input').length, 0);
 });
 
+test('Ledger: an item bought and sold again is one statement line, "Trading", under non-recurring; its lines have a chip and no tick (session 12, the accountant’s Q21)', () => {
+    const trade = [
+        line('tb1', 1225, 3, { items: [{ id: 99901, qty: 10 }], cost_total: 50e6 }),
+        line('ts1', 4210, 2, { item: 99901, quantity: 6, total_value: 33e6 }),
+        line('ts2', 1226, 1, { items: [{ id: 99901, qty: 4 }], cost_total: 22e6 }),
+    ];
+    const b = books([...LINES, ...trade]);
+    const st = statementCard(b);
+    const cells = st.all((n) => n.attrs['data-ledger-trading'] === '1');
+    assert.equal(cells.length, 1);
+    assert.equal(cells[0].textContent, 'Trading items bought and sold again · sold $55,000,000 less bought $50,000,000');
+    assert.ok(st.textContent.includes('$5,000,000'), 'sales less purchases');
+    assert.ok(!st.textContent.includes('Item shop sell') && !st.textContent.includes('Bazaar sell'), 'not listed by log type');
+    assert.ok(st.textContent.indexOf('Trading items') > st.textContent.indexOf('5Non-recurring'), 'in section 5');
+    const ctx = ctxFor(b);
+    assert.ok(buttons(linesCard(b, ctx)).map((x) => x.textContent).includes('Trading 3'));
+    ctx.ui.ledgerFilter = 'trading';
+    const card = linesCard(b, ctx);
+    assert.equal(card.all((n) => n.tagName === 'tbody')[0].children.length, 3);
+    assert.equal(card.all((n) => n.tagName === 'input').length, 0);
+});
+
 test('Ledger: without a Full key, or before the first read, the tab says what is missing', () => {
     const none = renderLedger({}, ctxFor(null, { fullKey: { has: false } }));
     assert.match(textOf(none.main), /needs a Full key: add one in Settings/);

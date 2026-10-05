@@ -5,6 +5,10 @@
  * start over, so the books covered 2 days, never 30. Now a read asks only
  * for what is newer than the last one and is joined to the lines kept: the
  * days the books cover grow with every read, up to 30. Pure.
+ *
+ * Session 12 (a trader's log: 700 outgoing lines a day): the read that
+ * builds on the lines kept walks back as far as a week of such a log, and
+ * 30 days of it fit in the lines kept (src/income.js).
  */
 
 import { DAY } from './bars.js';
